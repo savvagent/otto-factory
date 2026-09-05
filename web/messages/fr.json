@@ -5,5 +5,31 @@
   "status_in_progress": "En cours",
   "status_active": "Actif",
   "status_completed": "Terminé",
-  "status_failed": "Échec"
+  "status_failed": "Échec",
+  "meter_billable_ratio": "{used} / {included} facturables",
+  "meter_aria_label": "Opérations facturables utilisées sur cette période",
+  "meter_aria_valuetext": "{used} sur {included} opérations facturables ({percent} %)",
+  "meter_calls_recorded": [
+    {
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "# appel d'outil enregistré sur cette période.",
+        "countPlural=many": "# d'appels d'outils enregistrés sur cette période.",
+        "countPlural=other": "# appels d'outils enregistrés sur cette période."
+      }
+    }
+  ],
+  "meter_calls_billable": [
+    {
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "# d'entre eux était facturable.",
+        "countPlural=many": "# d'entre eux étaient facturables.",
+        "countPlural=other": "# d'entre eux étaient facturables."
+      }
+    }
+  ],
+  "meter_watch_note": "Les sondages continus comme {tool} sont gratuits, d'où l'écart entre les deux chiffres."
 }

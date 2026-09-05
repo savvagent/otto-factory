@@ -5,10 +5,22 @@
 
   import '../app.css';
   import { api, ApiError } from '$lib/api';
+  import { reconcile, resolveAtBoot } from '$lib/locale';
   import { session } from '$lib/session.svelte';
   import Alert from '$lib/components/Alert.svelte';
   import Loading from '$lib/components/Loading.svelte';
   import Logo from '$lib/components/Logo.svelte';
+
+  /**
+   * Decide the language before anything renders.
+   *
+   * Top-level in this script rather than in `+layout.ts`, because `ssr = false`
+   * makes this file browser-only while a universal load module is also
+   * evaluated by the static build — where `document` and `localStorage` do not
+   * exist. It runs once, synchronously, ahead of the first paint, so no page
+   * ever renders English and then snaps to Spanish.
+   */
+  resolveAtBoot();
 
   let { children }: { children: Snippet } = $props();
 
@@ -39,7 +51,12 @@
   async function resolve() {
     if (session.ready) return;
     try {
-      await session.refresh();
+      const me = await session.refresh();
+      // The account's stored choice is the source of truth; what booted was a
+      // cache or the browser's guess. `reconcile` no-ops unless they differ,
+      // and reloads at most once when they do — see its comment for why that
+      // cannot become a loop.
+      reconcile(me?.user.locale);
     } catch (error) {
       fatal =
         error instanceof ApiError ? error.message : 'Something went wrong resolving your session.';

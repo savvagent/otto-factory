@@ -5,5 +5,29 @@
   "status_in_progress": "In progress",
   "status_active": "Active",
   "status_completed": "Completed",
-  "status_failed": "Failed"
+  "status_failed": "Failed",
+  "meter_billable_ratio": "{used} / {included} billable",
+  "meter_aria_label": "Billable operations used this period",
+  "meter_aria_valuetext": "{used} of {included} billable operations ({percent}%)",
+  "meter_calls_recorded": [
+    {
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "# tool call recorded this period.",
+        "countPlural=other": "# tool calls recorded this period."
+      }
+    }
+  ],
+  "meter_calls_billable": [
+    {
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "# of them was billable.",
+        "countPlural=other": "# of them were billable."
+      }
+    }
+  ],
+  "meter_watch_note": "Continuous polls such as {tool} are free, which is why the two numbers differ."
 }

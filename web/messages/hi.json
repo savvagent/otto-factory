@@ -5,5 +5,29 @@
   "status_in_progress": "प्रगति पर",
   "status_active": "सक्रिय",
   "status_completed": "पूर्ण",
-  "status_failed": "विफल"
+  "status_failed": "विफल",
+  "meter_billable_ratio": "{used} / {included} बिल-योग्य",
+  "meter_aria_label": "इस अवधि में उपयोग किए गए बिल-योग्य ऑपरेशन",
+  "meter_aria_valuetext": "{included} में से {used} बिल-योग्य ऑपरेशन ({percent}%)",
+  "meter_calls_recorded": [
+    {
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "इस अवधि में # टूल कॉल दर्ज किया गया।",
+        "countPlural=other": "इस अवधि में # टूल कॉल दर्ज किए गए।"
+      }
+    }
+  ],
+  "meter_calls_billable": [
+    {
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "उनमें से # बिल-योग्य था।",
+        "countPlural=other": "उनमें से # बिल-योग्य थे।"
+      }
+    }
+  ],
+  "meter_watch_note": "{tool} जैसे निरंतर पोल निःशुल्क हैं, इसीलिए दोनों संख्याएँ अलग हैं।"
 }

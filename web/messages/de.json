@@ -5,5 +5,29 @@
   "status_in_progress": "In Arbeit",
   "status_active": "Aktiv",
   "status_completed": "Abgeschlossen",
-  "status_failed": "Fehlgeschlagen"
+  "status_failed": "Fehlgeschlagen",
+  "meter_billable_ratio": "{used} / {included} abrechenbar",
+  "meter_aria_label": "In diesem Zeitraum genutzte abrechenbare Vorgänge",
+  "meter_aria_valuetext": "{used} von {included} abrechenbaren Vorgängen ({percent} %)",
+  "meter_calls_recorded": [
+    {
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "# Werkzeugaufruf in diesem Zeitraum erfasst.",
+        "countPlural=other": "# Werkzeugaufrufe in diesem Zeitraum erfasst."
+      }
+    }
+  ],
+  "meter_calls_billable": [
+    {
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "# davon war abrechenbar.",
+        "countPlural=other": "# davon waren abrechenbar."
+      }
+    }
+  ],
+  "meter_watch_note": "Dauerabfragen wie {tool} sind kostenlos — deshalb unterscheiden sich die beiden Zahlen."
 }

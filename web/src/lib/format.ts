@@ -1,4 +1,18 @@
-/** Display helpers. Nothing here decides anything; it only renders. */
+/**
+ * Display helpers. Nothing here decides anything; it only renders.
+ *
+ * Every date and number here takes the console's resolved locale rather than
+ * the browser's. Those were the same thing until the language became a choice;
+ * now a Spanish console on an `en-US` machine would print `9/5/2026` beside
+ * Spanish prose, which reads as a bug even though each half is defensible.
+ *
+ * The locale is read through `currentLocale()` at call time rather than
+ * captured at import, so these stay ordinary functions and this stays an
+ * ordinary module — no runes, nothing to keep in sync.
+ */
+
+import { m } from '$lib/paraglide/messages';
+import { currentLocale } from '$lib/locale';
 
 /**
  * "3 minutes ago", "in 2 days".
@@ -13,7 +27,7 @@ export function relative(iso: string | null | undefined): string {
   if (Number.isNaN(then)) return '—';
 
   const seconds = (then - Date.now()) / 1000;
-  const format = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' });
+  const format = new Intl.RelativeTimeFormat(currentLocale(), { numeric: 'auto' });
 
   const steps: [Intl.RelativeTimeFormatUnit, number][] = [
     ['year', 60 * 60 * 24 * 365],
@@ -35,7 +49,7 @@ export function relative(iso: string | null | undefined): string {
 export function absolute(iso: string | null | undefined): string {
   if (!iso) return '—';
   const at = new Date(iso);
-  return Number.isNaN(at.getTime()) ? '—' : at.toLocaleString();
+  return Number.isNaN(at.getTime()) ? '—' : at.toLocaleString(currentLocale());
 }
 
 /**
@@ -50,15 +64,11 @@ export function day(iso: string | null | undefined): string {
   if (!iso) return '—';
   const [year, month, date] = iso.split('-').map(Number);
   if (!year || !month || !date) return iso;
-  return new Date(year, month - 1, date).toLocaleDateString(undefined, {
+  return new Date(year, month - 1, date).toLocaleDateString(currentLocale(), {
     year: 'numeric',
     month: 'long',
     day: 'numeric'
   });
-}
-
-export function plural(count: number, one: string, many = `${one}s`): string {
-  return `${count.toLocaleString()} ${count === 1 ? one : many}`;
 }
 
 /**
@@ -102,5 +112,5 @@ export async function copy(text: string): Promise<boolean> {
  * thing nobody notices until a customer screenshots it.
  */
 export function person(name: string | null, email: string | null): string {
-  return name ?? email ?? 'Unnamed account';
+  return name ?? email ?? m.common_unnamed_account();
 }
