@@ -360,6 +360,94 @@ async fn removing_a_member_revokes_their_tokens_for_that_org(pool: PgPool) {
         .await
         .expect(StatusCode::OK);
 }
+// --------------------------------------------------------------- language
+
+/// The console language, over the wire, in all three of its states.
+///
+/// It lives on the account rather than in one browser's `localStorage` so the
+/// choice follows the person to their next device. `null` is the state that
+/// needs the most care: it is how somebody goes back to "match my browser",
+/// and serde would collapse it into "leave alone" without the `double_option`
+/// on `ProfileRequest`.
+#[sqlx::test(migrations = "../df-core/migrations")]
+async fn the_console_language_is_set_cleared_and_left_alone(pool: PgPool) {
+    let h = harness(pool);
+    let rob = onboard(&h, "rob@acme.test").await;
+
+    let fresh = Call::get("/api/me")
+        .with_session(&rob.session)
+        .send(&h.router)
+        .await;
+    fresh.expect(StatusCode::OK);
+    assert!(
+        fresh.body["user"]["locale"].is_null(),
+        "a new account has chosen nothing — which is not the same as choosing English"
+    );
+
+    let set = Call::patch("/api/me")
+        .with_session(&rob.session)
+        .json(serde_json::json!({ "locale": "de" }))
+        .send(&h.router)
+        .await;
+    set.expect(StatusCode::OK);
+    assert_eq!(set.body["locale"], "de");
+
+    // Absent leaves it alone, which is what every other PATCH field does.
+    let renamed = Call::patch("/api/me")
+        .with_session(&rob.session)
+        .json(serde_json::json!({ "name": "Rob" }))
+        .send(&h.router)
+        .await;
+    renamed.expect(StatusCode::OK);
+    assert_eq!(
+        renamed.body["locale"], "de",
+        "omitting the field must not clear the language"
+    );
+
+    // An explicit null is the only way back to following the browser.
+    let cleared = Call::patch("/api/me")
+        .with_session(&rob.session)
+        .json(serde_json::json!({ "locale": null }))
+        .send(&h.router)
+        .await;
+    cleared.expect(StatusCode::OK);
+    assert!(
+        cleared.body["locale"].is_null(),
+        "an explicit null must clear the language, not read as 'leave alone'"
+    );
+}
+
+#[sqlx::test(migrations = "../df-core/migrations")]
+async fn an_unsupported_language_is_refused_by_name(pool: PgPool) {
+    let h = harness(pool);
+    let rob = onboard(&h, "rob@acme.test").await;
+
+    let refused = Call::patch("/api/me")
+        .with_session(&rob.session)
+        .json(serde_json::json!({ "locale": "klingon" }))
+        .send(&h.router)
+        .await;
+    refused.expect(StatusCode::BAD_REQUEST);
+    assert_eq!(refused.error_code(), Some("invalid_argument"));
+
+    let message = refused.body["error"]["message"].as_str().unwrap();
+    for locale in df_core::i18n::SUPPORTED_LOCALES {
+        assert!(
+            message.contains(locale),
+            "{message:?} should name the supported locale {locale}"
+        );
+    }
+
+    // An empty string is refused too, rather than quietly reading as
+    // "leave alone" — a broken picker should look broken.
+    Call::patch("/api/me")
+        .with_session(&rob.session)
+        .json(serde_json::json!({ "locale": "" }))
+        .send(&h.router)
+        .await
+        .expect(StatusCode::BAD_REQUEST);
+}
+
 // ---------------------------------------------------------------- invites
 
 #[sqlx::test(migrations = "../df-core/migrations")]

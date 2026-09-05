@@ -61,7 +61,7 @@ pub struct UpdateRepoRequest {
     /// Absent leaves the team alone; an explicit `null` makes the repo
     /// org-wide. The two have to be distinguishable, or a team-scoped repo can
     /// never be unscoped — and a team with repos still on it cannot be deleted.
-    #[serde(default, deserialize_with = "double_option")]
+    #[serde(default, deserialize_with = "super::double_option")]
     pub team_id: Option<Option<TeamId>>,
     #[serde(default)]
     pub default_agent_type: Option<String>,
@@ -69,20 +69,6 @@ pub struct UpdateRepoRequest {
     pub active: Option<bool>,
     #[serde(default)]
     pub add_remotes: Vec<String>,
-}
-
-/// Distinguish "field absent" from "field present and null".
-///
-/// serde collapses both into `None` for an `Option<T>`; wrapping the whole
-/// deserialization in `Some` recovers the difference — absent stays `None`
-/// because of `#[serde(default)]`, while an explicit `null` arrives as
-/// `Some(None)`.
-fn double_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: serde::Deserialize<'de>,
-{
-    serde::Deserialize::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Deserialize)]

@@ -14,3 +14,23 @@ pub mod tokens;
 pub mod trackers;
 pub mod usage;
 pub mod webhooks;
+
+/// Distinguish "field absent" from "field present and null".
+///
+/// serde collapses both into `None` for an `Option<T>`; wrapping the whole
+/// deserialization in `Some` recovers the difference — absent stays `None`
+/// because of `#[serde(default)]`, while an explicit `null` arrives as
+/// `Some(None)`.
+///
+/// Two `PATCH` bodies need the distinction and neither can fake it. A repo's
+/// `teamId` has to be un-settable or a team-scoped repo can never be made
+/// org-wide, and a team with repos still on it can never be deleted. A user's
+/// `locale` has to be clearable or "match my browser" is a choice nobody can
+/// make twice.
+pub fn double_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    serde::Deserialize::deserialize(deserializer).map(Some)
+}
