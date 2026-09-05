@@ -111,6 +111,10 @@ pub enum Key {
     ConsentCancel,
     /// Takes the signed-in address.
     ConsentSignedInAs,
+    /// Stands in for the address on an account that has not set one — which is
+    /// a real state here, because a passkey creates the account and the profile
+    /// comes afterwards.
+    ConsentThisAccount,
 
     // The error page.
     ErrorTitle,
@@ -256,6 +260,13 @@ pub fn msg(locale: Locale, key: Key) -> &'static str {
         (ConsentSignedInAs, Fr) => "Connecté en tant que {}.",
         (ConsentSignedInAs, It) => "Accesso effettuato come {}.",
         (ConsentSignedInAs, Hi) => "{} के रूप में साइन इन किया गया।",
+
+        (ConsentThisAccount, En) => "this account",
+        (ConsentThisAccount, Es) => "esta cuenta",
+        (ConsentThisAccount, De) => "dieses Konto",
+        (ConsentThisAccount, Fr) => "ce compte",
+        (ConsentThisAccount, It) => "questo account",
+        (ConsentThisAccount, Hi) => "यह खाता",
 
         // --------------------------------------------------------- errors
         (ErrorTitle, En) => "This request could not be authorized",
@@ -448,6 +459,7 @@ mod tests {
             ConsentAllow,
             ConsentCancel,
             ConsentSignedInAs,
+            ConsentThisAccount,
             ErrorTitle,
             ErrorNothingAuthorized,
             ErrorNoOrgTitle,
