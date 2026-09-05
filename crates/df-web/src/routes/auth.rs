@@ -461,6 +461,7 @@ pub async fn set_profile(
             caller.user.id,
             req.email.as_deref().filter(|e| !e.trim().is_empty()),
             req.name.as_deref().filter(|n| !n.trim().is_empty()),
+            None,
         )
         .await?;
     Ok(Json(updated))
