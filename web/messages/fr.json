@@ -1,0 +1,9 @@
+{
+  "$schema": "https://inlang.com/schema/inlang-message-format",
+  "common_unnamed_account": "Compte sans nom",
+  "status_pending": "En attente",
+  "status_in_progress": "En cours",
+  "status_active": "Actif",
+  "status_completed": "Terminé",
+  "status_failed": "Échec"
+}

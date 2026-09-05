@@ -1,0 +1,9 @@
+{
+  "$schema": "https://inlang.com/schema/inlang-message-format",
+  "common_unnamed_account": "बिना नाम का खाता",
+  "status_pending": "लंबित",
+  "status_in_progress": "प्रगति पर",
+  "status_active": "सक्रिय",
+  "status_completed": "पूर्ण",
+  "status_failed": "विफल"
+}
