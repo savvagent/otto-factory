@@ -1,5 +1,7 @@
 <script lang="ts">
-  import { api, ApiError } from '$lib/api';
+  import { api } from '$lib/api';
+  import { messageFor } from '$lib/errors';
+  import { m } from '$lib/paraglide/messages';
   import { useOrg } from '$lib/org.svelte';
   import { session } from '$lib/session.svelte';
   import { relative, person } from '$lib/format';
@@ -23,7 +25,7 @@
    * Two rules the server keeps and this page has to explain rather than
    * re-implement: only an owner may create or demote another owner, and the
    * last owner can be neither demoted nor removed. Both arrive as errors with
-   * messages written to be read, so they are shown as-is.
+   * codes this bundle has sentences for.
    */
 
   const org = useOrg();
@@ -56,7 +58,7 @@
         // spending a request to be told that on every page load is noise.
         invites = admin ? await api.invites(slug) : [];
       } catch (e) {
-        error = e instanceof ApiError ? e.message : 'Could not load members.';
+        error = messageFor(e, m.members_error_load());
       } finally {
         loading = false;
       }
@@ -78,7 +80,7 @@
       // the header reads them.
       await session.refresh();
     } catch (e) {
-      error = e instanceof ApiError ? e.message : 'That did not work.';
+      error = messageFor(e, m.error_that_did_not_work());
     } finally {
       busy = undefined;
     }
@@ -98,7 +100,7 @@
       inviteRole = 'member';
       invites = await api.invites(org.slug);
     } catch (e) {
-      inviteError = e instanceof ApiError ? e.message : 'Could not create that invitation.';
+      inviteError = messageFor(e, m.members_error_invite());
     } finally {
       inviting = false;
     }
@@ -117,20 +119,33 @@
     try {
       claim = await api.resetMemberPasskeys(org.slug, memberId);
     } catch (e) {
-      error = e instanceof ApiError ? e.message : 'Could not reset those passkeys.';
+      error = messageFor(e, m.members_error_reset());
     } finally {
       busy = undefined;
     }
   }
 
   const roles: Role[] = ['owner', 'admin', 'member'];
+
+  /**
+   * The word for a role, for display only.
+   *
+   * `owner` / `admin` / `member` are wire values: they are what the `<option>`
+   * carries and what `setMemberRole` sends. This translates the label beside
+   * them and never the value itself.
+   */
+  function roleLabel(role: Role): string {
+    if (role === 'owner') return m.members_role_owner();
+    if (role === 'admin') return m.members_role_admin();
+    return m.members_role_member();
+  }
 </script>
 
 <div class="space-y-5">
   <div>
-    <h1 class="text-lg font-semibold">Members</h1>
+    <h1 class="text-lg font-semibold">{m.members_title()}</h1>
     <p class="mt-0.5 text-sm text-faint">
-      Everyone who can sign in to {org.title}.
+      {m.members_subtitle({ org: org.title })}
     </p>
   </div>
 
@@ -139,42 +154,37 @@
   {#if claim}
     <div class="space-y-3 rounded-lg border border-warn/40 bg-warn/5 p-4">
       <p class="text-sm text-ink">
-        Passkeys cleared. Give them this code — <span class="text-muted"
-          >it is shown only now and cannot be looked up again. If you lose it, reset again.</span
-        >
+        {m.members_claim_headline()}
+        <span class="text-muted">{m.members_claim_caveat()}</span>
       </p>
-      <CopyField label="Link" value={claim.link} />
-      <CopyField label="Code" value={claim.code} />
+      <CopyField label={m.members_copy_link()} value={claim.link} />
+      <CopyField label={m.members_copy_code()} value={claim.code} />
       <p class="text-xs text-faint">
-        It works once, expires in 14 days, and is the only way back into that account. Anyone
-        holding it can register a passkey on it, so hand it over the way you would a password.
+        {m.members_claim_note()}
       </p>
-      <Button tone="quiet" onclick={() => (claim = undefined)}>Done</Button>
+      <Button tone="quiet" onclick={() => (claim = undefined)}>{m.members_claim_done()}</Button>
     </div>
   {/if}
 
   {#if org.isAdmin}
-    <Card
-      title="Invite someone"
-      description="A single-use code, good for 14 days. You deliver it — nothing is emailed."
-    >
+    <Card title={m.members_invite_title()} description={m.members_invite_description()}>
       <form class="flex flex-wrap items-end gap-3" onsubmit={invite}>
         <div class="min-w-56 flex-1">
-          <Field label="Email">
+          <Field label={m.members_field_email()}>
             <input class="df-input" type="email" required bind:value={inviteEmail} />
           </Field>
         </div>
         <div class="w-36">
-          <Field label="Role">
+          <Field label={m.members_field_role()}>
             <select class="df-input" bind:value={inviteRole}>
-              <option value="member">member</option>
-              <option value="admin">admin</option>
-              {#if org.isOwner}<option value="owner">owner</option>{/if}
+              <option value="member">{m.members_role_member()}</option>
+              <option value="admin">{m.members_role_admin()}</option>
+              {#if org.isOwner}<option value="owner">{m.members_role_owner()}</option>{/if}
             </select>
           </Field>
         </div>
         <div class="pb-0.5">
-          <Button type="submit" pending={inviting}>Create invitation</Button>
+          <Button type="submit" pending={inviting}>{m.members_invite_submit()}</Button>
         </div>
       </form>
 
@@ -182,17 +192,13 @@
       {#if minted}
         <div class="mt-4 space-y-3 rounded-lg border border-ok/40 bg-ok/5 p-4">
           <p class="text-sm text-ink">
-            Invitation for <span class="df-mono">{minted.email}</span>. Send them one of these —
-            <span class="text-muted"
-              >it is shown only now, and cannot be looked up again. If you lose it, invite them
-              again.</span
-            >
+            {m.members_invite_minted_headline({ email: minted.email })}
+            <span class="text-muted">{m.members_invite_minted_caveat()}</span>
           </p>
-          <CopyField label="Link" value={minted.link} />
-          <CopyField label="Code" value={minted.code} />
+          <CopyField label={m.members_copy_link()} value={minted.link} />
+          <CopyField label={m.members_copy_code()} value={minted.code} />
           <p class="text-xs text-faint">
-            Only an account signed in as {minted.email} can redeem it, so a code that goes astray is not
-            a free seat.
+            {m.members_invite_minted_note({ email: minted.email })}
           </p>
         </div>
       {/if}
@@ -200,9 +206,9 @@
   {/if}
 
   {#if loading && members.length === 0}
-    <Loading what="Loading members" />
+    <Loading what={m.members_loading()} />
   {:else}
-    <Card title="Roster">
+    <Card title={m.members_roster_title()}>
       <ul class="divide-y divide-edge/40">
         {#each members as member (member.id)}
           {@const isMe = member.id === session.me?.user.id}
@@ -210,15 +216,18 @@
             <div class="min-w-0 flex-1">
               <div class="flex items-center gap-2 text-sm">
                 <span class="text-ink">{person(member.name, member.email)}</span>
-                {#if isMe}<span class="text-xs text-faint">(you)</span>{/if}
+                {#if isMe}<span class="text-xs text-faint">{m.members_you()}</span>{/if}
                 {#if member.disabledAt}
                   <span class="rounded-full border border-bad/50 px-2 py-0.5 text-xs text-bad">
-                    disabled
+                    {m.members_badge_disabled()}
                   </span>
                 {/if}
               </div>
               <p class="text-xs text-faint">
-                {member.email ?? 'no email set'} · joined {relative(member.joinedAt)}
+                {m.members_row_meta({
+                  email: member.email ?? m.members_no_email(),
+                  when: relative(member.joinedAt)
+                })}
               </p>
             </div>
 
@@ -240,7 +249,7 @@
                     value={role}
                     disabled={!org.isOwner && (role === 'owner' || member.role === 'owner')}
                   >
-                    {role}
+                    {roleLabel(role)}
                   </option>
                 {/each}
               </select>
@@ -248,11 +257,11 @@
               <Button
                 tone="quiet"
                 pending={busy === `${member.id}:logout`}
-                title="End every browser session this account holds. Leaves their tokens alone."
+                title={m.members_force_logout_title()}
                 onclick={() =>
                   act(`${member.id}:logout`, () => api.forceLogout(org.slug, member.id))}
               >
-                Force sign-out
+                {m.members_force_logout()}
               </Button>
 
               <!-- The only assisted account recovery there is. No email means
@@ -264,18 +273,20 @@
                 <Button
                   tone="quiet"
                   pending={busy === `${member.id}:reset`}
-                  title="Clear their passkeys and get a one-time code they can use to register a new one. Ends their sessions."
+                  title={m.members_reset_title()}
                   onclick={() => {
                     if (
                       confirm(
-                        `Clear every passkey for ${member.email ?? 'this account'}? They will be signed out everywhere and must register again with the code you are about to be given.`
+                        m.members_reset_confirm({
+                          who: member.email ?? m.members_this_account()
+                        })
                       )
                     ) {
                       resetPasskeys(member.id);
                     }
                   }}
                 >
-                  Reset passkeys
+                  {m.members_reset_button()}
                 </Button>
               {/if}
             {/if}
@@ -287,7 +298,7 @@
                 onclick={() =>
                   act(`${member.id}:remove`, () => api.removeMember(org.slug, member.id))}
               >
-                {isMe ? 'Leave' : 'Remove'}
+                {isMe ? m.members_leave() : m.members_remove()}
               </Button>
             {/if}
           </li>
@@ -295,15 +306,14 @@
       </ul>
 
       <p class="mt-3 text-xs text-faint">
-        Removing someone also clears their team memberships and revokes the tokens they held in this
-        org — their agents stop on their next call.
+        {m.members_roster_note()}
       </p>
     </Card>
 
     {#if org.isAdmin}
-      <Card title="Outstanding invitations">
+      <Card title={m.members_invites_title()}>
         {#if invites.length === 0}
-          <Empty title="Nobody is waiting on an invitation." />
+          <Empty title={m.members_invites_empty()} />
         {:else}
           <ul class="divide-y divide-edge/40">
             {#each invites as pending (pending.id)}
@@ -311,7 +321,10 @@
                 <div class="min-w-0 flex-1">
                   <span class="text-ink">{pending.email}</span>
                   <p class="text-xs text-faint">
-                    {pending.role} · expires {relative(pending.expiresAt)}
+                    {m.members_invite_row_meta({
+                      role: roleLabel(pending.role),
+                      when: relative(pending.expiresAt)
+                    })}
                   </p>
                 </div>
                 <Button
@@ -319,7 +332,7 @@
                   pending={busy === pending.id}
                   onclick={() => act(pending.id, () => api.revokeInvite(org.slug, pending.id))}
                 >
-                  Withdraw
+                  {m.members_withdraw()}
                 </Button>
               </li>
             {/each}

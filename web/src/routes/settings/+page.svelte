@@ -3,6 +3,7 @@
   import { messageFor } from '$lib/errors';
   import { m } from '$lib/paraglide/messages';
   import { relative } from '$lib/format';
+  import { LOCALE_NAMES, SUPPORTED, applyLocale, type Locale } from '$lib/locale';
   import { session } from '$lib/session.svelte';
   import * as webauthn from '$lib/webauthn';
   import type { Passkey } from '$lib/types';
@@ -32,8 +33,46 @@
   let profileError = $state<string | undefined>(undefined);
   let profileSaved = $state(false);
 
+  /**
+   * The language picker.
+   *
+   * `''` is "match my browser" — the account stores no choice and detection
+   * stays in charge. It is a distinct option rather than the absence of one,
+   * because going back to following the browser is a real thing to want after
+   * having chosen Spanish once.
+   *
+   * The picker is the only way somebody whose machine is configured in English
+   * but who reads Spanish gets a Spanish console.
+   */
+  let locale = $state<Locale | ''>('');
+  let savingLocale = $state(false);
+  let localeError = $state<string | undefined>(undefined);
+
+  async function changeLanguage(next: Locale | '') {
+    if (savingLocale) return;
+    savingLocale = true;
+    localeError = undefined;
+    try {
+      // `null` clears the stored choice; `undefined` would mean "leave alone"
+      // and is not what an explicit pick of "match my browser" means.
+      await api.setProfile({ locale: next === '' ? null : next });
+      // Only now. Applying optimistically would leave the console speaking a
+      // language the account does not actually have if the server refused.
+      applyLocale(next === '' ? undefined : next);
+    } catch (e) {
+      localeError = messageFor(e, m.settings_language_failed());
+      locale = session.me?.user.locale ? (session.me.user.locale as Locale) : '';
+      savingLocale = false;
+    }
+  }
+
   $effect(() => {
     void load();
+  });
+
+  $effect(() => {
+    const stored = session.me?.user.locale;
+    locale = stored && (SUPPORTED as readonly string[]).includes(stored) ? (stored as Locale) : '';
   });
 
   $effect(() => {
@@ -60,7 +99,7 @@
     try {
       const started = await api.addPasskeyStart();
       const credential = await webauthn.register(started.challenge as never);
-      await api.addPasskeyFinish(started.ceremonyId, credential, 'New device');
+      await api.addPasskeyFinish(started.ceremonyId, credential, m.settings_new_passkey_name());
       keys = await api.passkeys();
       await session.refresh();
     } catch (e) {
@@ -101,39 +140,36 @@
   }
 </script>
 
-<svelte:head><title>Settings · dark-factory</title></svelte:head>
+<svelte:head><title>{m.settings_page_title()}</title></svelte:head>
 
 <div class="space-y-5">
   <div>
-    <h1 class="text-lg font-semibold">Settings</h1>
-    <p class="mt-0.5 text-sm text-faint">Your passkeys and how you are addressed.</p>
+    <h1 class="text-lg font-semibold">{m.settings_heading()}</h1>
+    <p class="mt-0.5 text-sm text-faint">{m.settings_subtitle()}</p>
   </div>
 
   {#if error}<Alert>{error}</Alert>{/if}
 
   {#if keys.length === 1 && !loading}
-    <Alert tone="warn">
-      You have one passkey, which means one device. We send no email, so if you lose it the only way
-      back in is an admin of an organization you belong to — and if you are the only owner of yours,
-      there is none. Add a second.
-    </Alert>
+    <Alert tone="warn">{m.settings_one_passkey_warning()}</Alert>
   {/if}
 
-  <Card
-    title="Passkeys"
-    description="Each one signs you in on its own. Add your phone as well as this device."
-  >
+  <Card title={m.settings_passkeys_title()} description={m.settings_passkeys_description()}>
     {#if loading}
-      <Loading what="Loading your passkeys" />
+      <Loading what={m.settings_loading_passkeys()} />
     {:else}
       <ul class="divide-y divide-edge/50">
         {#each keys as key (key.id)}
           <li class="flex items-center gap-3 py-2.5">
             <div class="min-w-0 flex-1">
-              <div class="text-sm text-ink">{key.nickname ?? 'Unnamed passkey'}</div>
+              <div class="text-sm text-ink">{key.nickname ?? m.settings_unnamed_passkey()}</div>
               <p class="text-xs text-faint">
-                Added {relative(key.createdAt)}
-                {#if key.lastUsedAt}· last used {relative(key.lastUsedAt)}{:else}· never used{/if}
+                {m.settings_passkey_added({ when: relative(key.createdAt) })}
+                {#if key.lastUsedAt}·
+                  {m.settings_passkey_last_used({ when: relative(key.lastUsedAt) })}
+                {:else}·
+                  {m.settings_passkey_never_used()}
+                {/if}
               </p>
             </div>
 
@@ -141,11 +177,11 @@
               tone="quiet"
               pending={busy === `${key.id}:rename`}
               onclick={() => {
-                const nickname = prompt('Name this passkey', key.nickname ?? '');
+                const nickname = prompt(m.settings_rename_prompt(), key.nickname ?? '');
                 if (nickname) act(`${key.id}:rename`, () => api.renamePasskey(key.id, nickname));
               }}
             >
-              Rename
+              {m.settings_rename()}
             </Button>
 
             <!-- The server refuses to remove the last one; hiding the button
@@ -157,7 +193,7 @@
                 pending={busy === `${key.id}:remove`}
                 onclick={() => act(`${key.id}:remove`, () => api.removePasskey(key.id))}
               >
-                Remove
+                {m.settings_remove()}
               </Button>
             {/if}
           </li>
@@ -165,25 +201,52 @@
       </ul>
 
       <div class="mt-4 border-t border-edge/50 pt-3">
-        <Button pending={busy === 'add'} onclick={addPasskey}>Add a passkey</Button>
+        <Button pending={busy === 'add'} onclick={addPasskey}>{m.settings_add_passkey()}</Button>
       </div>
     {/if}
   </Card>
 
-  <Card title="Profile" description="Your email is an identifier here. Nothing is sent to it.">
+  <Card title={m.settings_profile_title()} description={m.settings_profile_description()}>
     <form class="max-w-sm space-y-4" onsubmit={saveProfile}>
-      <Field label="Email" hint="How colleagues invite you to an organization.">
+      <Field label={m.settings_email_label()} hint={m.settings_email_hint()}>
         <input class="df-input" type="email" autocomplete="username" required bind:value={email} />
       </Field>
 
-      <Field label="Name">
+      <Field label={m.settings_name_label()}>
         <input class="df-input" type="text" autocomplete="name" bind:value={name} />
       </Field>
 
       {#if profileError}<Alert>{profileError}</Alert>{/if}
-      {#if profileSaved}<Alert tone="ok">Saved.</Alert>{/if}
+      {#if profileSaved}<Alert tone="ok">{m.settings_saved()}</Alert>{/if}
 
-      <Button type="submit" pending={savingProfile}>Save</Button>
+      <Button type="submit" pending={savingProfile}>{m.settings_save()}</Button>
     </form>
+  </Card>
+
+  <Card title={m.settings_language_title()} description={m.settings_language_description()}>
+    <div class="max-w-sm space-y-2">
+      <label class="block">
+        <span class="sr-only">{m.settings_language_title()}</span>
+        <!--
+          Every language names itself. Somebody who cannot read the language the
+          console is currently in has to be able to find their own in this list,
+          which they cannot do if the options say "German" rather than "Deutsch".
+        -->
+        <select
+          class="df-input w-full"
+          value={locale}
+          disabled={savingLocale}
+          onchange={(e) => changeLanguage(e.currentTarget.value as Locale | '')}
+        >
+          <option value="">{m.settings_language_match_browser()}</option>
+          {#each SUPPORTED as option (option)}
+            <option value={option}>{LOCALE_NAMES[option]}</option>
+          {/each}
+        </select>
+      </label>
+
+      {#if localeError}<Alert>{localeError}</Alert>{/if}
+      <p class="text-xs text-faint">{m.settings_language_reload_note()}</p>
+    </div>
   </Card>
 </div>

@@ -2,6 +2,8 @@
   import { page } from '$app/state';
 
   import { api, ApiError } from '$lib/api';
+  import { messageFor } from '$lib/errors';
+  import { m } from '$lib/paraglide/messages';
   import { useOrg } from '$lib/org.svelte';
   import { absolute, relative } from '$lib/format';
   import type { JobDetail, Repo } from '$lib/types';
@@ -50,7 +52,7 @@
         repo = repos.find((r) => r.id === found.repoId);
       } catch (e) {
         if (e instanceof ApiError && e.isNotFound) missing = true;
-        else error = e instanceof ApiError ? e.message : 'Could not load that job.';
+        else error = messageFor(e, m.job_load_failed());
       } finally {
         loading = false;
       }
@@ -66,21 +68,22 @@
 
 <div class="space-y-5">
   <p class="text-xs">
-    <a class="text-muted underline hover:text-ink" href="/o/{org.slug}/queue">← Queue</a>
+    <a class="text-muted underline hover:text-ink" href="/o/{org.slug}/queue">{m.job_back()}</a>
   </p>
 
   {#if missing}
     <div class="py-10 text-center">
-      <h1 class="text-lg font-semibold">No such job</h1>
-      <p class="mt-2 text-sm text-faint">
-        Nothing in {org.title} is called <code class="df-mono">{id}</code>. Job ids are counted per
-        organization, so the same id in another org is a different job.
-      </p>
+      <h1 class="text-lg font-semibold">{m.job_missing_title()}</h1>
+      <!--
+        The org name and the id sit inside the sentence rather than either side
+        of a `<code>`: where they fall in it is a fact about the language.
+      -->
+      <p class="mt-2 text-sm text-faint">{m.job_missing_body({ org: org.title, id })}</p>
     </div>
   {:else if error}
     <Alert>{error}</Alert>
   {:else if !job}
-    <Loading what="Loading {id}" />
+    <Loading what={m.job_loading({ id })} />
   {:else}
     <div>
       <div class="flex flex-wrap items-center gap-3">
@@ -91,7 +94,7 @@
     </div>
 
     {#if job.description}
-      <Card title="Description">
+      <Card title={m.job_description_title()}>
         <p class="text-sm whitespace-pre-wrap text-muted">{job.description}</p>
       </Card>
     {/if}
@@ -101,15 +104,15 @@
     {/if}
 
     {#if job.status === 'completed' && job.result}
-      <Card title="Result">
+      <Card title={m.job_result_title()}>
         <p class="text-sm whitespace-pre-wrap text-muted">{job.result}</p>
       </Card>
     {/if}
 
-    <Card title="Details">
+    <Card title={m.job_details_title()}>
       <dl class="grid grid-cols-1 gap-x-8 gap-y-3 text-sm sm:grid-cols-2">
         <div>
-          <dt class="df-label">Repo</dt>
+          <dt class="df-label">{m.job_field_repo()}</dt>
           <dd>
             {#if repo}
               <a
@@ -124,41 +127,38 @@
           </dd>
         </div>
         <div>
-          <dt class="df-label">Ticket</dt>
+          <dt class="df-label">{m.job_field_ticket()}</dt>
           <dd class="text-muted">{job.ticketRef ?? '—'}{job.tracker ? ` (${job.tracker})` : ''}</dd>
         </div>
         <div>
-          <dt class="df-label">Claimed by</dt>
+          <dt class="df-label">{m.job_field_claimed_by()}</dt>
           <dd class="text-muted">{job.claimedByLabel ?? '—'}</dd>
         </div>
         <div>
-          <dt class="df-label">Agent type</dt>
-          <dd class="text-muted">{job.agentType ?? 'any'}</dd>
+          <dt class="df-label">{m.job_field_agent_type()}</dt>
+          <dd class="text-muted">{job.agentType ?? m.job_agent_type_any()}</dd>
         </div>
         <div>
-          <dt class="df-label">Queued</dt>
+          <dt class="df-label">{m.job_field_queued()}</dt>
           <dd class="text-muted" title={absolute(job.createdAt)}>{relative(job.createdAt)}</dd>
         </div>
         <div>
-          <dt class="df-label">Started</dt>
+          <dt class="df-label">{m.job_field_started()}</dt>
           <dd class="text-muted" title={absolute(job.startedAt)}>{relative(job.startedAt)}</dd>
         </div>
         <div>
-          <dt class="df-label">Finished</dt>
+          <dt class="df-label">{m.job_field_finished()}</dt>
           <dd class="text-muted" title={absolute(job.completedAt)}>{relative(job.completedAt)}</dd>
         </div>
         <div>
-          <dt class="df-label">Attempts</dt>
+          <dt class="df-label">{m.job_field_attempts()}</dt>
           <dd class="text-muted">{job.attempts}</dd>
         </div>
       </dl>
     </Card>
 
     {#if job.dependsOn.length > 0}
-      <Card
-        title="Waiting on"
-        description="This job cannot be claimed until all of these are completed."
-      >
+      <Card title={m.job_waiting_on_title()} description={m.job_waiting_on_description()}>
         <ul class="flex flex-wrap gap-2">
           {#each job.dependsOn as dependency (dependency)}
             <a
@@ -173,10 +173,7 @@
     {/if}
 
     {#if metadata}
-      <Card
-        title="Metadata"
-        description="Opaque to dark-factory — whatever the queueing skill put here."
-      >
+      <Card title={m.job_metadata_title()} description={m.job_metadata_description()}>
         <pre class="df-mono overflow-x-auto whitespace-pre text-muted">{metadata}</pre>
       </Card>
     {/if}

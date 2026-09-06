@@ -1,5 +1,7 @@
 <script lang="ts">
-  import { api, ApiError } from '$lib/api';
+  import { api } from '$lib/api';
+  import { messageFor } from '$lib/errors';
+  import { m } from '$lib/paraglide/messages';
   import { useOrg } from '$lib/org.svelte';
   import { CLIENTS } from '$lib/clients';
   import { relative } from '$lib/format';
@@ -28,6 +30,9 @@
    * audience, same scopes, same per-request introspection — but it is a secret
    * a human has to hold, and that is a real cost worth stating before someone
    * mints one out of habit.
+   *
+   * Every snippet on this page is verbatim in every language. A translated
+   * `--transport http`, config path, or scope name is a command nobody can run.
    */
 
   const org = useOrg();
@@ -57,12 +62,12 @@
 
     void (async () => {
       try {
-        const [m, t] = await Promise.all([api.resourceMetadata(), api.tokens(slug)]);
+        const [m_, t] = await Promise.all([api.resourceMetadata(), api.tokens(slug)]);
         if (org.slug !== slug) return;
-        metadata = m;
+        metadata = m_;
         tokens = t;
       } catch (e) {
-        error = e instanceof ApiError ? e.message : 'Could not read the server configuration.';
+        error = messageFor(e, m.connect_error_metadata());
       } finally {
         loading = false;
       }
@@ -91,7 +96,7 @@
       name = '';
       tokens = await api.tokens(org.slug);
     } catch (e) {
-      mintError = e instanceof ApiError ? e.message : 'Could not mint that token.';
+      mintError = messageFor(e, m.connect_error_mint());
     } finally {
       minting = false;
     }
@@ -105,7 +110,7 @@
       tokens = await api.tokens(org.slug);
       if (minted?.id === id) minted = undefined;
     } catch (e) {
-      error = e instanceof ApiError ? e.message : 'Could not revoke that token.';
+      error = messageFor(e, m.connect_error_revoke());
     } finally {
       busy = undefined;
     }
@@ -114,33 +119,29 @@
 
 <div class="space-y-5">
   <div>
-    <h1 class="text-lg font-semibold">Connect an agent</h1>
+    <h1 class="text-lg font-semibold">{m.connect_title()}</h1>
     <p class="mt-0.5 text-sm text-faint">
-      Any client that speaks MCP over Streamable HTTP works. Nothing here depends on a particular
-      agent's plugins, hooks, or skills.
+      {m.connect_subtitle()}
     </p>
   </div>
 
   {#if error}<Alert>{error}</Alert>{/if}
 
   {#if loading && !metadata}
-    <Loading what="Reading the server configuration" />
+    <Loading what={m.connect_loading()} />
   {:else if !mcpUrl}
     <Alert>
-      The server did not report an MCP endpoint. Its
-      <code class="df-mono">/.well-known/oauth-protected-resource</code> document is what this page reads.
+      {m.connect_no_endpoint({ document: '/.well-known/oauth-protected-resource' })}
     </Alert>
   {:else}
-    <Card title="Endpoint">
+    <Card title={m.connect_endpoint_title()}>
       <CopyField value={mcpUrl} />
       <p class="mt-2 text-xs text-faint">
-        Tokens are audienced for exactly this URI. A token minted here is refused anywhere else, and
-        its organization —
-        <code class="df-mono">{org.slug}</code> — is fixed when it is issued and cannot be changed.
+        {m.connect_endpoint_note({ org: org.slug })}
       </p>
     </Card>
 
-    <Card title="Your client">
+    <Card title={m.connect_client_title()}>
       {#snippet actions()}
         <div class="flex rounded-md border border-edge text-xs">
           <button
@@ -159,7 +160,7 @@
             class:text-muted={!usingToken}
             onclick={() => (usingToken = true)}
           >
-            Access token
+            {m.connect_tab_token()}
           </button>
         </div>
       {/snippet}
@@ -182,7 +183,7 @@
       <div class="mt-4">
         {#if recipe.location}
           <p class="mb-1.5 text-xs text-faint">
-            Put this in <code class="df-mono">{recipe.location}</code>:
+            {m.connect_location({ path: recipe.location })}
           </p>
         {/if}
         <CopyField value={snippet} />
@@ -194,52 +195,49 @@
 
       {#if usingToken && !minted}
         <p class="mt-2 text-xs text-warn">
-          Replace the placeholder with a token — mint one below. The token is shown once.
+          {m.connect_token_placeholder_note()}
         </p>
       {:else if !usingToken}
         <p class="mt-2 text-xs text-faint">
-          The client registers itself and sends you here to approve it. Nothing is pasted, and you
-          can revoke it from this page afterwards.
+          {m.connect_oauth_note()}
         </p>
       {/if}
     </Card>
 
     {#if minted}
-      <Card title="Your new token">
+      <Card title={m.connect_new_token_title()}>
         <Alert tone="warn">
-          This is shown once. Only a SHA-256 hash of it is stored, so nobody — including us — can
-          show it to you again.
+          {m.connect_new_token_warning()}
         </Alert>
         <div class="mt-3">
           <CopyField value={minted.token} />
         </div>
         <p class="mt-2 text-xs text-faint">
-          Scopes: <span class="df-mono">{minted.scopes.join(' ')}</span>
+          {m.connect_new_token_scopes({ scopes: minted.scopes.join(' ') })}
         </p>
       </Card>
     {/if}
 
-    <Card
-      title="Personal access tokens"
-      description="The compatibility path, for clients whose OAuth support is partial."
-    >
+    <Card title={m.connect_pat_title()} description={m.connect_pat_description()}>
       <form class="space-y-4" onsubmit={mint}>
         <div class="grid gap-4 sm:grid-cols-3">
           <div class="sm:col-span-2">
-            <Field
-              label="What is it for"
-              hint="Shown in the list below. It is all you will have to go on when deciding what to revoke."
-            >
-              <input class="df-input" placeholder="laptop, CI runner" required bind:value={name} />
+            <Field label={m.connect_field_name_label()} hint={m.connect_field_name_hint()}>
+              <input
+                class="df-input"
+                placeholder={m.connect_field_name_placeholder()}
+                required
+                bind:value={name}
+              />
             </Field>
           </div>
-          <Field label="Expires in" hint="Days. 1–365.">
+          <Field label={m.connect_field_ttl_label()} hint={m.connect_field_ttl_hint()}>
             <input class="df-input" type="number" min="1" max="365" bind:value={ttlDays} />
           </Field>
         </div>
 
         <fieldset>
-          <legend class="df-label">Scopes</legend>
+          <legend class="df-label">{m.connect_scopes_legend()}</legend>
           <div class="flex flex-wrap gap-x-5 gap-y-2">
             {#each grantable as scope (scope)}
               <label class="flex items-center gap-2 text-sm text-muted">
@@ -253,45 +251,48 @@
             {/each}
           </div>
           <p class="mt-2 text-xs text-faint">
-            You can only grant scopes you hold. <code class="df-mono">org:admin</code> needs an owner
-            or admin of this organization.
+            {m.connect_scopes_note({ scope: 'org:admin' })}
           </p>
         </fieldset>
 
         {#if mintError}<Alert>{mintError}</Alert>{/if}
 
-        <Button type="submit" pending={minting}>Mint a token</Button>
+        <Button type="submit" pending={minting}>{m.connect_mint_button()}</Button>
       </form>
 
       <div class="mt-6 border-t border-edge/50 pt-4">
         <h3 class="text-xs font-medium tracking-wide text-muted uppercase">
-          Live credentials in {org.slug}
+          {m.connect_live_heading({ org: org.slug })}
         </h3>
         <p class="mt-1 text-xs text-faint">
-          Yours only, OAuth grants included. Revoking one stops that agent on its next call, not at
-          some later expiry.
+          {m.connect_live_note()}
         </p>
 
         {#if tokens.length === 0}
-          <div class="mt-3"><Empty title="No live tokens." /></div>
+          <div class="mt-3"><Empty title={m.connect_no_tokens()} /></div>
         {:else}
           <ul class="mt-3 divide-y divide-edge/40">
             {#each tokens as token (token.id)}
               <li class="flex flex-wrap items-center gap-3 py-2.5 text-sm">
                 <div class="min-w-0 flex-1">
-                  <span class="text-ink">{token.name ?? token.clientId ?? 'unnamed'}</span>
+                  <span class="text-ink">
+                    {token.name ?? token.clientId ?? m.connect_token_unnamed()}
+                  </span>
                   <span class="ml-2 rounded-full border border-edge px-2 py-0.5 text-xs text-faint">
                     {token.kind}
                   </span>
                   <p class="df-mono mt-0.5 text-xs text-faint">
-                    {token.scopes.join(' ') || 'no scopes'}
+                    {token.scopes.join(' ') || m.connect_token_no_scopes()}
                   </p>
                   <p class="text-xs text-faint">
-                    last used {relative(token.lastUsedAt)} · expires {relative(token.expiresAt)}
+                    {m.connect_token_meta({
+                      lastUsed: relative(token.lastUsedAt),
+                      expires: relative(token.expiresAt)
+                    })}
                   </p>
                 </div>
                 <Button tone="danger" pending={busy === token.id} onclick={() => revoke(token.id)}>
-                  Revoke
+                  {m.connect_revoke()}
                 </Button>
               </li>
             {/each}

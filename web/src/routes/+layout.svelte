@@ -131,7 +131,7 @@
       </a>
 
       {#if session.signedIn}
-        <nav class="ml-2 hidden gap-1 text-sm sm:flex" aria-label="Organizations">
+        <nav class="ml-2 hidden gap-1 text-sm sm:flex" aria-label={m.nav_organizations()}>
           {#each session.orgs as membership (membership.orgId)}
             <a
               href="/o/{membership.orgSlug}"
@@ -145,7 +145,7 @@
           <a
             href="/orgs/new"
             class="rounded-md px-2.5 py-1 text-faint transition hover:bg-raised hover:text-ink"
-            title="Create an organization"
+            title={m.nav_create_org()}
           >
             +
           </a>
@@ -154,13 +154,15 @@
 
       <div class="ml-auto flex items-center gap-3 text-sm">
         {#if session.me}
-          <span class="hidden text-faint sm:inline">{session.me.user.email ?? 'no email set'}</span>
+          <span class="hidden text-faint sm:inline"
+            >{session.me.user.email ?? m.nav_no_email()}</span
+          >
           <button
             class="rounded-md border border-edge px-2.5 py-1 text-muted transition hover:bg-raised hover:text-ink disabled:opacity-50"
             onclick={signOut}
             disabled={signingOut}
           >
-            Sign out
+            {m.nav_sign_out()}
           </button>
         {/if}
       </div>
@@ -171,16 +173,17 @@
     {#if fatal}
       <Alert>
         {fatal}
-        <button class="ml-2 underline" onclick={() => location.reload()}>Try again</button>
+        <button class="ml-2 underline" onclick={() => location.reload()}>{m.nav_try_again()}</button
+        >
       </Alert>
     {:else if !session.ready}
-      <Loading what="Checking your session" />
+      <Loading what={m.nav_checking_session()} />
     {:else}
       {@render children()}
     {/if}
   </main>
 
   <footer class="border-t border-edge/40 px-4 py-4 text-center text-xs text-faint">
-    <a class="hover:text-muted" href="/api/openapi.json">API reference</a>
+    <a class="hover:text-muted" href="/api/openapi.json">{m.nav_api_reference()}</a>
   </footer>
 </div>

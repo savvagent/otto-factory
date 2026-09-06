@@ -1,5 +1,6 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
+  import { m } from '$lib/paraglide/messages';
   import { session } from '$lib/session.svelte';
   import Loading from '$lib/components/Loading.svelte';
 
@@ -19,4 +20,4 @@
   });
 </script>
 
-<Loading what="Finding your organization" />
+<Loading what={m.home_finding_org()} />

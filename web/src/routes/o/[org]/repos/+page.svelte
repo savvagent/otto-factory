@@ -1,5 +1,7 @@
 <script lang="ts">
-  import { api, ApiError } from '$lib/api';
+  import { api } from '$lib/api';
+  import { messageFor } from '$lib/errors';
+  import { m } from '$lib/paraglide/messages';
   import { useOrg } from '$lib/org.svelte';
   import { relative, slugPreview } from '$lib/format';
   import type { Lease, Repo, Team, TrackerBinding, TrackerProvider } from '$lib/types';
@@ -48,9 +50,26 @@
   let bindingBusy = $state<string | undefined>(undefined);
   let bindingError = $state<Record<string, string | undefined>>({});
 
+  /**
+   * A sentence with a link in it is still one message.
+   *
+   * The translator puts `{link}` where the anchor belongs; this renders the
+   * message with a sentinel in that hole and splits around it, so the words on
+   * either side keep the order that language wants rather than the order this
+   * template happens to emit. Two fragments stitched together by a template
+   * cannot be translated; one message with a hole in it can.
+   */
+  const LINK = '::link::';
+  function around(sentence: string): [string, string] {
+    const [before = '', after = ''] = sentence.split(LINK);
+    return [before, after];
+  }
+
+  // `owner/repo` is git's own spelling rather than prose — a translated one is
+  // a placeholder nobody can act on. The JIRA hint names a concept, and is.
   const PROVIDERS: { provider: TrackerProvider; name: string; hint: string }[] = [
     { provider: 'github', name: 'GitHub', hint: 'owner/repo' },
-    { provider: 'jira', name: 'JIRA', hint: 'PROJECT KEY' }
+    { provider: 'jira', name: 'JIRA', hint: m.repos_binding_hint_jira() }
   ];
 
   let showForm = $state(false);
@@ -85,7 +104,7 @@
         teams = t;
       } catch (e) {
         if (seq !== latest) return;
-        error = e instanceof ApiError ? e.message : 'Could not load repos.';
+        error = messageFor(e, m.repos_error_load());
       } finally {
         if (seq === latest) loading = false;
       }
@@ -162,7 +181,7 @@
     } catch (e) {
       bindingError = {
         ...bindingError,
-        [key]: e instanceof ApiError ? e.message : 'Could not save that binding.'
+        [key]: messageFor(e, m.repos_error_save_binding())
       };
     } finally {
       bindingBusy = undefined;
@@ -181,7 +200,7 @@
     } catch (e) {
       bindingError = {
         ...bindingError,
-        [key]: e instanceof ApiError ? e.message : 'Could not remove that binding.'
+        [key]: messageFor(e, m.repos_error_remove_binding())
       };
     } finally {
       bindingBusy = undefined;
@@ -215,7 +234,7 @@
       showForm = false;
       repos = await api.repos(org.slug, includeInactive);
     } catch (e) {
-      formError = e instanceof ApiError ? e.message : 'Could not register that repo.';
+      formError = messageFor(e, m.repos_error_register());
     } finally {
       creating = false;
     }
@@ -226,57 +245,50 @@
       await api.updateRepo(org.slug, repo.slug, { active });
       repos = await api.repos(org.slug, includeInactive);
     } catch (e) {
-      error = e instanceof ApiError ? e.message : 'Could not update that repo.';
+      error = messageFor(e, m.repos_error_update());
     }
   }
 
   const teamName = $derived((id: string | null) =>
-    id ? (teams.find((t) => t.id === id)?.slug ?? 'unknown team') : 'org-wide'
+    id ? (teams.find((t) => t.id === id)?.slug ?? m.repos_team_unknown()) : m.repos_team_org_wide()
   );
 </script>
 
 <div class="space-y-5">
   <div class="flex flex-wrap items-center justify-between gap-3">
     <div>
-      <h1 class="text-lg font-semibold">Repos</h1>
+      <h1 class="text-lg font-semibold">{m.repos_title()}</h1>
       <p class="mt-0.5 text-sm text-faint">
-        Every job belongs to one of these. An agent that cannot resolve its checkout to a registered
-        repo gets an error naming these slugs, never a guess.
+        {m.repos_subtitle()}
       </p>
     </div>
     {#if org.isAdmin}
       <Button onclick={() => (showForm = !showForm)}>
-        {showForm ? 'Cancel' : 'Register a repo'}
+        {showForm ? m.repos_cancel() : m.repos_register_button()}
       </Button>
     {/if}
   </div>
 
   {#if showForm}
-    <Card title="Register a repo">
+    <Card title={m.repos_form_title()}>
       <form class="space-y-4" onsubmit={register}>
         <div class="grid gap-4 sm:grid-cols-2">
-          <Field label="Slug" hint="What agents will type. It cannot be changed later.">
+          <Field label={m.repos_field_slug_label()} hint={m.repos_field_slug_hint()}>
             <input class="df-input df-mono" required bind:value={slug} />
           </Field>
-          <Field label="Name" hint="Optional. Defaults to the slug.">
+          <Field label={m.repos_field_name_label()} hint={m.repos_field_name_hint()}>
             <input class="df-input" bind:value={name} />
           </Field>
         </div>
 
-        <Field
-          label="Remotes"
-          hint="One per line, in any form git prints. SSH and HTTPS spellings of one repository collapse to a single row."
-        >
+        <Field label={m.repos_field_remotes_label()} hint={m.repos_field_remotes_hint()}>
           <textarea class="df-input df-mono h-24" bind:value={remotes}></textarea>
         </Field>
 
         {#if teams.length > 0}
-          <Field
-            label="Team"
-            hint="Leave org-wide unless this repo should only be visible to one team."
-          >
+          <Field label={m.repos_field_team_label()} hint={m.repos_field_team_hint()}>
             <select class="df-input" bind:value={teamId}>
-              <option value="">Org-wide</option>
+              <option value="">{m.repos_option_org_wide()}</option>
               {#each teams as team (team.id)}
                 <option value={team.id}>{team.slug}</option>
               {/each}
@@ -286,28 +298,26 @@
 
         {#if formError}<Alert>{formError}</Alert>{/if}
 
-        <Button type="submit" pending={creating}>Register</Button>
+        <Button type="submit" pending={creating}>{m.repos_submit()}</Button>
       </form>
     </Card>
   {/if}
 
   <label class="flex items-center gap-2 text-xs text-muted">
     <input type="checkbox" bind:checked={includeInactive} />
-    Include retired repos
+    {m.repos_include_retired()}
   </label>
 
   {#if error}
     <Alert>{error}</Alert>
   {:else if loading && repos.length === 0}
-    <Loading what="Loading repos" />
+    <Loading what={m.repos_loading()} />
   {:else if repos.length === 0}
-    <Empty title="No repos registered yet.">
+    <Empty title={m.repos_empty_title()}>
       {#if org.isAdmin}
-        Register one above, or let an agent do it with the <code class="df-mono">register_repo</code
-        >
-        tool.
+        {m.repos_empty_admin({ tool: 'register_repo' })}
       {:else}
-        Ask an owner or admin to register one.
+        {m.repos_empty_member()}
       {/if}
     </Empty>
   {:else}
@@ -320,7 +330,7 @@
                 <span class="df-mono text-sm text-ink">{repo.slug}</span>
                 {#if !repo.active}
                   <span class="rounded-full border border-edge px-2 py-0.5 text-xs text-faint">
-                    retired
+                    {m.repos_badge_retired()}
                   </span>
                 {/if}
               </div>
@@ -334,19 +344,19 @@
               onclick={() => toggle(repo)}
               aria-expanded={expanded === repo.slug}
             >
-              {expanded === repo.slug ? 'Hide leases' : 'Who is in here?'}
+              {expanded === repo.slug ? m.repos_hide_leases() : m.repos_show_leases()}
             </button>
 
             <a
               class="text-xs text-muted underline hover:text-ink"
               href="/o/{org.slug}/queue?repo={encodeURIComponent(repo.slug)}"
             >
-              Queue
+              {m.repos_queue_link()}
             </a>
 
             {#if org.isAdmin}
               <Button tone="quiet" onclick={() => setActive(repo, !repo.active)}>
-                {repo.active ? 'Retire' : 'Reinstate'}
+                {repo.active ? m.repos_retire() : m.repos_reinstate()}
               </Button>
             {/if}
           </div>
@@ -354,19 +364,21 @@
           {#if expanded === repo.slug}
             <div class="border-t border-edge/60 px-4 py-3">
               {#if leases[repo.slug] === 'loading'}
-                <Loading what="Reading leases" />
+                <Loading what={m.repos_leases_loading()} />
               {:else if leases[repo.slug] === 'failed'}
-                <Alert>Could not read the leases on this repo.</Alert>
+                <Alert>{m.repos_leases_failed()}</Alert>
               {:else if (leases[repo.slug] as Lease[]).length === 0}
                 <p class="text-xs text-faint">
-                  Nobody holds a lease on {repo.slug} right now.
+                  {m.repos_no_leases({ repo: repo.slug })}
                 </p>
               {:else}
                 <ul class="space-y-1.5">
                   {#each leases[repo.slug] as Lease[] as lease (lease.id)}
                     <li class="flex flex-wrap items-baseline gap-x-3 text-sm">
                       <span class="df-mono text-ink">{lease.branch}</span>
-                      <span class="text-muted">{lease.holderLabel ?? 'an agent'}</span>
+                      <span class="text-muted">
+                        {lease.holderLabel ?? m.repos_lease_holder_unknown()}
+                      </span>
                       {#if lease.jobId}
                         <a
                           class="df-mono text-xs text-muted underline hover:text-ink"
@@ -375,24 +387,27 @@
                           {lease.jobId}
                         </a>
                       {/if}
-                      <span class="text-xs text-faint">expires {relative(lease.expiresAt)}</span>
+                      <span class="text-xs text-faint">
+                        {m.repos_lease_expires({ when: relative(lease.expiresAt) })}
+                      </span>
                     </li>
                   {/each}
                 </ul>
                 <p class="mt-2 text-xs text-faint">
-                  Leases are advisory. The server cannot see a git push, so a lease makes a
-                  collision visible — it does not prevent one.
+                  {m.repos_leases_note()}
                 </p>
               {/if}
             </div>
 
             <div class="border-t border-edge/60 px-4 py-3">
-              <h3 class="text-xs font-semibold tracking-wide text-muted uppercase">Trackers</h3>
+              <h3 class="text-xs font-semibold tracking-wide text-muted uppercase">
+                {m.repos_trackers_heading()}
+              </h3>
 
               {#if bindings[repo.slug] === 'loading'}
-                <Loading what="Reading tracker bindings" />
+                <Loading what={m.repos_bindings_loading()} />
               {:else if bindings[repo.slug] === 'failed'}
-                <Alert>Could not read this repo's tracker bindings.</Alert>
+                <Alert>{m.repos_bindings_failed()}</Alert>
               {:else}
                 <ul class="mt-2 space-y-3">
                   {#each PROVIDERS as { provider, name, hint } (provider)}
@@ -404,7 +419,9 @@
 
                         {#if org.isAdmin}
                           <label class="min-w-0 flex-1">
-                            <span class="sr-only">{name} project</span>
+                            <span class="sr-only">
+                              {m.repos_binding_ref_label({ provider: name })}
+                            </span>
                             <input
                               class="df-input df-mono"
                               placeholder={hint}
@@ -412,7 +429,9 @@
                             />
                           </label>
                           <label class="w-32 shrink-0">
-                            <span class="sr-only">{name} trigger label</span>
+                            <span class="sr-only">
+                              {m.repos_binding_trigger_label({ provider: name })}
+                            </span>
                             <input
                               class="df-input df-mono"
                               placeholder="dark-factory"
@@ -423,7 +442,7 @@
                             pending={bindingBusy === key}
                             onclick={() => saveBinding(repo.slug, provider)}
                           >
-                            {binding ? 'Update' : 'Bind'}
+                            {binding ? m.repos_binding_update() : m.repos_binding_bind()}
                           </Button>
                           {#if binding}
                             <Button
@@ -431,24 +450,28 @@
                               pending={bindingBusy === key}
                               onclick={() => removeBinding(repo.slug, provider)}
                             >
-                              Remove
+                              {m.repos_binding_remove()}
                             </Button>
                           {/if}
                         {:else if binding}
                           <span class="df-mono text-sm text-muted">{binding.externalRef}</span>
-                          <span class="text-xs text-faint">label {binding.triggerLabel}</span>
+                          <span class="text-xs text-faint">
+                            {m.repos_binding_trigger_display({ label: binding.triggerLabel })}
+                          </span>
                         {:else}
-                          <span class="text-xs text-faint">not bound</span>
+                          <span class="text-xs text-faint">{m.repos_binding_unbound()}</span>
                         {/if}
                       </div>
 
                       {#if binding && !binding.live}
+                        {@const parts = around(
+                          m.repos_binding_inactive({ provider: name, link: LINK })
+                        )}
                         <p class="mt-1 text-xs text-faint">
-                          Stored, but nothing syncs until {name} is connected on the
-                          <a class="underline hover:text-ink" href="/o/{org.slug}/trackers">
-                            Trackers
-                          </a>
-                          page.
+                          {parts[0]}<a
+                            class="underline hover:text-ink"
+                            href="/o/{org.slug}/trackers">{m.repos_trackers_heading()}</a
+                          >{parts[1]}
                         </p>
                       {/if}
                       {#if bindingError[key]}
@@ -459,9 +482,7 @@
                 </ul>
 
                 <p class="mt-3 text-xs text-faint">
-                  An issue in the bound project carrying the trigger label becomes a job in this
-                  repo. GitHub takes <code class="df-mono">owner/repo</code>; JIRA takes a project
-                  key. Both are matched exactly against what the provider sends.
+                  {m.repos_bindings_note({ githubRef: 'owner/repo' })}
                 </p>
               {/if}
             </div>

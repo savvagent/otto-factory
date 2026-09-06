@@ -49,41 +49,43 @@
   }
 </script>
 
-<svelte:head><title>Sign in · dark-factory</title></svelte:head>
+<svelte:head><title>{m.login_page_title()}</title></svelte:head>
 
 <div class="mx-auto max-w-sm py-8">
-  <h1 class="text-lg font-semibold">Sign in</h1>
+  <h1 class="text-lg font-semibold">{m.login_heading()}</h1>
   <p class="mt-1 text-sm text-faint">
     {#if next}
-      Sign in to continue.
+      {m.login_continue_hint()}
     {:else}
-      Your passkey knows who you are — there is nothing to type.
+      {m.login_passkey_hint()}
     {/if}
   </p>
 
   {#if !supported}
     <div class="mt-4">
-      <Alert>
-        This browser does not support passkeys. Try a current version of Safari, Chrome, Edge or
-        Firefox.
-      </Alert>
+      <Alert>{m.login_unsupported()}</Alert>
     </div>
   {:else}
     {#if error}<div class="mt-4"><Alert>{error}</Alert></div>{/if}
 
     <div class="mt-5">
-      <Button {pending} onclick={signIn}>Sign in with a passkey</Button>
+      <Button {pending} onclick={signIn}>{m.login_submit()}</Button>
     </div>
   {/if}
 
   <div class="mt-6 space-y-2 border-t border-edge/50 pt-4 text-xs text-faint">
+    <!--
+      Two complete sentences, and the link is one of them. A sentence split
+      around an anchor is a sentence no translator can reorder — and word order
+      is exactly what differs between these six languages.
+    -->
     <p>
-      Lost every device you registered? There is no email to recover through, so an admin of an
-      organization you belong to can issue you a one-time code to register a new passkey. If you
-      have one, <a class="text-muted underline hover:text-ink" href="/claim">use it here</a>.
+      {m.login_recovery_hint()}
+      <a class="text-muted underline hover:text-ink" href="/claim">{m.login_recovery_link()}</a>
     </p>
     <p class="pt-2">
-      No account? <a class="text-muted underline hover:text-ink" href="/signup">Create one</a>.
+      {m.login_no_account()}
+      <a class="text-muted underline hover:text-ink" href="/signup">{m.login_create_account()}</a>
     </p>
   </div>
 </div>

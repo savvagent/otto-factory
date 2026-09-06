@@ -1,5 +1,7 @@
 <script lang="ts">
-  import { api, ApiError } from '$lib/api';
+  import { api } from '$lib/api';
+  import { messageFor } from '$lib/errors';
+  import { m } from '$lib/paraglide/messages';
   import { useOrg } from '$lib/org.svelte';
   import { day } from '$lib/format';
   import type { UsageStatus } from '$lib/types';
@@ -37,7 +39,7 @@
         if (org.slug !== slug) return;
         usage = status;
       } catch (e) {
-        error = e instanceof ApiError ? e.message : 'Could not read the meter.';
+        error = messageFor(e, m.usage_load_failed());
       } finally {
         loading = false;
       }
@@ -49,75 +51,74 @@
 
 <div class="space-y-5">
   <div>
-    <h1 class="text-lg font-semibold">Usage</h1>
-    <p class="mt-0.5 text-sm text-faint">The billable unit is one MCP tool call.</p>
+    <h1 class="text-lg font-semibold">{m.usage_title()}</h1>
+    <p class="mt-0.5 text-sm text-faint">{m.usage_subtitle()}</p>
   </div>
 
   {#if error}
     <Alert>{error}</Alert>
   {:else if !usage}
-    <Loading what="Reading the meter" />
+    <Loading what={m.usage_reading_meter()} />
   {:else}
     {#if usage.remaining === 0 && usage.hardStop}
       <Alert tone={usage.enforced ? 'error' : 'warn'}>
         {#if usage.enforced}
-          This organization is out of its included operations and billable tools are being refused.
-          Reads keep working — the queue stays visible, and nothing already queued is lost.
+          {m.usage_out_enforced()}
         {:else}
-          This organization is past its included operations. Nothing is being refused yet.
+          {m.usage_out_not_enforced()}
         {/if}
       </Alert>
     {:else if usage.warning}
-      <Alert tone="warn">Most of this period's included operations have been used.</Alert>
+      <Alert tone="warn">{m.usage_warning()}</Alert>
     {/if}
 
-    <Card title="This period" description="Since {day(usage.periodStart)}.">
+    <Card
+      title={m.usage_period_title()}
+      description={m.usage_period_since({ date: day(usage.periodStart) })}
+    >
       <Meter {usage} />
     </Card>
 
     <div class="grid gap-3 sm:grid-cols-3">
       <div class="df-card px-4 py-3">
         <div class="text-2xl font-semibold text-ink">{usage.totalCalls.toLocaleString()}</div>
-        <div class="mt-0.5 text-xs text-faint">Tool calls recorded</div>
+        <div class="mt-0.5 text-xs text-faint">{m.usage_tile_recorded()}</div>
       </div>
       <div class="df-card px-4 py-3">
         <div class="text-2xl font-semibold text-ink">{usage.billableUsed.toLocaleString()}</div>
-        <div class="mt-0.5 text-xs text-faint">Billable</div>
+        <div class="mt-0.5 text-xs text-faint">{m.usage_tile_billable()}</div>
       </div>
       <div class="df-card px-4 py-3">
         <div class="text-2xl font-semibold text-muted">{free.toLocaleString()}</div>
-        <div class="mt-0.5 text-xs text-faint">Free</div>
+        <div class="mt-0.5 text-xs text-faint">{m.usage_tile_free()}</div>
       </div>
     </div>
 
-    <Card title="Why the two numbers differ">
-      <p class="text-sm text-muted">
-        Every call is recorded, but not every call is billed. <code class="df-mono">watch</code> is a
-        continuous long poll — an agent waiting for work holds one open more or less permanently — and
-        charging it flat would bill an idle agent tens of thousands of calls a month for doing nothing.
-        Reads that answer "what is going on", including this page, are free too.
-      </p>
-      <p class="mt-3 text-sm text-muted">
-        The full history is kept regardless of how a call was classified, so a change to what counts
-        can be applied without losing what happened.
-      </p>
+    <Card title={m.usage_why_title()}>
+      <!--
+        The tool name is a placeholder rather than markup around a fragment, the
+        same way `meter_watch_note` carries it: `watch` is a wire name and stays
+        verbatim in every language, but the clause around it does not.
+      -->
+      <p class="text-sm text-muted">{m.usage_why_body({ tool: 'watch' })}</p>
+      <p class="mt-3 text-sm text-muted">{m.usage_why_history()}</p>
       <dl class="mt-4 grid grid-cols-2 gap-y-2 text-sm sm:grid-cols-4">
         <div>
-          <dt class="df-label">Plan</dt>
+          <dt class="df-label">{m.usage_field_plan()}</dt>
           <dd class="text-muted">{usage.plan}</dd>
         </div>
         <div>
-          <dt class="df-label">Included</dt>
+          <dt class="df-label">{m.usage_field_included()}</dt>
           <dd class="text-muted">{usage.includedOps.toLocaleString()}</dd>
         </div>
         <div>
-          <dt class="df-label">Remaining</dt>
+          <dt class="df-label">{m.usage_field_remaining()}</dt>
           <dd class="text-muted">{usage.remaining.toLocaleString()}</dd>
         </div>
         <div>
-          <dt class="df-label">Over the bucket</dt>
+          <dt class="df-label">{m.usage_field_over_bucket()}</dt>
           <dd class="text-muted">
-            {usage.hardStop ? 'stops billable work' : 'metered as overage'}
+            {usage.hardStop ? m.usage_over_stops() : m.usage_over_metered()}
           </dd>
         </div>
       </dl>

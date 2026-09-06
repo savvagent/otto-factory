@@ -1,5 +1,7 @@
 <script lang="ts">
-  import { api, ApiError } from '$lib/api';
+  import { api } from '$lib/api';
+  import { messageFor } from '$lib/errors';
+  import { m } from '$lib/paraglide/messages';
   import { useOrg } from '$lib/org.svelte';
   import { slugPreview, person } from '$lib/format';
   import type { OrgMember, Team, TeamMember } from '$lib/types';
@@ -13,10 +15,10 @@
   /**
    * Teams — the visibility scope inside an org.
    *
-   * Deleting a team is refused while repos are still scoped to it, and the
-   * refusal names them. That is not a validation nicety: a null team means
-   * org-wide, so a delete that cascaded would quietly publish a team's repos to
-   * everybody. The error arrives with the repo names in it and is shown as-is.
+   * Deleting a team is refused while repos are still scoped to it. That is not
+   * a validation nicety: a null team means org-wide, so a delete that cascaded
+   * would quietly publish a team's repos to everybody. The refusal arrives as a
+   * code this bundle has a sentence for.
    */
 
   const org = useOrg();
@@ -43,12 +45,12 @@
 
     void (async () => {
       try {
-        const [t, m] = await Promise.all([api.teams(org_), api.members(org_)]);
+        const [t, m_] = await Promise.all([api.teams(org_), api.members(org_)]);
         if (org.slug !== org_) return;
         teams = t;
-        members = m;
+        members = m_;
       } catch (e) {
-        error = e instanceof ApiError ? e.message : 'Could not load teams.';
+        error = messageFor(e, m.teams_error_load());
       } finally {
         loading = false;
       }
@@ -68,7 +70,7 @@
     try {
       rosters = { ...rosters, [teamSlug]: await api.teamMembers(org.slug, teamSlug) };
     } catch (e) {
-      error = e instanceof ApiError ? e.message : 'Could not read that team.';
+      error = messageFor(e, m.teams_error_read());
     }
   }
 
@@ -82,7 +84,7 @@
       name = '';
       teams = await api.teams(org.slug);
     } catch (e) {
-      formError = e instanceof ApiError ? e.message : 'Could not create that team.';
+      formError = messageFor(e, m.teams_error_create());
     } finally {
       creating = false;
     }
@@ -96,7 +98,7 @@
       teams = await api.teams(org.slug);
       if (teamSlug) await loadRoster(teamSlug);
     } catch (e) {
-      error = e instanceof ApiError ? e.message : 'That did not work.';
+      error = messageFor(e, m.error_that_did_not_work());
     } finally {
       busy = undefined;
     }
@@ -104,36 +106,36 @@
 
   /** Org members not already on the expanded team. */
   const candidates = $derived((teamSlug: string) => {
-    const on = new Set((rosters[teamSlug] ?? []).map((m) => m.userId));
-    return members.filter((m) => !on.has(m.id));
+    const on = new Set((rosters[teamSlug] ?? []).map((m_) => m_.userId));
+    return members.filter((m_) => !on.has(m_.id));
   });
 </script>
 
 <div class="space-y-5">
   <div>
-    <h1 class="text-lg font-semibold">Teams</h1>
+    <h1 class="text-lg font-semibold">{m.teams_title()}</h1>
     <p class="mt-0.5 text-sm text-faint">
-      A team scopes repos and their queues. A repo with no team is visible to the whole org.
+      {m.teams_subtitle()}
     </p>
   </div>
 
   {#if error}<Alert>{error}</Alert>{/if}
 
   {#if org.isAdmin}
-    <Card title="New team">
+    <Card title={m.teams_new_title()}>
       <form class="flex flex-wrap items-end gap-3" onsubmit={create}>
         <div class="w-44">
-          <Field label="Slug">
+          <Field label={m.teams_field_slug()}>
             <input class="df-input df-mono" required bind:value={slug} />
           </Field>
         </div>
         <div class="min-w-48 flex-1">
-          <Field label="Name" hint="Optional. Defaults to the slug.">
+          <Field label={m.teams_field_name()} hint={m.teams_field_name_hint()}>
             <input class="df-input" bind:value={name} />
           </Field>
         </div>
         <div class="pb-0.5">
-          <Button type="submit" pending={creating}>Create</Button>
+          <Button type="submit" pending={creating}>{m.teams_create()}</Button>
         </div>
       </form>
       {#if formError}<div class="mt-3"><Alert>{formError}</Alert></div>{/if}
@@ -141,10 +143,10 @@
   {/if}
 
   {#if loading && teams.length === 0}
-    <Loading what="Loading teams" />
+    <Loading what={m.teams_loading()} />
   {:else if teams.length === 0}
-    <Empty title="No teams yet.">
-      Teams are optional. Without one, every repo is visible to every member.
+    <Empty title={m.teams_empty_title()}>
+      {m.teams_empty_body()}
     </Empty>
   {:else}
     <ul class="space-y-2">
@@ -161,14 +163,14 @@
               onclick={() => openTeam(team)}
               aria-expanded={expanded === team.slug}
             >
-              {expanded === team.slug ? 'Hide members' : 'Members'}
+              {expanded === team.slug ? m.teams_hide_members() : m.teams_show_members()}
             </button>
 
             <a
               class="text-xs text-muted underline hover:text-ink"
               href="/o/{org.slug}/queue?team={encodeURIComponent(team.slug)}"
             >
-              Queue
+              {m.teams_queue_link()}
             </a>
 
             {#if org.isAdmin}
@@ -177,7 +179,7 @@
                 pending={busy === `${team.id}:delete`}
                 onclick={() => act(`${team.id}:delete`, () => api.deleteTeam(org.slug, team.slug))}
               >
-                Delete
+                {m.teams_delete()}
               </Button>
             {/if}
           </div>
@@ -186,9 +188,9 @@
             {@const roster = rosters[team.slug]}
             <div class="space-y-3 border-t border-edge/60 px-4 py-3">
               {#if !roster}
-                <Loading what="Loading the roster" />
+                <Loading what={m.teams_roster_loading()} />
               {:else if roster.length === 0}
-                <p class="text-xs text-faint">Nobody is on this team yet.</p>
+                <p class="text-xs text-faint">{m.teams_roster_empty()}</p>
               {:else}
                 <ul class="divide-y divide-edge/40">
                   {#each roster as member (member.userId)}
@@ -207,7 +209,7 @@
                               team.slug
                             )}
                         >
-                          Remove
+                          {m.teams_remove_member()}
                         </Button>
                       {/if}
                     </li>
@@ -217,7 +219,7 @@
 
               {#if org.isAdmin && candidates(team.slug).length > 0}
                 <label class="flex items-end gap-2">
-                  <span class="sr-only">Add a member to {team.slug}</span>
+                  <span class="sr-only">{m.teams_add_member_label({ team: team.slug })}</span>
                   <select
                     class="df-input w-64"
                     value=""
@@ -233,7 +235,7 @@
                       }
                     }}
                   >
-                    <option value="">Add a member…</option>
+                    <option value="">{m.teams_add_member_option()}</option>
                     {#each candidates(team.slug) as member (member.id)}
                       <option value={member.id}>{person(member.name, member.email)}</option>
                     {/each}

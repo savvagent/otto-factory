@@ -75,78 +75,72 @@
   function deviceName(): string {
     const ua = navigator.userAgent;
     if (/iPhone|iPad/.test(ua)) return 'iPhone';
-    if (/Android/.test(ua)) return 'Android device';
+    if (/Android/.test(ua)) return m.signup_device_android();
     if (/Mac OS X/.test(ua)) return 'Mac';
-    if (/Windows/.test(ua)) return 'Windows PC';
-    return 'This device';
+    if (/Windows/.test(ua)) return m.signup_device_windows();
+    return m.signup_device_generic();
   }
 </script>
 
-<svelte:head><title>Create an account · dark-factory</title></svelte:head>
+<svelte:head><title>{m.signup_page_title()}</title></svelte:head>
 
 <div class="mx-auto max-w-sm py-8">
   {#if step === 'intro'}
-    <h1 class="text-lg font-semibold">Create an account</h1>
-    <p class="mt-1 text-sm text-faint">
-      No password, and no email to confirm. You create a passkey now, and that is how you sign in
-      from then on.
-    </p>
+    <h1 class="text-lg font-semibold">{m.signup_heading()}</h1>
+    <p class="mt-1 text-sm text-faint">{m.signup_intro()}</p>
 
     {#if !supported}
       <div class="mt-4">
-        <Alert>
-          This browser does not support passkeys. Try a current version of Safari, Chrome, Edge or
-          Firefox.
-        </Alert>
+        <Alert>{m.signup_unsupported()}</Alert>
       </div>
     {:else}
       <p class="mt-4 text-xs text-faint">
         {#if platform}
-          Your device will ask for your fingerprint, face, or screen lock. A security key or your
-          phone works too.
+          {m.signup_platform_hint()}
         {:else}
-          You will need a security key or your phone — this device has no built-in authenticator.
+          {m.signup_no_platform_hint()}
         {/if}
       </p>
 
       {#if error}<div class="mt-4"><Alert>{error}</Alert></div>{/if}
 
       <div class="mt-5">
-        <Button {pending} onclick={createAccount}>Create a passkey</Button>
+        <Button {pending} onclick={createAccount}>{m.signup_create_passkey()}</Button>
       </div>
     {/if}
 
     <p class="mt-6 text-xs text-faint">
-      Already have an account? <a class="text-muted underline hover:text-ink" href="/login"
-        >Sign in</a
-      >.
+      {m.signup_have_account()}
+      <a class="text-muted underline hover:text-ink" href="/login">{m.signup_sign_in_link()}</a>
     </p>
   {:else}
-    <h1 class="text-lg font-semibold">Your account is ready</h1>
-    <p class="mt-1 text-sm text-faint">
-      Tell us how to address you. Your email is how colleagues invite you to an organization — we
-      never send anything to it.
-    </p>
+    <h1 class="text-lg font-semibold">{m.signup_ready_heading()}</h1>
+    <p class="mt-1 text-sm text-faint">{m.signup_ready_intro()}</p>
 
     <form class="mt-6 space-y-4" onsubmit={saveProfile}>
-      <Field label="Email" hint="Your unique identifier here. Nothing is ever sent to it.">
+      <Field label={m.signup_email_label()} hint={m.signup_email_hint()}>
         <input class="df-input" type="email" autocomplete="username" required bind:value={email} />
       </Field>
 
-      <Field label="Name" hint="Optional. Shown to the other people in your organizations.">
+      <Field label={m.signup_name_label()} hint={m.signup_name_hint()}>
         <input class="df-input" type="text" autocomplete="name" bind:value={name} />
       </Field>
 
       {#if error}<Alert>{error}</Alert>{/if}
 
-      <Button type="submit" {pending}>Save and continue</Button>
+      <Button type="submit" {pending}>{m.signup_save()}</Button>
     </form>
 
+    <!--
+      The link is a whole sentence of its own rather than two words lifted out
+      of the middle of one: a sentence cut around an anchor cannot be reordered
+      into a language that puts the verb somewhere else.
+    -->
     <p class="mt-6 text-xs text-faint">
-      Next, add a second passkey from <a
-        class="text-muted underline hover:text-ink"
-        href="/settings">your settings</a
-      >. One passkey is one device, and there is no email to recover through if you lose it.
+      <a class="text-muted underline hover:text-ink" href="/settings"
+        >{m.signup_second_passkey_link()}</a
+      >
+      {m.signup_second_passkey_hint()}
     </p>
   {/if}
 </div>
