@@ -174,7 +174,7 @@
             class:text-muted={client !== option.id}
             onclick={() => (client = option.id)}
           >
-            {option.name}
+            {option.label()}
           </button>
         {/each}
       </div>
@@ -189,7 +189,7 @@
       </div>
 
       {#if recipe.note}
-        <p class="mt-2 text-xs text-faint">{recipe.note}</p>
+        <p class="mt-2 text-xs text-faint">{recipe.note()}</p>
       {/if}
 
       {#if usingToken && !minted}

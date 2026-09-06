@@ -1,5 +1,6 @@
 <script lang="ts">
   import { copy } from '$lib/format';
+  import { m } from '$lib/paraglide/messages';
   import Button from './Button.svelte';
 
   /**
@@ -37,12 +38,14 @@
       class:whitespace-pre-wrap={multiline}>{value}</code
     >
     <Button tone="quiet" onclick={onCopy}>
-      {state === 'copied' ? 'Copied' : state === 'failed' ? 'Select it' : 'Copy'}
+      {state === 'copied'
+        ? m.copy_copied()
+        : state === 'failed'
+          ? m.copy_select_it()
+          : m.copy_action()}
     </Button>
   </div>
   {#if state === 'failed'}
-    <p class="mt-1 text-xs text-warn">
-      The browser refused clipboard access. Select the text above and copy it by hand.
-    </p>
+    <p class="mt-1 text-xs text-warn">{m.copy_clipboard_refused()}</p>
   {/if}
 </div>

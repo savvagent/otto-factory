@@ -1,9 +1,12 @@
 <script lang="ts">
+  import { statusLabel } from '$lib/status';
   import type { JobStatus } from '$lib/types';
 
   /**
    * Colour *and* the word, never colour alone. A queue read by someone with a
-   * colour vision deficiency has to say "failed", not merely be red.
+   * colour vision deficiency has to say "failed", not merely be red — and now
+   * has to say it in their language, which is why the label is looked up rather
+   * than being the enum value printed raw.
    */
   interface Props {
     status: JobStatus;
@@ -25,5 +28,5 @@
     status
   ]}"
 >
-  {status}
+  {statusLabel(status)}
 </span>

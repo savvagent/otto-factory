@@ -86,5 +86,14 @@
   "error_could_not_load_passkeys": "Impossible de charger vos clés d'accès.",
   "error_could_not_add_passkey": "Impossible d'ajouter cette clé d'accès.",
   "error_that_did_not_work": "Cela n'a pas fonctionné.",
-  "error_session_resolve_failed": "Une erreur est survenue lors de la résolution de votre session."
+  "error_session_resolve_failed": "Une erreur est survenue lors de la résolution de votre session.",
+  "copy_action": "Copier",
+  "copy_copied": "Copié",
+  "copy_select_it": "Sélectionnez-le",
+  "copy_clipboard_refused": "Le navigateur a refusé l'accès au presse-papiers. Sélectionnez le texte ci-dessus et copiez-le à la main.",
+  "loading_default": "Chargement",
+  "client_generic_name": "Tout autre client MCP",
+  "client_note_claude_code": "Exécutez ensuite `claude mcp login dark-factory` dans un terminal interactif pour consentir : une session `-p` ne peut pas ouvrir de navigateur et signalera le serveur comme non authentifié.",
+  "client_note_copilot": "Copilot ne propose le consentement navigateur que depuis sa session interactive ; une exécution `-p` sans identifiant signale que l'outil n'existe pas au lieu de demander. Scriptez-le avec un jeton.",
+  "client_note_generic": "HTTP en streaming. Un client conforme n'a besoin que de cette URL : le 401 qu'il reçoit pointe vers le document de ressource protégée, qui pointe vers le serveur d'autorisation."
 }

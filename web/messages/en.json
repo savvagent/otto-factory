@@ -84,5 +84,14 @@
   "error_could_not_load_passkeys": "Could not load your passkeys.",
   "error_could_not_add_passkey": "Could not add that passkey.",
   "error_that_did_not_work": "That did not work.",
-  "error_session_resolve_failed": "Something went wrong resolving your session."
+  "error_session_resolve_failed": "Something went wrong resolving your session.",
+  "copy_action": "Copy",
+  "copy_copied": "Copied",
+  "copy_select_it": "Select it",
+  "copy_clipboard_refused": "The browser refused clipboard access. Select the text above and copy it by hand.",
+  "loading_default": "Loading",
+  "client_generic_name": "Any other MCP client",
+  "client_note_claude_code": "Then run `claude mcp login dark-factory` in an interactive terminal to consent — a `-p` session cannot open a browser and will report the server as unauthenticated.",
+  "client_note_copilot": "Copilot only offers the browser consent from its interactive session; a `-p` run with no credential reports no such tool rather than asking. Script it with a token.",
+  "client_note_generic": "Streamable HTTP. A conforming client needs nothing but this URL: the 401 it gets back points at the protected-resource document, which points at the authorization server."
 }

@@ -84,5 +84,14 @@
   "error_could_not_load_passkeys": "Deine Passkeys konnten nicht geladen werden.",
   "error_could_not_add_passkey": "Dieser Passkey konnte nicht hinzugefügt werden.",
   "error_that_did_not_work": "Das hat nicht geklappt.",
-  "error_session_resolve_failed": "Beim Auflösen deiner Sitzung ist etwas schiefgelaufen."
+  "error_session_resolve_failed": "Beim Auflösen deiner Sitzung ist etwas schiefgelaufen.",
+  "copy_action": "Kopieren",
+  "copy_copied": "Kopiert",
+  "copy_select_it": "Auswählen",
+  "copy_clipboard_refused": "Der Browser hat den Zugriff auf die Zwischenablage verweigert. Markiere den Text oben und kopiere ihn von Hand.",
+  "loading_default": "Wird geladen",
+  "client_generic_name": "Jeder andere MCP-Client",
+  "client_note_claude_code": "Führe dann `claude mcp login dark-factory` in einem interaktiven Terminal aus, um zuzustimmen — eine `-p`-Sitzung kann keinen Browser öffnen und meldet den Server als nicht authentifiziert.",
+  "client_note_copilot": "Copilot bietet die Browser-Zustimmung nur in seiner interaktiven Sitzung an; ein `-p`-Lauf ohne Anmeldedaten meldet, dass es das Werkzeug nicht gibt, statt zu fragen. Skripte es mit einem Token.",
+  "client_note_generic": "Streamable HTTP. Ein konformer Client braucht nichts außer dieser URL: Das zurückkommende 401 verweist auf das Protected-Resource-Dokument, und das verweist auf den Autorisierungsserver."
 }

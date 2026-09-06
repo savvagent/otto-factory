@@ -86,5 +86,14 @@
   "error_could_not_load_passkeys": "No se pudieron cargar tus claves de acceso.",
   "error_could_not_add_passkey": "No se pudo añadir esa clave de acceso.",
   "error_that_did_not_work": "No funcionó.",
-  "error_session_resolve_failed": "Algo salió mal al resolver tu sesión."
+  "error_session_resolve_failed": "Algo salió mal al resolver tu sesión.",
+  "copy_action": "Copiar",
+  "copy_copied": "Copiado",
+  "copy_select_it": "Selecciónalo",
+  "copy_clipboard_refused": "El navegador denegó el acceso al portapapeles. Selecciona el texto de arriba y cópialo a mano.",
+  "loading_default": "Cargando",
+  "client_generic_name": "Cualquier otro cliente MCP",
+  "client_note_claude_code": "Después ejecuta `claude mcp login dark-factory` en un terminal interactivo para dar consentimiento: una sesión `-p` no puede abrir un navegador e informará de que el servidor no está autenticado.",
+  "client_note_copilot": "Copilot solo ofrece el consentimiento del navegador desde su sesión interactiva; una ejecución `-p` sin credencial informa de que no existe la herramienta en lugar de preguntar. Automatízalo con un token.",
+  "client_note_generic": "HTTP en streaming. Un cliente conforme no necesita más que esta URL: el 401 que recibe apunta al documento de recurso protegido, que apunta al servidor de autorización."
 }
