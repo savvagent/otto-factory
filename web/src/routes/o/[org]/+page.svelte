@@ -2,9 +2,10 @@
   import { api } from '$lib/api';
   import { messageFor } from '$lib/errors';
   import { m } from '$lib/paraglide/messages';
+  import { currentLocale } from '$lib/locale';
   import { useOrg } from '$lib/org.svelte';
   import { relative } from '$lib/format';
-  import { statusLabel } from '$lib/status';
+  import { roleLabel, statusLabel } from '$lib/labels';
   import type { Job, QueueStats, Repo, UsageStatus } from '$lib/types';
   import Alert from '$lib/components/Alert.svelte';
   import Card from '$lib/components/Card.svelte';
@@ -91,7 +92,7 @@
     <h1 class="text-lg font-semibold">{org.title}</h1>
     <p class="mt-0.5 text-sm text-faint">
       <code class="df-mono">{org.slug}</code> · {m.overview_role_and_plan({
-        role: org.role ?? '—',
+        role: org.role ? roleLabel(org.role) : '—',
         plan: org.org?.plan ?? '—'
       })}
     </p>
@@ -105,7 +106,9 @@
     <div class="grid grid-cols-2 gap-3 sm:grid-cols-4">
       {#each tiles as tile (tile.label)}
         <div class="df-card px-4 py-3">
-          <div class="text-2xl font-semibold {tile.tone}">{tile.value.toLocaleString()}</div>
+          <div class="text-2xl font-semibold {tile.tone}">
+            {tile.value.toLocaleString(currentLocale())}
+          </div>
           <div class="mt-0.5 text-xs text-faint">{tile.label}</div>
         </div>
       {/each}

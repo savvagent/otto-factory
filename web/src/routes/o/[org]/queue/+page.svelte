@@ -7,7 +7,7 @@
   import { m } from '$lib/paraglide/messages';
   import { useOrg } from '$lib/org.svelte';
   import { relative } from '$lib/format';
-  import { statusLabel } from '$lib/status';
+  import { statusLabel } from '$lib/labels';
   import type { Job, JobStatus, Repo, Team } from '$lib/types';
   import Alert from '$lib/components/Alert.svelte';
   import Empty from '$lib/components/Empty.svelte';

@@ -8,6 +8,7 @@
   import { messageFor } from '$lib/errors';
   import { m } from '$lib/paraglide/messages';
   import { reconcile, resolveAtBoot } from '$lib/locale';
+  import { isServerRoute, safeNext } from '$lib/next';
   import { session } from '$lib/session.svelte';
   import Alert from '$lib/components/Alert.svelte';
   import Loading from '$lib/components/Loading.svelte';
@@ -53,16 +54,35 @@
   async function resolve() {
     if (session.ready) return;
     try {
-      const me = await session.refresh();
-      // The account's stored choice is the source of truth; what booted was a
-      // cache or the browser's guess. `reconcile` no-ops unless they differ,
-      // and reloads at most once when they do — see its comment for why that
-      // cannot become a loop.
-      reconcile(me?.user.locale);
+      await session.refresh();
     } catch (error) {
       fatal = messageFor(error, m.error_session_resolve_failed());
     }
   }
+
+  /**
+   * Apply the account's stored language whenever the session resolves.
+   *
+   * **An effect over `session.me`, not a line inside `resolve()`.** `resolve()`
+   * runs exactly once, on mount, and returns early forever after; every other
+   * path that establishes a session — signing in, signing up, redeeming a
+   * claim code or an invitation, and the settings page — calls
+   * `session.refresh()` directly and would never reach it. Reading
+   * `session.me` here makes this re-run for all of them.
+   *
+   * That is not a tidiness point: the case this whole mechanism exists for is
+   * **the first sign-in on a new device**, where the cache is empty and the
+   * browser's language differs from the account's. That is precisely the path
+   * `resolve()` cannot see, because the session became ready while the visitor
+   * was still signed out.
+   *
+   * `reconcile` no-ops unless the stored choice differs from what is rendering,
+   * so running it on every change is free — and it reloads at most once when
+   * they do differ, for the reason its own comment gives.
+   */
+  $effect(() => {
+    reconcile(session.me?.user.locale);
+  });
 
   /**
    * The routing guard, in one place.
@@ -102,7 +122,16 @@
     // exactly what it did until a browser test caught it.
     const needsProfile = session.me != null && session.me.user.email == null;
     if (isPublic && !needsProfile) {
-      void goto('/', { replaceState: true });
+      // Honour `next` rather than always landing on `/`. A language change
+      // detected at sign-in reloads this page, and the reload lands back here
+      // signed in — so without this, arriving with a stored locale that differs
+      // from the browser's silently costs the visitor their destination.
+      // `safeNext` is what makes an attacker-supplied `next` safe to follow;
+      // a server route needs a real navigation because the client router has
+      // no `/oauth/authorize` to render.
+      const next = safeNext(page.url.searchParams.get('next'));
+      if (next && isServerRoute(next)) location.assign(next);
+      else void goto(next ?? '/', { replaceState: true });
     }
   });
 

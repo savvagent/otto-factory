@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { statusLabel } from '$lib/status';
+  import { statusLabel } from '$lib/labels';
   import type { JobStatus } from '$lib/types';
 
   /**

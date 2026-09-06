@@ -2,6 +2,7 @@
   import { api } from '$lib/api';
   import { messageFor } from '$lib/errors';
   import { m } from '$lib/paraglide/messages';
+  import { LINK, around } from '$lib/labels';
   import { useOrg } from '$lib/org.svelte';
   import { relative, slugPreview } from '$lib/format';
   import type { Lease, Repo, Team, TrackerBinding, TrackerProvider } from '$lib/types';
@@ -49,21 +50,6 @@
   let labelDraft = $state<Record<string, string>>({});
   let bindingBusy = $state<string | undefined>(undefined);
   let bindingError = $state<Record<string, string | undefined>>({});
-
-  /**
-   * A sentence with a link in it is still one message.
-   *
-   * The translator puts `{link}` where the anchor belongs; this renders the
-   * message with a sentinel in that hole and splits around it, so the words on
-   * either side keep the order that language wants rather than the order this
-   * template happens to emit. Two fragments stitched together by a template
-   * cannot be translated; one message with a hole in it can.
-   */
-  const LINK = '::link::';
-  function around(sentence: string): [string, string] {
-    const [before = '', after = ''] = sentence.split(LINK);
-    return [before, after];
-  }
 
   // `owner/repo` is git's own spelling rather than prose — a translated one is
   // a placeholder nobody can act on. The JIRA hint names a concept, and is.

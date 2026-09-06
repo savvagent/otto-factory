@@ -2,6 +2,7 @@
   import { api } from '$lib/api';
   import { messageFor } from '$lib/errors';
   import { m } from '$lib/paraglide/messages';
+  import { LINK, around } from '$lib/labels';
   import { useOrg } from '$lib/org.svelte';
   import { relative } from '$lib/format';
   import { beginConnect } from '$lib/trackerState';
@@ -37,20 +38,6 @@
   let busy = $state<TrackerProvider | undefined>(undefined);
 
   let latest = 0;
-
-  /**
-   * A sentence with a link in it is still one message.
-   *
-   * The translator puts `{link}` where the anchor belongs; this renders the
-   * message with a sentinel in that hole and splits around it, so the words on
-   * either side keep the order that language wants rather than the order this
-   * template happens to emit.
-   */
-  const LINK = '::link::';
-  function around(sentence: string): [string, string] {
-    const [before = '', after = ''] = sentence.split(LINK);
-    return [before, after];
-  }
 
   $effect(() => {
     const org_ = org.slug;

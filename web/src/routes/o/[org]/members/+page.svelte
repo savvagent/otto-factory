@@ -2,6 +2,7 @@
   import { api } from '$lib/api';
   import { messageFor } from '$lib/errors';
   import { m } from '$lib/paraglide/messages';
+  import { roleLabel } from '$lib/labels';
   import { useOrg } from '$lib/org.svelte';
   import { session } from '$lib/session.svelte';
   import { relative, person } from '$lib/format';
@@ -134,11 +135,6 @@
    * carries and what `setMemberRole` sends. This translates the label beside
    * them and never the value itself.
    */
-  function roleLabel(role: Role): string {
-    if (role === 'owner') return m.members_role_owner();
-    if (role === 'admin') return m.members_role_admin();
-    return m.members_role_member();
-  }
 </script>
 
 <div class="space-y-5">

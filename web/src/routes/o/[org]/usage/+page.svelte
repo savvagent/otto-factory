@@ -2,6 +2,7 @@
   import { api } from '$lib/api';
   import { messageFor } from '$lib/errors';
   import { m } from '$lib/paraglide/messages';
+  import { currentLocale } from '$lib/locale';
   import { useOrg } from '$lib/org.svelte';
   import { day } from '$lib/format';
   import type { UsageStatus } from '$lib/types';
@@ -81,15 +82,19 @@
 
     <div class="grid gap-3 sm:grid-cols-3">
       <div class="df-card px-4 py-3">
-        <div class="text-2xl font-semibold text-ink">{usage.totalCalls.toLocaleString()}</div>
+        <div class="text-2xl font-semibold text-ink">
+          {usage.totalCalls.toLocaleString(currentLocale())}
+        </div>
         <div class="mt-0.5 text-xs text-faint">{m.usage_tile_recorded()}</div>
       </div>
       <div class="df-card px-4 py-3">
-        <div class="text-2xl font-semibold text-ink">{usage.billableUsed.toLocaleString()}</div>
+        <div class="text-2xl font-semibold text-ink">
+          {usage.billableUsed.toLocaleString(currentLocale())}
+        </div>
         <div class="mt-0.5 text-xs text-faint">{m.usage_tile_billable()}</div>
       </div>
       <div class="df-card px-4 py-3">
-        <div class="text-2xl font-semibold text-muted">{free.toLocaleString()}</div>
+        <div class="text-2xl font-semibold text-muted">{free.toLocaleString(currentLocale())}</div>
         <div class="mt-0.5 text-xs text-faint">{m.usage_tile_free()}</div>
       </div>
     </div>
@@ -109,11 +114,11 @@
         </div>
         <div>
           <dt class="df-label">{m.usage_field_included()}</dt>
-          <dd class="text-muted">{usage.includedOps.toLocaleString()}</dd>
+          <dd class="text-muted">{usage.includedOps.toLocaleString(currentLocale())}</dd>
         </div>
         <div>
           <dt class="df-label">{m.usage_field_remaining()}</dt>
-          <dd class="text-muted">{usage.remaining.toLocaleString()}</dd>
+          <dd class="text-muted">{usage.remaining.toLocaleString(currentLocale())}</dd>
         </div>
         <div>
           <dt class="df-label">{m.usage_field_over_bucket()}</dt>
