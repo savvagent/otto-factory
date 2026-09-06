@@ -856,7 +856,9 @@ async fn the_error_page_speaks_the_same_language_as_the_consent_page(pool: PgPoo
 async fn the_no_organization_page_is_translated(pool: PgPool) {
     let h = harness(pool);
     let rob = onboard(&h, "rob@acme.test").await;
-    let client_id = register(&h, "Test Agent", REDIRECT).await;
+    // A name with markup in it, because `client_name` is self-asserted through
+    // open registration and this page is where it is shown.
+    let client_id = register(&h, "<b>Test Agent</b>", REDIRECT).await;
     let (_, challenge) = pkce();
 
     let page = Call::get(authorize_url(&client_id, &challenge, "jobs:read", "s"))
@@ -869,7 +871,16 @@ async fn the_no_organization_page_is_translated(pool: PgPool) {
     assert!(page.text.contains("<html lang=es>"));
     assert!(page.text.contains("Todavía no hay ninguna organización"));
     assert!(
-        page.text.contains("Test Agent"),
-        "the client name still has to be named, in any language"
+        page.text.contains("&lt;b&gt;Test Agent&lt;/b&gt;"),
+        "the client name has to be named, escaped exactly once: {}",
+        page.text
+    );
+    assert!(
+        !page.text.contains("<b>Test Agent</b>"),
+        "the client name reached the page as markup"
+    );
+    assert!(
+        !page.text.contains("&amp;lt;"),
+        "the client name was double-escaped, so the page misreports who is asking"
     );
 }

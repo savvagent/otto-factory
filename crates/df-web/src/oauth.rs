@@ -217,9 +217,13 @@ pub async fn authorize_page(
     if orgs.is_empty() {
         return error_page_html(
             i18n::msg(locale, Key::ErrorNoOrgTitle),
+            // Escaped once, around the whole filled sentence. Escaping the name
+            // first as well double-encodes it, so a client called `<b>x</b>`
+            // renders as the literal text `&lt;b&gt;x&lt;/b&gt;` — which is safe
+            // but makes this page misreport the one fact it exists to show.
             &escape(&i18n::fill(
                 i18n::msg(locale, Key::ErrorNoOrgBody),
-                &escape(client.client_name.as_deref().unwrap_or("A client")),
+                client.client_name.as_deref().unwrap_or("A client"),
             )),
             locale,
         );
