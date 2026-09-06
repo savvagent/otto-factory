@@ -1,7 +1,9 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
 
-  import { api, ApiError } from '$lib/api';
+  import { api } from '$lib/api';
+  import { messageFor } from '$lib/errors';
+  import { m } from '$lib/paraglide/messages';
   import { session } from '$lib/session.svelte';
   import * as webauthn from '$lib/webauthn';
   import Alert from '$lib/components/Alert.svelte';
@@ -48,10 +50,7 @@
       await session.refresh();
       step = 'profile';
     } catch (e) {
-      error =
-        e instanceof webauthn.WebauthnError || e instanceof ApiError
-          ? e.message
-          : 'Could not create that account.';
+      error = messageFor(e, m.error_could_not_create_account());
     } finally {
       pending = false;
     }
@@ -66,7 +65,7 @@
       await session.refresh();
       await goto('/', { replaceState: true });
     } catch (e) {
-      error = e instanceof ApiError ? e.message : 'Could not save that.';
+      error = messageFor(e, m.error_could_not_save());
     } finally {
       pending = false;
     }

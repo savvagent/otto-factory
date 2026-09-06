@@ -4,7 +4,9 @@
   import type { Snippet } from 'svelte';
 
   import '../app.css';
-  import { api, ApiError } from '$lib/api';
+  import { api } from '$lib/api';
+  import { messageFor } from '$lib/errors';
+  import { m } from '$lib/paraglide/messages';
   import { reconcile, resolveAtBoot } from '$lib/locale';
   import { session } from '$lib/session.svelte';
   import Alert from '$lib/components/Alert.svelte';
@@ -58,8 +60,7 @@
       // cannot become a loop.
       reconcile(me?.user.locale);
     } catch (error) {
-      fatal =
-        error instanceof ApiError ? error.message : 'Something went wrong resolving your session.';
+      fatal = messageFor(error, m.error_session_resolve_failed());
     }
   }
 

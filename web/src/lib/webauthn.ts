@@ -100,7 +100,7 @@ export async function register(challenge: CreationChallenge): Promise<unknown> {
     .create({ publicKey })
     .catch(rethrow)) as PublicKeyCredential | null;
 
-  if (!credential) throw new WebauthnError('No passkey was created.');
+  if (!credential) throw new WebauthnError('no_passkey_created', 'No passkey was created.');
   const response = credential.response as AuthenticatorAttestationResponse;
 
   return {
@@ -141,7 +141,7 @@ export async function authenticate(challenge: RequestChallenge): Promise<unknown
     .get({ publicKey })
     .catch(rethrow)) as PublicKeyCredential | null;
 
-  if (!credential) throw new WebauthnError('No passkey was offered.');
+  if (!credential) throw new WebauthnError('no_passkey_offered', 'No passkey was offered.');
   const response = credential.response as AuthenticatorAssertionResponse;
 
   return {
@@ -158,7 +158,49 @@ export async function authenticate(challenge: RequestChallenge): Promise<unknown
   };
 }
 
-export class WebauthnError extends Error {}
+/**
+ * A ceremony that did not produce a credential.
+ *
+ * **Carries a `code` for the same reason `ApiError` does**: an error has a code
+ * before it has a message. The code is the stable branch point a UI switches on
+ * — here, what `$lib/errors` looks up to render the message in the reader's
+ * language — and the `message` is the English fallback for a code nothing has
+ * been taught yet. This type was the one error surface in the console exempt
+ * from that rule, which meant the login page — the first page anyone sees —
+ * could not be translated at all.
+ */
+export class WebauthnError extends Error {
+  readonly code: WebauthnErrorCode;
+  /**
+   * The `DOMException` name, when the browser refused for a reason we have no
+   * specific code for.
+   *
+   * Carried as data rather than baked into the message, because it is not a
+   * word in anybody's language and the sentence around it has to be
+   * translatable without losing it.
+   */
+  readonly detail?: string;
+
+  constructor(code: WebauthnErrorCode, message: string, detail?: string) {
+    super(message);
+    this.name = 'WebauthnError';
+    this.code = code;
+    this.detail = detail;
+  }
+}
+
+export type WebauthnErrorCode =
+  /** The ceremony resolved, but with nothing in it. */
+  | 'no_passkey_created'
+  | 'no_passkey_offered'
+  /** Dismissed, or timed out — by far the most common outcome. */
+  | 'passkey_cancelled'
+  /** This authenticator already holds a credential for this account. */
+  | 'passkey_already_registered'
+  /** An `rp_id` that does not match the origin: a deployment error. */
+  | 'passkey_misconfigured'
+  /** Anything else the browser refused, named by its `DOMException`. */
+  | 'passkey_refused';
 
 /**
  * Turn the browser's exception into something worth showing.
@@ -171,20 +213,31 @@ export class WebauthnError extends Error {}
 function rethrow(e: unknown): never {
   if (e instanceof DOMException) {
     if (e.name === 'NotAllowedError') {
-      throw new WebauthnError('No passkey was used. Try again when you are ready.');
+      throw new WebauthnError(
+        'passkey_cancelled',
+        'No passkey was used. Try again when you are ready.'
+      );
     }
     if (e.name === 'InvalidStateError') {
-      throw new WebauthnError('That authenticator is already registered to this account.');
+      throw new WebauthnError(
+        'passkey_already_registered',
+        'That authenticator is already registered to this account.'
+      );
     }
     if (e.name === 'SecurityError') {
       // Almost always an rp_id that does not match the page's origin, which is
       // a deployment error rather than anything the user did.
       throw new WebauthnError(
+        'passkey_misconfigured',
         'This site is not configured correctly for passkeys. Tell whoever runs it that the ' +
           'relying party ID does not match this origin.'
       );
     }
-    throw new WebauthnError(`Your browser refused the passkey: ${e.name}.`);
+    throw new WebauthnError(
+      'passkey_refused',
+      `Your browser refused the passkey: ${e.name}.`,
+      e.name
+    );
   }
   throw e;
 }

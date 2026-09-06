@@ -2,7 +2,9 @@
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
 
-  import { api, ApiError } from '$lib/api';
+  import { api } from '$lib/api';
+  import { messageFor } from '$lib/errors';
+  import { m } from '$lib/paraglide/messages';
   import { session } from '$lib/session.svelte';
   import * as webauthn from '$lib/webauthn';
   import Alert from '$lib/components/Alert.svelte';
@@ -40,10 +42,7 @@
       await session.refresh();
       await goto(next ?? '/', { replaceState: true });
     } catch (e) {
-      error =
-        e instanceof webauthn.WebauthnError || e instanceof ApiError
-          ? e.message
-          : 'Could not sign you in.';
+      error = messageFor(e, m.error_could_not_sign_in());
     } finally {
       pending = false;
     }

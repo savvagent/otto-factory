@@ -1,5 +1,7 @@
 <script lang="ts">
-  import { api, ApiError } from '$lib/api';
+  import { api } from '$lib/api';
+  import { messageFor } from '$lib/errors';
+  import { m } from '$lib/paraglide/messages';
   import { relative } from '$lib/format';
   import { session } from '$lib/session.svelte';
   import * as webauthn from '$lib/webauthn';
@@ -46,7 +48,7 @@
     try {
       keys = await api.passkeys();
     } catch (e) {
-      error = e instanceof ApiError ? e.message : 'Could not load your passkeys.';
+      error = messageFor(e, m.error_could_not_load_passkeys());
     } finally {
       loading = false;
     }
@@ -62,10 +64,7 @@
       keys = await api.passkeys();
       await session.refresh();
     } catch (e) {
-      error =
-        e instanceof webauthn.WebauthnError || e instanceof ApiError
-          ? e.message
-          : 'Could not add that passkey.';
+      error = messageFor(e, m.error_could_not_add_passkey());
     } finally {
       busy = undefined;
     }
@@ -79,7 +78,7 @@
       keys = await api.passkeys();
       await session.refresh();
     } catch (e) {
-      error = e instanceof ApiError ? e.message : 'That did not work.';
+      error = messageFor(e, m.error_that_did_not_work());
     } finally {
       busy = undefined;
     }
@@ -95,7 +94,7 @@
       await session.refresh();
       profileSaved = true;
     } catch (e) {
-      profileError = e instanceof ApiError ? e.message : 'Could not save that.';
+      profileError = messageFor(e, m.error_could_not_save());
     } finally {
       savingProfile = false;
     }
