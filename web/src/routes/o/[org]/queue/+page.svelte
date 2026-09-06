@@ -124,7 +124,7 @@
     <label class="block">
       <span class="df-label">{m.queue_filter_status()}</span>
       <select
-        class="df-input w-40"
+        class="df-input min-w-40"
         value={status ?? ''}
         onchange={(e) => setFilter('status', e.currentTarget.value)}
       >
@@ -140,7 +140,7 @@
     <label class="block">
       <span class="df-label">{m.queue_filter_repo()}</span>
       <select
-        class="df-input w-44"
+        class="df-input min-w-44"
         value={repo ?? ''}
         onchange={(e) => setFilter('repo', e.currentTarget.value)}
       >
@@ -162,7 +162,7 @@
       <label class="block">
         <span class="df-label">{m.queue_filter_team()}</span>
         <select
-          class="df-input w-44"
+          class="df-input min-w-44"
           value={team ?? ''}
           onchange={(e) => setFilter('team', e.currentTarget.value)}
         >

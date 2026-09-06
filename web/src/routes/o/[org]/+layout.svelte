@@ -94,7 +94,10 @@
   <Alert>{error}</Alert>
 {:else}
   <div class="flex flex-col gap-6 sm:flex-row">
-    <nav class="shrink-0 sm:w-44" aria-label={m.orgnav_sections_aria({ org: context.title })}>
+    <nav
+      class="shrink-0 sm:w-auto sm:min-w-44"
+      aria-label={m.orgnav_sections_aria({ org: context.title })}
+    >
       <ul class="flex gap-1 overflow-x-auto sm:flex-col sm:overflow-visible">
         {#each nav as item (item.href)}
           <li>
