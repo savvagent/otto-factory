@@ -7,6 +7,8 @@ web/.wrangler
 web/build
 # Paraglide compiles messages into here on every check/build. Generated, never edited.
 web/src/lib/paraglide
+# Paraglide's compiler cache. Generated, machine-specific, never reviewed.
+web/project.inlang/cache
 *.log
 # Feature worktrees live inside the repo; never stage their contents.
 .worktrees/

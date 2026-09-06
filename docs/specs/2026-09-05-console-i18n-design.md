@@ -1,6 +1,6 @@
 # Console internationalization design
 
-> **Status:** DRAFT — localize the console and the two server-rendered browser pages into
+> **Status:** IMPLEMENTED — localize the console and the two server-rendered browser pages into
 > English, Spanish, German, French, Italian and Hindi.
 
 Implements [`#42`](https://github.com/savvagent/dark-factory/issues/42).
