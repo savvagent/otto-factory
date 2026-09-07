@@ -30,8 +30,8 @@ primary_region = "iad"
   # would stop working.** Settled deliberately while the database held no
   # accounts. A later move behind a Cloudflare Worker keeps this same hostname —
   # a Worker custom domain serves it directly — so that migration is safe.
-  OF_PUBLIC_URL = "https://df.savvagent.com"
-  OF_RESOURCE_URI = "https://df.savvagent.com/mcp"
+  OF_PUBLIC_URL = "https://otto-factory.savvagent.com"
+  OF_RESOURCE_URI = "https://otto-factory.savvagent.com/mcp"
   OF_STATIC_DIR = "/srv/console"
   OF_LOG_FORMAT = "json"
   RUST_LOG = "info,of_server=info,of_mcp=info,of_web=info"

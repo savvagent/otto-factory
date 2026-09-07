@@ -7,108 +7,58 @@ serverless model would fight. See `CLAUDE.md` for why the process must stay warm
 ## Org and infra (provisioned)
 
 - **Org**: `savvagent`.
-- **App**: `otto-factory-mcp` (created; `otto-factory` itself is already taken globally
-  on Fly.io by an unrelated app, hence the `-mcp` suffix).
-- **Database**: the shared `savvagent-pg` managed Postgres cluster
-  (`kyzl60xmdjxopj9g`, region `iad`) also serves `light-factory` and `nels-api`. Isolation
-  follows the cluster's existing per-app pattern — each app gets its own database and
-  role, never a shared one:
-  - Database: `otto_factory`
-  - Role: `otto-factory` (a member of `schema_admin`). It owns the `otto_factory`
-    schema — but **not** only that: see "The app's credential can reach
-    `light_factory`" below before treating this as isolation.
-  - Attached via `fly mpg attach kyzl60xmdjxopj9g -a otto-factory-mcp -d otto_factory
-    -u otto-factory --variable-name DATABASE_URL` — this staged `DATABASE_URL` as an app
-    secret.
+- **App**: `otto-factory-mcp`, freshly created rather than renamed in place — Fly does
+  not support renaming an app's slug, and the previous `dark-factory-mcp` app predates
+  this rename.
+- **Database**: a dedicated, standalone (unmanaged) Fly Postgres app,
+  `otto-factory-mcp-db` (region `iad`), created specifically for this app rather than
+  attached to the shared `savvagent-pg` managed Postgres cluster that `nels-api` uses.
+  This is a deliberate change from an earlier draft of this document, which assumed the
+  shared `mpg` cluster: `mpg`'s per-cluster role model does not grant `CREATEROLE` to a
+  tenant app's own role (see "Tenant isolation" below for why that matters), and a
+  dedicated instance sidesteps the cluster's cross-database `CONNECT` grants entirely —
+  there is no other app's database this credential can reach.
+  - Database: `otto_factory`.
+  - Connecting role: `otto_factory_mcp`, created by `fly postgres attach` — a
+    **superuser** on this dedicated instance, which is what makes `CREATE ROLE of_app
+    NOLOGIN` succeed at migration time (see below).
+  - Attached via `fly postgres attach otto-factory-mcp-db -a otto-factory-mcp
+    --database-name otto_factory` — this staged `DATABASE_URL` as an app secret.
 
-  **Never** run `fly mpg` commands with a bare cluster-wide scope (e.g. resetting or
-  dropping without naming `otto_factory`/`otto-factory` explicitly) — the cluster is
-  shared with nels' production database.
+- **Secrets staged**: `DATABASE_URL` (from the attach above), `OF_ENCRYPTION_KEY`,
+  `OF_SIGNING_KEY` (both generated with `openssl rand -base64 32`, per `.env.example`).
 
-- **Secrets staged** (not yet deployed — no image exists yet to receive them):
-  `DATABASE_URL`, `OF_ENCRYPTION_KEY`, `OF_SIGNING_KEY` (both generated with
-  `openssl rand -base64 32`, per `.env.example`).
+## Tenant isolation on a dedicated Postgres instance
 
-## Tenant isolation on managed Postgres — and what the app role can actually reach
-
-Two facts about `savvagent-pg` decide how isolation works here. Both were verified
-against the live cluster rather than reasoned about, because the first one was
-wrong in an earlier draft of this document.
-
-### `of_app` cannot exist on this cluster, and does not need to
-
-`0007_rls.sql` issues `CREATE ROLE of_app NOLOGIN` and `GRANT of_app TO
-CURRENT_USER`. Both are cluster-level operations needing `CREATEROLE`. On this
-cluster the only role with it is `postgres`, and `fly mpg connect -u postgres`
-answers `cluster … or user postgres not found` — flyctl does not issue those
-credentials. `CREATE ROLE of_app NOLOGIN` as `otto-factory` fails with
-*permission denied*, and `fly mpg users create` rejects the name outright
-(`user_name must contain only lowercase letters, numbers, and dashes`).
-
-That does not weaken isolation, because `of_app` was never the only guard. Every
-tenant table is `FORCE ROW LEVEL SECURITY`, which makes the policies apply to the
-table's **owner** as well — and connecting as `otto-factory` lands in
-`schema_admin`, which owns the tables but is neither a superuser nor `BYPASSRLS`
-(`rolsuper=f`, `rolbypassrls=f`). Verified directly against `otto_factory` inside
-a rolled-back transaction: an unpinned `SELECT` over a policied table returned
-**0 rows**, and the same query pinned to one org returned that org's row only.
-
-So `Db::begin` issues `SET LOCAL ROLE of_app` **only when the role can actually be
-assumed**, and `Db::verify_tenant_isolation` re-derives the whole question from the
-catalog at startup. `of-server` refuses to bind a port unless one of two things
-holds:
-
-- the tenant role was assumed (local development, `#[sqlx::test]` — where the
-  connecting role *is* a superuser and dropping out of it is the only thing that
-  makes policies bite), or
-- the connecting role is neither a superuser nor `BYPASSRLS`, and every tenant
-  table is `FORCE`d.
-
-A healthy boot logs which one it is running under:
+Unlike a shared managed-Postgres cluster, this instance's connecting role,
+`otto_factory_mcp`, **is a superuser** (`fly postgres attach` creates it that way on a
+dedicated instance). That matters because `0007_rls.sql` issues `CREATE ROLE of_app
+NOLOGIN` and `GRANT of_app TO CURRENT_USER`, both of which need `CREATEROLE` — and a
+superuser has it unconditionally. Confirmed at first deploy:
 
 ```
-INFO of_server: tenant isolation enforced as role "otto-factory"
-                (connecting role, not exempt from RLS); 14 tenant tables, 14 forced
+INFO of_server: tenant isolation enforced as role "of_app"
+                (assumed via SET LOCAL ROLE); 16 tenant tables, 16 forced
 ```
 
-The combination those two hide between them — no `of_app` *and* an exempt
-connecting role — is a startup error naming the remediation. Nothing about that
-check is optional or best-effort: a deployment that cannot prove isolation does
-not serve.
+So this deployment runs in the same configuration as local development and
+`#[sqlx::test]`: `of_app` exists, `Db::begin` issues `SET LOCAL ROLE of_app` for every
+tenant transaction, and the connecting superuser is never the role a request actually
+runs as. `Db::verify_tenant_isolation` re-derives this from the catalog at startup and
+`of-server` refuses to bind a port otherwise — see `CLAUDE.md` for the two
+configurations it accepts and why a superuser *not* dropping into `of_app` would be a
+silent bypass rather than a defense.
 
-> An earlier version of this section said of-server "recognizes a permission-denied
-> failure at this step and fails startup with this same remediation". It did not —
-> `main.rs` wrapped the failure in a bare `.context("migrations failed")`, and the
-> migration aborted before any RLS was applied at all.
+> An earlier version of this section described a managed-Postgres deployment where
+> `CREATEROLE` was unavailable and isolation instead relied on `FORCE ROW LEVEL
+> SECURITY` applying to a non-superuser table owner. That scenario doesn't apply here —
+> this instance is dedicated to this app, not the shared `savvagent-pg` cluster — but it
+> remains the fallback path `of-server` supports if this ever moves to managed Postgres.
 
-### The app's credential can reach `light_factory`
-
-`docs` previously claimed the `otto-factory` role "owns its own schema only,
-cannot touch `light_factory` or `fly-db`". **That is not true**, and it matters
-because `nels-api` runs on `light_factory`:
-
-```
-$ fly mpg connect kyzl60xmdjxopj9g -d light_factory -u otto-factory
- current_database | current_user | session_user
-------------------+--------------+--------------
- light_factory    | schema_admin | otto-factory
-```
-
-`pg_database.datacl` grants `CONNECT` on all three databases to `schema_admin`,
-`writer` and `reader`, and `schema_admin` is a member of `pg_read_all_data` and
-`pg_write_all_data` — which are **cluster-wide** attributes, not per-database
-ones. So the `DATABASE_URL` staged for this app can read and write nels'
-production database.
-
-Nothing in this repository caused that and nothing here should fix it: revoking
-`CONNECT` from `schema_admin` or `writer` would alter roles another production app
-depends on. It is recorded here because it is the real blast radius of leaking
-this app's `DATABASE_URL`, and because the same reasoning rules out
-`fly mpg users create -r writer` as a way to get a "least-privilege" app role —
-on this cluster a `writer` is not least-privilege in the way the name suggests.
-
-Whoever administers `savvagent-pg` should decide whether per-database isolation is
-wanted; until then, treat `DATABASE_URL` as a credential to nels' database too.
+Because the Postgres instance is dedicated rather than shared, there is no other app's
+database reachable from this credential — the cross-database `CONNECT` exposure that a
+shared cluster's roles carry (e.g. `nels-api`'s `light_factory` on `savvagent-pg`)
+doesn't exist here.
 
 ## What's scaffolded
 
@@ -116,8 +66,8 @@ wanted; until then, treat `DATABASE_URL` as a credential to nels' database too.
   stage that builds `of-server`, and a slim non-root runtime holding both. The
   migrations are not copied in: `Db::migrate` uses the `sqlx::migrate!` macro,
   which embeds them in the binary at compile time.
-- `fly.toml` — `otto-factory-mcp` app, region `iad` (co-located with the Postgres
-  cluster), `min_machines_running = 1` with `auto_stop_machines = "suspend"` so a
+- `fly.toml` — `otto-factory-mcp` app, region `iad` (co-located with its Postgres
+  instance), `min_machines_running = 1` with `auto_stop_machines = "suspend"` so a
   `watch` long poll never pays a cold start, health check on `GET /readyz`.
 
 ## What's assembled (Task 13 in the milestone plan)
@@ -180,17 +130,17 @@ authenticator for its first step.
 
 ## The hostname, and why it was settled early
 
-The public hostname is **`df.savvagent.com`**, and the app answers on
+The public hostname is **`otto-factory.savvagent.com`**, and the app answers on
 `otto-factory-mcp.fly.dev` without advertising it. DNS is at Namecheap:
 
 ```
-A     df.savvagent.com  →  66.241.124.226            (Fly shared IPv4)
-AAAA  df.savvagent.com  →  2a09:8280:1::181:a2ef:0   (this app's dedicated IPv6)
+A     otto-factory.savvagent.com  →  66.241.124.65             (Fly shared IPv4)
+AAAA  otto-factory.savvagent.com  →  2a09:8280:1::186:67e:0     (this app's dedicated IPv6)
 ```
 
-`fly certs add df.savvagent.com` issues and renews the certificate; nothing else
-in DNS is needed, because the dedicated IPv6 is what Fly validates ownership
-against.
+`fly certs add otto-factory.savvagent.com -a otto-factory-mcp` issues and renews the
+certificate; nothing else in DNS is needed, because the dedicated IPv6 is what Fly
+validates ownership against.
 
 **This was decided before the first account existed, on purpose.** `OF_PUBLIC_URL`
 is the OAuth issuer, the token audience, and both discovery documents — and, as the
@@ -198,7 +148,7 @@ section above lays out, it is also the WebAuthn relying party id that every pass
 cryptographically bound to. Doing it while the database held zero users cost nothing.
 
 A later move behind a Cloudflare Worker keeps this same hostname: a Worker custom
-domain serves `df.savvagent.com` directly and proxies to the Fly app, so
+domain serves `otto-factory.savvagent.com` directly and proxies to the Fly app, so
 `OF_ORIGIN` becomes `otto-factory-mcp.fly.dev` and `OF_PUBLIC_URL` does not
 change. See `cloudflare.md`, whose `OF_ALLOWED_HOSTS` trap is exactly about that
 split.
