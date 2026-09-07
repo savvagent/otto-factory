@@ -96,7 +96,7 @@ fn web_state(db: Db, config: &Config) -> Result<of_web::AppState> {
 /// Split out because the failure mode is silence: a field added to
 /// `of_web::Config` that nothing here assigns keeps its `Default`, and the
 /// console then reports that default as fact. `enforce_quotas` reached exactly
-/// that state once already — see `every_deployment_setting_reaches_df_web`.
+/// that state once already — see `every_deployment_setting_reaches_of_web`.
 fn web_config(config: &Config) -> of_web::Config {
     let mut web = of_web::Config::new(&config.public_url, &config.resource_uri);
     web.totp_issuer = config.totp_issuer.clone();
@@ -184,7 +184,7 @@ mod tests {
     /// and was never assigned on the other, so an org whose agents were being
     /// refused would have been shown `enforced: false`.
     #[test]
-    fn every_deployment_setting_reaches_df_web() {
+    fn every_deployment_setting_reaches_of_web() {
         let mut config = Config::for_test();
         config.totp_issuer = "acme-factory".into();
         config.github_app_webhook_secret = Some("webhook-secret".into());
@@ -217,7 +217,7 @@ mod tests {
     }
 
     #[test]
-    fn every_tracker_setting_reaches_df_mcp() {
+    fn every_tracker_setting_reaches_of_mcp() {
         let mut config = Config::for_test();
         config.github_app_id = Some(42);
         config.github_app_private_key = Some("pem".into());

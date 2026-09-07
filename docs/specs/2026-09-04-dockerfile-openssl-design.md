@@ -43,7 +43,7 @@
   Fly deploy attempts — but it is CI/deploy-automation scope, not a Dockerfile line fix, and
   belongs in its own ticket rather than expanding this one. Filed as a follow-up recommendation
   in the PR, not implemented here.
-- Anything touching `fly.toml`, `DF_*` config, migrations, or the console (`web/`) — none of
+- Anything touching `fly.toml`, `OF_*` config, migrations, or the console (`web/`) — none of
   those are implicated by this defect.
 - The three architectural constraints in `CLAUDE.md` (repo-anchored coordination,
   substrate-not-workflow, coding-agent agnostic) are not implicated: this is pure build

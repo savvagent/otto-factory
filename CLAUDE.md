@@ -35,7 +35,7 @@ required for any new tenant table:
 1. **API shape.** Tenant data is reachable only through `Tx`, which cannot be constructed
    without an `OrgId`. Every statement carries `org_id = $1` explicitly, even though RLS
    would also filter it — the predicate keeps plans index-friendly and intent legible.
-2. **Row-level security.** `Db::begin` issues `SET LOCAL ROLE df_app` **and**
+2. **Row-level security.** `Db::begin` issues `SET LOCAL ROLE of_app` **and**
    `SET LOCAL app.org_id`. Both matter. Postgres exempts superusers and table owners from
    their own RLS policies, and the connecting user is frequently one or both, so **without
    the `SET LOCAL ROLE` the policies do nothing at all**. This was verified empirically,
@@ -43,7 +43,7 @@ required for any new tenant table:
 
    The role is issued *only when it can be assumed*, because `CREATE ROLE` needs a
    cluster-level privilege that managed Postgres does not hand out — on Fly's managed
-   cluster `df_app` cannot be created at all. There, every tenant table being
+   cluster `of_app` cannot be created at all. There, every tenant table being
    `FORCE ROW LEVEL SECURITY` carries the same guarantee: FORCE applies the policies to
    the table's owner, and the connecting role is neither a superuser nor `BYPASSRLS`.
    **Nothing assumes which of the two shapes it is in.** `Db::verify_tenant_isolation`
@@ -66,12 +66,12 @@ names the credential in `allowCredentials`. Only what the fake sees is softened;
 server step is the production one. What that cannot cover — a browser finding a credential
 unprompted — needs a CDP virtual authenticator, which is how the flow was actually verified.
 
-**A privilege granted to `df_app` is not a protection.** `df_app` does not exist on
-managed Postgres, so `REVOKE … FROM df_app` protects nothing there. Express the rule as a
+**A privilege granted to `of_app` is not a protection.** `of_app` does not exist on
+managed Postgres, so `REVOKE … FROM of_app` protects nothing there. Express the rule as a
 policy instead: `audit_events` is append-only because it has no `UPDATE` policy, which
 under FORCE binds the table's owner too — strictly stronger than the grant it replaced,
 and it survives both deployment shapes. `#[sqlx::test]` connects as a superuser and
-bypasses RLS, so a test of such a policy **must** `SET LOCAL ROLE df_app` explicitly or it
+bypasses RLS, so a test of such a policy **must** `SET LOCAL ROLE of_app` explicitly or it
 passes against no policy at all.
 
 Note that ordinary cross-org tests pass on the strength of guard 1 alone. The tests that

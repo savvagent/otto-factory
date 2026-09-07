@@ -97,4 +97,4 @@ Single task: this is one YAML addition to one existing file. No sequencing decis
 - **Container image** — not modified by this change (`Dockerfile` untouched), but the new job now
   builds it as part of CI; the local `podman build` check above stands in for the CI-native
   `docker build` this environment can't run directly.
-- No other out-of-band surface (`web/`, `web/worker/`, migrations, `DF_*` config) is touched.
+- No other out-of-band surface (`web/`, `web/worker/`, migrations, `OF_*` config) is touched.

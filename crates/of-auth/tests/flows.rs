@@ -389,7 +389,7 @@ async fn refresh_is_bound_to_its_client_and_resource(pool: PgPool) {
     let refresh = issued.refresh_token.unwrap();
 
     assert!(
-        tokens::redeem_refresh(&db, &refresh, "df_client_b", RESOURCE)
+        tokens::redeem_refresh(&db, &refresh, "of_client_b", RESOURCE)
             .await
             .is_err(),
         "a refresh token must not be redeemable by another client"

@@ -40,7 +40,7 @@ fn principal(user: UserId, org: OrgId, scopes: Vec<String>) -> Principal {
         token_id: uuid::Uuid::new_v4(),
         user_id: user,
         org_id: org,
-        client_id: Some("df_client_test".into()),
+        client_id: Some("of_client_test".into()),
         scopes,
         kind: TokenKind::Oauth,
         expires_at: chrono::Utc::now() + chrono::Duration::hours(1),

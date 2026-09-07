@@ -239,7 +239,7 @@ New module `crates/of-core/src/trackers.rs`, same shape as `repos.rs`:
 its existing per-table cross-org `rls_scopes_*` coverage, following the same pattern as
 the `repos` table's existing case: two orgs, a connection/binding created in org A,
 unscoped `SELECT`/`UPDATE`/`DELETE` issued with `SET LOCAL app.org_id` pointed at org B
-under `SET LOCAL ROLE df_app`, asserting zero rows are visible or mutable.
+under `SET LOCAL ROLE of_app`, asserting zero rows are visible or mutable.
 
 ## §4 `of-core::crypto` (promoted from `of-auth::crypto`)
 

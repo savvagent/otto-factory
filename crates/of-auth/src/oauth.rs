@@ -259,7 +259,7 @@ pub async fn register_client(db: &Db, req: RegistrationRequest) -> Result<Regist
         }
     }
 
-    let client_id = crypto::generate("df_client_").into_plaintext();
+    let client_id = crypto::generate("of_client_").into_plaintext();
 
     sqlx::query(
         "INSERT INTO oauth_clients \

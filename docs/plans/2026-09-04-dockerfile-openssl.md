@@ -56,5 +56,5 @@ above was written and critiqued rather than skipped.
 ## Out-of-band verification (Phase 5, step 14)
 
 Container image touched → build it: `podman build -t otto-factory .` — done above, succeeded.
-No other out-of-band surface (`web/`, `web/worker/`, migrations, CI workflow, `DF_*` config)
+No other out-of-band surface (`web/`, `web/worker/`, migrations, CI workflow, `OF_*` config)
 touched by this change.

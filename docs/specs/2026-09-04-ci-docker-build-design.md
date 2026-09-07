@@ -32,7 +32,7 @@
 - The new job is independent of (does not depend on / is not depended on by) the existing `rust`
   and `web` jobs — it runs in parallel, matching this workflow's existing structure where `rust`
   and `web` already run as independent jobs with no `needs:`.
-- No new public interface, no schema change, no tenant table, no MCP tool, no `DF_*` config key,
+- No new public interface, no schema change, no tenant table, no MCP tool, no `OF_*` config key,
   no auth-spine change. The three constraints in `CLAUDE.md` are not implicated — this is pure CI
   infrastructure, not a product capability, so there is no "could this live in a customer skill"
   question to ask.

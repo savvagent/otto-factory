@@ -29,7 +29,7 @@ because the four checkboxes below assumed console REST routes that did not exist
 - Run `cargo fmt --all` before every Rust commit. No `unwrap()` outside tests. No AI
   self-attribution anywhere (commits, PR bodies, comments, docs).
 - Coordination stays anchored on repos: a tracker binding always names a `repo_id`, never
-  a standalone tracker entity with no repo. Any `DF_*` config this milestone adds
+  a standalone tracker entity with no repo. Any `OF_*` config this milestone adds
   (`OF_GITHUB_APP_ID`, `OF_GITHUB_APP_PRIVATE_KEY`, `OF_GITHUB_APP_WEBHOOK_SECRET`, later)
   must fail `Config::from_env` loudly on an unparseable value, never default silently.
 - No credential is ever spent on a `GET` — the webhook route (Task 3) and any console
@@ -153,7 +153,7 @@ to consume. Consumes nothing new (no dependency edges added).
 - [ ] Write a failing cross-org negative test in `crates/of-core/tests/isolation.rs` for
       `tracker_connections` and `tracker_bindings`, following the file's existing pattern
       for another tenant table: create a row under org A inside a normal `Tx`, then open a
-      second transaction with `SET LOCAL ROLE df_app; SET LOCAL app.org_id = '<org B>'`
+      second transaction with `SET LOCAL ROLE of_app; SET LOCAL app.org_id = '<org B>'`
       and issue an unscoped `SELECT`/`UPDATE`/`DELETE` against the same table, asserting
       zero rows visible/mutable. Temporarily comment out the two new `CREATE POLICY`
       statements in `0011_trackers.sql` and confirm the new test fails (proving it isn't a
@@ -449,5 +449,5 @@ same as existing repo-registration console flows).
 - [x] Commit.
 
 **Out-of-band reminders for whichever task lands last:** confirm `OF_GITHUB_APP_PRIVATE_KEY`
-and any other new `DF_*` vars are documented in `.env.example` with the *why*, and that
+and any other new `OF_*` vars are documented in `.env.example` with the *why*, and that
 `Config::from_env` errors (never silently defaults) on an unparseable value.

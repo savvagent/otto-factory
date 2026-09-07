@@ -62,7 +62,7 @@ two independent guards, and both are tested:
 
 1. **API shape.** Tenant data is reachable only through `Tx`, which cannot be constructed
    without an `OrgId`, and every statement carries `org_id = $1`.
-2. **Row-level security.** Every tenant transaction opens with `SET LOCAL ROLE df_app` and
+2. **Row-level security.** Every tenant transaction opens with `SET LOCAL ROLE of_app` and
    `SET LOCAL app.org_id`. A query that forgets its predicate returns nothing rather than
    leaking.
 
