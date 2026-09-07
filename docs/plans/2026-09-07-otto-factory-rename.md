@@ -39,7 +39,7 @@ to `savvagent/otto-factory`, the local checkout directory is `~/dev/otto-factory
 | `crates/df-*/` → `crates/of-*/` | **Rename (7 dirs).** Task 1. |
 | `Cargo.toml` (workspace + 7 crate manifests) | **Modify.** Members list, `[workspace.dependencies]` paths, package names. Task 1. |
 | `crates/of-server/src/config.rs` | **Modify.** Every `DF_*` → `OF_*`, no fallback. Task 2. |
-| `crates/of-core/migrations/0015_rename_tenant_role.sql` | **Create.** `df_app` → `of_app`. Task 3. |
+| `crates/of-core/migrations/0018_rename_tenant_role.sql` | **Create.** `df_app` → `of_app`. Task 3. |
 | `crates/of-core/src/db.rs` | **Modify.** `TENANT_ROLE` constant + doc comments. Task 3. |
 | `crates/of-core/src/isolation.rs` | **Modify.** Role name in error strings and unit-test fixtures. Task 3. |
 | `crates/of-auth/src/crypto.rs` | **Modify.** `ACCESS`/`SESSION`/`PAT`/`INVITE` prefixes. Task 4. |
@@ -106,13 +106,17 @@ Full list: `DF_ALLOWED_HOSTS`, `DF_ALLOWED_ORIGINS`, `DF_ALLOW_LOG_MAILER`, `DF_
 - [ ] `web/wrangler.jsonc` `vars` block; `fly.toml` `[env]`; `.github/workflows/ci.yml`.
 - [ ] `docs/deploy/fly.md` and `docs/deploy/cloudflare.md` — including the config table whose
       `DF_ALLOWED_HOSTS` row documents the trap that breaks every authenticated MCP call.
+- [ ] **Rename every key in the local, developer `.env`** (the file `.env.example` is copied to,
+      gitignored) from `DF_*` to `OF_*`, keeping each value as-is. With no compatibility fallback
+      (spec decision 1), `cargo run -p of-server` will refuse to boot on the old names — this step
+      is what makes Task 3's later boot check pass rather than fail on an unrelated env-var error.
 - [ ] `cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`.
 - [ ] `cd web && npm run check && npm run lint && npm test`.
 - [ ] Commit: `rename: DF_ environment namespace to OF_`.
 
 ## Task 3 — Postgres role `df_app` → `of_app`, database `dark_factory` → `otto_factory` ⬜
 
-**Files:** `crates/of-core/migrations/0015_rename_tenant_role.sql` (new),
+**Files:** `crates/of-core/migrations/0018_rename_tenant_role.sql` (new),
 `crates/of-core/src/db.rs`, `crates/of-core/src/isolation.rs`, `crates/of-core/src/lib.rs`,
 `crates/of-core/tests/isolation.rs`, `compose.yaml`, `.env.example`,
 `.github/workflows/ci.yml`, `docs/deploy/fly.md`.
@@ -121,7 +125,7 @@ Full list: `DF_ALLOWED_HOSTS`, `DF_ALLOWED_ORIGINS`, `DF_ALLOW_LOG_MAILER`, `DF_
 two-guard tenant isolation rule is the role; `#[sqlx::test]` connects as a superuser and
 bypasses RLS, so a green suite is not evidence.
 
-- [ ] Write `0015_rename_tenant_role.sql`. `ALTER ROLE df_app RENAME TO of_app` when `df_app`
+- [ ] Write `0018_rename_tenant_role.sql`. `ALTER ROLE df_app RENAME TO of_app` when `df_app`
       exists; otherwise create `of_app` under the same guarded, CREATEROLE-tolerant shape as
       `0007_rls.sql` (a deployment where the role cannot exist is supported, not a failure);
       `GRANT of_app TO CURRENT_USER` to mirror `0007`. Do **not** edit `0007` or `0008`.
@@ -222,17 +226,28 @@ plus test fixtures across `of-auth`, `of-web`, `of-mcp`.
 - [ ] `docs/deploy/{fly,cloudflare}.md`: the `[issue #2](…/dark-factory/issues/2)` links, the
       `fly deploy -a` command, the Fly role/database names, and the `dark-factory-staging`
       example.
-- [ ] Create the new Fly app and Cloudflare Workers under the new names; re-set every secret
-      under its `OF_*` name. **The old `DF_*` secrets must be removed, not left set** — a
-      stale `DF_ENCRYPTION_KEY` on the machine is exactly the "operator believes they removed
-      it" case from spec decision 1.
 - [ ] `cd web && npm run check && npm run lint && npm test && npm run build`.
 - [ ] `podman build -t otto-factory .` — confirms the Dockerfile's Task 1 binary rename.
 - [ ] Commit: `rename: deployment names and dev skill`.
 
-## Task 7 — Public hostname `df.savvagent.com` → `otto-factory.savvagent.com` ⬜
+**Out-of-band, not part of this task's commit** (no credentials/interactive browser access from
+this environment): creating the new Fly app and Cloudflare Workers under the new names and
+re-setting every secret under its `OF_*` name, with the old `DF_*` secrets removed rather than
+left set (a stale `DF_ENCRYPTION_KEY` left on the machine is exactly the "operator believes they
+removed it" case from spec decision 1). Tracked as a manual deploy step in Task 7, not blocking
+this PR's merge — the code is deployment-name-correct once this task's diff lands; only the
+actual infrastructure objects still need to be created by whoever holds the Fly/Cloudflare
+credentials.
 
-Separable, and the only task that is not find-and-replace. **Invalidates every registered
+## Task 7 — Public hostname `df.savvagent.com` → `otto-factory.savvagent.com` (manual, out-of-band) ⬜
+
+**Not a code task and not part of the rename PR.** Every step here is either an external
+infrastructure change (Namecheap DNS, `fly certs`) or an interactive browser ceremony (passkey
+re-registration) that cannot be executed from this environment — there is no DNS credential, no
+Fly/Cloudflare session, and no browser to complete a WebAuthn ceremony in. This task is a
+checklist for whoever holds those credentials to run **after** Task 6's PR is merged and
+deployed, tracked separately from the code work so a missing DNS record or an unissued
+certificate never blocks or is conflated with the code review. **Invalidates every registered
 passkey** — the hostname is the WebAuthn relying party id. Re-registration is required
 afterwards, including for the operator running this task.
 
@@ -254,7 +269,9 @@ afterwards, including for the operator running this task.
       resident key against the new RP id.
 - [ ] `curl https://otto-factory.savvagent.com/.well-known/oauth-protected-resource` — confirm the
       issuer and resource URI both name the new host.
-- [ ] Commit: `rename: move public hostname to otto-factory.savvagent.com`.
+- [ ] This checklist has no code commit of its own — the `docs/deploy/fly.md` hostname-section
+      edit lands as its own small follow-up PR once the DNS/cert/passkey steps above are
+      actually done, so the doc never claims a hostname is live before it is.
 
 ## Final Verification
 

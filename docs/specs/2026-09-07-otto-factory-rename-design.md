@@ -97,6 +97,25 @@ tasks 1–6 coherent, at the cost of a console that says "otto-factory" on a hos
 work that shipped under that name. Those are accurate history and stay. What changes in
 historical docs is the *product name in prose* and links that must still resolve.
 
+### 6a. The design-of-record spec is renamed too, and every inbound link follows it
+
+`docs/specs/2026-09-01-dark-factory-design.md` is `git mv`'d to
+`docs/specs/2026-09-01-otto-factory-design.md`. `CLAUDE.md` links to it by path (twice), and
+`web/worker/index.ts` and the renamed dev skill each reference it — every one of those links
+is fixed in the same change, or the design of record 404s from its own linking documents.
+
+### 6b. Every renamed identifier below is a deliberate, documented breaking change
+
+Per `CLAUDE.md`'s rule on public-interface changes, non-additive renames must be named
+explicitly rather than treated as incidental refactor side-effects. This rename touches
+several: the `DF_*` config env-var namespace, the `df_*_` token prefixes, the
+`__Host-df_session` cookie name, and the `x-dark-factory-auth` OpenAPI extension key (an
+MCP/console-facing identifier, surfaced to every coding-agent client through
+`web/src/lib/openapi.ts`). None of these renames is additive — each is named here, flagged to
+the architect reviewer in the PR body, and recorded in `docs/clients/matrix.md` where it
+changes what a client sees. Decision 1 (no compatibility shim) is what makes each of these an
+explicit break rather than a silent one: there is no dual-read anywhere.
+
 ### 6. `.github/skills/dark-factory-development/` is operational, not documentation
 
 The skill hard-codes `--repo savvagent/dark-factory` in ~25 commands it actually executes.
