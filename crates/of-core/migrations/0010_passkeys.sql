@@ -11,7 +11,7 @@
 --    `users.email` becomes nullable: an account exists the moment a key is
 --    registered, and the address is a label set afterwards. This is what lets
 --    signup take no identifier at all — see 0011's note and
---    `df_web::routes::auth`.
+--    `of_web::routes::auth`.
 -- 3. **There is no recovery secret.** `recovery_codes` is dropped rather than
 --    carried over: a static code that bypasses a phishing-resistant credential
 --    is the weakest link, and reintroducing one would undo the reason for this

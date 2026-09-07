@@ -11,7 +11,7 @@ template's heading — honor it. If the runtime exposes only generic subagent ty
 body into a `general` subagent unchanged; the reviewer's identity lives in the prompt, not in the
 type string.
 
-`<ref>` below is the source reference: a GitHub issue (`savvagent/dark-factory#123`) or — on the
+`<ref>` below is the source reference: a GitHub issue (`savvagent/otto-factory#123`) or — on the
 ticketless path — the captured task brief.
 
 ---
@@ -79,7 +79,7 @@ Agent tool:
 
     Check completeness, spec alignment, task decomposition, buildability, and whether each task
     respects the repo-specific requirements above. In particular:
-    - Does every task use the repo's real commands (cargo test -p df-<crate> --test <suite>,
+    - Does every task use the repo's real commands (cargo test -p of-<crate> --test <suite>,
       cargo clippy --all-targets -- -D warnings, cargo fmt --all, and for web/ npm run check /
       npm run lint / npm test)?
     - Does a task touching a tenant table or tenant-scoped function include a cross-org negative test step?
@@ -260,7 +260,7 @@ Agent tool:
   subagent_type: rust-pro
   description: "Rust review: PR #<N>"
   prompt: |
-    Review the Rust in PR #<N> of savvagent/dark-factory (`gh pr diff <N>`), for ref <ref>.
+    Review the Rust in PR #<N> of savvagent/otto-factory (`gh pr diff <N>`), for ref <ref>.
 
     Judge idiomatic Rust against this repo's conventions:
     - Ownership, lifetimes, and borrow discipline; no needless clones or Arc<Mutex<...>> where a
@@ -274,7 +274,7 @@ Agent tool:
       enum round-tripping, and #[sqlx::test] integration tests against a real Postgres (there are no
       database mocks, on purpose)
     - Tests: a tenant-scoped function needs a cross-org negative test; an RLS policy test must
-      SET LOCAL ROLE df_app explicitly or it passes against no policy at all; a test that spawns a
+      SET LOCAL ROLE of_app explicitly or it passes against no policy at all; a test that spawns a
       Watcher must call shutdown() or it hangs at teardown
 
     Report: Strengths, Issues (Critical / Important / Minor), Assessment.
@@ -287,7 +287,7 @@ Agent tool:
   subagent_type: architect-reviewer
   description: "Architecture review: PR #<N>"
   prompt: |
-    Review PR #<N> of savvagent/dark-factory (`gh pr diff <N>`) for architectural consistency, for
+    Review PR #<N> of savvagent/otto-factory (`gh pr diff <N>`) for architectural consistency, for
     ref <ref>. Read CLAUDE.md at the repo root first — it is the conventions document of record.
 
     Judge:
@@ -320,7 +320,7 @@ Agent tool:
   subagent_type: security-auditor
   description: "Security review: PR #<N>"
   prompt: |
-    Perform an independent security review of PR #<N> in savvagent/dark-factory.
+    Perform an independent security review of PR #<N> in savvagent/otto-factory.
 
     Read ONLY the diff: `gh pr diff <N>`.
     Do NOT read the PR description, the issue, the spec, the plan, or any summary of intent. Your
@@ -354,7 +354,7 @@ Agent tool:
   subagent_type: general-purpose
   description: "Address PR review feedback"
   prompt: |
-    You are addressing PR review feedback on PR #<N> of savvagent/dark-factory, for <ref>.
+    You are addressing PR review feedback on PR #<N> of savvagent/otto-factory, for <ref>.
     Follow otto-factory-development requirements (Phase 4 step 9).
 
     Your job:

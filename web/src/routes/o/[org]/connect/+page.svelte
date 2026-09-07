@@ -128,7 +128,7 @@
   {:else if !mcpUrl}
     <Alert>
       The server did not report an MCP endpoint. Its
-      <code class="df-mono">/.well-known/oauth-protected-resource</code> document is what this page reads.
+      <code class="of-mono">/.well-known/oauth-protected-resource</code> document is what this page reads.
     </Alert>
   {:else}
     <Card title="Endpoint">
@@ -136,7 +136,7 @@
       <p class="mt-2 text-xs text-faint">
         Tokens are audienced for exactly this URI. A token minted here is refused anywhere else, and
         its organization —
-        <code class="df-mono">{org.slug}</code> — is fixed when it is issued and cannot be changed.
+        <code class="of-mono">{org.slug}</code> — is fixed when it is issued and cannot be changed.
       </p>
     </Card>
 
@@ -182,7 +182,7 @@
       <div class="mt-4">
         {#if recipe.location}
           <p class="mb-1.5 text-xs text-faint">
-            Put this in <code class="df-mono">{recipe.location}</code>:
+            Put this in <code class="of-mono">{recipe.location}</code>:
           </p>
         {/if}
         <CopyField value={snippet} />
@@ -214,7 +214,7 @@
           <CopyField value={minted.token} />
         </div>
         <p class="mt-2 text-xs text-faint">
-          Scopes: <span class="df-mono">{minted.scopes.join(' ')}</span>
+          Scopes: <span class="of-mono">{minted.scopes.join(' ')}</span>
         </p>
       </Card>
     {/if}
@@ -230,16 +230,16 @@
               label="What is it for"
               hint="Shown in the list below. It is all you will have to go on when deciding what to revoke."
             >
-              <input class="df-input" placeholder="laptop, CI runner" required bind:value={name} />
+              <input class="of-input" placeholder="laptop, CI runner" required bind:value={name} />
             </Field>
           </div>
           <Field label="Expires in" hint="Days. 1–365.">
-            <input class="df-input" type="number" min="1" max="365" bind:value={ttlDays} />
+            <input class="of-input" type="number" min="1" max="365" bind:value={ttlDays} />
           </Field>
         </div>
 
         <fieldset>
-          <legend class="df-label">Scopes</legend>
+          <legend class="of-label">Scopes</legend>
           <div class="flex flex-wrap gap-x-5 gap-y-2">
             {#each grantable as scope (scope)}
               <label class="flex items-center gap-2 text-sm text-muted">
@@ -248,12 +248,12 @@
                   checked={scopes.includes(scope)}
                   onchange={(e) => toggleScope(scope, e.currentTarget.checked)}
                 />
-                <span class="df-mono">{scope}</span>
+                <span class="of-mono">{scope}</span>
               </label>
             {/each}
           </div>
           <p class="mt-2 text-xs text-faint">
-            You can only grant scopes you hold. <code class="df-mono">org:admin</code> needs an owner
+            You can only grant scopes you hold. <code class="of-mono">org:admin</code> needs an owner
             or admin of this organization.
           </p>
         </fieldset>
@@ -283,7 +283,7 @@
                   <span class="ml-2 rounded-full border border-edge px-2 py-0.5 text-xs text-faint">
                     {token.kind}
                   </span>
-                  <p class="df-mono mt-0.5 text-xs text-faint">
+                  <p class="of-mono mt-0.5 text-xs text-faint">
                     {token.scopes.join(' ') || 'no scopes'}
                   </p>
                   <p class="text-xs text-faint">

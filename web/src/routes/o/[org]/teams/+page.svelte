@@ -124,12 +124,12 @@
       <form class="flex flex-wrap items-end gap-3" onsubmit={create}>
         <div class="w-44">
           <Field label="Slug">
-            <input class="df-input df-mono" required bind:value={slug} />
+            <input class="of-input of-mono" required bind:value={slug} />
           </Field>
         </div>
         <div class="min-w-48 flex-1">
           <Field label="Name" hint="Optional. Defaults to the slug.">
-            <input class="df-input" bind:value={name} />
+            <input class="of-input" bind:value={name} />
           </Field>
         </div>
         <div class="pb-0.5">
@@ -149,10 +149,10 @@
   {:else}
     <ul class="space-y-2">
       {#each teams as team (team.id)}
-        <li class="df-card">
+        <li class="of-card">
           <div class="flex flex-wrap items-center gap-3 px-4 py-3">
             <div class="min-w-0 flex-1">
-              <span class="df-mono text-sm text-ink">{team.slug}</span>
+              <span class="of-mono text-sm text-ink">{team.slug}</span>
               <p class="text-xs text-faint">{team.name}</p>
             </div>
 
@@ -219,7 +219,7 @@
                 <label class="flex items-end gap-2">
                   <span class="sr-only">Add a member to {team.slug}</span>
                   <select
-                    class="df-input w-64"
+                    class="of-input w-64"
                     value=""
                     onchange={(e) => {
                       const user = e.currentTarget.value;

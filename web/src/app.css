@@ -43,20 +43,20 @@
 }
 
 @layer components {
-  .df-card {
+  .of-card {
     @apply rounded-lg border border-edge/60 bg-surface/70;
   }
 
-  .df-input {
+  .of-input {
     @apply w-full rounded-md border border-edge bg-canvas px-3 py-2 text-sm text-ink placeholder:text-faint disabled:opacity-50;
   }
 
-  .df-label {
+  .of-label {
     @apply mb-1 block text-xs font-medium tracking-wide text-muted uppercase;
   }
 
   /* Tokens, provisioning keys, job ids — anything that is copied, not read. */
-  .df-mono {
+  .of-mono {
     @apply font-mono text-sm break-all;
   }
 }

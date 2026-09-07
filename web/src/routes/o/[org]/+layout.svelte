@@ -82,7 +82,7 @@
   <div class="mx-auto max-w-md py-10 text-center">
     <h1 class="text-lg font-semibold">No such organization</h1>
     <p class="mt-2 text-sm text-faint">
-      Nothing here is called <code class="df-mono">{slug}</code>. Check the address, or pick one
+      Nothing here is called <code class="of-mono">{slug}</code>. Check the address, or pick one
       from the bar above.
     </p>
   </div>

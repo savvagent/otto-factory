@@ -131,11 +131,11 @@
 
     <form class="mt-6 space-y-4" onsubmit={saveProfile}>
       <Field label="Email" hint="Your unique identifier here. Nothing is ever sent to it.">
-        <input class="df-input" type="email" autocomplete="username" required bind:value={email} />
+        <input class="of-input" type="email" autocomplete="username" required bind:value={email} />
       </Field>
 
       <Field label="Name" hint="Optional. Shown to the other people in your organizations.">
-        <input class="df-input" type="text" autocomplete="name" bind:value={name} />
+        <input class="of-input" type="text" autocomplete="name" bind:value={name} />
       </Field>
 
       {#if error}<Alert>{error}</Alert>{/if}

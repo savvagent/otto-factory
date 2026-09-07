@@ -117,11 +117,11 @@
     <p class="text-xs text-faint">Read-only. Jobs are queued and completed by agents over MCP.</p>
   </div>
 
-  <div class="df-card flex flex-wrap items-end gap-3 px-4 py-3">
+  <div class="of-card flex flex-wrap items-end gap-3 px-4 py-3">
     <label class="block">
-      <span class="df-label">Status</span>
+      <span class="of-label">Status</span>
       <select
-        class="df-input w-40"
+        class="of-input w-40"
         value={status ?? ''}
         onchange={(e) => setFilter('status', e.currentTarget.value)}
       >
@@ -133,9 +133,9 @@
     </label>
 
     <label class="block">
-      <span class="df-label">Repo</span>
+      <span class="of-label">Repo</span>
       <select
-        class="df-input w-44"
+        class="of-input w-44"
         value={repo ?? ''}
         onchange={(e) => setFilter('repo', e.currentTarget.value)}
       >
@@ -155,9 +155,9 @@
 
     {#if teams.length > 0 || team}
       <label class="block">
-        <span class="df-label">Team</span>
+        <span class="of-label">Team</span>
         <select
-          class="df-input w-44"
+          class="of-input w-44"
           value={team ?? ''}
           onchange={(e) => setFilter('team', e.currentTarget.value)}
         >
@@ -203,7 +203,7 @@
       {/if}
     </Empty>
   {:else}
-    <div class="df-card overflow-x-auto">
+    <div class="of-card overflow-x-auto">
       <table class="w-full text-sm">
         <thead class="border-b border-edge/60 text-left text-xs text-faint">
           <tr>
@@ -221,7 +221,7 @@
                 <a class="text-ink hover:underline" href="/o/{org.slug}/queue/{job.id}">
                   {job.title}
                 </a>
-                <div class="df-mono text-xs text-faint">{job.id}</div>
+                <div class="of-mono text-xs text-faint">{job.id}</div>
               </td>
               <td class="px-4 py-2"><StatusPill status={job.status} /></td>
               <td class="px-4 py-2 text-muted">

@@ -174,11 +174,11 @@
   <Card title="Profile" description="Your email is an identifier here. Nothing is sent to it.">
     <form class="max-w-sm space-y-4" onsubmit={saveProfile}>
       <Field label="Email" hint="How colleagues invite you to an organization.">
-        <input class="df-input" type="email" autocomplete="username" required bind:value={email} />
+        <input class="of-input" type="email" autocomplete="username" required bind:value={email} />
       </Field>
 
       <Field label="Name">
-        <input class="df-input" type="text" autocomplete="name" bind:value={name} />
+        <input class="of-input" type="text" autocomplete="name" bind:value={name} />
       </Field>
 
       {#if profileError}<Alert>{profileError}</Alert>{/if}

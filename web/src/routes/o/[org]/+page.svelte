@@ -82,7 +82,7 @@
   <div>
     <h1 class="text-lg font-semibold">{org.title}</h1>
     <p class="mt-0.5 text-sm text-faint">
-      <code class="df-mono">{org.slug}</code> · {org.role ?? '—'} · {org.org?.plan ?? '—'} plan
+      <code class="of-mono">{org.slug}</code> · {org.role ?? '—'} · {org.org?.plan ?? '—'} plan
     </p>
   </div>
 
@@ -93,7 +93,7 @@
   {:else}
     <div class="grid grid-cols-2 gap-3 sm:grid-cols-4">
       {#each tiles as tile (tile.label)}
-        <div class="df-card px-4 py-3">
+        <div class="of-card px-4 py-3">
           <div class="text-2xl font-semibold {tile.tone}">{tile.value.toLocaleString()}</div>
           <div class="mt-0.5 text-xs text-faint">{tile.label}</div>
         </div>
@@ -171,7 +171,7 @@
             <ul class="flex flex-wrap gap-2">
               {#each repos as repo (repo.id)}
                 <a
-                  class="df-mono rounded-md border border-edge px-2 py-1 text-xs text-muted transition hover:bg-raised hover:text-ink"
+                  class="of-mono rounded-md border border-edge px-2 py-1 text-xs text-muted transition hover:bg-raised hover:text-ink"
                   href="/o/{org.slug}/queue?repo={encodeURIComponent(repo.slug)}"
                 >
                   {repo.slug}

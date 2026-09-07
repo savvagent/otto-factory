@@ -79,7 +79,7 @@ These hold for every run of this skill, no exceptions, no fast-path carve-outs:
    agents bind to are the **MCP tool surface** (`of-mcp` tool names, input schemas, and the
    one-field result envelopes in `tools::out`), the **console REST API** (`of-web`'s
    `catalog.rs` routes and their request/response shapes, which the OpenAPI document is rendered
-   from), the **OAuth/discovery endpoints**, the **config surface** (`DF_*` env vars), and the
+   from), the **OAuth/discovery endpoints**, the **config surface** (`OF_*` env vars), and the
    **database schema** (forward-only migrations). Additive changes — a new tool, a new optional
    field, a new route added to the catalog, a new env var with a default — are the normal case and
    need no version bump while every crate is `0.1.0` under the workspace `[workspace.package]`
@@ -116,7 +116,7 @@ are true:
 - Single-file or 1–2 logical source files (tests and lock files don't count toward the cap; a file
   and its required mirror/duplicate count as one logical file)
 - No new public interface: no new MCP tool, no new console route in `catalog.rs`, no new SQL
-  statement or `of-core` function, no new `DF_*` config key, no new migration, no new crate
+  statement or `of-core` function, no new `OF_*` config key, no new migration, no new crate
 - No **breaking** change to the MCP tool surface, the console API, the OAuth/discovery endpoints,
   the config surface, or the schema (Non-Negotiable Rule 6) — breaking changes are never fast-path
 - No change to the auth spine (`of-auth`: passkey ceremonies, OAuth 2.1 AS, token hashing, sessions,
@@ -164,7 +164,7 @@ more than a one-sentence AC → STOP. Write the spec. The fast-path is for genui
 
 | Convention                 | Value                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Repo                       | `savvagent/dark-factory` — pass `--repo savvagent/dark-factory` on `gh` commands run from a worktree or outside the checkout.                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| Repo                       | `savvagent/otto-factory` — pass `--repo savvagent/otto-factory` on `gh` commands run from a worktree or outside the checkout.                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | Trunk                      | `master`. **All** work happens in a worktree; **all** master-branch changes land via merged PRs. No direct commits, pushes, or merges to `master` outside a PR (Non-Negotiable Rules 1–2).                                                                                                                                                                                                                                                                                                                                                                  |
 | Worktree                   | **Required.** `git worktree add .worktrees/<branch> -b <branch> origin/master` — the worktrees live **inside the repo** at `.worktrees/<branch>`, not as sibling directories. Confirm `.worktrees/` is gitignored before creating the first one — **never `git add .`** in the main checkout (a nested worktree's contents, including a developer-local `.env`, could be staged). Branch off `origin/master`, never local `master` (see Phase 0 trunk-sync). Every code edit, commit, and push happens from inside this worktree.                           |
 | Branch name                | `<area>/<kebab-slug>`, matching the repo's history — `passkeys/webauthn`, `deploy/isolation-startup-check`, `ci/github-actions`. Area is a crate short name (`core`, `auth`, `mcp`, `billing`, `trackers`, `web`, `server`) or a theme (`deploy`, `ci`, `docs`).                                                                                                                                                                                                                                                                                            |
@@ -194,8 +194,8 @@ explains the reasoning behind each at length — read it, and treat the list her
 1. **Tenant isolation has two independent guards, and both are required.** Guard 1 is the API shape:
    tenant data is reachable only through `Tx`, which cannot be constructed without an `OrgId`, and
    every statement carries `org_id = $1` explicitly. Guard 2 is row-level security: `Db::begin`
-   issues `SET LOCAL ROLE df_app` **and** `SET LOCAL app.org_id`, and on managed Postgres (where
-   `df_app` cannot be created) `FORCE ROW LEVEL SECURITY` carries the guarantee instead —
+   issues `SET LOCAL ROLE of_app` **and** `SET LOCAL app.org_id`, and on managed Postgres (where
+   `of_app` cannot be created) `FORCE ROW LEVEL SECURITY` carries the guarantee instead —
    `Db::verify_tenant_isolation` reads back which shape it is in, and `of-server` refuses to bind a
    port unless one of them holds. A new tenant table needs a `NOT NULL org_id`, an entry in the
    `tenant_tables` array in `0007_rls.sql`, a policy named exactly `<table>_tenant_isolation`, and a
@@ -203,8 +203,8 @@ explains the reasoning behind each at length — read it, and treat the list her
 2. **Ordinary cross-org tests pass on guard 1 alone.** The tests that actually exercise RLS are the
    `rls_scopes_*` ones in `crates/of-core/tests/isolation.rs`, which issue deliberately unscoped SQL
    inside a pinned transaction. `#[sqlx::test]` connects as a superuser and bypasses RLS, so a test
-   of a policy **must** `SET LOCAL ROLE df_app` explicitly or it passes against no policy at all. A
-   privilege granted to or revoked from `df_app` is not a protection — express the rule as a policy.
+   of a policy **must** `SET LOCAL ROLE of_app` explicitly or it passes against no policy at all. A
+   privilege granted to or revoked from `of_app` is not a protection — express the rule as a policy.
 3. **Every SQL statement lives in `of-core`.** A query in `of-mcp`, `of-web`, `of-auth`, or
    `of-billing` is a bug: it bypasses the `Tx` pinning that guard 2 depends on. `of-core` has no
    HTTP and no auth; every tenant-scoped function takes an `OrgId`.
@@ -289,15 +289,15 @@ Resolve once at intake and stay on that path for the whole task.
 
 > **One-time bootstrap.** The `status:*` tracker labels below are NOT GitHub defaults, and this repo
 > currently carries only the stock label set. Create them once before the first tracked issue
-> (`gh label create status:in-progress --repo savvagent/dark-factory`, likewise `status:in-review`),
+> (`gh label create status:in-progress --repo savvagent/otto-factory`, likewise `status:in-review`),
 > or the `--add-label` transitions will error ("could not find label").
 
 | Lifecycle step     | GitHub Issues                                                                     | Ticketless                                                                |
 | ------------------ | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
-| Ref form           | `savvagent/dark-factory#123` (`#123` short)                                       | the captured task brief                                                   |
-| Intake / read AC   | `gh issue view <n> --repo savvagent/dark-factory --json title,body,labels`        | the user's instruction, captured verbatim in working memory + the PR body |
-| → In Progress      | `gh issue edit <n> --repo savvagent/dark-factory --add-label status:in-progress`  | n/a — capture `T_impl_start` only                                         |
-| → In Review        | `gh issue edit <n> --repo savvagent/dark-factory --add-label status:in-review`    | n/a                                                                       |
+| Ref form           | `savvagent/otto-factory#123` (`#123` short)                                       | the captured task brief                                                   |
+| Intake / read AC   | `gh issue view <n> --repo savvagent/otto-factory --json title,body,labels`        | the user's instruction, captured verbatim in working memory + the PR body |
+| → In Progress      | `gh issue edit <n> --repo savvagent/otto-factory --add-label status:in-progress`  | n/a — capture `T_impl_start` only                                         |
+| → In Review        | `gh issue edit <n> --repo savvagent/otto-factory --add-label status:in-review`    | n/a                                                                       |
 | Spec / Plan record | committed to `docs/specs/` / `docs/plans/`; reference the paths from the PR body  | same — the repo docs ARE the durable record                               |
 | Close              | `gh issue close <n> --comment "…"` (the merged PR's `Closes #N` may have done it) | n/a — the Phase 6 summary is the close-out                                |
 | Branch             | `<area>/<slug>`                                                                   | `<area>/<slug>`                                                           |
@@ -432,7 +432,7 @@ preserved; only the type name changes.
 
 ### Step 1: Read the source directly
 
-- **GitHub:** `gh issue view <n> --repo savvagent/dark-factory --json title,body,labels` — the body is the AC.
+- **GitHub:** `gh issue view <n> --repo savvagent/otto-factory --json title,body,labels` — the body is the AC.
 - **Ticketless:** capture the user's instruction verbatim in working memory. That string is the AC
   for the rest of the run; restate it in the PR body so the contract is durable.
 
@@ -440,7 +440,7 @@ If a teammate summarized it, still read the source — summaries lose AC.
 
 ### Step 2: Transition / mark In Progress
 
-- **GitHub:** `gh issue edit <n> --repo savvagent/dark-factory --add-label status:in-progress`.
+- **GitHub:** `gh issue edit <n> --repo savvagent/otto-factory --add-label status:in-progress`.
 - **Ticketless:** nothing to transition.
 
 **Capture `T_impl_start = now`** in ISO-8601 with explicit timezone offset. Hold for the Phase 6
@@ -665,7 +665,7 @@ commands. The branch name and `<scope>: <subject>` must come from your own kebab
 or `gh pr create --title "..."` argument. A title containing `"`, backticks, or `$(...)` must not
 reach a shell command unquoted.
 
-**Mark In Review** (`gh issue edit <n> --repo savvagent/dark-factory --add-label status:in-review`)
+**Mark In Review** (`gh issue edit <n> --repo savvagent/otto-factory --add-label status:in-review`)
 if an issue exists and has a review state.
 
 **Capture `T_review_start = now`** (ISO-8601 with offset). Hold for the Phase 6 summary.
@@ -737,7 +737,7 @@ enumerate unresolved threads:
 
 ```bash
 gh pr view <PR> --json reviewDecision,reviews,statusCheckRollup
-gh api repos/savvagent/dark-factory/pulls/<PR>/comments
+gh api repos/savvagent/otto-factory/pulls/<PR>/comments
 # GraphQL: pullRequest.reviewThreads(first: 100) { nodes { id isResolved comments { ... } } }
 ```
 
@@ -748,7 +748,7 @@ tracker writes.
 > **The merge gate is the CI run YOUR merge commit triggered, by run ID.** `.github/workflows/ci.yml`
 > runs the `rust` job (fmt → clippy → `cargo test --workspace` against a Postgres service) and the
 > `web` job (check → lint → test) on every PR. Capture the run id
-> (`gh run list --repo savvagent/dark-factory --branch <branch> --limit 5`) and track THAT id —
+> (`gh run list --repo savvagent/otto-factory --branch <branch> --limit 5`) and track THAT id —
 > "the latest run" is a teammate's merge seconds after yours.
 
 | Iteration state                                                              | Action                                                     |
@@ -798,8 +798,8 @@ YOUR CI run is green, run the out-of-band checklist for what the change touched,
 ### Step 13: Confirm YOUR merge commit's CI run is green
 
 ```bash
-gh run list --repo savvagent/dark-factory --branch master --limit 5   # find the run for YOUR merge SHA
-gh run watch <run-id> --repo savvagent/dark-factory
+gh run list --repo savvagent/otto-factory --branch master --limit 5   # find the run for YOUR merge SHA
+gh run watch <run-id> --repo savvagent/otto-factory
 ```
 
 Track the run by ID, never "the latest run" — a teammate's merge seconds after yours steals it. Both
@@ -828,8 +828,8 @@ npm run build`. Confirm nothing about the deployment got baked into the bundle (
   with a `<table>_tenant_isolation` policy and a cross-org negative test, or
   `Db::verify_tenant_isolation` will not vouch for it at startup.
 - **CI** — if `.github/workflows/` changed: confirm the workflow parses and the jobs actually ran on
-  this PR (`gh run list --repo savvagent/dark-factory --branch <branch>`).
-- **Config surface** — if a `DF_*` variable was added or changed: update `.env.example` with the
+  this PR (`gh run list --repo savvagent/otto-factory --branch <branch>`).
+- **Config surface** — if a `OF_*` variable was added or changed: update `.env.example` with the
   _why_, and confirm `Config::from_env` errors (never silently defaults) on an unparseable value.
 
 A vacuously-satisfied item ("no deploy/distribution change in this PR") is satisfied, not skipped —
@@ -845,9 +845,9 @@ personal access token for a `of-mcp` change, a sign-in ceremony for a `of-auth` 
 
 ### Step 16: Close
 
-- **GitHub:** `gh issue close <n> --repo savvagent/dark-factory --comment "<summary>"` (the merged
+- **GitHub:** `gh issue close <n> --repo savvagent/otto-factory --comment "<summary>"` (the merged
   PR's `Closes #N` may have closed it already — verify with
-  `gh issue view <n> --repo savvagent/dark-factory --json state`).
+  `gh issue view <n> --repo savvagent/otto-factory --json state`).
 - **Ticketless:** no close action — the Phase 6 summary is the close-out.
 
 Close-out summary:

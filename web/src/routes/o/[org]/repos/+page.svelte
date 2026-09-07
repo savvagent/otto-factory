@@ -256,10 +256,10 @@
       <form class="space-y-4" onsubmit={register}>
         <div class="grid gap-4 sm:grid-cols-2">
           <Field label="Slug" hint="What agents will type. It cannot be changed later.">
-            <input class="df-input df-mono" required bind:value={slug} />
+            <input class="of-input of-mono" required bind:value={slug} />
           </Field>
           <Field label="Name" hint="Optional. Defaults to the slug.">
-            <input class="df-input" bind:value={name} />
+            <input class="of-input" bind:value={name} />
           </Field>
         </div>
 
@@ -267,7 +267,7 @@
           label="Remotes"
           hint="One per line, in any form git prints. SSH and HTTPS spellings of one repository collapse to a single row."
         >
-          <textarea class="df-input df-mono h-24" bind:value={remotes}></textarea>
+          <textarea class="of-input of-mono h-24" bind:value={remotes}></textarea>
         </Field>
 
         {#if teams.length > 0}
@@ -275,7 +275,7 @@
             label="Team"
             hint="Leave org-wide unless this repo should only be visible to one team."
           >
-            <select class="df-input" bind:value={teamId}>
+            <select class="of-input" bind:value={teamId}>
               <option value="">Org-wide</option>
               {#each teams as team (team.id)}
                 <option value={team.id}>{team.slug}</option>
@@ -303,7 +303,7 @@
   {:else if repos.length === 0}
     <Empty title="No repos registered yet.">
       {#if org.isAdmin}
-        Register one above, or let an agent do it with the <code class="df-mono">register_repo</code
+        Register one above, or let an agent do it with the <code class="of-mono">register_repo</code
         >
         tool.
       {:else}
@@ -313,11 +313,11 @@
   {:else}
     <ul class="space-y-2">
       {#each repos as repo (repo.id)}
-        <li class="df-card">
+        <li class="of-card">
           <div class="flex flex-wrap items-center gap-3 px-4 py-3">
             <div class="min-w-0 flex-1">
               <div class="flex items-center gap-2">
-                <span class="df-mono text-sm text-ink">{repo.slug}</span>
+                <span class="of-mono text-sm text-ink">{repo.slug}</span>
                 {#if !repo.active}
                   <span class="rounded-full border border-edge px-2 py-0.5 text-xs text-faint">
                     retired
@@ -365,11 +365,11 @@
                 <ul class="space-y-1.5">
                   {#each leases[repo.slug] as Lease[] as lease (lease.id)}
                     <li class="flex flex-wrap items-baseline gap-x-3 text-sm">
-                      <span class="df-mono text-ink">{lease.branch}</span>
+                      <span class="of-mono text-ink">{lease.branch}</span>
                       <span class="text-muted">{lease.holderLabel ?? 'an agent'}</span>
                       {#if lease.jobId}
                         <a
-                          class="df-mono text-xs text-muted underline hover:text-ink"
+                          class="of-mono text-xs text-muted underline hover:text-ink"
                           href="/o/{org.slug}/queue/{lease.jobId}"
                         >
                           {lease.jobId}
@@ -406,7 +406,7 @@
                           <label class="min-w-0 flex-1">
                             <span class="sr-only">{name} project</span>
                             <input
-                              class="df-input df-mono"
+                              class="of-input of-mono"
                               placeholder={hint}
                               bind:value={refDraft[key]}
                             />
@@ -414,7 +414,7 @@
                           <label class="w-32 shrink-0">
                             <span class="sr-only">{name} trigger label</span>
                             <input
-                              class="df-input df-mono"
+                              class="of-input of-mono"
                               placeholder="otto-factory"
                               bind:value={labelDraft[key]}
                             />
@@ -435,7 +435,7 @@
                             </Button>
                           {/if}
                         {:else if binding}
-                          <span class="df-mono text-sm text-muted">{binding.externalRef}</span>
+                          <span class="of-mono text-sm text-muted">{binding.externalRef}</span>
                           <span class="text-xs text-faint">label {binding.triggerLabel}</span>
                         {:else}
                           <span class="text-xs text-faint">not bound</span>
@@ -460,7 +460,7 @@
 
                 <p class="mt-3 text-xs text-faint">
                   An issue in the bound project carrying the trigger label becomes a job in this
-                  repo. GitHub takes <code class="df-mono">owner/repo</code>; JIRA takes a project
+                  repo. GitHub takes <code class="of-mono">owner/repo</code>; JIRA takes a project
                   key. Both are matched exactly against what the provider sends.
                 </p>
               {/if}

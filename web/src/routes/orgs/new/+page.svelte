@@ -60,7 +60,7 @@
 
   <form class="mt-6 space-y-4" onsubmit={submit}>
     <Field label="Name">
-      <input class="df-input" type="text" required bind:value={name} />
+      <input class="of-input" type="text" required bind:value={name} />
     </Field>
 
     <Field
@@ -68,7 +68,7 @@
       hint="Appears in URLs and in every agent's configuration. It cannot be changed later."
     >
       <input
-        class="df-input df-mono"
+        class="of-input of-mono"
         type="text"
         value={suggested}
         oninput={(event) => {
