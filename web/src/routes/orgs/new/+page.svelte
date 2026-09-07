@@ -61,12 +61,12 @@
 
   <form class="mt-6 space-y-4" onsubmit={submit}>
     <Field label={m.orgnew_name_label()}>
-      <input class="df-input" type="text" required bind:value={name} />
+      <input class="of-input" type="text" required bind:value={name} />
     </Field>
 
     <Field label={m.orgnew_slug_label()} hint={m.orgnew_slug_hint()}>
       <input
-        class="df-input df-mono"
+        class="of-input of-mono"
         type="text"
         value={suggested}
         oninput={(event) => {

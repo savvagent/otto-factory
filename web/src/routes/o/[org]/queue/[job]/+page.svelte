@@ -15,7 +15,7 @@
   /**
    * One job.
    *
-   * `metadata` is rendered as raw JSON on purpose. dark-factory never interprets
+   * `metadata` is rendered as raw JSON on purpose. otto-factory never interprets
    * it — it is where a customer's own skill keeps whatever its methodology needs
    * — so any attempt to lay it out prettily would be the console inventing a
    * schema the server promised not to have. Showing it verbatim is the honest
@@ -90,7 +90,7 @@
         <h1 class="text-lg font-semibold">{job.title}</h1>
         <StatusPill status={job.status} />
       </div>
-      <p class="df-mono mt-1 text-xs text-faint">{job.id}</p>
+      <p class="of-mono mt-1 text-xs text-faint">{job.id}</p>
     </div>
 
     {#if job.description}
@@ -112,11 +112,11 @@
     <Card title={m.job_details_title()}>
       <dl class="grid grid-cols-1 gap-x-8 gap-y-3 text-sm sm:grid-cols-2">
         <div>
-          <dt class="df-label">{m.job_field_repo()}</dt>
+          <dt class="of-label">{m.job_field_repo()}</dt>
           <dd>
             {#if repo}
               <a
-                class="df-mono text-muted underline hover:text-ink"
+                class="of-mono text-muted underline hover:text-ink"
                 href="/o/{org.slug}/queue?repo={encodeURIComponent(repo.slug)}"
               >
                 {repo.slug}
@@ -127,31 +127,31 @@
           </dd>
         </div>
         <div>
-          <dt class="df-label">{m.job_field_ticket()}</dt>
+          <dt class="of-label">{m.job_field_ticket()}</dt>
           <dd class="text-muted">{job.ticketRef ?? '—'}{job.tracker ? ` (${job.tracker})` : ''}</dd>
         </div>
         <div>
-          <dt class="df-label">{m.job_field_claimed_by()}</dt>
+          <dt class="of-label">{m.job_field_claimed_by()}</dt>
           <dd class="text-muted">{job.claimedByLabel ?? '—'}</dd>
         </div>
         <div>
-          <dt class="df-label">{m.job_field_agent_type()}</dt>
+          <dt class="of-label">{m.job_field_agent_type()}</dt>
           <dd class="text-muted">{job.agentType ?? m.job_agent_type_any()}</dd>
         </div>
         <div>
-          <dt class="df-label">{m.job_field_queued()}</dt>
+          <dt class="of-label">{m.job_field_queued()}</dt>
           <dd class="text-muted" title={absolute(job.createdAt)}>{relative(job.createdAt)}</dd>
         </div>
         <div>
-          <dt class="df-label">{m.job_field_started()}</dt>
+          <dt class="of-label">{m.job_field_started()}</dt>
           <dd class="text-muted" title={absolute(job.startedAt)}>{relative(job.startedAt)}</dd>
         </div>
         <div>
-          <dt class="df-label">{m.job_field_finished()}</dt>
+          <dt class="of-label">{m.job_field_finished()}</dt>
           <dd class="text-muted" title={absolute(job.completedAt)}>{relative(job.completedAt)}</dd>
         </div>
         <div>
-          <dt class="df-label">{m.job_field_attempts()}</dt>
+          <dt class="of-label">{m.job_field_attempts()}</dt>
           <dd class="text-muted">{job.attempts}</dd>
         </div>
       </dl>
@@ -162,7 +162,7 @@
         <ul class="flex flex-wrap gap-2">
           {#each job.dependsOn as dependency (dependency)}
             <a
-              class="df-mono rounded-md border border-edge px-2 py-1 text-xs text-muted transition hover:bg-raised hover:text-ink"
+              class="of-mono rounded-md border border-edge px-2 py-1 text-xs text-muted transition hover:bg-raised hover:text-ink"
               href="/o/{org.slug}/queue/{dependency}"
             >
               {dependency}
@@ -174,7 +174,7 @@
 
     {#if metadata}
       <Card title={m.job_metadata_title()} description={m.job_metadata_description()}>
-        <pre class="df-mono overflow-x-auto whitespace-pre text-muted">{metadata}</pre>
+        <pre class="of-mono overflow-x-auto whitespace-pre text-muted">{metadata}</pre>
       </Card>
     {/if}
   {/if}

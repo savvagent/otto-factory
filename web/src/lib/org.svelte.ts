@@ -16,7 +16,7 @@
 import { getContext, setContext } from 'svelte';
 import type { Org, Role } from './types';
 
-const KEY = Symbol('df.org');
+const KEY = Symbol('of.org');
 
 export class OrgContext {
   org = $state<Org | undefined>(undefined);

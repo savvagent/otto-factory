@@ -1,12 +1,12 @@
 /**
- * The one place the console talks to `df-web`.
+ * The one place the console talks to `of-web`.
  *
  * Three things hold here, and each of them is a rule the server also keeps.
  *
  * **No credential is ever spent on a GET.** An invitation link points at a
  * *page* in this app; the page renders a button and
  * the button calls one of the `post` helpers below. A mail scanner that follows
- * the link loads a page and burns nothing. `df-web`'s
+ * the link loads a page and burns nothing. `of-web`'s
  * `every_single_use_redemption_is_a_post` asserts the other half.
  *
  * **The session is never touched by script.** It is an `HttpOnly`,

@@ -1,0 +1,17 @@
+-- The console language, when the account has chosen one.
+--
+-- Nullable with no default and no backfill, and the nullability carries
+-- meaning: NULL is "never chose", which is *not* the same as "chose English".
+-- Defaulting to 'en' would make a German-speaking new account permanently
+-- English-by-default and would destroy the only signal that says browser
+-- detection is still in charge.
+--
+-- No CHECK constraint on purpose. A CHECK listing six values makes the seventh
+-- locale a migration; of_core::i18n validates instead, which keeps the list in
+-- one place and lets the error name the valid options rather than surfacing a
+-- constraint violation.
+--
+-- `users` is not a tenant table -- it has no org_id and is absent from the
+-- tenant_tables array in 0007_rls.sql -- so this column needs no RLS policy and
+-- no cross-org test. It is reachable only through the caller's own CurrentUser.
+ALTER TABLE users ADD COLUMN locale text;

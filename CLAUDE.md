@@ -4,10 +4,10 @@ Guidance for Claude Code working in this repository.
 
 ## What this is
 
-**dark-factory** is a hosted, multi-tenant MCP server for coordinating agentic coding work
+**otto-factory** is a hosted, multi-tenant MCP server for coordinating agentic coding work
 across enterprises and teams. Server-only — no TUI, no PTY, no local binary, no plugin.
 
-Read [`docs/specs/2026-09-01-dark-factory-design.md`](docs/specs/2026-09-01-dark-factory-design.md)
+Read [`docs/specs/2026-09-01-otto-factory-design.md`](docs/specs/2026-09-01-otto-factory-design.md)
 before any non-trivial change. The build order is in
 [`docs/plans/2026-09-01-milestone-1.md`](docs/plans/2026-09-01-milestone-1.md).
 
@@ -18,7 +18,7 @@ These decide scope disputes. When a change conflicts with one of them, the chang
 1. **Coordination is anchored on repos.** A repo is a first-class entity, not a config
    string. Jobs belong to repos (`repo_id` is `NOT NULL`); leases are repo-scoped; an
    unresolvable repo is an error naming the registered slugs, never a silent fallback.
-2. **Substrate, not workflow.** dark-factory ships no opinion about how work is specified,
+2. **Substrate, not workflow.** otto-factory ships no opinion about how work is specified,
    planned, reviewed, or measured. If a capability could live either in the server or in a
    customer's own skill calling the server, **it belongs in the skill**. Jobs carry an
    opaque `metadata` JSONB field for exactly this reason — the server never interprets it.
@@ -35,7 +35,7 @@ required for any new tenant table:
 1. **API shape.** Tenant data is reachable only through `Tx`, which cannot be constructed
    without an `OrgId`. Every statement carries `org_id = $1` explicitly, even though RLS
    would also filter it — the predicate keeps plans index-friendly and intent legible.
-2. **Row-level security.** `Db::begin` issues `SET LOCAL ROLE df_app` **and**
+2. **Row-level security.** `Db::begin` issues `SET LOCAL ROLE of_app` **and**
    `SET LOCAL app.org_id`. Both matter. Postgres exempts superusers and table owners from
    their own RLS policies, and the connecting user is frequently one or both, so **without
    the `SET LOCAL ROLE` the policies do nothing at all**. This was verified empirically,
@@ -43,12 +43,12 @@ required for any new tenant table:
 
    The role is issued *only when it can be assumed*, because `CREATE ROLE` needs a
    cluster-level privilege that managed Postgres does not hand out — on Fly's managed
-   cluster `df_app` cannot be created at all. There, every tenant table being
+   cluster `of_app` cannot be created at all. There, every tenant table being
    `FORCE ROW LEVEL SECURITY` carries the same guarantee: FORCE applies the policies to
    the table's owner, and the connecting role is neither a superuser nor `BYPASSRLS`.
    **Nothing assumes which of the two shapes it is in.** `Db::verify_tenant_isolation`
    reads it back out of the catalog as the role a tenant transaction actually runs as,
-   and `df-server` refuses to bind a port unless one of them holds. Guard 2 is the one
+   and `of-server` refuses to bind a port unless one of them holds. Guard 2 is the one
    guard the *environment* can switch off, so it is the one guard that gets checked at
    startup rather than trusted.
 
@@ -66,12 +66,12 @@ names the credential in `allowCredentials`. Only what the fake sees is softened;
 server step is the production one. What that cannot cover — a browser finding a credential
 unprompted — needs a CDP virtual authenticator, which is how the flow was actually verified.
 
-**A privilege granted to `df_app` is not a protection.** `df_app` does not exist on
-managed Postgres, so `REVOKE … FROM df_app` protects nothing there. Express the rule as a
+**A privilege granted to `of_app` is not a protection.** `of_app` does not exist on
+managed Postgres, so `REVOKE … FROM of_app` protects nothing there. Express the rule as a
 policy instead: `audit_events` is append-only because it has no `UPDATE` policy, which
 under FORCE binds the table's owner too — strictly stronger than the grant it replaced,
 and it survives both deployment shapes. `#[sqlx::test]` connects as a superuser and
-bypasses RLS, so a test of such a policy **must** `SET LOCAL ROLE df_app` explicitly or it
+bypasses RLS, so a test of such a policy **must** `SET LOCAL ROLE of_app` explicitly or it
 passes against no policy at all.
 
 Note that ordinary cross-org tests pass on the strength of guard 1 alone. The tests that
@@ -85,8 +85,8 @@ suite that cannot tell the two guards apart cannot tell you when one has broken.
 podman compose up -d          # Postgres 16 on host port 15433
 cp .env.example .env          # DATABASE_URL for sqlx
 cargo test                    # everything
-cargo test -p df-core --test isolation   # tenant isolation
-cargo test -p df-core --test queue       # queue behaviour
+cargo test -p of-core --test isolation   # tenant isolation
+cargo test -p of-core --test queue       # queue behaviour
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all
 
@@ -96,11 +96,11 @@ npm run lint                  # prettier --check — the console's `cargo fmt --
 npm test                      # vitest — the Cloudflare Worker's routing rule
 npm run build                 # static bundle into web/build
 
-cargo run -p df-server        # everything on one port, reading .env
-podman build -t dark-factory .   # console stage + rust stage + slim runtime
+cargo run -p of-server        # everything on one port, reading .env
+podman build -t otto-factory .   # console stage + rust stage + slim runtime
 ```
 
-`DF_PUBLIC_URL` and `DF_ENCRYPTION_KEY` are required with no defaults; `.env.example` says
+`OF_PUBLIC_URL` and `OF_ENCRYPTION_KEY` are required with no defaults; `.env.example` says
 why for each. Build `web/` first or every console page answers `404` while the API works.
 
 Integration tests are `#[sqlx::test]` against a real Postgres — one fresh throwaway
@@ -110,28 +110,28 @@ likely to be wrong, and a mock cannot tell you about any of them.
 
 ## Architecture
 
-One binary (`df-server`) mounts every HTTP surface on one port. The crates are a
+One binary (`of-server`) mounts every HTTP surface on one port. The crates are a
 compile-time layering discipline, not separate services.
 
 | Crate | Responsibility |
 |---|---|
-| `df-core` | Domain + **all** SQL. No HTTP, no auth. Every tenant fn takes an `OrgId`. |
-| `df-auth` | OAuth 2.1 AS, passkeys, enterprise OIDC federation, personal access tokens. |
-| `df-mcp` | `rmcp` Streamable HTTP server, tool surface, resource-server middleware. |
-| `df-billing` | Usage recording, period counters, tier limits. |
-| `df-trackers` | GitHub App + JIRA clients, webhook ingest, two-way sync. |
-| `df-web` | Console REST API, session cookies, the AS's HTML endpoints. |
-| `df-server` | Config, migrations, router assembly, graceful shutdown. |
+| `of-core` | Domain + **all** SQL. No HTTP, no auth. Every tenant fn takes an `OrgId`. |
+| `of-auth` | OAuth 2.1 AS, passkeys, enterprise OIDC federation, personal access tokens. |
+| `of-mcp` | `rmcp` Streamable HTTP server, tool surface, resource-server middleware. |
+| `of-billing` | Usage recording, period counters, tier limits. |
+| `of-trackers` | GitHub App + JIRA clients, webhook ingest, two-way sync. |
+| `of-web` | Console REST API, session cookies, the AS's HTML endpoints. |
+| `of-server` | Config, migrations, router assembly, graceful shutdown. |
 
 `web/` is the console UI — SvelteKit 2 / Svelte 5 runes / Tailwind v4, TypeScript strict —
-built to static files that `df-server` serves beside `/api`. See `web/README.md`.
+built to static files that `of-server` serves beside `/api`. See `web/README.md`.
 
-**Every SQL statement lives in `df-core`.** A query in `df-mcp` or `df-web` is a bug — it
+**Every SQL statement lives in `of-core`.** A query in `of-mcp` or `of-web` is a bug — it
 bypasses the `Tx` pinning that guard 2 depends on.
 
 ## The MCP surface
 
-`df-mcp` is the only crate a customer's agent talks to, and four conventions hold across
+`of-mcp` is the only crate a customer's agent talks to, and four conventions hold across
 every tool in it:
 
 - **The caller comes from the request, not the session.** An MCP session spans many HTTP
@@ -150,17 +150,18 @@ every tool in it:
 
 ## The console surface
 
-`df-web` serves everything a human touches, plus the authorization server's HTTP endpoints
+`of-web` serves everything a human touches, plus the authorization server's HTTP endpoints
 — `/oauth/authorize` is a browser surface that needs the console's session cookie, which is
-why it lives here and not in `df-mcp`. Five conventions:
+why it lives here and not in `of-mcp`. Five conventions:
 
 - **The two browser-facing HTML pages negotiate a language.** `/oauth/authorize`'s consent
-  screen and its error page have no client-side JS to swap strings, so `crates/df-web/src/i18n.rs`
+  screen and its error page have no client-side JS to swap strings, so `crates/of-web/src/i18n.rs`
   holds a hand-written `match` on `(Key, Locale)` — a new key with no Hindi translation fails to
   compile. Both pages use one rule, resolved once per request: the caller's stored `locale`
   first, `Accept-Language` second. **Both**, not just the consent page: every `error_page` call
   site is downstream of a resolved `CurrentUser`, so splitting the rule would give one flow a
   German consent screen and an English error page.
+
 - **Authorization is an extractor, not a handler's first line.** `OrgCtx` resolves the
   caller, the `{org}` path segment, and their role before any handler body runs;
   `require_admin()` / `require_owner()` narrow it. A handler that forgets is a handler that
@@ -189,13 +190,13 @@ the design removed on purpose.
 
 The console API is read-only over the queue, and a unit test
 (`the_queue_is_read_only_over_the_console`) fails if a write ever appears under `/jobs`.
-Every job write belongs to `df-mcp`: the agent doing the work is the only party that can
+Every job write belongs to `of-mcp`: the agent doing the work is the only party that can
 say when it is done, and a "mark complete" button would let a human put something into the
 audit trail that they did not observe.
 
 ## `web/` — the console UI
 
-Five things hold, and the first explains the next three.
+Five things hold, and the first explains the other four.
 
 - **It is a single-page app for a security reason, not a performance one.** The session is
   an `HttpOnly`, `__Host-`-prefixed cookie, which browsers refuse to store unless it is
@@ -235,10 +236,10 @@ Five things hold, and the first explains the next three.
   The locale is the account's (`users.locale`, source of truth), cached in `localStorage` for
   first paint, and detected from `navigator.languages` when nothing was chosen — where `NULL`
   means "never chose", not "chose English". A change reloads the document, because `m.*()` are
-  plain calls with nothing for Svelte to invalidate. `df_core::i18n` owns the locale list and a
+  plain calls with nothing for Svelte to invalidate. `of_core::i18n` owns the locale list and a
   test reads `web/project.inlang/settings.json` to prove the two halves agree.
 
-  **The MCP surface stays English.** `df-mcp` tool descriptions and `df-core` error messages are
+  **The MCP surface stays English.** `of-mcp` tool descriptions and `of-core` error messages are
   written for an LLM caller that has never read these docs; translating them fragments the one
   audience they have. Commands, config paths, product names and every wire value stay verbatim
   too — a translated `--transport http` is a broken command. `web/README.md` has the details.
@@ -252,17 +253,17 @@ and that frame is where one org's data renders under another's heading.
 Org pages live under `/o/[org]`, not `/[org]`, so no org slug can collide with a page name.
 The paths the *server* names — `/login`, `/verify`, `/recover`, `/invite/{org}`,
 `/settings/billing` — are fixed by what the server puts in an invitation link and in
-`df-billing`'s upgrade prompt, and cannot be renamed here alone.
+`of-billing`'s upgrade prompt, and cannot be renamed here alone.
 
-## `df-server` — assembly, and the two things only it can get wrong
+## `of-server` — assembly, and the two things only it can get wrong
 
 One binary mounts every surface on one port. Nothing here has business logic; what it has is
 the decisions no single crate could make.
 
-- **Route collisions are a startup panic, so a test builds the router.** `df-web` and
-  `df-mcp` both serve `/.well-known/oauth-protected-resource`, each for a good reason, and
-  `Router::merge` panics rather than choosing. `df-server` mounts `df_mcp::mcp_endpoint`
-  (the MCP route alone) beside `df-web`'s catalog, and `the_whole_router_assembles` reaches
+- **Route collisions are a startup panic, so a test builds the router.** `of-web` and
+  `of-mcp` both serve `/.well-known/oauth-protected-resource`, each for a good reason, and
+  `Router::merge` panics rather than choosing. `of-server` mounts `of_mcp::mcp_endpoint`
+  (the MCP route alone) beside `of-web`'s catalog, and `the_whole_router_assembles` reaches
   that panic before a deployment does.
 - **The console SPA is the fallback, but not under `/api`, `/oauth`, `/mcp`, or
   `/.well-known`.** `index.html` answering an unknown path is what makes a hard refresh of a
@@ -272,16 +273,16 @@ the decisions no single crate could make.
   questions — "should this process be killed?" and "should traffic come here?" — and wiring
   liveness to the database turns a brief database blip into a simultaneous cold start of
   every replica.
-- **`into_make_service_with_connect_info` is load-bearing.** `df_web::state::client_ip`
+- **`into_make_service_with_connect_info` is load-bearing.** `of_web::state::client_ip`
   reads the peer address out of `ConnectInfo`, and that address keys every per-IP throttle
   and every audit entry. Serve without it and `client_ip` returns `None` for every request,
   silently disabling rate limiting on login and client registration.
 - **`Config::from_env` never falls back quietly.** A variable that is *set* but unparseable
-  is a startup error naming it, not a default — `DF_ENFORCE_QUOTAS=yes-please` reading as
-  "off" is how a billing control gets deployed switched off for a year. `DF_PUBLIC_URL` and
-  `DF_ENCRYPTION_KEY` have no defaults at all, because a wrong value for either fails
+  is a startup error naming it, not a default — `OF_ENFORCE_QUOTAS=yes-please` reading as
+  "off" is how a billing control gets deployed switched off for a year. `OF_PUBLIC_URL` and
+  `OF_ENCRYPTION_KEY` have no defaults at all, because a wrong value for either fails
   silently: bad links in somebody's inbox, or tokens minted for an audience nothing accepts.
-- **`DF_CLIENT_IP_HEADER` names the header, and which header is not a matter of taste.**
+- **`OF_CLIENT_IP_HEADER` names the header, and which header is not a matter of taste.**
   Only a header the proxy *overwrites* can be trusted. On Fly.io that is `fly-client-ip`,
   never `x-forwarded-for` — fly-proxy appends, so a caller's own value arrives left-most and
   every throttle keys on something the attacker chose.
@@ -299,7 +300,7 @@ released before it continues — graceful shutdown, a test tearing down — call
 
 ## Migrations
 
-Forward-only, one file per concern, in `crates/df-core/migrations/`. Never edit a migration
+Forward-only, one file per concern, in `crates/of-core/migrations/`. Never edit a migration
 that has been applied anywhere; add a new one. `0007_rls.sql` runs last so earlier
 migrations' tests are not fighting policies mid-build.
 
@@ -351,7 +352,7 @@ recovery always means the assistant *could* impersonate; the honest mitigations 
 is auditable, single-use, and expiring. An org's last owner has nobody above them, and the
 console says so.
 
-**Two places `df-auth::passkeys` overrides webauthn-rs, both on the challenge and never on
+**Two places `of-auth::passkeys` overrides webauthn-rs, both on the challenge and never on
 the verification state.** `start_passkey_registration` sets `require_resident_key(false)`,
 which would produce credentials that cannot be found without naming the account first;
 `start_discoverable_authentication` forces `mediation: conditional`, which is the autofill
@@ -365,7 +366,7 @@ signature is.
 ## Metering
 
 The billable unit is the MCP tool call, but the free/billable classification in
-`df-billing::classify` is load-bearing: `watch` is a continuous long poll, and billing it
+`of-billing::classify` is load-bearing: `watch` is a continuous long poll, and billing it
 flat would charge an idle agent tens of thousands of calls a month. Record every call
 regardless of class so the classification can be repriced without losing history.
 
@@ -381,7 +382,7 @@ Three rules hold, and the first is what makes the other two true:
    price list and `every_tool_has_a_price` fails when they disagree. An unclassified tool
    is treated as free and logged: over-billing a customer for something nobody decided to
    charge for is a worse failure than under-billing ourselves.
-3. **Enforcement never blocks a read.** It is behind `DF_ENFORCE_QUOTAS`, off by default,
+3. **Enforcement never blocks a read.** It is behind `OF_ENFORCE_QUOTAS`, off by default,
    and refuses only billable tools on hard-stop plans. An org that runs out mid-task keeps
    full read access to its own queue.
 

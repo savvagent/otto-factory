@@ -1,15 +1,15 @@
 # sync_ticket quota pre-check design
 
 > **Status:** IMPLEMENTED — the read-only quota check shipped in
-> savvagent/dark-factory#30.
-> **Depends on:** `docs/specs/2026-09-03-df-trackers-design.md` §7 (`link_ticket`/
+> savvagent/otto-factory#30.
+> **Depends on:** `docs/specs/2026-09-03-of-trackers-design.md` §7 (`link_ticket`/
 > `sync_ticket`) — merged in PR #26.
 
 ## Goal & Success Criteria
 
-`sync_ticket` (`crates/df-mcp/src/tools/jobs.rs`) charges for its call *after* the
+`sync_ticket` (`crates/of-mcp/src/tools/jobs.rs`) charges for its call *after* the
 outbound tracker write-back succeeds, not before — a deliberate exception to the rule
-documented in `crates/df-billing/src/meter.rs` ("charging happens before the work, so a
+documented in `crates/of-billing/src/meter.rs` ("charging happens before the work, so a
 refusal costs nothing"), because charging in the same transaction as the write-back would
 let a quota refusal roll back loop-safety state (`remote_revision`, rotated JIRA
 credentials) for a tracker call that already happened, making a caller's retry re-post to
@@ -41,13 +41,13 @@ Success:
 ## Scope
 
 **In:**
-- A new read-only quota check on `Meter` (`crates/df-billing/src/meter.rs`) that mirrors
+- A new read-only quota check on `Meter` (`crates/of-billing/src/meter.rs`) that mirrors
   `charge`'s enforcement/hard-stop/bucket logic but never calls `record_usage`.
-- A thin wrapper on `Factory` (`crates/df-mcp/src/server.rs`) exposing that check, mapped
+- A thin wrapper on `Factory` (`crates/of-mcp/src/server.rs`) exposing that check, mapped
   to `ErrorData` the same way `charge` is.
 - Calling that check from `sync_ticket` before the tracker-specific outbound call
   (`sync_github_job` / `sync_jira_job`), for both the GitHub and JIRA arms.
-- A regression test in `crates/df-mcp/tests/tools.rs`.
+- A regression test in `crates/of-mcp/tests/tools.rs`.
 
 **Out:**
 - Changing the post-write-back `charge` call — it stays exactly as it is, for exactly the
@@ -81,7 +81,7 @@ impl Meter {
 
     /// Check whether a call would be refused, without recording any usage.
     ///
-    /// Used by `sync_ticket` (`df_mcp::tools::jobs`), whose "work" is an
+    /// Used by `sync_ticket` (`of_mcp::tools::jobs`), whose "work" is an
     /// outbound tracker write that has already happened by the time
     /// `charge` runs (see `Factory::charge`'s doc comment) — without this,
     /// an org on a hard-stop plan already over its bucket gets that write
@@ -126,7 +126,7 @@ suite passing unchanged.
 
 ## §2 — `Factory::would_refuse`
 
-`crates/df-mcp/src/server.rs` gets a thin wrapper next to `charge`, mapping
+`crates/of-mcp/src/server.rs` gets a thin wrapper next to `charge`, mapping
 `BillingError` to `ErrorData` the same way:
 
 ```rust
@@ -145,7 +145,7 @@ pub async fn would_refuse(&self, tx: &mut Tx<'_>, tool: &str) -> Result<(), Erro
 
 ## §3 — `sync_ticket`'s call site
 
-In `crates/df-mcp/src/tools/jobs.rs`, the initial transaction that fetches the job (opened
+In `crates/of-mcp/src/tools/jobs.rs`, the initial transaction that fetches the job (opened
 before either tracker arm runs) also runs the pre-check, before it commits:
 
 ```rust
@@ -171,7 +171,7 @@ error code every other tool already returns when refused, mapped through the sam
 `error::from_billing`. A caller does not need to learn a new error shape for this one
 tool.
 
-No new `df-billing::classify` entry is needed: `sync_ticket` is already classified as
+No new `of-billing::classify` entry is needed: `sync_ticket` is already classified as
 billable, and this change only adds a pre-check on that existing tool's path — it neither
 adds a tool nor changes its class. Likewise, this is a non-breaking behavioral tightening
 of an existing refusal path: the tool's caller-visible contract only gets stricter about
@@ -180,13 +180,13 @@ returns.
 
 ## §5 — Testing
 
-- `crates/df-billing/src/meter.rs`: no new unit tests needed beyond what's there — the
+- `crates/of-billing/src/meter.rs`: no new unit tests needed beyond what's there — the
   quota arithmetic (`remaining`, `warning`) is unchanged, and `would_refuse`/`check_quota`
   share the exact logic `charge`'s existing tests already exercise indirectly through
   other tools. Add one focused unit-level assertion only if the refactor introduces a
   behavior seam the existing tests don't already cover (they do: `check_quota` is called
   identically from both paths).
-- `crates/df-mcp/tests/tools.rs`: add a test alongside the existing `sync_ticket_*` group
+- `crates/of-mcp/tests/tools.rs`: add a test alongside the existing `sync_ticket_*` group
   that reuses `sync_ticket_reports_an_outbound_failure_as_retriable`'s setup (a binding
   with no GitHub App configured, so an outbound call would fail with
   `tracker_sync_failed`), but with `Meter::new(true, UPGRADE_URL)` and the bucket

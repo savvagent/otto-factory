@@ -1,13 +1,13 @@
 [workspace]
 resolver = "2"
 members = [
-  "crates/df-core",
-  "crates/df-auth",
-  "crates/df-mcp",
-  "crates/df-billing",
-  "crates/df-trackers",
-  "crates/df-web",
-  "crates/df-server",
+  "crates/of-core",
+  "crates/of-auth",
+  "crates/of-mcp",
+  "crates/of-billing",
+  "crates/of-trackers",
+  "crates/of-web",
+  "crates/of-server",
 ]
 
 [workspace.package]
@@ -17,12 +17,12 @@ license = "UNLICENSED"
 rust-version = "1.88"
 
 [workspace.dependencies]
-df-core = { path = "crates/df-core" }
-df-auth = { path = "crates/df-auth" }
-df-mcp = { path = "crates/df-mcp" }
-df-billing = { path = "crates/df-billing" }
-df-trackers = { path = "crates/df-trackers" }
-df-web = { path = "crates/df-web" }
+of-core = { path = "crates/of-core" }
+of-auth = { path = "crates/of-auth" }
+of-mcp = { path = "crates/of-mcp" }
+of-billing = { path = "crates/of-billing" }
+of-trackers = { path = "crates/of-trackers" }
+of-web = { path = "crates/of-web" }
 
 sqlx = { version = "0.8", default-features = false, features = [
   "runtime-tokio", "tls-rustls", "postgres", "chrono", "uuid", "macros", "migrate", "json",

@@ -26,7 +26,7 @@ import { WebauthnError } from './webauthn';
 /**
  * Every code this bundle has a translation for.
  *
- * Enumerated from `df_core::Error::code()`, `df-web`'s `auth_code()`, the two
+ * Enumerated from `of_core::Error::code()`, `of-web`'s `auth_code()`, the two
  * codes `api.ts` mints for itself, and `WebauthnErrorCode`. Deliberately not
  * exhaustive over what the server *could* send — see the fallback above. A code
  * missing from here is a sentence in English, not a missing sentence.
@@ -36,7 +36,7 @@ const KNOWN: Record<string, () => string> = {
   network: () => m.error_network(),
   unknown: () => m.error_unknown(),
 
-  // ---- df-core ----
+  // ---- of-core ----
   job_not_found: () => m.error_job_not_found(),
   repo_not_found: () => m.error_repo_not_found(),
   repo_unresolved: () => m.error_repo_unresolved(),
@@ -59,7 +59,7 @@ const KNOWN: Record<string, () => string> = {
   invalid_argument: () => m.error_invalid_argument(),
   internal_error: () => m.error_internal(),
 
-  // ---- df-web / df-auth ----
+  // ---- of-web / of-auth ----
   unauthenticated: () => m.error_unauthenticated(),
   not_found: () => m.error_not_found(),
   forbidden: () => m.error_forbidden(),

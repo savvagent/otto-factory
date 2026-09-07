@@ -9,7 +9,7 @@
    *
    * There is no useful org-less view: everything the console shows — the queue,
    * repos, members, the meter — is scoped to one org, because everything in
-   * `df-core` is. So this resolves where to go and goes there, and a brand new
+   * `of-core` is. So this resolves where to go and goes there, and a brand new
    * account with no memberships is sent to create an org rather than shown an
    * empty shell that explains nothing.
    */

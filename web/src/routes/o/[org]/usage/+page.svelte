@@ -15,7 +15,7 @@
    * The usage meter.
    *
    * Free to read, and readable by an org that has run out — the same
-   * `df_billing::Meter::report` the `usage` MCP tool calls, so the figure here
+   * `of_billing::Meter::report` the `usage` MCP tool calls, so the figure here
    * and the figure an agent sees cannot disagree. Nothing on this page charges
    * anything: billing a customer for looking at what they have been billed
    * costs more in trust than it could ever earn.
@@ -81,19 +81,19 @@
     </Card>
 
     <div class="grid gap-3 sm:grid-cols-3">
-      <div class="df-card px-4 py-3">
+      <div class="of-card px-4 py-3">
         <div class="text-2xl font-semibold text-ink">
           {usage.totalCalls.toLocaleString(currentLocale())}
         </div>
         <div class="mt-0.5 text-xs text-faint">{m.usage_tile_recorded()}</div>
       </div>
-      <div class="df-card px-4 py-3">
+      <div class="of-card px-4 py-3">
         <div class="text-2xl font-semibold text-ink">
           {usage.billableUsed.toLocaleString(currentLocale())}
         </div>
         <div class="mt-0.5 text-xs text-faint">{m.usage_tile_billable()}</div>
       </div>
-      <div class="df-card px-4 py-3">
+      <div class="of-card px-4 py-3">
         <div class="text-2xl font-semibold text-muted">{free.toLocaleString(currentLocale())}</div>
         <div class="mt-0.5 text-xs text-faint">{m.usage_tile_free()}</div>
       </div>
@@ -109,19 +109,19 @@
       <p class="mt-3 text-sm text-muted">{m.usage_why_history()}</p>
       <dl class="mt-4 grid grid-cols-2 gap-y-2 text-sm sm:grid-cols-4">
         <div>
-          <dt class="df-label">{m.usage_field_plan()}</dt>
+          <dt class="of-label">{m.usage_field_plan()}</dt>
           <dd class="text-muted">{usage.plan}</dd>
         </div>
         <div>
-          <dt class="df-label">{m.usage_field_included()}</dt>
+          <dt class="of-label">{m.usage_field_included()}</dt>
           <dd class="text-muted">{usage.includedOps.toLocaleString(currentLocale())}</dd>
         </div>
         <div>
-          <dt class="df-label">{m.usage_field_remaining()}</dt>
+          <dt class="of-label">{m.usage_field_remaining()}</dt>
           <dd class="text-muted">{usage.remaining.toLocaleString(currentLocale())}</dd>
         </div>
         <div>
-          <dt class="df-label">{m.usage_field_over_bucket()}</dt>
+          <dt class="of-label">{m.usage_field_over_bucket()}</dt>
           <dd class="text-muted">
             {usage.hardStop ? m.usage_over_stops() : m.usage_over_metered()}
           </dd>

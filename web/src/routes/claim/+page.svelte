@@ -56,7 +56,7 @@
   <form class="mt-6 space-y-4" onsubmit={claim}>
     <Field label={m.claim_code_label()}>
       <input
-        class="df-input df-mono"
+        class="of-input of-mono"
         type="text"
         autocapitalize="off"
         spellcheck="false"

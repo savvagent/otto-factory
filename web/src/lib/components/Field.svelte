@@ -16,7 +16,7 @@
 </script>
 
 <label class="block">
-  <span class="df-label">{label}</span>
+  <span class="of-label">{label}</span>
   {@render children()}
   {#if hint}<span class="mt-1 block text-xs text-faint">{hint}</span>{/if}
 </label>

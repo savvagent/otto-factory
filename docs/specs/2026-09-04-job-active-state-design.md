@@ -1,7 +1,7 @@
 # Job `active` state design
 
 > **Status:** IMPLEMENTED — adds an `active` job state between `in-progress` (claimed) and
-> `completed`/`failed`, closing savvagent/dark-factory#13.
+> `completed`/`failed`, closing savvagent/otto-factory#13.
 
 ## Goal & Success Criteria
 
@@ -28,7 +28,7 @@ Success:
 - No existing test asserting `pending → in-progress → completed | failed` behavior
   regresses; new tests cover the `in-progress → active → completed|failed` path and the
   direct `in-progress → completed|failed` path (skipping `active`) side by side.
-- `activate_job` is classified in `df-billing::classify` (billable, alongside
+- `activate_job` is classified in `of-billing::classify` (billable, alongside
   `claim_jobs`/`complete_job`/`fail_job`) — `every_tool_has_a_price` must not fail.
 
 ## Public interface note
@@ -44,30 +44,30 @@ response shape. No version bump is required.
 
 **In:**
 
-- New migration `crates/df-core/migrations/0016_job_active_status.sql` adding `'active'`
+- New migration `crates/of-core/migrations/0016_job_active_status.sql` adding `'active'`
   to the `job_status` enum.
-- `crates/df-core/src/jobs.rs`: `Status::Active` variant, `as_str`/`FromStr`, a new
+- `crates/of-core/src/jobs.rs`: `Status::Active` variant, `as_str`/`FromStr`, a new
   `Tx::activate_job` transition method, `finalize`/`close_from_ticket` accepting `Active`
   as a valid starting state, `Stats.active` counter and its query, and widening
   `get_live_job_by_ticket_for_repo`'s open-status filter to include `active`.
-- A second migration, `crates/df-core/migrations/0017_job_active_ticket_index.sql`,
+- A second migration, `crates/of-core/migrations/0017_job_active_ticket_index.sql`,
   recreates `jobs_org_repo_tracker_ticket_open_idx` (`0015_jobs_ticket_ref_uniqueness.sql`)
   to treat `active` as an open status, so the ticket-dedupe guarantee does not regress for
   a job that has moved past `in-progress`. This must be a separate migration file from
   0016 — see §1 for why.
-- `crates/df-mcp/src/tools/jobs.rs`: new `activate_job` tool (`ActivateJobArgs` reuses the
+- `crates/of-mcp/src/tools/jobs.rs`: new `activate_job` tool (`ActivateJobArgs` reuses the
   existing single-`job` shape), updated tool descriptions listing `active` among valid
   states, and the `sync_ticket` status match extended to handle `Status::Active`.
-- `crates/df-billing/src/classify.rs`: classify `activate_job` as billable.
-- `crates/df-web`: `openapi.rs` status enum + `QueueStats` schema, `routes/jobs.rs` doc
+- `crates/of-billing/src/classify.rs`: classify `activate_job` as billable.
+- `crates/of-web`: `openapi.rs` status enum + `QueueStats` schema, `routes/jobs.rs` doc
   comments listing valid `status` query values.
 - `web/`: `JobStatus` type, `StatusPill` tone, queue page's status filter list, and the
   overview page's stat tiles gain an `active` entry.
-- Tests: `crates/df-core/tests/queue.rs` and `tests/jobs.rs`, `crates/df-mcp/tests/tools.rs`,
-  `crates/df-web/tests/console.rs`, and `web/` type-checking (`npm run check`) all cover
+- Tests: `crates/of-core/tests/queue.rs` and `tests/jobs.rs`, `crates/of-mcp/tests/tools.rs`,
+  `crates/of-web/tests/console.rs`, and `web/` type-checking (`npm run check`) all cover
   the new state.
 - Doc updates: the four lifecycle-diagram comments found in `jobs.rs` (both crates) and
-  `docs/specs/2026-09-01-dark-factory-design.md`'s job-model line.
+  `docs/specs/2026-09-01-otto-factory-design.md`'s job-model line.
 
 **Out:**
 
@@ -95,7 +95,7 @@ response shape. No version bump is required.
 
 ## §1 — Migration
 
-`crates/df-core/migrations/0016_job_active_status.sql`:
+`crates/of-core/migrations/0016_job_active_status.sql`:
 
 ```sql
 -- Adds 'active' to job_status: an agent-signaled refinement of 'in-progress'
@@ -106,7 +106,7 @@ response shape. No version bump is required.
 ALTER TYPE job_status ADD VALUE 'active';
 ```
 
-`crates/df-core/migrations/0017_job_active_ticket_index.sql`:
+`crates/of-core/migrations/0017_job_active_ticket_index.sql`:
 
 ```sql
 -- 0015_jobs_ticket_ref_uniqueness.sql's partial unique index enforces at most
@@ -132,12 +132,12 @@ against the same Postgres 16 the test suite runs against (matching the version p
 `podman-compose.yml`) — combining them into one file fails every test that exercises a
 fresh migration run.
 
-`get_live_job_by_ticket_for_repo` (`crates/df-core/src/jobs.rs`) backs the conflict
+`get_live_job_by_ticket_for_repo` (`crates/of-core/src/jobs.rs`) backs the conflict
 lookup callers make after losing a race against this index — its own `status IN
 ('pending', 'in-progress')` filter is widened to `('pending', 'in-progress', 'active')`
 in §2, so it keeps agreeing with what the index now considers "open."
 
-## §2 — `crates/df-core/src/jobs.rs`
+## §2 — `crates/of-core/src/jobs.rs`
 
 ```rust
 pub enum Status {
@@ -223,7 +223,7 @@ not "when work actually began." `activate_job` adds no new timestamp column; the
 of activation is observable only via the status change itself (and, if a caller wants a
 record of it, `watch`/change notifications already fire on every `UPDATE jobs`).
 
-## §3 — `crates/df-mcp/src/tools/jobs.rs`
+## §3 — `crates/of-mcp/src/tools/jobs.rs`
 
 New tool, same argument shape as `repend_job` (`JobArgs { job }`):
 
@@ -270,13 +270,13 @@ and actively working" are the same external state.
 description are updated to list `active` among the valid values (currently: "pending",
 "in-progress", "completed" or "failed").
 
-## §4 — `crates/df-billing/src/classify.rs`
+## §4 — `crates/of-billing/src/classify.rs`
 
 `activate_job` is added to the `BILLABLE` list alongside `claim_jobs`/`complete_job`/
 `fail_job` — it is a state-changing write on the same footing as those three, not a read.
 `every_tool_has_a_price`/`exhaustive_over` enforce this is not forgotten.
 
-## §5 — `crates/df-web`
+## §5 — `crates/of-web`
 
 - `routes/jobs.rs`'s `ListJobsQuery.status` doc comment: `` `pending` | `in-progress` |
   `active` | `completed` | `failed` ``.
@@ -304,25 +304,25 @@ value the existing `GET` endpoints pass through.
 
 ## §7 — Testing
 
-- `crates/df-core/tests/queue.rs`: a test claiming a job, calling `activate_job`, and
+- `crates/of-core/tests/queue.rs`: a test claiming a job, calling `activate_job`, and
   asserting the status is `active` and `is_terminal()` is still false; a test that
   `complete_job`/`fail_job` succeed directly from `in-progress` (unchanged path) and also
   from `active` (new path); a test that `activate_job` on a `pending` or already-
   `completed`/`failed`/`active` job returns `WrongStatus` naming `"in-progress"` as
   expected; a `stats()` test asserting the new `active` counter.
-- `crates/df-core/tests/jobs.rs` (where `close_from_ticket`'s and the ticket-uniqueness/
+- `crates/of-core/tests/jobs.rs` (where `close_from_ticket`'s and the ticket-uniqueness/
   live-holder tests already live): `close_from_ticket` succeeding from `Active`; and a
   test that a ticket-linked job moved to `active` still reads as the *live* holder of its
   `ticket_ref` — `link_ticket` from a second job against the same ref returns
   `Error::TicketAlreadyLinked` naming the active job, proving
   `jobs_org_repo_tracker_ticket_open_idx` and `get_live_job_by_ticket_for_repo` both
   still treat `active` as open — the regression the spec critique surfaced.
-- `crates/df-mcp/tests/tools.rs`: `activate_job` end-to-end (claim → activate → assert
+- `crates/of-mcp/tests/tools.rs`: `activate_job` end-to-end (claim → activate → assert
   status), `activate_job` rejected on an unclaimed job, `complete_job`/`fail_job` still
   passing without a prior `activate_job` call, and `activate_job` appearing in the tool
   list with a description (existing `tests/tools.rs` assertion pattern). Billing test
   extended: `activate_job` added to the billable-tools list alongside `claim_jobs`.
-- `crates/df-web/tests/console.rs`: a job moved to `active` (via `df-core` directly, the
+- `crates/of-web/tests/console.rs`: a job moved to `active` (via `of-core` directly, the
   same way other console tests seed state) round-trips through `GET .../jobs` and
   `GET .../jobs/stats` with the new status/counter visible.
 - `web/`: `npm run check` (the type additions must satisfy `svelte-check`), `npm run

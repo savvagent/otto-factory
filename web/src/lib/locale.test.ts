@@ -54,7 +54,7 @@ describe('detect', () => {
   it('matches a region-qualified tag to its language', () => {
     // A browser sending es-419 means Spanish. Handing it English because of the
     // region would be the opposite of what it asked for — and it is the same
-    // rule df_core::i18n::Locale::from_str applies on the server.
+    // rule of_core::i18n::Locale::from_str applies on the server.
     expect(detect(['es-419'])).toBe('es');
     expect(detect(['de-CH', 'de'])).toBe('de');
     expect(detect(['hi_IN'])).toBe('hi');
@@ -122,13 +122,13 @@ describe('the cache', () => {
   });
 
   it('clears on undefined, which is "match my browser"', () => {
-    const store = fakeStore({ 'df.locale': 'it' });
+    const store = fakeStore({ 'of.locale': 'it' });
     writeCached(undefined, store);
     expect(readCached(store)).toBeUndefined();
   });
 
   it('ignores a stored value that is not a locale we ship', () => {
-    expect(readCached(fakeStore({ 'df.locale': 'klingon' }))).toBeUndefined();
+    expect(readCached(fakeStore({ 'of.locale': 'klingon' }))).toBeUndefined();
   });
 
   /**

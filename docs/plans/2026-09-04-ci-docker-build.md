@@ -10,7 +10,7 @@ dev headers the container's build stage lacked.
 
 ## Status — 2026-09-04
 
-✅ Done — merged as savvagent/dark-factory#39. Confirmed the `push`-to-`master` path actually runs
+✅ Done — merged as savvagent/otto-factory#39. Confirmed the `push`-to-`master` path actually runs
 the build (not skipped) on the merge commit's own CI run (job ID 101232544964, `docker-build` in
 4m22s), and re-verified locally with `podman build` on the updated `master`.
 
@@ -73,7 +73,7 @@ Single task: this is one YAML addition to one existing file. No sequencing decis
       jobs are byte-for-byte unchanged (no accidental reflow/indentation change from an editor).
 - [x] Local equivalence check (no GitHub Actions runner available here): confirm the Dockerfile
       itself still builds with the engine available on this machine — `podman build -t
-      dark-factory-ci-check .` from the repo root — so a locally-detectable break isn't shipped
+      otto-factory-ci-check .` from the repo root — so a locally-detectable break isn't shipped
       inside the same PR as the new gate. Expect: build completes successfully (it already did as
       of #37's fix; this is a regression check, not new ground).
 - [x] Format and commit: `git commit -m "ci: build the Docker image on every PR/push touching Dockerfile, Cargo manifests, or web/"`.
@@ -97,4 +97,4 @@ Single task: this is one YAML addition to one existing file. No sequencing decis
 - **Container image** — not modified by this change (`Dockerfile` untouched), but the new job now
   builds it as part of CI; the local `podman build` check above stands in for the CI-native
   `docker build` this environment can't run directly.
-- No other out-of-band surface (`web/`, `web/worker/`, migrations, `DF_*` config) is touched.
+- No other out-of-band surface (`web/`, `web/worker/`, migrations, `OF_*` config) is touched.

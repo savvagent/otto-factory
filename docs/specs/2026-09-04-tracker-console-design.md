@@ -1,6 +1,6 @@
 # Tracker console design — Milestone 2 Task 6
 
-**Parent spec:** [`docs/specs/2026-09-03-df-trackers-design.md`](2026-09-03-df-trackers-design.md).
+**Parent spec:** [`docs/specs/2026-09-03-of-trackers-design.md`](2026-09-03-of-trackers-design.md).
 **Plan:** [`docs/plans/2026-09-04-tracker-console.md`](../plans/2026-09-04-tracker-console.md).
 
 Task 6 is the last task in Milestone 2: the human-facing half of the tracker
@@ -31,17 +31,17 @@ anywhere in the setup path.
 Two things the parent plan's four-checkbox sketch of Task 6 assumed that are not true of
 the code as it stands.
 
-- **"`df-web`'s `catalog.rs` if new read/write REST routes are needed" — they are needed,
+- **"`of-web`'s `catalog.rs` if new read/write REST routes are needed" — they are needed,
   all of them.** The catalog has no tracker route at all beyond `POST /webhooks/{provider}`.
   Task 6 is not a UI task with an incidental route or two; it is a server task (a new
-  `df-web::routes::trackers` module, six endpoints, new config) with a UI on top. The plan
+  `of-web::routes::trackers` module, six endpoints, new config) with a UI on top. The plan
   splits accordingly.
 
 - **The connection rows cannot be created from an admin-supplied identifier alone.**
   Binding a GitHub installation means writing an `external_id` that
   `tracker_connection_index` then maps *globally* — `PRIMARY KEY (provider, external_id)`
   — to one org. An endpoint that took `{"installationId": 12345}` on an admin's word would
-  let any org admin claim any installation id no other dark-factory org had claimed yet,
+  let any org admin claim any installation id no other otto-factory org had claimed yet,
   and then drive comments and state transitions on that installation's issues using the
   operator's own App credentials. Installation ids are small sequential integers. This is a
   cross-tenant escalation reachable by typing a number, so the GitHub flow verifies
@@ -55,8 +55,8 @@ the code as it stands.
   a repo's tracker binding.
 - GitHub App installation binding with user-to-server verification (§2).
 - JIRA 3LO binding, sealing the refresh token into `encrypted_credentials` (§2).
-- New deployment config: `DF_GITHUB_APP_SLUG`, `DF_GITHUB_APP_CLIENT_ID`,
-  `DF_GITHUB_APP_CLIENT_SECRET` (§5).
+- New deployment config: `OF_GITHUB_APP_SLUG`, `OF_GITHUB_APP_CLIENT_ID`,
+  `OF_GITHUB_APP_CLIENT_SECRET` (§5).
 - Console pages: an org-level `Trackers` page, a provider-agnostic OAuth return page, and a
   per-repo binding editor on the existing repos page (§6).
 - Removing `trackerBinding` from the console's repo write surface and TypeScript types (§7).
@@ -70,7 +70,7 @@ the code as it stands.
   spec, and the schema's `UNIQUE (org_id, provider)` still enforces it.
 - Any new MCP tool. Tracker *setup* is an admin act performed by a human in a browser; the
   agent-facing surface (`link_ticket`, `sync_ticket`) shipped in Task 5 and is unchanged.
-  Nothing here needs `df-billing::classify`.
+  Nothing here needs `of-billing::classify`.
 - A conflict/merge UI, a webhook replay viewer, connection health checks. Not asked for.
 
 ## §1 Where a connection comes from
@@ -100,7 +100,7 @@ user-authorization `code`. The server exchanges that code for a user-to-server t
 calls `GET /user/installations`. The claimed installation id must appear in the result, or
 the request is refused and nothing is written. This is possession, not assertion: the token
 speaks for the human who just clicked through GitHub's own install screen, and GitHub —
-not dark-factory — decides which installations that human can see.
+not otto-factory — decides which installations that human can see.
 
 `GET /app/installations/{id}` (an App-JWT call, which the existing client could already
 make) is *not* sufficient and is not used: it proves the installation exists, which is
@@ -113,14 +113,14 @@ is read from that response, never from the request body.
 
 If that response names more than one site, the server writes nothing and returns an error
 listing the site names and ids, telling the admin to re-run the connect flow granting a
-single site. dark-factory stores one JIRA site per org (`UNIQUE (org_id, provider)`), the
+single site. otto-factory stores one JIRA site per org (`UNIQUE (org_id, provider)`), the
 authorization code is single-use so there is no second round trip to ask with, and picking
 one silently is precisely the "errors that guess" this codebase refuses. Accepted as a rare,
 loud dead end rather than solved with server-side pending-token storage.
 
-The refresh token from the exchange is sealed with `df_core::crypto::Cipher` and stored in
+The refresh token from the exchange is sealed with `of_core::crypto::Cipher` and stored in
 `encrypted_credentials`, in the same `base64(nonce || ciphertext)` encoding
-`df_core::trackers::decode_stored_secret` reads — the encoding `df-mcp`'s `sync_ticket`
+`of_core::trackers::decode_stored_secret` reads — the encoding `of-mcp`'s `sync_ticket`
 already round-trips when it rotates the token.
 
 ## §3 The endpoints
@@ -148,17 +148,17 @@ is a single place for the two flows to stay in step, and an unknown segment gets
 `Provider::from_str`'s error, which names the providers that do exist rather than 404ing
 into silence.
 
-**`TrackerConnectionView` is a `df-web` type, not `df_core::TrackerConnection`.** The domain
+**`TrackerConnectionView` is a `of-web` type, not `of_core::TrackerConnection`.** The domain
 row carries `encrypted_credentials` and `encrypted_webhook_secret` and `#[derive(Serialize)]`
 would put both on the wire. Ciphertext is not a secret in the sense that leaking it grants
 access, but a console `GET` that returns a sealed refresh token to every admin's browser is
-gratuitous exposure of the exact material `DF_ENCRYPTION_KEY` exists to protect. The view is
+gratuitous exposure of the exact material `OF_ENCRYPTION_KEY` exists to protect. The view is
 `{id, provider, externalId, hasCredentials, createdAt, updatedAt}`, and a unit test asserts
 no serialization of it contains `"encrypted"`.
 
 `TrackerConnectionsView` wraps the list with what the deployment supports:
 `{connections: [...], github: {configured, installUrl}, jira: {configured, authorizeUrl}}`.
-The two URLs are built **server-side** from the App slug / client id and `DF_PUBLIC_URL`,
+The two URLs are built **server-side** from the App slug / client id and `OF_PUBLIC_URL`,
 and the console appends only `&state=`. Nothing about the deployment is baked into the
 bundle — a hard-coded App slug is how a staging console sends admins to install the
 production App. `configured: false` (the operator set no GitHub or no JIRA credentials) is
@@ -187,24 +187,24 @@ already carry `<table>_tenant_isolation` policies from `0011_trackers.sql` and c
 negative tests from Task 1.
 
 What Task 6 adds is a second *surface* onto those tables, so guard 1 is what needs asserting:
-every new handler goes through `state.db.begin(ctx.org.id)`, every `df-core` function it
+every new handler goes through `state.db.begin(ctx.org.id)`, every `of-core` function it
 calls already binds `org_id = $1`, and the console tests assert an admin of org A gets `404`
 — never `403` — for org B's tracker routes.
 
-The two new `df-core` functions (`list_connections`, `list_bindings_for_repo`) take `&mut Tx`
-like every other one in the module, and get cross-org tests in `crates/df-core/tests/trackers.rs`.
+The two new `of-core` functions (`list_connections`, `list_bindings_for_repo`) take `&mut Tx`
+like every other one in the module, and get cross-org tests in `crates/of-core/tests/trackers.rs`.
 
 ## §5 Config
 
 Three new optional vars, following `github_app_id`'s existing shape exactly — optional
 because a deployment that offers no GitHub integration has no App:
 
-- `DF_GITHUB_APP_SLUG` — the App's URL slug, for `https://github.com/apps/{slug}/installations/new`.
-- `DF_GITHUB_APP_CLIENT_ID`, `DF_GITHUB_APP_CLIENT_SECRET` — the App's OAuth credentials,
+- `OF_GITHUB_APP_SLUG` — the App's URL slug, for `https://github.com/apps/{slug}/installations/new`.
+- `OF_GITHUB_APP_CLIENT_ID`, `OF_GITHUB_APP_CLIENT_SECRET` — the App's OAuth credentials,
   for the user-to-server exchange in §2.
 
-`DF_JIRA_CLIENT_ID`/`DF_JIRA_CLIENT_SECRET` already exist and are already threaded to
-`df-mcp`; Task 6 threads them to `df-web` as well.
+`OF_JIRA_CLIENT_ID`/`OF_JIRA_CLIENT_SECRET` already exist and are already threaded to
+`of-mcp`; Task 6 threads them to `of-web` as well.
 
 None of them parse to anything but a string, so there is no unparseable-value case to fail
 loudly on — but the *combination* has one: a deployment with an App id and private key but
@@ -237,7 +237,7 @@ table. The column is read by nothing at all.
 Task 6 removes it from the console, exactly:
 
 - `RegisterRepoRequest` and `UpdateRepoRequest` lose the field, so the console API can no
-  longer write the blob. `NewRepo`/`RepoPatch` in `df-core` keep it — the MCP tools still
+  longer write the blob. `NewRepo`/`RepoPatch` in `of-core` keep it — the MCP tools still
   accept it, and this task is not a change to the agent-facing surface.
 - `openapi.rs` loses it from those two request schemas and marks it `deprecated` on the
   `Repo` response schema, naming the tracker-binding endpoints as the replacement.
@@ -258,7 +258,7 @@ column and its data are untouched, so the change is reversible by restoring two 
 - **Installation id not in `/user/installations`**: refused as `invalid`, saying the signed-in
   GitHub account does not administer that installation. Deliberately not `not_found`; the
   admin needs to know the difference between "no such thing" and "not yours".
-- **Installation already claimed by another org**: `df-core`'s `upsert_connection_index`
+- **Installation already claimed by another org**: `of-core`'s `upsert_connection_index`
   already raises `Error::Invalid` naming exactly that, and the transaction rolls back. The
   console renders the message unchanged; it is the truth and the admin's next step (ask the
   other org to disconnect) follows from it.
@@ -277,7 +277,7 @@ column and its data are untouched, so the change is reversible by restoring two 
 - **The GitHub verification depends on an App setting the operator must have enabled.** If
   "Request user authorization (OAuth) during installation" is off, GitHub's redirect carries
   no `code`, and the connect flow fails with a message saying so rather than falling back to
-  trusting the installation id. Naming it in `.env.example` next to `DF_GITHUB_APP_CLIENT_ID`
+  trusting the installation id. Naming it in `.env.example` next to `OF_GITHUB_APP_CLIENT_ID`
   is the mitigation; there is no way for the server to detect the setting in advance.
 - **`state` lives in `sessionStorage`, so a connect flow that finishes in a different tab or
   after a browser restart fails the nonce check** and asks the admin to start again. Correct

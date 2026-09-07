@@ -224,7 +224,7 @@
           <div class="sm:col-span-2">
             <Field label={m.connect_field_name_label()} hint={m.connect_field_name_hint()}>
               <input
-                class="df-input"
+                class="of-input"
                 placeholder={m.connect_field_name_placeholder()}
                 required
                 bind:value={name}
@@ -232,12 +232,12 @@
             </Field>
           </div>
           <Field label={m.connect_field_ttl_label()} hint={m.connect_field_ttl_hint()}>
-            <input class="df-input" type="number" min="1" max="365" bind:value={ttlDays} />
+            <input class="of-input" type="number" min="1" max="365" bind:value={ttlDays} />
           </Field>
         </div>
 
         <fieldset>
-          <legend class="df-label">{m.connect_scopes_legend()}</legend>
+          <legend class="of-label">{m.connect_scopes_legend()}</legend>
           <div class="flex flex-wrap gap-x-5 gap-y-2">
             {#each grantable as scope (scope)}
               <label class="flex items-center gap-2 text-sm text-muted">
@@ -246,7 +246,7 @@
                   checked={scopes.includes(scope)}
                   onchange={(e) => toggleScope(scope, e.currentTarget.checked)}
                 />
-                <span class="df-mono">{scope}</span>
+                <span class="of-mono">{scope}</span>
               </label>
             {/each}
           </div>
@@ -281,7 +281,7 @@
                   <span class="ml-2 rounded-full border border-edge px-2 py-0.5 text-xs text-faint">
                     {token.kind}
                   </span>
-                  <p class="df-mono mt-0.5 text-xs text-faint">
+                  <p class="of-mono mt-0.5 text-xs text-faint">
                     {token.scopes.join(' ') || m.connect_token_no_scopes()}
                   </p>
                   <p class="text-xs text-faint">

@@ -3,7 +3,7 @@
 > **Status:** IMPLEMENTED — localize the console and the two server-rendered browser pages into
 > English, Spanish, German, French, Italian and Hindi.
 
-Implements [`#42`](https://github.com/savvagent/dark-factory/issues/42).
+Implements [`#42`](https://github.com/savvagent/otto-factory/issues/42).
 
 ## Brief
 
@@ -11,7 +11,7 @@ Quoting the issue:
 
 > The console ships English only. Every string in `web/src` is a literal in a component,
 > `<html lang="en">` is hard-coded in `web/src/app.html`, and the two server-rendered browser
-> pages in `df-web` (`consent_html` and the OAuth error page in `crates/df-web/src/oauth.rs`)
+> pages in `of-web` (`consent_html` and the OAuth error page in `crates/of-web/src/oauth.rs`)
 > are English HTML with no content negotiation. Localize the web interface for **English,
 > Spanish, German, French, Italian and Hindi**.
 
@@ -57,7 +57,7 @@ Every choice made without asking, with its rationale.
   make a German-speaking new account permanently English-by-default and hide the difference
   between "chose English" and "has not chosen".
 - **The set of valid locales is enforced in Rust, not by a `CHECK` constraint.** A `CHECK`
-  listing six values makes the seventh locale a migration. `df-core::i18n` validates against one
+  listing six values makes the seventh locale a migration. `of-core::i18n` validates against one
   `SUPPORTED_LOCALES` constant and returns `Error::Invalid` naming the valid options, which is
   the house error style ("say what went wrong, what the valid options were"). See "One list, and
   who owns it" for why that constant is the only hand-written copy in the workspace.
@@ -84,7 +84,7 @@ Every choice made without asking, with its rationale.
   page and an English error page **in the same flow** — exactly the inconsistency the rule above
   exists to prevent. The locale is therefore resolved **once**, at the top of the handler, and
   passed to whichever page is rendered.
-- **The `df-web` message table is hand-written Rust, not a second Paraglide project.** It is
+- **The `of-web` message table is hand-written Rust, not a second Paraglide project.** It is
   roughly twenty strings across two pages plus seven scope descriptions. A compiler toolchain for
   that is more moving parts than a `match` on a locale enum, and the two surfaces do not share
   keys anyway.
@@ -145,17 +145,17 @@ Measurable:
   rendered from an `ApiError` comes from the server and is keyed by `code`, not translated here.
 - `web/src/app.html` — the shell's `lang`.
 - A locale picker in `/settings`.
-- A `users.locale` column, its migration, its `df-core` accessor and validation, the
-  `PATCH /api/me` field, and that endpoint's entry in `crates/df-web/src/catalog.rs` — the
+- A `users.locale` column, its migration, its `of-core` accessor and validation, the
+  `PATCH /api/me` field, and that endpoint's entry in `crates/of-web/src/catalog.rs` — the
   catalog is the reachability gate *and* the source of the OpenAPI description, so a new field
   that is not described there is undocumented by construction.
-- `crates/df-web/src/oauth.rs` — `consent_html` and `error_page_html`, plus a new
-  `crates/df-web/src/i18n.rs` for negotiation and the message table.
+- `crates/of-web/src/oauth.rs` — `consent_html` and `error_page_html`, plus a new
+  `crates/of-web/src/i18n.rs` for negotiation and the message table.
 - `web/README.md` and the `web/` section of `CLAUDE.md`.
 
 **Out**
 
-- **The MCP surface.** `df-mcp` tool descriptions and `df-core` error messages are written for an
+- **The MCP surface.** `of-mcp` tool descriptions and `of-core` error messages are written for an
   LLM caller. Translating them fragments the one audience they have, and `tests/tools.rs` asserts
   their shape. They stay English. This is the issue's own boundary and CLAUDE.md's
   "Descriptions are the documentation" convention.
@@ -163,7 +163,7 @@ Measurable:
 - RTL and bidi. None of the six are RTL. No hard-coded `left`/`right` is *added* where a logical
   property would do; existing ones are not audited as part of this.
 - Locale-aware number/currency beyond what `Intl` already gives `toLocaleString`.
-- Translating the server's `message` strings themselves. The console maps `code`s; `df-web`
+- Translating the server's `message` strings themselves. The console maps `code`s; `of-web`
   keeps writing English messages, which remain the documented fallback.
 
 ## Architecture
@@ -175,7 +175,7 @@ Three tiers, in resolution order, each with one job:
 | Tier | Holds | Authority |
 |---|---|---|
 | `users.locale` (Postgres) | the account's explicit choice, or `NULL` | **source of truth** |
-| `localStorage['df.locale']` | a copy of the above, for first paint | cache only |
+| `localStorage['of.locale']` | a copy of the above, for first paint | cache only |
 | `navigator.languages` | the browser's preference | fallback when no choice was made |
 
 `users` is a global identity table with no `org_id` — it is not a tenant table, so the two-guard
@@ -186,7 +186,7 @@ caller's own `CurrentUser`, and no handler accepts a user id from the request.
 ### Boot and switch
 
 ```
-boot ──► locale = localStorage['df.locale'] ?? match(navigator.languages) ?? 'en'
+boot ──► locale = localStorage['of.locale'] ?? match(navigator.languages) ?? 'en'
          overwriteGetLocale(() => locale)         # synchronous, before first paint
               │
               ▼
@@ -221,7 +221,7 @@ browser" is a real choice a user makes after having chosen Spanish once:
 | `{"locale": null}` | clear it — go back to following the browser |
 
 That is `Option<Option<String>>` behind the existing `double_option` deserializer already used by
-`UpdateRepoRequest::team_id` in `crates/df-web/src/routes/repos.rs`, and for the same documented
+`UpdateRepoRequest::team_id` in `crates/of-web/src/routes/repos.rs`, and for the same documented
 reason: serde collapses "absent" and "explicit null" into one `None` unless the whole
 deserialization is wrapped. The helper moves to a shared location rather than being duplicated.
 
@@ -230,18 +230,18 @@ deserialization is wrapped. The helper moves to a shared location rather than be
 ### One list, and who owns it
 
 Four places could plausibly hold "the six locales", which is three too many. The owner is
-**`df-core::i18n`**:
+**`of-core::i18n`**:
 
 | Place | How it gets the list |
 |---|---|
-| `df-core::i18n::{Locale, SUPPORTED_LOCALES}` | **the hand-written original** — the domain list, next to the validation that uses it |
-| `df-web` | `pub use df_core::i18n::Locale` — `df-core` cannot depend on `df-web`, so `i18n.rs` in `df-web` holds only the HTTP concern (`negotiate`) and the two pages' message table |
+| `of-core::i18n::{Locale, SUPPORTED_LOCALES}` | **the hand-written original** — the domain list, next to the validation that uses it |
+| `of-web` | `pub use of_core::i18n::Locale` — `of-core` cannot depend on `of-web`, so `i18n.rs` in `of-web` holds only the HTTP concern (`negotiate`) and the two pages' message table |
 | `web/project.inlang/settings.json` | hand-written, and the one copy that cannot be a `use` statement — it is JSON read by a compiler in another language |
 | `web/src/lib/locale.svelte.ts` | `import { locales } from '$lib/paraglide/runtime'` — **generated from the settings file**, never re-typed |
 
 That leaves exactly two hand-written lists, in two languages, and a drift between them is a real
 failure: a locale offered in the `/settings` picker but missing from `SUPPORTED_LOCALES` is a
-`400` on click, and the reverse is a translation nobody can reach. So a `df-core` test reads
+`400` on click, and the reverse is a translation nobody can reach. So a `of-core` test reads
 `web/project.inlang/settings.json` off disk and asserts the two agree.
 
 This is a **stronger** guard than the one the repo already uses for the `API_PREFIXES` /
@@ -256,7 +256,7 @@ simply a `400` nobody wrote a test for. Hence the file read.
 `cargo test` runs the binary with its working directory at the *package* root, so the obvious
 `fs::read_to_string("web/project.inlang/settings.json")` is the implementation that fails. CI runs
 `cargo test --workspace` from a full checkout and the Dockerfile only ever runs `cargo build`, so
-nothing compiles `df-core`'s tests without `web/` on disk.
+nothing compiles `of-core`'s tests without `web/` on disk.
 
 ### `web/` module layout
 
@@ -346,10 +346,10 @@ the word remains the rule — the word is now a translated word.
 
 ### Server-rendered pages
 
-New `crates/df-web/src/i18n.rs`:
+New `crates/of-web/src/i18n.rs`:
 
-- `pub use df_core::i18n::Locale;` — the enum is **defined in `df-core`** (see "One list, and who
-  owns it"); `df-web` only re-exports it. `df-core` cannot depend on `df-web`, so this direction is
+- `pub use of_core::i18n::Locale;` — the enum is **defined in `of-core`** (see "One list, and who
+  owns it"); `of-web` only re-exports it. `of-core` cannot depend on `of-web`, so this direction is
   the only one available, and it is also the right one: the list is a domain fact, not an HTTP one.
 - `negotiate(accept_language: Option<&str>) -> Locale` — RFC 9110 `Accept-Language` parsing:
   split on `,`, take `;q=` weights (default `1.0`), ignore malformed entries rather than failing,
@@ -409,8 +409,8 @@ it is, rather than as a half-finished job.
 | `cargo test` | `negotiate()` table tests; a consent-page test **per locale** asserting `lang="xx"` and one translated string; a second consent test proving the *stored* locale outranks the header; `users.locale` round trip through `PATCH /api/me`; an invalid-locale rejection; the `SUPPORTED_LOCALES` ↔ `settings.json` drift guard |
 | `cargo clippy --all-targets -- -D warnings` | — |
 
-New Rust tests live beside the existing ones in `crates/df-web/tests/oauth_http.rs` and
-`crates/df-web/tests/console.rs`. `users` is not a tenant table, so no cross-org negative test is
+New Rust tests live beside the existing ones in `crates/of-web/tests/oauth_http.rs` and
+`crates/of-web/tests/console.rs`. `users` is not a tenant table, so no cross-org negative test is
 required for the new column — stated explicitly rather than skipped silently.
 
 **The per-locale consent test has to use a fixture user whose `locale` is `NULL`, or it tests the
@@ -425,7 +425,7 @@ no human wrote.
 
 ## Out-of-band artifacts
 
-- **One migration**, `0018_user_locale.sql`, additive and forward-only: a nullable column with no
+- **One migration**, `0021_user_locale.sql`, additive and forward-only: a nullable column with no
   default and no backfill. It is safe to apply before the code that reads it and safe to leave in
   place if the code is rolled back, which is what makes it deployable independently.
 - No config surface, no secret, no grant, no feature flag, no generated code committed.

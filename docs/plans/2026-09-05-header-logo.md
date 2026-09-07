@@ -2,12 +2,12 @@
 
 ## Goal
 
-Replace the accent-dot + "dark-factory" text in the console's root header with an inline,
+Replace the accent-dot + "otto-factory" text in the console's root header with an inline,
 theme-aware rendering of the logo mark, preserving an accessible name on the header link.
 
 ## Status — 2026-09-05
 
-✅ Shipped in `savvagent/dark-factory#44`.
+✅ Shipped in `savvagent/otto-factory#44`.
 
 **Spec:** `docs/specs/2026-09-05-header-logo-design.md` — read it first. This plan implements it
 exactly.
@@ -21,7 +21,7 @@ exactly.
   equivalent needed since this task touches no Rust code.
 - This change touches only `web/` presentational files — no SQL, no MCP tool, no console API route,
   no migration, no config surface. Tenant isolation, metering, and public-interface rules do not
-  apply; no cross-org test and no `df-billing::classify` step are needed.
+  apply; no cross-org test and no `of-billing::classify` step are needed.
 - Gates: `npm run check` (svelte-check + tsc), `npm run lint` (prettier), `npm run build`. `npm test`
   (vitest) exercises the Cloudflare Worker only and has no bearing on this change — running it is a
   vacuous pass, not a skip.
@@ -68,12 +68,12 @@ together; there is no intermediate state worth a checkpoint between them.
   ```svelte
   <a href="/" class="flex items-center gap-2 text-sm font-semibold tracking-tight">
     <span class="inline-block size-2.5 rounded-sm bg-accent"></span>
-    dark-factory
+    otto-factory
   </a>
   ```
   with:
   ```svelte
-  <a href="/" class="flex items-center gap-2" aria-label="dark-factory">
+  <a href="/" class="flex items-center gap-2" aria-label="otto-factory">
     <Logo class="size-6 text-accent" />
   </a>
   ```
@@ -82,9 +82,9 @@ together; there is no intermediate state worth a checkpoint between them.
       first if it does, then re-check).
 - [ ] Run `npm run build` — confirms the static bundle still builds.
 - [ ] Manual visual check: `npm run dev`, load the console (any page under `/`), confirm the header
-      shows the logo mark (no visible "dark-factory" text or accent dot), it is legible at header
+      shows the logo mark (no visible "otto-factory" text or accent dot), it is legible at header
       scale, and it inherits the accent color. Confirm the link still navigates to `/` and that a
-      screen reader / the accessibility tree reports the link's name as "dark-factory" (e.g. via
+      screen reader / the accessibility tree reports the link's name as "otto-factory" (e.g. via
       browser devtools' Accessibility panel on the `<a>`).
 - [ ] Format and commit: no Rust changes, so no `cargo fmt`; run `npm run lint` once more as the
       formatting gate, then `git add -A && git commit -m "web: swap header wordmark for logo mark"`.

@@ -1,6 +1,6 @@
 # Header logo design
 
-> **Status:** IMPLEMENTED — replace the "dark-factory" wordmark in the console header with the logo mark
+> **Status:** IMPLEMENTED — replace the "otto-factory" wordmark in the console header with the logo mark
 
 ## Scope
 
@@ -8,14 +8,14 @@
 
 - Adapt `web/static/logo.svg` into an inline Svelte component usable at header scale (a few
   pixels tall in a nav bar, not the ~390×409 illustration size the file ships at).
-- Replace the accent-dot + "dark-factory" text in the root header (`web/src/routes/+layout.svelte`)
+- Replace the accent-dot + "otto-factory" text in the root header (`web/src/routes/+layout.svelte`)
   with the logo mark.
 - Preserve accessible, discoverable text for the brand — the link still needs a name for screen
   readers and for anyone skimming the DOM, per the existing `<a href="/">` semantics.
 
 **Out:**
 
-- No change to the `<title>` suffix (`· dark-factory`) in `web/src/routes/o/[org]/+layout.svelte`
+- No change to the `<title>` suffix (`· otto-factory`) in `web/src/routes/o/[org]/+layout.svelte`
   or any other page's `<title>` — those are document titles, not header UI, and are out of scope
   for this task.
 - No change to `web/static/logo.svg` itself (favicon / static asset) — a new inline component is
@@ -28,13 +28,13 @@
 
 ## Assumptions
 
-- The task brief is explicit: "use the logo instead of 'dark-factory' in the header" — so the
-  visible accent-dot **and** the visible "dark-factory" text are both replaced by the logo mark.
+- The task brief is explicit: "use the logo instead of 'otto-factory' in the header" — so the
+  visible accent-dot **and** the visible "otto-factory" text are both replaced by the logo mark.
   No visible wordmark remains next to it.
 - The mark reads clearly at header scale (roughly 20–24px tall) next to the org nav links — it is
   a solid, simple silhouette (see `web/static/logo.svg`), not fine detail that would blur down.
 - Removing the visible text must not remove the link's accessible name. The `<a href="/">` gets an
-  explicit `aria-label="dark-factory"` (or an `sr-only` text node) so the brand name is still
+  explicit `aria-label="otto-factory"` (or an `sr-only` text node) so the brand name is still
   present for screen readers and in the accessibility tree, even though nothing is visibly printed.
   This is what keeps the header a single link with one clear purpose ("go home") while satisfying
   the brief literally.
@@ -70,7 +70,7 @@ static asset for the favicon, this is a second, small copy tailored for UI scale
 `web/src/routes/+layout.svelte`, in the header `<a href="/">`:
 
 ```svelte
-<a href="/" class="flex items-center gap-2" aria-label="dark-factory">
+<a href="/" class="flex items-center gap-2" aria-label="otto-factory">
   <Logo class="size-6 text-accent" />
 </a>
 ```
@@ -80,12 +80,12 @@ Replaces:
 ```svelte
 <a href="/" class="flex items-center gap-2 text-sm font-semibold tracking-tight">
   <span class="inline-block size-2.5 rounded-sm bg-accent"></span>
-  dark-factory
+  otto-factory
 </a>
 ```
 
 No visible text remains next to the mark — `aria-label` on the anchor is the accessible name,
-matching the brief's "use the logo instead of 'dark-factory'".
+matching the brief's "use the logo instead of 'otto-factory'".
 
 ## Testing
 

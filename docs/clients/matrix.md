@@ -1,6 +1,6 @@
 # Client conformance matrix
 
-Milestone 1, task 12. Run on **2026-09-02** against `df-server` built from `46c7896`
+Milestone 1, task 12. Run on **2026-09-02** against `of-server` built from `46c7896`
 plus the two fixes this run produced (below), serving on one origin with a real
 Postgres behind it.
 
@@ -48,7 +48,7 @@ run below is the milestone's "done means" criterion, executed rather than argued
    `watch` long poll woken by another agent's write.
 
 The client traffic was captured by putting a logging reverse proxy in front of the server
-and pointing `DF_PUBLIC_URL` at it, so every quoted request below is a real one a client
+and pointing `OF_PUBLIC_URL` at it, so every quoted request below is a real one a client
 sent, not a reconstruction.
 
 ---
@@ -72,11 +72,11 @@ the `resource_metadata` pointer out of the `WWW-Authenticate` header rather than
 well-known path, and sends `resource` on both the authorize and token requests.
 
 **It will not authorize in a non-interactive session.** `claude -p` reports the server as
-unauthenticated and stops; the flow needs `claude mcp login dark-factory` — or `/mcp` inside
+unauthenticated and stops; the flow needs `claude mcp login otto-factory` — or `/mcp` inside
 an interactive session — because Claude Code asks the terminal to fall back to a pasted
 redirect URL when the browser cannot reach it. Once a token is stored, `-p` sessions use it.
 
-**Token path**: `claude mcp add --transport http dark-factory <url> --header "Authorization: Bearer df_pat_…"`.
+**Token path**: `claude mcp add --transport http otto-factory <url> --header "Authorization: Bearer of_pat_…"`.
 Verified by listing all 28 tools and calling `whoami`.
 
 ## Copilot CLI 1.0.82
@@ -126,7 +126,7 @@ registers `http://localhost:3118/callback`. The old rule was deliberate — `loc
 resolves through the host's resolver and the literal addresses do not — but the trade was
 made on paper against a client that does not exist. `localhost` now sits in the RFC 8252
 §7.3 carve-out with the literal addresses, port ignored, everything else exact; the reasoning
-is in `df_auth::oauth::redirect_uri_matches` and the string Claude Code sends is now a test
+is in `of_auth::oauth::redirect_uri_matches` and the string Claude Code sends is now a test
 case. Copilot, which registers `http://127.0.0.1:<port>/`, was unaffected either way.
 
 **`watch` reported its timeout budget as the time it had waited.** A poll that was woken
@@ -191,15 +191,15 @@ refuses an unrequested version would fail, and the fix belongs upstream in `rmcp
 ## Re-running this
 
 ```bash
-cargo run -p df-server                      # .env, DF_PUBLIC_URL=http://localhost:8080
+cargo run -p of-server                      # .env, OF_PUBLIC_URL=http://localhost:8080
 # console: sign up with a passkey, create an org, register a repo, mint a PAT
-claude mcp add --transport http dark-factory http://localhost:8080/mcp
-claude mcp login dark-factory                # interactive terminal required
+claude mcp add --transport http otto-factory http://localhost:8080/mcp
+claude mcp login otto-factory                # interactive terminal required
 copilot --additional-mcp-config @copilot.json --allow-all-tools -p "call whoami"
 ```
 
-To capture what a client sends, point `DF_PUBLIC_URL` and `DF_RESOURCE_URI` at a logging
-proxy in front of the bind address — the discovery documents are built from `DF_PUBLIC_URL`,
+To capture what a client sends, point `OF_PUBLIC_URL` and `OF_RESOURCE_URI` at a logging
+proxy in front of the bind address — the discovery documents are built from `OF_PUBLIC_URL`,
 so the client follows the proxy of its own accord. A proxy used this way **must not follow
 redirects**: the `303` off `/oauth/authorize` is addressed to the client's own loopback
 listener, and a proxy that follows it eats the authorization code.

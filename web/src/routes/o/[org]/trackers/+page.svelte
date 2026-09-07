@@ -129,7 +129,7 @@
               <div class="min-w-0 flex-1">
                 <p class="text-sm text-ink">
                   {identifies}
-                  <code class="df-mono">{connection.externalId}</code>
+                  <code class="of-mono">{connection.externalId}</code>
                 </p>
                 <p class="mt-0.5 text-xs text-faint">
                   {connection.hasCredentials

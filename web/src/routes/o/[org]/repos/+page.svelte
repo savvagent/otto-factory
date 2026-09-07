@@ -260,20 +260,20 @@
       <form class="space-y-4" onsubmit={register}>
         <div class="grid gap-4 sm:grid-cols-2">
           <Field label={m.repos_field_slug_label()} hint={m.repos_field_slug_hint()}>
-            <input class="df-input df-mono" required bind:value={slug} />
+            <input class="of-input of-mono" required bind:value={slug} />
           </Field>
           <Field label={m.repos_field_name_label()} hint={m.repos_field_name_hint()}>
-            <input class="df-input" bind:value={name} />
+            <input class="of-input" bind:value={name} />
           </Field>
         </div>
 
         <Field label={m.repos_field_remotes_label()} hint={m.repos_field_remotes_hint()}>
-          <textarea class="df-input df-mono h-24" bind:value={remotes}></textarea>
+          <textarea class="of-input of-mono h-24" bind:value={remotes}></textarea>
         </Field>
 
         {#if teams.length > 0}
           <Field label={m.repos_field_team_label()} hint={m.repos_field_team_hint()}>
-            <select class="df-input" bind:value={teamId}>
+            <select class="of-input" bind:value={teamId}>
               <option value="">{m.repos_option_org_wide()}</option>
               {#each teams as team (team.id)}
                 <option value={team.id}>{team.slug}</option>
@@ -309,11 +309,11 @@
   {:else}
     <ul class="space-y-2">
       {#each repos as repo (repo.id)}
-        <li class="df-card">
+        <li class="of-card">
           <div class="flex flex-wrap items-center gap-3 px-4 py-3">
             <div class="min-w-0 flex-1">
               <div class="flex items-center gap-2">
-                <span class="df-mono text-sm text-ink">{repo.slug}</span>
+                <span class="of-mono text-sm text-ink">{repo.slug}</span>
                 {#if !repo.active}
                   <span class="rounded-full border border-edge px-2 py-0.5 text-xs text-faint">
                     {m.repos_badge_retired()}
@@ -361,13 +361,13 @@
                 <ul class="space-y-1.5">
                   {#each leases[repo.slug] as Lease[] as lease (lease.id)}
                     <li class="flex flex-wrap items-baseline gap-x-3 text-sm">
-                      <span class="df-mono text-ink">{lease.branch}</span>
+                      <span class="of-mono text-ink">{lease.branch}</span>
                       <span class="text-muted">
                         {lease.holderLabel ?? m.repos_lease_holder_unknown()}
                       </span>
                       {#if lease.jobId}
                         <a
-                          class="df-mono text-xs text-muted underline hover:text-ink"
+                          class="of-mono text-xs text-muted underline hover:text-ink"
                           href="/o/{org.slug}/queue/{lease.jobId}"
                         >
                           {lease.jobId}
@@ -409,7 +409,7 @@
                               {m.repos_binding_ref_label({ provider: name })}
                             </span>
                             <input
-                              class="df-input df-mono"
+                              class="of-input of-mono"
                               placeholder={hint}
                               bind:value={refDraft[key]}
                             />
@@ -419,8 +419,8 @@
                               {m.repos_binding_trigger_label({ provider: name })}
                             </span>
                             <input
-                              class="df-input df-mono"
-                              placeholder="dark-factory"
+                              class="of-input of-mono"
+                              placeholder="otto-factory"
                               bind:value={labelDraft[key]}
                             />
                           </label>
@@ -440,7 +440,7 @@
                             </Button>
                           {/if}
                         {:else if binding}
-                          <span class="df-mono text-sm text-muted">{binding.externalRef}</span>
+                          <span class="of-mono text-sm text-muted">{binding.externalRef}</span>
                           <span class="text-xs text-faint">
                             {m.repos_binding_trigger_display({ label: binding.triggerLabel })}
                           </span>
