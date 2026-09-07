@@ -69,5 +69,22 @@ BEGIN
             'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO of_app';
     EXECUTE 'ALTER DEFAULT PRIVILEGES IN SCHEMA public '
             'GRANT USAGE, SELECT ON SEQUENCES TO of_app';
+
+    -- The blanket grant above just re-granted UPDATE and DELETE on
+    -- audit_events, reversing 0008_audit.sql's deliberate
+    -- `REVOKE UPDATE, DELETE ON audit_events FROM df_app` — a documented
+    -- defense-in-depth invariant (see CLAUDE.md: "a policy decides which rows
+    -- a statement may touch, a grant decides whether it may run at all, and
+    -- this table is worth both"). Not exploitable on its own, since FORCE ROW
+    -- LEVEL SECURITY with no UPDATE/DELETE policy on audit_events still blocks
+    -- both at the row level regardless of grants, but silently losing the
+    -- second guard is still a regression worth not shipping. Re-apply 0008's
+    -- narrower grant immediately, scoped to of_app, same as its own
+    -- unconditional-within-the-IF-block shape above.
+    IF EXISTS (SELECT 1 FROM pg_class WHERE relname = 'audit_events' AND relkind = 'r') THEN
+      EXECUTE 'REVOKE UPDATE, DELETE ON audit_events FROM of_app';
+      EXECUTE 'GRANT SELECT, INSERT ON audit_events TO of_app';
+      EXECUTE 'GRANT USAGE, SELECT ON SEQUENCE audit_events_id_seq TO of_app';
+    END IF;
   END IF;
 END $$;

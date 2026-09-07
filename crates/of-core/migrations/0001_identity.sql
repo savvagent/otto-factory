@@ -30,7 +30,7 @@ CREATE TABLE orgs (
   plan          org_plan    NOT NULL DEFAULT 'free',
   -- Per-org job id counter. Job ids are `job-N` scoped to the org, so two orgs
   -- both have a `job-1` and neither can enumerate the other's. Bumped under the
-  -- org row lock inside the insert transaction (see of-core::jobs::add_job).
+  -- org row lock inside the insert transaction (see df-core::jobs::add_job).
   next_job_seq  bigint      NOT NULL DEFAULT 1,
   -- When true, this org's members must authenticate through its bound IdP;
   -- TOTP is refused for them.

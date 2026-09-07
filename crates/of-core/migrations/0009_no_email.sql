@@ -1,6 +1,6 @@
 -- Remove email from the product.
 --
--- otto-factory sends no mail. An authenticator app is the only factor, recovery
+-- dark-factory sends no mail. An authenticator app is the only factor, recovery
 -- codes are the only self-service way back in, and an org admin resetting a
 -- member's credential is the only assisted one. Invitations travel as codes the
 -- admin hands over themselves, and enterprises federate through OIDC.
@@ -16,7 +16,7 @@
 -- simply never sent to, and never proved.
 
 -- Single-use links for verification, recovery, and invitation acceptance.
--- Nothing issues or consumes these any more: `of_auth::magic` is gone, and the
+-- Nothing issues or consumes these any more: `df_auth::magic` is gone, and the
 -- invitation token lives in `org_invites.token_hash`, which is unaffected.
 DROP TABLE IF EXISTS magic_links;
 DROP TYPE IF EXISTS magic_link_purpose;
@@ -27,5 +27,5 @@ DROP TYPE IF EXISTS magic_link_purpose;
 -- The one place it was load-bearing was the gate on creating an org: an
 -- unverified address must not be able to claim a public slug. That check now
 -- asks for a confirmed authenticator instead, which is a *stronger* statement
--- about the account than a clicked link ever was — see `of_web::routes::orgs`.
+-- about the account than a clicked link ever was — see `df_web::routes::orgs`.
 ALTER TABLE users DROP COLUMN IF EXISTS email_verified_at;

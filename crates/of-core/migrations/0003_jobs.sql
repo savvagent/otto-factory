@@ -1,5 +1,5 @@
 -- Jobs: the queue itself. Every job is anchored to a repo (repo_id NOT NULL) —
--- coordination in otto-factory is repo-scoped by construction, so there is no
+-- coordination in dark-factory is repo-scoped by construction, so there is no
 -- such thing as a job floating free of the repository it is work on.
 
 CREATE TYPE job_status AS ENUM ('pending', 'in-progress', 'completed', 'failed');
@@ -30,7 +30,7 @@ CREATE TABLE jobs (
   -- an agent we have never heard of must work on day one.
   agent_type      text,
 
-  -- otto-factory NEVER interprets this. It is where a customer's own skills,
+  -- dark-factory NEVER interprets this. It is where a customer's own skills,
   -- commands, and plugins store whatever their methodology needs — the generic
   -- replacement for dark-agent's opinionated success-metrics framework.
   metadata        jsonb       NOT NULL DEFAULT '{}'::jsonb,
@@ -59,7 +59,7 @@ CREATE INDEX jobs_team_idx ON jobs (team_id) WHERE team_id IS NOT NULL;
 -- Dependencies are job-to-job with a real foreign key, not dark-agent's loose
 -- ticket-ref strings: a dependency that cannot be resolved to a queued job is
 -- rejected at insert rather than silently blocking forever. Cycles are rejected
--- in of-core::jobs::set_dependencies via a recursive reachability check.
+-- in df-core::jobs::set_dependencies via a recursive reachability check.
 CREATE TABLE job_dependencies (
   org_id     uuid NOT NULL,
   job_id     text NOT NULL,

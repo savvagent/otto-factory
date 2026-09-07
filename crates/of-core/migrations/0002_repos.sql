@@ -14,7 +14,7 @@ CREATE TABLE repos (
   -- the repo and its jobs; when null the repo is org-wide.
   team_id            uuid          REFERENCES teams (id) ON DELETE SET NULL,
   -- Free-form hint only ('claude-code', 'copilot-cli', ...). Never enforced:
-  -- otto-factory is agent-agnostic and must not privilege any client.
+  -- dark-factory is agent-agnostic and must not privilege any client.
   default_agent_type text,
   -- Tracker binding, e.g. {"jiraProjects":["RELMGT"],"githubRepo":"acme/api"}.
   -- Shaped, not enforced, until the milestone-2 sync engine reads it.
@@ -29,7 +29,7 @@ CREATE INDEX repos_org_active_idx ON repos (org_id, active);
 CREATE INDEX repos_team_idx ON repos (team_id) WHERE team_id IS NOT NULL;
 
 -- Every remote form that identifies a repo, NORMALIZED (see
--- of-core::repos::normalize_remote): scheme, credentials, port, trailing `.git`
+-- df-core::repos::normalize_remote): scheme, credentials, port, trailing `.git`
 -- and SSH-vs-HTTPS differences stripped, host lowercased. This is the lookup
 -- index for `resolve_repo` — an agent passes whatever
 -- `git remote get-url origin` gave it and lands on exactly one row.
