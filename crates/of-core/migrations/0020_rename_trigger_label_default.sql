@@ -1,5 +1,5 @@
 -- 0014_trigger_label.sql set the tracker_bindings.trigger_label default (and
--- every row's initial value) to the previous product name.
+-- every row's initial value) to the product name at the time: 'dark-factory'.
 -- 0014 is an already-applied migration, so it is not edited in place --
 -- sqlx checksums each migration file's raw bytes and refuses to start against
 -- a database that already ran a version whose stored checksum no longer
@@ -14,4 +14,4 @@ ALTER COLUMN trigger_label SET DEFAULT 'otto-factory';
 
 UPDATE tracker_bindings
 SET trigger_label = 'otto-factory'
-WHERE trigger_label = 'dark' || '-factory';
+WHERE trigger_label = 'dark-factory';

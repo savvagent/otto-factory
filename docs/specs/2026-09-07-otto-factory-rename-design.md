@@ -25,7 +25,7 @@ default; a silently-honoured legacy alias is the same failure wearing a friendli
 A deployment that still sets `OF_PUBLIC_URL` should fail to boot and say so, not come up
 on a value the operator believes they removed.
 
-Likewise: no dual-read of the session cookie, no acceptance of `of_pat_`-prefixed tokens,
+Likewise: no dual-read of the session cookie, no acceptance of `df_pat_`-prefixed tokens,
 no `df_app` fallback in `Db::begin`.
 
 ### 2. The tenant role is renamed by a new migration, not by editing `0007_rls.sql`
@@ -94,7 +94,7 @@ tasks 1–6 coherent, at the cost of a console that says "otto-factory" on a hos
 
 ### 5. Historical references are not rewritten
 
-`docs/plans/*` and `docs/specs/*` contain `savvagent/otto-factory#NN` references recording
+`docs/plans/*` and `docs/specs/*` contain `savvagent/dark-factory#NN` references recording
 work that shipped under that name. Those are accurate history and stay. What changes in
 historical docs is the *product name in prose* and links that must still resolve.
 
@@ -119,7 +119,7 @@ explicit break rather than a silent one: there is no dual-read anywhere.
 
 ### 6. `.github/skills/otto-factory-development/` is operational, not documentation
 
-The skill hard-codes `--repo savvagent/otto-factory` in ~25 commands it actually executes.
+The skill hard-codes `--repo savvagent/dark-factory` in ~25 commands it actually executes.
 GitHub's redirect keeps them working, which is the problem: they will quietly keep the old
 name alive in every `gh issue edit` and `gh run list` indefinitely. The directory, the
 `name:` frontmatter field, and every flag are renamed.
@@ -127,7 +127,7 @@ name alive in every `gh issue edit` and `gh run list` indefinitely. The director
 ## Out of scope
 
 - Any `DF_*` → `OF_*` compatibility shim (see decision 1).
-- Rewriting `savvagent/otto-factory#NN` history references (decision 5).
+- Rewriting `savvagent/dark-factory#NN` history references (decision 5).
 - The `<table>_tenant_isolation` policy naming convention — unaffected; `verify_tenant_isolation`
   discovers tenant tables by that suffix and no policy name contains the product name.
 - Re-pointing the git remote and renaming the GitHub repo — **already done** before this spec.
@@ -138,5 +138,5 @@ The gates in `CLAUDE.md`, plus the two that are specific to this change:
 
 - `cargo run -p of-server` logs `tenant isolation enforced as role "of_app"` — the only
   direct evidence guard 2 survived the role rename.
-- `grep -rIn '<old-brand-or-crate-pattern>' --exclude-dir=.git --exclude-dir=node_modules \
-  --exclude-dir=target .` returns only the intentional `savvagent/otto-factory#NN` history.
+- `grep -rIn 'dark.factory\|\bdf[-_]\|\bDF_' --exclude-dir=.git --exclude-dir=node_modules \
+  --exclude-dir=target .` returns only the intentional `savvagent/dark-factory#NN` history.

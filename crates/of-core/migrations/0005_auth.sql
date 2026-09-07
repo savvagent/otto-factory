@@ -3,7 +3,7 @@
 --            idp_connections, claimed_domains, user_identities, browser_sessions.
 --   Layer 1 (what a client may do): oauth_clients, authorization_codes,
 --            access_tokens, refresh_tokens.
--- Nothing here stores a password, because otto-factory never accepts one.
+-- Nothing here stores a password, because dark-factory never accepts one.
 
 CREATE TYPE token_kind AS ENUM ('oauth', 'pat');
 
@@ -159,7 +159,7 @@ CREATE TABLE authorization_codes (
   code_challenge_method text       NOT NULL DEFAULT 'S256',
   scopes               text[]      NOT NULL DEFAULT '{}',
   -- RFC 8707 resource indicator. The token minted from this code is audience-
-  -- bound to it, and of-mcp rejects any token whose audience is not its own
+  -- bound to it, and df-mcp rejects any token whose audience is not its own
   -- canonical URI. This is the confused-deputy defense.
   resource             text        NOT NULL,
   expires_at           timestamptz NOT NULL,
@@ -192,7 +192,7 @@ CREATE INDEX access_tokens_org_user_idx ON access_tokens (org_id, user_id);
 
 -- Refresh tokens rotate: redeeming one consumes it and issues a successor. A
 -- replayed (already-consumed) refresh token is treated as theft and revokes the
--- whole chain — see of-auth::oauth::refresh.
+-- whole chain — see df-auth::oauth::refresh.
 CREATE TABLE refresh_tokens (
   id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   token_hash      bytea       NOT NULL,

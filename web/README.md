@@ -78,7 +78,7 @@ messages/{en,es,de,fr,it,hi}.json   the catalogs
 scripts/check-messages.mjs     the completeness gate, wired into `npm run check`
 src/lib/locale.ts              which language this document is in, and how it got there
 src/lib/errors.ts              ApiError.code / WebauthnError.code → a sentence
-src/lib/status.ts              JobStatus → a word (the wire value never changes)
+src/lib/labels.ts              JobStatus / role → a word (the wire value never changes)
 src/lib/paraglide/**           generated. git-ignored, prettier-ignored, never edited.
 ```
 

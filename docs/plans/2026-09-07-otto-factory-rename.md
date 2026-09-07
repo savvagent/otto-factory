@@ -22,10 +22,10 @@ to `savvagent/otto-factory`, the local checkout directory is `~/dev/otto-factory
 
 - No AI self-attribution anywhere (commits, comments, docs, PR body).
 - **No compatibility shims.** No `DF_*` fallback in `Config::from_env`, no dual-read of the
-  session cookie, no `df_app` fallback in `Db::begin`, no acceptance of `of_pat_` tokens.
+  session cookie, no `df_app` fallback in `Db::begin`, no acceptance of `df_pat_` tokens.
   Per the spec's decision 1, a legacy alias is a defect here, not a courtesy.
 - Use `git mv` for every directory and file rename so history follows the file.
-- `savvagent/otto-factory#NN` references in `docs/plans/*` and `docs/specs/*` are history and
+- `savvagent/dark-factory#NN` references in `docs/plans/*` and `docs/specs/*` are history and
   are **left alone** (spec decision 5). Only the product name in their prose changes.
 - Every task ends green and gets its own commit. `cargo test --workspace`,
   `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all` for Rust tasks;
@@ -114,7 +114,7 @@ Full list: `OF_ALLOWED_HOSTS`, `OF_ALLOWED_ORIGINS`, `OF_ALLOW_LOG_MAILER`, `OF_
 - [x] `cd web && npm run check && npm run lint && npm test`.
 - [x] Commit: `rename: DF_ environment namespace to OF_`.
 
-## Task 3 — Postgres role `df_app` → `of_app`, database `otto_factory` → `otto_factory` ✅
+## Task 3 — Postgres role `df_app` → `of_app`, database `dark_factory` → `otto_factory` ✅
 
 **Files:** `crates/of-core/migrations/0018_rename_tenant_role.sql` (new),
 `crates/of-core/src/db.rs`, `crates/of-core/src/isolation.rs`, `crates/of-core/src/lib.rs`,
@@ -142,7 +142,7 @@ bypasses RLS, so a green suite is not evidence.
       policy at all.
 - [x] `.github/workflows/ci.yml`: the `Pre-create df_app role` step name, its
       `CREATE ROLE df_app NOLOGIN;` statement, and the comment explaining why the step exists.
-- [x] Database name `otto_factory` → `otto_factory` in `compose.yaml` (both `POSTGRES_DB` and
+- [x] Database name `dark_factory` → `otto_factory` in `compose.yaml` (both `POSTGRES_DB` and
       the `pg_isready` healthcheck), `.env.example`'s `DATABASE_URL`, and the four places in
       `.github/workflows/ci.yml`.
 - [x] Recreate the local database: `podman compose down -v && podman compose up -d`, then
@@ -161,7 +161,7 @@ bypasses RLS, so a green suite is not evidence.
 plus test fixtures across `of-auth`, `of-web`, `of-mcp`.
 
 - [x] `crypto.rs`: `ACCESS` `df_at_` → `of_at_`, `SESSION` `df_ss_` → `of_ss_`, `PAT`
-      `of_pat_` → `of_pat_`, `INVITE` `of_inv_` → `of_inv_`, and the two in-module assertions.
+      `df_pat_` → `of_pat_`, `INVITE` `df_inv_` → `of_inv_`, and the two in-module assertions.
 - [x] `session.rs`: `COOKIE_NAME` → `"__Host-of_session"`, **and** the independent literal in
       the clear-cookie header (`"__Host-df_session=; Path=/; HttpOnly; …"`) — two separate
       strings, and the second is not covered by changing the constant.
@@ -173,9 +173,9 @@ plus test fixtures across `of-auth`, `of-web`, `of-mcp`.
 - [x] Confirm the attribute assertions (`HttpOnly`, `Secure`, `Path=/`, `SameSite=Lax`,
       `__Host-` prefix) are untouched — `SameSite=Lax` specifically, because `Strict` drops the
       cookie on the top-level navigation into `/oauth/authorize`.
-- [x] `openapi.rs`: the `__Host-df_session` description and the `of_pat_…` example.
+- [x] `openapi.rs`: the `__Host-df_session` description and the `df_pat_…` example.
 - [x] Sweep remaining fixtures: `df_ss_abc`, `df_at_abc`, `df_ss_supersecret`, `df_client_a`,
-      `df_client_x`, `df_changes`, `of-webhook`.
+      `df_client_x`, `df_changes`, `df-webhook`.
 - [x] `cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all`.
 - [x] Commit: `rename: token prefixes and session cookie to of_`.
 
@@ -195,14 +195,14 @@ plus test fixtures across `of-auth`, `of-web`, `of-mcp`.
 - [x] **`web/src/lib/clients.ts` — every connect snippet.** Claude Code
       (`claude mcp add --transport http otto-factory …` **and** the
       `claude mcp login otto-factory` follow-up line), the two JSON `mcpServers` keys, and
-      Codex's `[mcp_servers.otto_factory]` TOML table (which appears twice, once with the
+      Codex's `[mcp_servers.dark_factory]` TOML table (which appears twice, once with the
       `.http_headers` sub-table). These are what a customer pastes into their agent config.
 - [x] The `x-otto-factory-auth` OpenAPI extension → `x-otto-factory-auth`, in its producer
       (`crates/of-web/src/openapi.rs`) and its three consumers (`web/src/lib/openapi.ts`,
       `openapi.fixtures.ts`, and the `/docs/api` page's rendering).
 - [x] `web/src/lib/types.ts` doc comment; `web/src/lib/clients.ts` header comment.
 - [x] Prose sweep of `README.md`, `CLAUDE.md`, `web/README.md`, `docs/**`. Leave
-      `savvagent/otto-factory#NN` history references intact (spec decision 5).
+      `savvagent/dark-factory#NN` history references intact (spec decision 5).
 - [x] `cargo test --workspace` (the OpenAPI extension key is asserted server-side).
 - [x] `cd web && npm run check && npm run lint && npm test && npm run build`.
 - [x] Commit: `rename: product name in docs and console UI`.
@@ -220,7 +220,7 @@ plus test fixtures across `of-auth`, `of-web`, `of-mcp`.
 - [x] `web/package.json` `name`, and regenerate `package-lock.json`.
 - [x] `git mv .github/skills/otto-factory-development .github/skills/otto-factory-development`;
       update the `name:` frontmatter, the description, and **all ~25
-      `--repo savvagent/otto-factory` flags** in `SKILL.md` and `agent-prompts.md`. These are
+      `--repo savvagent/dark-factory` flags** in `SKILL.md` and `agent-prompts.md`. These are
       executed commands, not prose — the GitHub redirect is what makes leaving them dangerous
       rather than broken (spec decision 6).
 - [x] `docs/deploy/{fly,cloudflare}.md`: the `[issue #2](…/otto-factory/issues/2)` links, the
@@ -280,7 +280,7 @@ afterwards, including for the operator running this task.
 - [x] `cd web && npm run check && npm run lint && npm test && npm run build`.
 - [x] `podman build -t otto-factory .`.
 - [x] `cargo run -p of-server` → `tenant isolation enforced as role "of_app"`.
-- [x] `grep -rIn '<old-brand-or-crate-pattern>' --exclude-dir=.git --exclude-dir=node_modules
-      --exclude-dir=target .` returns only `savvagent/otto-factory#NN` history references.
+- [x] `grep -rIn 'dark.factory\|\bdf[-_]\|\bDF_' --exclude-dir=.git --exclude-dir=node_modules
+      --exclude-dir=target .` returns only `savvagent/dark-factory#NN` history references.
 - [x] Flip the spec's `> **Status:**` to IMPLEMENTED and this plan's markers to ✅ at
       record-as-shipped, after merge.

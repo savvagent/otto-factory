@@ -1,11 +1,11 @@
 -- Row-level security: the second, independent tenant-isolation guard.
 --
--- Guard one is the of-core API shape — every query function takes an OrgId and
+-- Guard one is the df-core API shape — every query function takes an OrgId and
 -- every statement says `org_id = $1`. Guard two is this file. If someone later
 -- adds a query that forgets the predicate, the database still refuses to return
 -- another tenant's rows. Neither guard is allowed to be the only one.
 --
--- Each tenant transaction opens with (of-core::Tx::begin):
+-- Each tenant transaction opens with (df-core::Tx::begin):
 --     SET LOCAL ROLE df_app;
 --     SET LOCAL app.org_id = '<uuid>';
 --
@@ -56,7 +56,7 @@ BEGIN
       'could not CREATE ROLE df_app (no CREATEROLE). Tenant transactions will '
       'run as the connecting role and rely on FORCE ROW LEVEL SECURITY, which '
       'holds only while that role is neither a superuser nor BYPASSRLS. '
-      'of-server verifies this at startup and refuses to serve otherwise.';
+      'df-server verifies this at startup and refuses to serve otherwise.';
   END;
 
   have_role := EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'df_app');
@@ -72,7 +72,7 @@ BEGIN
     EXCEPTION WHEN insufficient_privilege THEN
       RAISE NOTICE
         'df_app exists but could not be granted to the migrating role. Tenant '
-        'transactions will fall back to FORCE ROW LEVEL SECURITY; of-server '
+        'transactions will fall back to FORCE ROW LEVEL SECURITY; df-server '
         'verifies that at startup.';
     END;
 
@@ -104,7 +104,7 @@ DECLARE
   -- (users, access_tokens, oauth_clients, magic_links, claimed_domains,
   -- idp_connections) are deliberately absent: authentication has to resolve a
   -- principal BEFORE an org is known, so pinning them to current_org() would
-  -- make login impossible. They are reachable only from of-auth, which runs
+  -- make login impossible. They are reachable only from df-auth, which runs
   -- outside the tenant role.
   tenant_tables text[] := ARRAY[
     'teams',

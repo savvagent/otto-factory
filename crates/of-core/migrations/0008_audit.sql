@@ -17,7 +17,7 @@ CREATE TABLE audit_events (
   -- The consequence is deliberate and fail-closed: `org_id = current_org()` is
   -- NULL for a NULL row, which is not TRUE, so org-scoped rows are the only
   -- ones a tenant can ever see. NULL-org rows are reachable only from the
-  -- unpinned control plane (of-auth), which is exactly the intent.
+  -- unpinned control plane (df-auth), which is exactly the intent.
   org_id        uuid        REFERENCES orgs (id) ON DELETE CASCADE,
 
   actor_user_id uuid        REFERENCES users (id) ON DELETE SET NULL,
@@ -26,7 +26,7 @@ CREATE TABLE audit_events (
   -- attributes it to a human where one exists.
   actor_label   text,
 
-  -- Dotted, stable, and enumerated in of_core::audit::action. Queried by
+  -- Dotted, stable, and enumerated in df_core::audit::action. Queried by
   -- prefix ('auth.%'), so the namespace ordering matters.
   action        text        NOT NULL,
   target_type   text,

@@ -3,7 +3,7 @@
 -- A connection says how this org reaches a provider: one GitHub App
 -- installation id, one JIRA cloud site id, plus any per-org encrypted secret
 -- material that provider needs. A binding says which external project or repo a
--- registered otto-factory repo maps to.
+-- registered dark-factory repo maps to.
 
 CREATE TYPE tracker_provider AS ENUM ('github', 'jira');
 

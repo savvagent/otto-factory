@@ -4,7 +4,7 @@
 -- `watch` is a 30-second long poll that every connected agent calls
 -- continuously. Billing it flat would charge an idle agent ~86,000 calls a month
 -- for doing nothing and make bills impossible to predict. So each tool is
--- classified in code (of-billing::classify) as free (reads and polls) or
+-- classified in code (df-billing::classify) as free (reads and polls) or
 -- billable (work), and only billable calls consume the bucket.
 --
 -- Both kinds are recorded here regardless, so the classification can be repriced
