@@ -48,7 +48,7 @@
   }
 </script>
 
-<svelte:head><title>Register a new passkey · dark-factory</title></svelte:head>
+<svelte:head><title>Register a new passkey · otto-factory</title></svelte:head>
 
 <div class="mx-auto max-w-sm py-8">
   <h1 class="text-lg font-semibold">Register a new passkey</h1>
@@ -60,7 +60,7 @@
   <form class="mt-6 space-y-4" onsubmit={claim}>
     <Field label="Recovery code">
       <input
-        class="df-input df-mono"
+        class="of-input of-mono"
         type="text"
         autocapitalize="off"
         spellcheck="false"

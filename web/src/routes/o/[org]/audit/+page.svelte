@@ -64,7 +64,7 @@
   {:else if events.length === 0}
     <Empty title="Nothing recorded yet." />
   {:else}
-    <div class="df-card overflow-x-auto">
+    <div class="of-card overflow-x-auto">
       <table class="w-full text-sm">
         <thead class="border-b border-edge/60 text-left text-xs text-faint">
           <tr>
@@ -81,12 +81,12 @@
               <td class="px-4 py-2 whitespace-nowrap text-faint" title={absolute(event.createdAt)}>
                 {relative(event.createdAt)}
               </td>
-              <td class="df-mono px-4 py-2 whitespace-nowrap text-ink">{event.action}</td>
+              <td class="of-mono px-4 py-2 whitespace-nowrap text-ink">{event.action}</td>
               <td class="px-4 py-2 text-muted">{event.actorLabel ?? event.actorUserId ?? '—'}</td>
               <td class="px-4 py-2 text-muted">
                 {event.targetType ? `${event.targetType} ${event.targetId ?? ''}` : '—'}
               </td>
-              <td class="df-mono max-w-64 truncate px-4 py-2 text-faint" title={detail(event)}>
+              <td class="of-mono max-w-64 truncate px-4 py-2 text-faint" title={detail(event)}>
                 {detail(event)}
               </td>
             </tr>

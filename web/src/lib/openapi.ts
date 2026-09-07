@@ -1,6 +1,6 @@
 /**
  * Pure data shaping over the OpenAPI 3.1 document at `/api/openapi.json`
- * (`crates/df-web/src/openapi.rs`), for `/docs/api` to render.
+ * (`crates/of-web/src/openapi.rs`), for `/docs/api` to render.
  *
  * Deliberately loose typing (`unknown` where the shape isn't relied on): this
  * mirrors a document generated elsewhere, and forking OpenAPI's vocabulary
@@ -27,7 +27,7 @@ interface OpenApiOperation {
   parameters?: OpenApiParameter[];
   requestBody?: { content?: { 'application/json'?: { schema?: { $ref?: string } } } };
   responses?: Record<string, { content?: { 'application/json'?: { schema?: { $ref?: string } } } }>;
-  'x-dark-factory-auth'?: string;
+  'x-otto-factory-auth'?: string;
 }
 
 export interface OpenApiDocument {
@@ -90,7 +90,7 @@ function refName(schema?: { $ref?: string }): string | undefined {
 }
 
 /**
- * Only the endpoint's success response can be its "response body" — `df-web`
+ * Only the endpoint's success response can be its "response body" — `of-web`
  * gives every endpoint `400`/`500` (and often `401`/`403`/`404`) entries that
  * all reference the shared `Error` schema, and iterating
  * `Object.values(operation.responses)` without filtering would visit those
@@ -127,7 +127,7 @@ export function groupByTag(doc: OpenApiDocument): TagGroup[] {
         operationId: operation.operationId,
         summary: operation.summary ?? '',
         description: operation.description ?? '',
-        auth: operation['x-dark-factory-auth'] ?? 'public',
+        auth: operation['x-otto-factory-auth'] ?? 'public',
         parameters: (operation.parameters ?? []).map((p) => ({
           name: p.name,
           description: p.description ?? ''

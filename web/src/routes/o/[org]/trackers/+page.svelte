@@ -121,7 +121,7 @@
               <div class="min-w-0 flex-1">
                 <p class="text-sm text-ink">
                   {identifies}
-                  <code class="df-mono">{connection.externalId}</code>
+                  <code class="of-mono">{connection.externalId}</code>
                 </p>
                 <p class="mt-0.5 text-xs text-faint">
                   Connected {relative(connection.createdAt)}{connection.hasCredentials
@@ -140,10 +140,10 @@
           {:else if setup.configured}
             <p class="text-sm text-muted">
               Not connected. {#if provider === 'github'}
-                You will install the dark-factory GitHub App on the organization whose issues this
+                You will install the otto-factory GitHub App on the organization whose issues this
                 org works from, and come back here.
               {:else}
-                You will authorize dark-factory against one Atlassian site. Grant access to a single
+                You will authorize otto-factory against one Atlassian site. Grant access to a single
                 site — one JIRA site per organization is what this stores.
               {/if}
             </p>

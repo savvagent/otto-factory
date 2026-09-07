@@ -63,7 +63,7 @@
       {plural(usage.totalCalls, 'tool call')} recorded this period, {plural(
         usage.billableUsed,
         'billable call'
-      )} of them. Continuous polls such as <code class="df-mono">watch</code> are free, which is why the
+      )} of them. Continuous polls such as <code class="of-mono">watch</code> are free, which is why the
       two numbers differ.
     </p>
   {/if}

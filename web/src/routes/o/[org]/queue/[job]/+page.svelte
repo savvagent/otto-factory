@@ -13,7 +13,7 @@
   /**
    * One job.
    *
-   * `metadata` is rendered as raw JSON on purpose. dark-factory never interprets
+   * `metadata` is rendered as raw JSON on purpose. otto-factory never interprets
    * it — it is where a customer's own skill keeps whatever its methodology needs
    * — so any attempt to lay it out prettily would be the console inventing a
    * schema the server promised not to have. Showing it verbatim is the honest
@@ -73,7 +73,7 @@
     <div class="py-10 text-center">
       <h1 class="text-lg font-semibold">No such job</h1>
       <p class="mt-2 text-sm text-faint">
-        Nothing in {org.title} is called <code class="df-mono">{id}</code>. Job ids are counted per
+        Nothing in {org.title} is called <code class="of-mono">{id}</code>. Job ids are counted per
         organization, so the same id in another org is a different job.
       </p>
     </div>
@@ -87,7 +87,7 @@
         <h1 class="text-lg font-semibold">{job.title}</h1>
         <StatusPill status={job.status} />
       </div>
-      <p class="df-mono mt-1 text-xs text-faint">{job.id}</p>
+      <p class="of-mono mt-1 text-xs text-faint">{job.id}</p>
     </div>
 
     {#if job.description}
@@ -109,11 +109,11 @@
     <Card title="Details">
       <dl class="grid grid-cols-1 gap-x-8 gap-y-3 text-sm sm:grid-cols-2">
         <div>
-          <dt class="df-label">Repo</dt>
+          <dt class="of-label">Repo</dt>
           <dd>
             {#if repo}
               <a
-                class="df-mono text-muted underline hover:text-ink"
+                class="of-mono text-muted underline hover:text-ink"
                 href="/o/{org.slug}/queue?repo={encodeURIComponent(repo.slug)}"
               >
                 {repo.slug}
@@ -124,31 +124,31 @@
           </dd>
         </div>
         <div>
-          <dt class="df-label">Ticket</dt>
+          <dt class="of-label">Ticket</dt>
           <dd class="text-muted">{job.ticketRef ?? '—'}{job.tracker ? ` (${job.tracker})` : ''}</dd>
         </div>
         <div>
-          <dt class="df-label">Claimed by</dt>
+          <dt class="of-label">Claimed by</dt>
           <dd class="text-muted">{job.claimedByLabel ?? '—'}</dd>
         </div>
         <div>
-          <dt class="df-label">Agent type</dt>
+          <dt class="of-label">Agent type</dt>
           <dd class="text-muted">{job.agentType ?? 'any'}</dd>
         </div>
         <div>
-          <dt class="df-label">Queued</dt>
+          <dt class="of-label">Queued</dt>
           <dd class="text-muted" title={absolute(job.createdAt)}>{relative(job.createdAt)}</dd>
         </div>
         <div>
-          <dt class="df-label">Started</dt>
+          <dt class="of-label">Started</dt>
           <dd class="text-muted" title={absolute(job.startedAt)}>{relative(job.startedAt)}</dd>
         </div>
         <div>
-          <dt class="df-label">Finished</dt>
+          <dt class="of-label">Finished</dt>
           <dd class="text-muted" title={absolute(job.completedAt)}>{relative(job.completedAt)}</dd>
         </div>
         <div>
-          <dt class="df-label">Attempts</dt>
+          <dt class="of-label">Attempts</dt>
           <dd class="text-muted">{job.attempts}</dd>
         </div>
       </dl>
@@ -162,7 +162,7 @@
         <ul class="flex flex-wrap gap-2">
           {#each job.dependsOn as dependency (dependency)}
             <a
-              class="df-mono rounded-md border border-edge px-2 py-1 text-xs text-muted transition hover:bg-raised hover:text-ink"
+              class="of-mono rounded-md border border-edge px-2 py-1 text-xs text-muted transition hover:bg-raised hover:text-ink"
               href="/o/{org.slug}/queue/{dependency}"
             >
               {dependency}
@@ -175,9 +175,9 @@
     {#if metadata}
       <Card
         title="Metadata"
-        description="Opaque to dark-factory — whatever the queueing skill put here."
+        description="Opaque to otto-factory — whatever the queueing skill put here."
       >
-        <pre class="df-mono overflow-x-auto whitespace-pre text-muted">{metadata}</pre>
+        <pre class="of-mono overflow-x-auto whitespace-pre text-muted">{metadata}</pre>
       </Card>
     {/if}
   {/if}

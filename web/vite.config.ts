@@ -3,7 +3,7 @@ import tailwindcss from '@tailwindcss/vite';
 import { defineConfig } from 'vite';
 
 /**
- * In production the console and the API are one origin: `df-server` serves the
+ * In production the console and the API are one origin: `of-server` serves the
  * built bundle beside `/api`, `/oauth`, and `/.well-known`.
  *
  * Development has to reproduce that, not merely approximate it. The session
@@ -18,7 +18,7 @@ import { defineConfig } from 'vite';
  * certificate; it has nothing to do with the cookie's `Secure` attribute, which
  * browsers honour on `localhost` regardless.
  */
-const api = process.env.DF_API_ORIGIN ?? 'http://127.0.0.1:8080';
+const api = process.env.OF_API_ORIGIN ?? 'http://127.0.0.1:8080';
 
 const proxied = {
   target: api,

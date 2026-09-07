@@ -59,7 +59,7 @@
 </script>
 
 <svelte:head>
-  <title>API reference · dark-factory</title>
+  <title>API reference · otto-factory</title>
 </svelte:head>
 
 <div class="space-y-6">
@@ -84,7 +84,7 @@
         <h2 class="text-sm font-semibold tracking-wide text-faint uppercase">{group.tag}</h2>
         <div class="space-y-4">
           {#each group.endpoints as endpoint (endpoint.operationId)}
-            <article id={endpoint.operationId} class="df-card scroll-mt-4 px-4 py-3">
+            <article id={endpoint.operationId} class="of-card scroll-mt-4 px-4 py-3">
               <div class="flex flex-wrap items-center gap-2">
                 <span
                   class="rounded bg-raised px-1.5 py-0.5 font-mono text-xs font-semibold text-ink uppercase"

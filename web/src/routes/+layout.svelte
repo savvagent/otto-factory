@@ -123,7 +123,7 @@
 <div class="flex min-h-full flex-col">
   <header class="border-b border-edge/60 bg-surface/40">
     <div class="mx-auto flex w-full max-w-6xl items-center gap-4 px-4 py-3">
-      <a href="/" class="flex items-center gap-2" aria-label="dark-factory">
+      <a href="/" class="flex items-center gap-2" aria-label="otto-factory">
         <Logo class="size-6 text-accent" />
       </a>
 

@@ -1,13 +1,13 @@
 {
   // The console, deployed to Cloudflare as one Worker that serves the built SPA
-  // and forwards everything dynamic to df-server. See docs/deploy/cloudflare.md
+  // and forwards everything dynamic to of-server. See docs/deploy/cloudflare.md
   // for the account-side setup this file cannot express, and worker/index.ts for
   // why it is a proxy rather than a second origin.
   "$schema": "node_modules/wrangler/config-schema.json",
   // The default config is the development one, and it is named as such: a
   // bare `wrangler deploy` should never be able to land on the Worker the
   // console actually runs on. Production is a named environment below.
-  "name": "dark-factory-console-dev",
+  "name": "otto-factory-console-dev",
   "main": "worker/index.ts",
   "compatibility_date": "2026-09-02",
 
@@ -25,7 +25,7 @@
     // The alternative is a glob list — ["/api/*", "/oauth/*", …] — which is
     // cheaper, because assets would be served without an invocation. It is also
     // a second, differently-shaped copy of a rule that already exists twice
-    // (here and in df-server), expressed in a pattern language whose treatment
+    // (here and in of-server), expressed in a pattern language whose treatment
     // of `/` inside `*` decides whether `/api/orgs/nope` reaches the origin at
     // all. When that glob is wrong the failure is silent and specific: the asset
     // router answers with index.html and a 200, and an agent retries forever
@@ -38,26 +38,26 @@
   },
 
   "vars": {
-    // Where df-server listens. Not a secret — a hostname.
+    // Where of-server listens. Not a secret — a hostname.
     //
     // The default is the local origin on purpose. A deploy that forgets to name
     // an environment then proxies to somewhere that is not listening and fails
     // loudly, which is the failure everyone wants; the same slot holding a
     // production hostname would mean a staging Worker silently serving real
     // user traffic from production, and nothing about it would look wrong.
-    "DF_ORIGIN": "http://127.0.0.1:8080"
+    "OF_ORIGIN": "http://127.0.0.1:8080"
   },
 
   // Production is named, never inherited: `wrangler deploy --env production`.
   //
   // `name` is stated here because wrangler otherwise derives it by suffixing the
-  // top-level one, and a deploy that silently created `dark-factory-console-dev-production`
+  // top-level one, and a deploy that silently created `otto-factory-console-dev-production`
   // would look successful while serving nobody.
   "env": {
     "production": {
-      "name": "dark-factory-console",
+      "name": "otto-factory-console",
       "vars": {
-        "DF_ORIGIN": "https://dark-factory-mcp.fly.dev"
+        "OF_ORIGIN": "https://otto-factory-mcp.fly.dev"
       }
     }
   },

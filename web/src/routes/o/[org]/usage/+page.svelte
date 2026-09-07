@@ -12,7 +12,7 @@
    * The usage meter.
    *
    * Free to read, and readable by an org that has run out — the same
-   * `df_billing::Meter::report` the `usage` MCP tool calls, so the figure here
+   * `of_billing::Meter::report` the `usage` MCP tool calls, so the figure here
    * and the figure an agent sees cannot disagree. Nothing on this page charges
    * anything: billing a customer for looking at what they have been billed
    * costs more in trust than it could ever earn.
@@ -76,15 +76,15 @@
     </Card>
 
     <div class="grid gap-3 sm:grid-cols-3">
-      <div class="df-card px-4 py-3">
+      <div class="of-card px-4 py-3">
         <div class="text-2xl font-semibold text-ink">{usage.totalCalls.toLocaleString()}</div>
         <div class="mt-0.5 text-xs text-faint">Tool calls recorded</div>
       </div>
-      <div class="df-card px-4 py-3">
+      <div class="of-card px-4 py-3">
         <div class="text-2xl font-semibold text-ink">{usage.billableUsed.toLocaleString()}</div>
         <div class="mt-0.5 text-xs text-faint">Billable</div>
       </div>
-      <div class="df-card px-4 py-3">
+      <div class="of-card px-4 py-3">
         <div class="text-2xl font-semibold text-muted">{free.toLocaleString()}</div>
         <div class="mt-0.5 text-xs text-faint">Free</div>
       </div>
@@ -92,7 +92,7 @@
 
     <Card title="Why the two numbers differ">
       <p class="text-sm text-muted">
-        Every call is recorded, but not every call is billed. <code class="df-mono">watch</code> is a
+        Every call is recorded, but not every call is billed. <code class="of-mono">watch</code> is a
         continuous long poll — an agent waiting for work holds one open more or less permanently — and
         charging it flat would bill an idle agent tens of thousands of calls a month for doing nothing.
         Reads that answer "what is going on", including this page, are free too.
@@ -103,19 +103,19 @@
       </p>
       <dl class="mt-4 grid grid-cols-2 gap-y-2 text-sm sm:grid-cols-4">
         <div>
-          <dt class="df-label">Plan</dt>
+          <dt class="of-label">Plan</dt>
           <dd class="text-muted">{usage.plan}</dd>
         </div>
         <div>
-          <dt class="df-label">Included</dt>
+          <dt class="of-label">Included</dt>
           <dd class="text-muted">{usage.includedOps.toLocaleString()}</dd>
         </div>
         <div>
-          <dt class="df-label">Remaining</dt>
+          <dt class="of-label">Remaining</dt>
           <dd class="text-muted">{usage.remaining.toLocaleString()}</dd>
         </div>
         <div>
-          <dt class="df-label">Over the bucket</dt>
+          <dt class="of-label">Over the bucket</dt>
           <dd class="text-muted">
             {usage.hardStop ? 'stops billable work' : 'metered as overage'}
           </dd>

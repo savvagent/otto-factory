@@ -4,7 +4,7 @@
 
 Replace the footer's raw `/api/openapi.json` link with a console page, `/docs/api`, that renders
 the same document grouped by tag, with each endpoint's method, path, summary, description,
-parameters, request/response schema shape, and `x-dark-factory-auth` level visible without reading
+parameters, request/response schema shape, and `x-otto-factory-auth` level visible without reading
 JSON. `/api/openapi.json` itself is untouched.
 
 ## Status — 2026-09-05
@@ -31,7 +31,7 @@ implements it exactly.
 - This touches only `web/` — no SQL, no MCP tool, no console API route in `catalog.rs`, no
   migration, no config surface, no server-side Rust change at all. Tenant isolation, metering, and
   the public-interface rule (Non-Negotiable Rule 6) do not apply; no cross-org test and no
-  `df-billing::classify` step are needed. `cargo test` / `cargo clippy --all-targets -- -D
+  `of-billing::classify` step are needed. `cargo test` / `cargo clippy --all-targets -- -D
   warnings` are run once at the end as a vacuous-pass confirmation that nothing regressed
   server-side, not because this plan changes any Rust code.
 - Gates: `npm run check` (svelte-check + tsc over `worker/`), `npm run lint` (prettier), `npm test`
@@ -92,7 +92,7 @@ plain object).
           tags: ['repos'],
           requestBody: { content: { 'application/json': { schema: { $ref: '#/components/schemas/CreateRepo' } } } },
           responses: { '201': { content: { 'application/json': { schema: { $ref: '#/components/schemas/Repo' } } } } },
-          'x-dark-factory-auth': 'org admin'
+          'x-otto-factory-auth': 'org admin'
         }
       },
       '/api/orgs/{org}/webhooks': {
@@ -102,7 +102,7 @@ plain object).
           description: 'From a tracker.',
           tags: ['a-brand-new-tag-nobody-has-seen'],
           responses: { '200': {} },
-          'x-dark-factory-auth': 'public'
+          'x-otto-factory-auth': 'public'
         }
       }
     },
@@ -195,7 +195,7 @@ plain object).
   const fixtureDoc = {
     /* same shape as web/src/lib/openapi.test.ts's `doc`, reused inline or imported if that file
        exports its fixture — at least two tags, one path with two verbs, one with an
-       x-dark-factory-auth of "org admin" and one of "public" */
+       x-otto-factory-auth of "org admin" and one of "public" */
   };
 
   describe('/docs/api page', () => {
@@ -267,8 +267,8 @@ plain object).
       worker test's environment).
 - [ ] Run `cd web && npm run lint` — confirm prettier is clean.
 - [ ] Run `cd web && npm run build` — confirms the SPA still builds with the new route.
-- [ ] Manual check: `cd web && npm run dev` (with `df-server` running locally —
-      `cargo run -p df-server` from the repo root, so `/api/openapi.json` has something to proxy
+- [ ] Manual check: `cd web && npm run dev` (with `of-server` running locally —
+      `cargo run -p of-server` from the repo root, so `/api/openapi.json` has something to proxy
       to; this step is local-only and not part of any CI gate), visit `/docs/api` signed out and
       signed in, confirm groups render and the auth badge is visible; confirm the footer link on
       `/login` points at `/docs/api` and renders there; confirm a hard refresh onto

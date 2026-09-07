@@ -50,7 +50,7 @@
   }
 </script>
 
-<svelte:head><title>Sign in · dark-factory</title></svelte:head>
+<svelte:head><title>Sign in · otto-factory</title></svelte:head>
 
 <div class="mx-auto max-w-sm py-8">
   <h1 class="text-lg font-semibold">Sign in</h1>

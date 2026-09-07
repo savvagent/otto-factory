@@ -8,7 +8,7 @@
    * The org-less billing URL, which exists because something else already
    * points at it.
    *
-   * `df-billing`'s quota error and `df-mcp`'s upgrade prompt are built as
+   * `of-billing`'s quota error and `of-mcp`'s upgrade prompt are built as
    * `{public_url}/settings/billing` — an agent that runs out of bucket puts that
    * exact string in front of a human. It has no org segment because the meter
    * builds it from configuration, once, at startup. So this page resolves the
@@ -23,7 +23,7 @@
   });
 </script>
 
-<svelte:head><title>Usage · dark-factory</title></svelte:head>
+<svelte:head><title>Usage · otto-factory</title></svelte:head>
 
 {#if session.ready && session.signedIn && !session.homeOrg}
   <Empty title="You are not in an organization yet.">

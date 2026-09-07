@@ -30,10 +30,10 @@
 </script>
 
 <div>
-  {#if label}<span class="df-label">{label}</span>{/if}
+  {#if label}<span class="of-label">{label}</span>{/if}
   <div class="flex items-start gap-2">
     <code
-      class="df-mono flex-1 rounded-md border border-edge bg-canvas px-3 py-2 text-ink"
+      class="of-mono flex-1 rounded-md border border-edge bg-canvas px-3 py-2 text-ink"
       class:whitespace-pre-wrap={multiline}>{value}</code
     >
     <Button tone="quiet" onclick={onCopy}>
