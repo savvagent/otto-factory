@@ -70,7 +70,7 @@ jobs:
         # the rename branch in 0018 only ever fires for real on an actual
         # deployment migrating forward, never under this workaround.
         run: |
-          psql "******localhost:15433/otto_factory" \
+          psql "$DATABASE_URL" \
             -c "CREATE ROLE df_app NOLOGIN;" \
             -c "CREATE ROLE of_app NOLOGIN;"
 
