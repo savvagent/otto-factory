@@ -171,7 +171,7 @@ refuses to boot on a mismatch rather than failing at somebody's first sign-in).
 **Changing that host invalidates every passkey ever registered.** Nothing can soften it;
 that is what binding a credential to an origin means. This is exactly why the hostname
 below was settled before the first account existed, and why moving the console behind the
-Cloudflare Worker in [issue #2](https://github.com/savvagent/dark-factory/issues/2) is
+Cloudflare Worker in [issue #2](https://github.com/savvagent/otto-factory/issues/2) is
 designed to keep `OF_PUBLIC_URL` unchanged rather than to swap it for a new one.
 
 Note also that account creation now requires a browser: there is no scripted signup, so

@@ -1,6 +1,6 @@
 # The console on Cloudflare
 
-Closes the question in [issue #2](https://github.com/savvagent/dark-factory/issues/2):
+Closes the question in [issue #2](https://github.com/savvagent/otto-factory/issues/2):
 how to put `web/` on Cloudflare without giving up the single origin the session cookie
 depends on.
 
