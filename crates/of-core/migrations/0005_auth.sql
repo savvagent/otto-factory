@@ -9,7 +9,7 @@ CREATE TYPE token_kind AS ENUM ('oauth', 'pat');
 
 -- ---------------------------------------------------------------- layer 2 ---
 
--- TOTP shared secrets, encrypted at rest with AES-256-GCM under DF_ENCRYPTION_KEY.
+-- TOTP shared secrets, encrypted at rest with AES-256-GCM under OF_ENCRYPTION_KEY.
 -- The key lives in the environment/KMS and never in this database, so a database
 -- dump alone does not yield a single working second factor.
 CREATE TABLE totp_credentials (

@@ -8,7 +8,7 @@ client how to connect.
 
 ```bash
 npm install
-npm run dev      # Vite on :5173, proxying /api /oauth /.well-known to DF_API_ORIGIN
+npm run dev      # Vite on :5173, proxying /api /oauth /.well-known to OF_API_ORIGIN
 npm run check    # svelte-check + tsc over worker/ — the type gate
 npm run lint     # prettier --check
 npm test         # vitest — the Worker's routing rule, which mirrors the server's
@@ -16,7 +16,7 @@ npm run build    # static bundle in build/
 npm run deploy   # build, then deploy the production Worker — docs/deploy/cloudflare.md
 ```
 
-`npm run dev` needs a server behind it. Set `DF_API_ORIGIN` if it is not on
+`npm run dev` needs a server behind it. Set `OF_API_ORIGIN` if it is not on
 `http://127.0.0.1:8080`. **Until task 13 binds a port there is nothing to proxy to**, so
 the dev server renders the shell and every request 502s.
 
@@ -102,9 +102,9 @@ must not drift from it — `worker/index.test.ts` is the half of that check whic
 and `api_prefixes_do_not_match_by_string_prefix_alone` is the other half.
 
 Two things on the `of-server` side are not optional and are easy to miss:
-`DF_ALLOWED_HOSTS` must name the origin's own hostname, or every authenticated MCP call
+`OF_ALLOWED_HOSTS` must name the origin's own hostname, or every authenticated MCP call
 fails while everything else looks healthy; and the origin must refuse traffic that did not
-come through Cloudflare, because `DF_CLIENT_IP_HEADER=cf-connecting-ip` is only trustworthy
+come through Cloudflare, because `OF_CLIENT_IP_HEADER=cf-connecting-ip` is only trustworthy
 while Cloudflare is the one writing it. [`docs/deploy/cloudflare.md`](../docs/deploy/cloudflare.md)
 has both, and what a local `wrangler dev` run proved about each.
 

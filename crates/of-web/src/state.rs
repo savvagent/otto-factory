@@ -80,7 +80,7 @@ pub struct Config {
 
     /// Whether hard-stop plans are currently being enforced against.
     ///
-    /// Must match the flag `of-mcp` was built with (`DF_ENFORCE_QUOTAS`) — this
+    /// Must match the flag `of-mcp` was built with (`OF_ENFORCE_QUOTAS`) — this
     /// never gates anything here (the console's `Meter` never calls `charge`,
     /// see `routes::usage`'s module doc), but `/api/orgs/{org}/usage` reports
     /// this value as `enforced`, and a console reporting `false` while MCP

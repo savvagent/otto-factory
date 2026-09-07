@@ -100,7 +100,7 @@ cargo run -p of-server        # everything on one port, reading .env
 podman build -t otto-factory .   # console stage + rust stage + slim runtime
 ```
 
-`DF_PUBLIC_URL` and `DF_ENCRYPTION_KEY` are required with no defaults; `.env.example` says
+`OF_PUBLIC_URL` and `OF_ENCRYPTION_KEY` are required with no defaults; `.env.example` says
 why for each. Build `web/` first or every console page answers `404` while the API works.
 
 Integration tests are `#[sqlx::test]` against a real Postgres — one fresh throwaway
@@ -249,11 +249,11 @@ the decisions no single crate could make.
   and every audit entry. Serve without it and `client_ip` returns `None` for every request,
   silently disabling rate limiting on login and client registration.
 - **`Config::from_env` never falls back quietly.** A variable that is *set* but unparseable
-  is a startup error naming it, not a default — `DF_ENFORCE_QUOTAS=yes-please` reading as
-  "off" is how a billing control gets deployed switched off for a year. `DF_PUBLIC_URL` and
-  `DF_ENCRYPTION_KEY` have no defaults at all, because a wrong value for either fails
+  is a startup error naming it, not a default — `OF_ENFORCE_QUOTAS=yes-please` reading as
+  "off" is how a billing control gets deployed switched off for a year. `OF_PUBLIC_URL` and
+  `OF_ENCRYPTION_KEY` have no defaults at all, because a wrong value for either fails
   silently: bad links in somebody's inbox, or tokens minted for an audience nothing accepts.
-- **`DF_CLIENT_IP_HEADER` names the header, and which header is not a matter of taste.**
+- **`OF_CLIENT_IP_HEADER` names the header, and which header is not a matter of taste.**
   Only a header the proxy *overwrites* can be trusted. On Fly.io that is `fly-client-ip`,
   never `x-forwarded-for` — fly-proxy appends, so a caller's own value arrives left-most and
   every throttle keys on something the attacker chose.
@@ -353,7 +353,7 @@ Three rules hold, and the first is what makes the other two true:
    price list and `every_tool_has_a_price` fails when they disagree. An unclassified tool
    is treated as free and logged: over-billing a customer for something nobody decided to
    charge for is a worse failure than under-billing ourselves.
-3. **Enforcement never blocks a read.** It is behind `DF_ENFORCE_QUOTAS`, off by default,
+3. **Enforcement never blocks a read.** It is behind `OF_ENFORCE_QUOTAS`, off by default,
    and refuses only billable tools on hard-stop plans. An org that runs out mid-task keeps
    full read access to its own queue.
 

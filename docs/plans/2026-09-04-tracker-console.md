@@ -37,7 +37,7 @@ actually collide with:
 |---|---|
 | **Modify.** `crates/of-core/src/trackers.rs` | `list_connections`, `list_bindings_for_repo` |
 | **Modify.** `crates/of-core/tests/trackers.rs` | tests for both, incl. cross-org |
-| **Modify.** `crates/of-server/src/config.rs` | `DF_GITHUB_APP_SLUG`, `DF_GITHUB_APP_CLIENT_ID`, `DF_GITHUB_APP_CLIENT_SECRET` |
+| **Modify.** `crates/of-server/src/config.rs` | `OF_GITHUB_APP_SLUG`, `OF_GITHUB_APP_CLIENT_ID`, `OF_GITHUB_APP_CLIENT_SECRET` |
 | **Modify.** `crates/of-server/src/lib.rs` | thread the new + existing JIRA vars into `of_web::Config` |
 | **Modify.** `.env.example` | document all three, with the *why* and the App setting they depend on |
 | **Modify.** `crates/of-trackers/src/github.rs` | `exchange_user_code`, `user_installations`, `verify_installation_access` |
@@ -83,11 +83,11 @@ jira_client_id, jira_client_secret}` for 6.3 to consume.
 - [x] Add both functions to `crates/of-core/src/trackers.rs`, each taking `&mut Tx<'_>`, each
       binding `org_id = $1` explicitly, reusing `CONNECTION_COLS`/`BINDING_COLS` and
       `validate_connection` exactly as the existing getters do.
-- [x] Add the three `DF_GITHUB_APP_*` vars to `crates/of-server/src/config.rs` as
+- [x] Add the three `OF_GITHUB_APP_*` vars to `crates/of-server/src/config.rs` as
       `Option<String>`, following `github_app_webhook_secret`'s shape (`optional(...)`), with
       doc comments saying why each is optional.
 - [x] Add the five fields to `of_web::Config` (`crates/of-web/src/state.rs`) and thread them
-      from `crates/of-server/src/lib.rs`, including the two existing `DF_JIRA_*` values that
+      from `crates/of-server/src/lib.rs`, including the two existing `OF_JIRA_*` values that
       `of-web` does not currently receive.
 - [x] Document all three new vars in `.env.example` with the *why*, and state explicitly that
       the GitHub App must have "Request user authorization (OAuth) during installation"

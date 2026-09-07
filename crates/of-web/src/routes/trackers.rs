@@ -31,7 +31,7 @@ use crate::error::{ApiError, ApiResult};
 use crate::session::OrgCtx;
 use crate::state::AppState;
 
-/// One connection, with nothing stored under `DF_ENCRYPTION_KEY` on it.
+/// One connection, with nothing stored under `OF_ENCRYPTION_KEY` on it.
 ///
 /// Deliberately not `of_core::TrackerConnection`, which derives `Serialize` and
 /// would put `encrypted_credentials` on the wire. Ciphertext is not a secret in
@@ -256,8 +256,8 @@ async fn connect_github(state: &AppState, req: &ConnectTrackerRequest) -> Result
         .ok_or_else(|| {
             ApiError::bad_request(
                 "GitHub tracker sync is not configured on this deployment (no GitHub App OAuth \
-                 client). An operator sets DF_GITHUB_APP_SLUG, DF_GITHUB_APP_CLIENT_ID and \
-                 DF_GITHUB_APP_CLIENT_SECRET.",
+                 client). An operator sets OF_GITHUB_APP_SLUG, OF_GITHUB_APP_CLIENT_ID and \
+                 OF_GITHUB_APP_CLIENT_SECRET.",
             )
         })?;
 
@@ -296,7 +296,7 @@ async fn connect_jira(
         .ok_or_else(|| {
             ApiError::bad_request(
                 "JIRA tracker sync is not configured on this deployment (no Atlassian OAuth \
-                 client). An operator sets DF_JIRA_CLIENT_ID and DF_JIRA_CLIENT_SECRET.",
+                 client). An operator sets OF_JIRA_CLIENT_ID and OF_JIRA_CLIENT_SECRET.",
             )
         })?;
 

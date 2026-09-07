@@ -88,24 +88,24 @@ workspace does not build.
 **Files:** `crates/of-server/src/config.rs`, `.env.example`, `fly.toml`, `web/wrangler.jsonc`,
 `web/worker/index.ts`, `.github/workflows/ci.yml`, `docs/deploy/*`.
 
-Full list: `DF_ALLOWED_HOSTS`, `DF_ALLOWED_ORIGINS`, `DF_ALLOW_LOG_MAILER`, `DF_API_ORIGIN`,
-`DF_BIND`, `DF_CLIENT_IP_HEADER`, `DF_ENCRYPTION_KEY`, `DF_ENFORCE_QUOTAS`, `DF_GITHUB_APP_*`
-(6), `DF_JIRA_*` (2), `DF_LOG_FORMAT`, `DF_ORIGIN`, `DF_PUBLIC_URL`, `DF_RESOURCE_URI`,
-`DF_RUN_MIGRATIONS`, `DF_SIGNING_KEY`, `DF_STATIC_DIR`, `DF_TOTP_ISSUER`, `DF_UPGRADE_URL`.
+Full list: `OF_ALLOWED_HOSTS`, `OF_ALLOWED_ORIGINS`, `OF_ALLOW_LOG_MAILER`, `OF_API_ORIGIN`,
+`OF_BIND`, `OF_CLIENT_IP_HEADER`, `OF_ENCRYPTION_KEY`, `OF_ENFORCE_QUOTAS`, `OF_GITHUB_APP_*`
+(6), `OF_JIRA_*` (2), `OF_LOG_FORMAT`, `OF_ORIGIN`, `OF_PUBLIC_URL`, `OF_RESOURCE_URI`,
+`OF_RUN_MIGRATIONS`, `OF_SIGNING_KEY`, `OF_STATIC_DIR`, `OF_TOTP_ISSUER`, `OF_UPGRADE_URL`.
 
 - [ ] Rename every variable at its read site in `config.rs`. **Add no fallback** — per spec
-      decision 1, a deployment still setting `DF_PUBLIC_URL` must fail to boot naming
+      decision 1, a deployment still setting `OF_PUBLIC_URL` must fail to boot naming
       `OF_PUBLIC_URL`, which `Config::from_env`'s existing "required, no default" path already
       does correctly once the name changes.
-- [ ] Rename the `DF_TEST_ABSENT_VAR_XYZ` / `DF_TEST_ABSENT_LIST_XYZ` fixtures in the
+- [ ] Rename the `OF_TEST_ABSENT_VAR_XYZ` / `OF_TEST_ABSENT_LIST_XYZ` fixtures in the
       `config.rs` tests to match.
-- [ ] `.env.example` — including the commented `#DF_TOTP_ISSUER=otto-factory` line, whose
+- [ ] `.env.example` — including the commented `#OF_TOTP_ISSUER=otto-factory` line, whose
       *value* is also the old product name.
-- [ ] `web/worker/index.ts` — the `DF_ORIGIN` binding, its interface field, its two error
-      strings, and the `--var DF_ORIGIN:` guidance in the thrown message.
+- [ ] `web/worker/index.ts` — the `OF_ORIGIN` binding, its interface field, its two error
+      strings, and the `--var OF_ORIGIN:` guidance in the thrown message.
 - [ ] `web/wrangler.jsonc` `vars` block; `fly.toml` `[env]`; `.github/workflows/ci.yml`.
 - [ ] `docs/deploy/fly.md` and `docs/deploy/cloudflare.md` — including the config table whose
-      `DF_ALLOWED_HOSTS` row documents the trap that breaks every authenticated MCP call.
+      `OF_ALLOWED_HOSTS` row documents the trap that breaks every authenticated MCP call.
 - [ ] **Rename every key in the local, developer `.env`** (the file `.env.example` is copied to,
       gitignored) from `DF_*` to `OF_*`, keeping each value as-is. With no compatibility fallback
       (spec decision 1), `cargo run -p of-server` will refuse to boot on the old names — this step
@@ -233,7 +233,7 @@ plus test fixtures across `of-auth`, `of-web`, `of-mcp`.
 **Out-of-band, not part of this task's commit** (no credentials/interactive browser access from
 this environment): creating the new Fly app and Cloudflare Workers under the new names and
 re-setting every secret under its `OF_*` name, with the old `DF_*` secrets removed rather than
-left set (a stale `DF_ENCRYPTION_KEY` left on the machine is exactly the "operator believes they
+left set (a stale `OF_ENCRYPTION_KEY` left on the machine is exactly the "operator believes they
 removed it" case from spec decision 1). Tracked as a manual deploy step in Task 7, not blocking
 this PR's merge — the code is deployment-name-correct once this task's diff lands; only the
 actual infrastructure objects still need to be created by whoever holds the Fly/Cloudflare

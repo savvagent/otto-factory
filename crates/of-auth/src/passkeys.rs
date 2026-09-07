@@ -5,7 +5,7 @@
 //! - **Phishing resistance.** A passkey signs over the origin it was registered
 //!   to. A user can be talked into typing a six-digit code into a lookalike
 //!   site; they cannot be talked into producing a signature their authenticator
-//!   will only make for `DF_PUBLIC_URL`.
+//!   will only make for `OF_PUBLIC_URL`.
 //! - **No shared secret at rest.** [`passkeys`] holds public keys. Losing the
 //!   whole table to an attacker lets them sign in as nobody. The TOTP table it
 //!   replaced held encrypted seeds, which is a much worse thing to hold.
@@ -84,7 +84,7 @@ pub struct Ceremony<T> {
 ///
 /// `rp_id` is a *hostname*, and it is the thing a passkey is bound to. Changing
 /// it invalidates every credential ever registered, so it is derived from
-/// `DF_PUBLIC_URL` and asserted at startup rather than typed twice.
+/// `OF_PUBLIC_URL` and asserted at startup rather than typed twice.
 pub fn relying_party(rp_id: &str, rp_origin: &str) -> Result<Webauthn> {
     let origin = Url::parse(rp_origin).map_err(|_| {
         AuthError::Config(format!(

@@ -48,7 +48,7 @@ run below is the milestone's "done means" criterion, executed rather than argued
    `watch` long poll woken by another agent's write.
 
 The client traffic was captured by putting a logging reverse proxy in front of the server
-and pointing `DF_PUBLIC_URL` at it, so every quoted request below is a real one a client
+and pointing `OF_PUBLIC_URL` at it, so every quoted request below is a real one a client
 sent, not a reconstruction.
 
 ---
@@ -191,15 +191,15 @@ refuses an unrequested version would fail, and the fix belongs upstream in `rmcp
 ## Re-running this
 
 ```bash
-cargo run -p of-server                      # .env, DF_PUBLIC_URL=http://localhost:8080
+cargo run -p of-server                      # .env, OF_PUBLIC_URL=http://localhost:8080
 # console: sign up with a passkey, create an org, register a repo, mint a PAT
 claude mcp add --transport http otto-factory http://localhost:8080/mcp
 claude mcp login otto-factory                # interactive terminal required
 copilot --additional-mcp-config @copilot.json --allow-all-tools -p "call whoami"
 ```
 
-To capture what a client sends, point `DF_PUBLIC_URL` and `DF_RESOURCE_URI` at a logging
-proxy in front of the bind address — the discovery documents are built from `DF_PUBLIC_URL`,
+To capture what a client sends, point `OF_PUBLIC_URL` and `OF_RESOURCE_URI` at a logging
+proxy in front of the bind address — the discovery documents are built from `OF_PUBLIC_URL`,
 so the client follows the proxy of its own accord. A proxy used this way **must not follow
 redirects**: the `303` off `/oauth/authorize` is addressed to the client's own loopback
 listener, and a proxy that follows it eats the authorization code.

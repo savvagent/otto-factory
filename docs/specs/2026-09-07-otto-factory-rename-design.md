@@ -21,7 +21,7 @@ adding one would be a defect, not a kindness.
 `Config::from_env` must not read `DF_*` as a fallback for a missing `OF_*`. `CLAUDE.md`'s
 rule is that a variable set but unparseable is a startup error naming it, never a quiet
 default; a silently-honoured legacy alias is the same failure wearing a friendlier face.
-A deployment that still sets `DF_PUBLIC_URL` should fail to boot and say so, not come up
+A deployment that still sets `OF_PUBLIC_URL` should fail to boot and say so, not come up
 on a value the operator believes they removed.
 
 Likewise: no dual-read of the session cookie, no acceptance of `df_pat_`-prefixed tokens,

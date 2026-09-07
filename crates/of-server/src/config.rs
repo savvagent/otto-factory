@@ -4,7 +4,7 @@
 //! this file is longer than a `serde` derive would be:
 //!
 //! 1. **A setting whose wrong value fails silently has no default.** A wrong
-//!    `DF_PUBLIC_URL` does not crash: it mails links to an origin that does not
+//!    `OF_PUBLIC_URL` does not crash: it mails links to an origin that does not
 //!    exist and mints tokens for an audience nothing accepts, and the first
 //!    report arrives hours later from somebody who cannot sign in. Refusing to
 //!    start is the cheap version of that failure.
@@ -14,7 +14,7 @@
 //!
 //! Nothing here falls back quietly. A variable that is set but unparseable is
 //! an error naming the variable and what it accepts, never a default — a
-//! `DF_ENFORCE_QUOTAS=yes-please` that silently reads as "off" is how a billing
+//! `OF_ENFORCE_QUOTAS=yes-please` that silently reads as "off" is how a billing
 //! control gets deployed switched off for a year.
 
 use std::net::SocketAddr;
@@ -39,7 +39,7 @@ pub struct Config {
     /// `of_trackers::jira`).
     pub encryption_key: String,
     /// Unused since passkeys replaced TOTP (see `CLAUDE.md`'s Authentication
-    /// section) — kept only because `DF_TOTP_ISSUER` is still read from the
+    /// section) — kept only because `OF_TOTP_ISSUER` is still read from the
     /// environment below and threaded through to `of-web`'s `AppState`.
     pub totp_issuer: String,
 
@@ -108,27 +108,27 @@ pub enum LogFormat {
 impl Config {
     /// Read the environment. Every failure names the variable it is about.
     pub fn from_env() -> Result<Self> {
-        let public_url = required("DF_PUBLIC_URL")?.trim_end_matches('/').to_string();
+        let public_url = required("OF_PUBLIC_URL")?.trim_end_matches('/').to_string();
 
-        // Parsed rather than merely stored: a `DF_PUBLIC_URL` with no scheme
+        // Parsed rather than merely stored: a `OF_PUBLIC_URL` with no scheme
         // produces links a mail client will not linkify and an `allowed_hosts`
         // entry of the empty string, both of which are much harder to diagnose
         // later than a message here.
         let parsed = url::Url::parse(&public_url)
-            .with_context(|| format!("DF_PUBLIC_URL is not a URL: {public_url:?}"))?;
+            .with_context(|| format!("OF_PUBLIC_URL is not a URL: {public_url:?}"))?;
         if !matches!(parsed.scheme(), "http" | "https") {
             return Err(anyhow!(
-                "DF_PUBLIC_URL must be http or https, got {:?}",
+                "OF_PUBLIC_URL must be http or https, got {:?}",
                 parsed.scheme()
             ));
         }
         if parsed.host_str().is_none() {
-            return Err(anyhow!("DF_PUBLIC_URL has no host: {public_url:?}"));
+            return Err(anyhow!("OF_PUBLIC_URL has no host: {public_url:?}"));
         }
 
         Ok(Self {
             database_url: required("DATABASE_URL")?,
-            bind: parse_var("DF_BIND", "0.0.0.0:8080", |v| {
+            bind: parse_var("OF_BIND", "0.0.0.0:8080", |v| {
                 v.parse::<SocketAddr>()
                     .map_err(|e| anyhow!("{e}; expected host:port, e.g. 0.0.0.0:8080"))
             })?,
@@ -137,46 +137,46 @@ impl Config {
             // this binary actually serves it. Overridable because a deployment
             // behind a rewriting proxy may advertise a different canonical URI,
             // and the audience must match what the AS mints tokens for.
-            resource_uri: optional("DF_RESOURCE_URI")
+            resource_uri: optional("OF_RESOURCE_URI")
                 .unwrap_or_else(|| format!("{public_url}/mcp")),
 
-            encryption_key: required("DF_ENCRYPTION_KEY")?,
-            totp_issuer: optional("DF_TOTP_ISSUER").unwrap_or_else(|| "otto-factory".into()),
-            github_app_id: optional("DF_GITHUB_APP_ID")
+            encryption_key: required("OF_ENCRYPTION_KEY")?,
+            totp_issuer: optional("OF_TOTP_ISSUER").unwrap_or_else(|| "otto-factory".into()),
+            github_app_id: optional("OF_GITHUB_APP_ID")
                 .map(|value| {
                     value.trim().parse::<i64>().with_context(|| {
                         format!(
-                            "DF_GITHUB_APP_ID={value:?} is not valid; expected an integer App id"
+                            "OF_GITHUB_APP_ID={value:?} is not valid; expected an integer App id"
                         )
                     })
                 })
                 .transpose()?,
-            github_app_private_key: optional("DF_GITHUB_APP_PRIVATE_KEY")
+            github_app_private_key: optional("OF_GITHUB_APP_PRIVATE_KEY")
                 .map(normalize_pem_newlines),
-            github_app_webhook_secret: optional("DF_GITHUB_APP_WEBHOOK_SECRET"),
-            github_app_slug: optional("DF_GITHUB_APP_SLUG"),
-            github_app_client_id: optional("DF_GITHUB_APP_CLIENT_ID"),
-            github_app_client_secret: optional("DF_GITHUB_APP_CLIENT_SECRET"),
-            jira_client_id: optional("DF_JIRA_CLIENT_ID"),
-            jira_client_secret: optional("DF_JIRA_CLIENT_SECRET"),
+            github_app_webhook_secret: optional("OF_GITHUB_APP_WEBHOOK_SECRET"),
+            github_app_slug: optional("OF_GITHUB_APP_SLUG"),
+            github_app_client_id: optional("OF_GITHUB_APP_CLIENT_ID"),
+            github_app_client_secret: optional("OF_GITHUB_APP_CLIENT_SECRET"),
+            jira_client_id: optional("OF_JIRA_CLIENT_ID"),
+            jira_client_secret: optional("OF_JIRA_CLIENT_SECRET"),
 
-            client_ip_header: optional("DF_CLIENT_IP_HEADER")
+            client_ip_header: optional("OF_CLIENT_IP_HEADER")
                 .map(|v| v.trim().to_ascii_lowercase())
                 .filter(|v| !v.is_empty()),
 
-            enforce_quotas: parse_var("DF_ENFORCE_QUOTAS", "0", parse_bool)?,
-            upgrade_url: optional("DF_UPGRADE_URL")
+            enforce_quotas: parse_var("OF_ENFORCE_QUOTAS", "0", parse_bool)?,
+            upgrade_url: optional("OF_UPGRADE_URL")
                 .unwrap_or_else(|| format!("{public_url}/settings/billing")),
 
-            extra_allowed_hosts: list("DF_ALLOWED_HOSTS"),
-            allowed_origins: list("DF_ALLOWED_ORIGINS"),
+            extra_allowed_hosts: list("OF_ALLOWED_HOSTS"),
+            allowed_origins: list("OF_ALLOWED_ORIGINS"),
 
-            static_dir: optional("DF_STATIC_DIR")
+            static_dir: optional("OF_STATIC_DIR")
                 .unwrap_or_else(|| "web/build".into())
                 .into(),
 
-            run_migrations: parse_var("DF_RUN_MIGRATIONS", "1", parse_bool)?,
-            log_format: parse_var("DF_LOG_FORMAT", "text", |v| match v {
+            run_migrations: parse_var("OF_RUN_MIGRATIONS", "1", parse_bool)?,
+            log_format: parse_var("OF_LOG_FORMAT", "text", |v| match v {
                 "json" => Ok(LogFormat::Json),
                 "text" => Ok(LogFormat::Text),
                 other => Err(anyhow!("expected json or text, got {other:?}")),
@@ -302,7 +302,7 @@ mod tests {
         }
     }
 
-    /// The whole point of `parse_bool` returning a `Result`. `DF_ENFORCE_QUOTAS`
+    /// The whole point of `parse_bool` returning a `Result`. `OF_ENFORCE_QUOTAS`
     /// reading as "off" because somebody wrote `enabled` is a control that is
     /// deployed switched off, and nothing says so.
     #[test]
@@ -316,14 +316,14 @@ mod tests {
     fn a_default_applies_only_when_the_variable_is_absent() {
         // Absent: the default is used.
         assert_eq!(
-            parse_var("DF_TEST_ABSENT_VAR_XYZ", "7", |v| Ok(v.parse::<u8>()?)).unwrap(),
+            parse_var("OF_TEST_ABSENT_VAR_XYZ", "7", |v| Ok(v.parse::<u8>()?)).unwrap(),
             7
         );
     }
 
     #[test]
     fn a_list_treats_absent_empty_and_whitespace_alike() {
-        assert!(list("DF_TEST_ABSENT_LIST_XYZ").is_empty());
+        assert!(list("OF_TEST_ABSENT_LIST_XYZ").is_empty());
     }
 
     #[test]

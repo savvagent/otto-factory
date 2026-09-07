@@ -78,14 +78,14 @@ pub fn router(db: Db, watcher: Arc<Watcher>, config: &Config) -> Result<Router> 
 /// `of-web`'s state, with the settings that are this deployment's to decide.
 fn web_state(db: Db, config: &Config) -> Result<of_web::AppState> {
     let cipher = of_core::crypto::Cipher::from_base64_key(&config.encryption_key)
-        .context("DF_ENCRYPTION_KEY is not a valid 32-byte base64 key")?;
+        .context("OF_ENCRYPTION_KEY is not a valid 32-byte base64 key")?;
 
     let web_config = web_config(config);
     // Built here and once: `rp_id` is what every passkey is bound to, so a bad
     // value must stop the process rather than surface as a browser error on
     // somebody's first sign-in.
     let webauthn = of_web::relying_party(&web_config)
-        .context("could not build the WebAuthn relying party from DF_PUBLIC_URL")?;
+        .context("could not build the WebAuthn relying party from OF_PUBLIC_URL")?;
 
     Ok(of_web::AppState::new(db, cipher, webauthn, web_config))
 }

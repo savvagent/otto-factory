@@ -45,7 +45,7 @@
     // loudly, which is the failure everyone wants; the same slot holding a
     // production hostname would mean a staging Worker silently serving real
     // user traffic from production, and nothing about it would look wrong.
-    "DF_ORIGIN": "http://127.0.0.1:8080"
+    "OF_ORIGIN": "http://127.0.0.1:8080"
   },
 
   // Production is named, never inherited: `wrangler deploy --env production`.
@@ -57,7 +57,7 @@
     "production": {
       "name": "otto-factory-console",
       "vars": {
-        "DF_ORIGIN": "https://otto-factory-mcp.fly.dev"
+        "OF_ORIGIN": "https://otto-factory-mcp.fly.dev"
       }
     }
   },

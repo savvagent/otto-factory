@@ -242,7 +242,7 @@ static credential is ever set, stored, or reset.
 Details that matter:
 - The server stores only public keys and signature counters (`passkeys`); losing the whole
   table lets an attacker sign in as nobody, unlike a shared secret at rest.
-- A passkey signs over the origin it was registered to (`DF_PUBLIC_URL`), which is what
+- A passkey signs over the origin it was registered to (`OF_PUBLIC_URL`), which is what
   makes it phishing-resistant — nobody can be talked into producing a signature their
   authenticator will only make for the real origin.
 - Rate limited per account and per IP, with exponential lockout.

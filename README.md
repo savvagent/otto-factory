@@ -102,7 +102,7 @@ npm run lint      # prettier --check
 npm run build     # static bundle into web/build
 ```
 
-`npm run dev` proxies `/api`, `/oauth`, and `/.well-known` to `DF_API_ORIGIN` (default
+`npm run dev` proxies `/api`, `/oauth`, and `/.well-known` to `OF_API_ORIGIN` (default
 `http://127.0.0.1:8080`) so every request stays on one origin — the session cookie carries
 the `__Host-` prefix and cannot cross ports. See [`web/README.md`](web/README.md).
 
@@ -123,7 +123,7 @@ It reads `.env`, applies migrations, and serves everything on one port:
 | `/mcp` | The MCP endpoint. Bearer tokens only. |
 | everything else | The console SPA, with an `index.html` fallback. |
 
-`DF_PUBLIC_URL` and `DF_ENCRYPTION_KEY` are required and have no defaults, because a wrong
+`OF_PUBLIC_URL` and `OF_ENCRYPTION_KEY` are required and have no defaults, because a wrong
 value for either fails silently rather than loudly — see the comments in `.env.example`.
 Run `npm run build` in `web/` first, or every console page answers `404` while the API
 works perfectly.
@@ -145,8 +145,8 @@ The rest are secrets:
 ```bash
 fly secrets set \
   DATABASE_URL="postgres://…" \
-  DF_ENCRYPTION_KEY="$(openssl rand -base64 32)" \
-  DF_PUBLIC_URL="https://factory.example.com"
+  OF_ENCRYPTION_KEY="$(openssl rand -base64 32)" \
+  OF_PUBLIC_URL="https://factory.example.com"
 fly deploy
 ```
 
@@ -155,12 +155,12 @@ together is safe: the losers wait rather than racing through the same DDL.
 
 Two settings are deployment-specific and easy to get subtly wrong:
 
-- **`DF_CLIENT_IP_HEADER`** decides what every per-IP throttle and audit entry is keyed on.
+- **`OF_CLIENT_IP_HEADER`** decides what every per-IP throttle and audit entry is keyed on.
   Leave it unset with no proxy in front. Behind Fly's proxy it must be `fly-client-ip` and
   **not** `x-forwarded-for`: fly-proxy *appends* to `X-Forwarded-For`, so a caller sending
   its own value arrives left-most, and a rate limiter keyed on that is worse than none
   because it looks like it is working. `fly.toml` sets it.
-- **`DF_PUBLIC_URL`** is the audience every token is bound to and the origin every issued
+- **`OF_PUBLIC_URL`** is the audience every token is bound to and the origin every issued
   link points at. It is not derived from the `Host` header on purpose — that header is
   attacker-controlled, and an audience derived from one is not an audience check.
 

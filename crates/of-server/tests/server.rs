@@ -147,7 +147,7 @@ async fn discovery_is_open_and_answers_on_one_origin(pool: PgPool) {
 }
 
 /// The `401` challenge points at a document served on this same origin. It is
-/// built from `DF_PUBLIC_URL`, so a deployment that gets that wrong sends every
+/// built from `OF_PUBLIC_URL`, so a deployment that gets that wrong sends every
 /// client somewhere that does not answer — and nothing else would notice.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn the_mcp_endpoint_points_an_unauthenticated_caller_at_this_origin(pool: PgPool) {

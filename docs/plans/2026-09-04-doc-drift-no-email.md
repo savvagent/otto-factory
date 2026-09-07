@@ -78,7 +78,7 @@ breaking change and needs its own spec. `action::MAGIC_LINK_SENT`,
 `action::MAGIC_LINK_CONSUMED`, `action::RECOVERY_CODE_USED`, and `action::EMAIL_VERIFIED`
 appear to be dead code (no remaining callers). `of-auth`'s and `of-web`'s `Cargo.toml` both
 still depend on `totp-rs`, unused by any remaining source. `totp_issuer` config
-(`DF_TOTP_ISSUER`) is plumbed through `of-server` → `of-web` but read by nothing since TOTP
+(`OF_TOTP_ISSUER`) is plumbed through `of-server` → `of-web` but read by nothing since TOTP
 was replaced by passkeys. All three are dependency/config/audit-trail changes, not
 documentation, and each needs its own decision about backward compatibility.
 

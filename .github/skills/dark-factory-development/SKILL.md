@@ -257,7 +257,7 @@ explains the reasoning behind each at length — read it, and treat the list her
     double-billed; `watch` is the single exception and meters in its own short transaction. **A new
     tool must be classified in `of-billing::classify`** — `exhaustive_over` and
     `every_tool_has_a_price` fail when the router and the price list disagree. Enforcement is behind
-    `DF_ENFORCE_QUOTAS`, off by default, and never blocks a read.
+    `OF_ENFORCE_QUOTAS`, off by default, and never blocks a read.
 12. **Migrations are forward-only, one file per concern, in `crates/of-core/migrations/`.** Never
     edit a migration that has been applied anywhere — add a new one. `0007_rls.sql` runs last.
 13. **`Watcher::spawn` detaches a connection for `LISTEN`, and dropping the pool does not reclaim
@@ -269,11 +269,11 @@ explains the reasoning behind each at length — read it, and treat the list her
     answer under `/api`, `/oauth`, `/mcp`, or `/.well-known`. `/healthz` never touches the database
     and `/readyz` always does. `into_make_service_with_connect_info` is load-bearing: without it
     `client_ip` returns `None` and every per-IP throttle silently stops working, and
-    `DF_CLIENT_IP_HEADER` must name a header the proxy **overwrites** (`fly-client-ip`, never
+    `OF_CLIENT_IP_HEADER` must name a header the proxy **overwrites** (`fly-client-ip`, never
     `x-forwarded-for`).
 15. **`Config::from_env` never falls back quietly.** A variable that is set but unparseable is a
-    startup error naming it, not a default. `DF_PUBLIC_URL` and `DF_ENCRYPTION_KEY` have no defaults
-    at all. Never log a secret, a token, or `DF_ENCRYPTION_KEY`; never echo one in an error or a
+    startup error naming it, not a default. `OF_PUBLIC_URL` and `OF_ENCRYPTION_KEY` have no defaults
+    at all. Never log a secret, a token, or `OF_ENCRYPTION_KEY`; never echo one in an error or a
     response; never commit one.
 16. **Errors are written for an LLM caller that has never read the docs**: what went wrong, what the
     valid options were, what to call next. `Error::code()` is the stable machine-readable branch

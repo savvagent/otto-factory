@@ -136,9 +136,9 @@ spec draft right now):**
   operator; an org's `tracker_connections` row for `github` records only the
   **installation id** it was granted (`external_id`) — the thing that varies per org.
   Minting an installation access token needs the single global private key
-  (`DF_GITHUB_APP_PRIVATE_KEY`, a later task's config addition) plus that installation id;
+  (`OF_GITHUB_APP_PRIVATE_KEY`, a later task's config addition) plus that installation id;
   it never needs a per-org secret. Likewise the GitHub webhook HMAC secret is one value
-  set on the App itself (`DF_GITHUB_APP_WEBHOOK_SECRET`), not one per installation. JIRA's
+  set on the App itself (`OF_GITHUB_APP_WEBHOOK_SECRET`), not one per installation. JIRA's
   OAuth 2 3LO flow is the opposite shape: the **refresh token is genuinely per-org**
   (each org authorizes its own JIRA site), so `encrypted_credentials` is where it lives.
   Both `encrypted_credentials` and `encrypted_webhook_secret` are therefore **nullable**
@@ -153,7 +153,7 @@ spec draft right now):**
   in scope (Scope §Out).
 - **If a webhook secret is ever stored in `tracker_connections`, it is never plaintext.**
   For Task 1 this is vacuous — GitHub's webhook HMAC secret lives only in
-  `DF_GITHUB_APP_WEBHOOK_SECRET` and is never written to `encrypted_webhook_secret` at
+  `OF_GITHUB_APP_WEBHOOK_SECRET` and is never written to `encrypted_webhook_secret` at
   all (that column stays `NULL` for `github` rows). The column exists for a later task's
   JIRA Automation secret, which — if that design ends up needing one — would go through
   the same `Cipher::seal` primitive as `encrypted_credentials`, never plaintext. This
@@ -173,7 +173,7 @@ CREATE TABLE tracker_connections (
     org_id              UUID NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
     provider            tracker_provider NOT NULL,
     -- GitHub: the App installation id (the private key that mints tokens from
-    -- it is deployment config, DF_GITHUB_APP_PRIVATE_KEY, never stored here).
+    -- it is deployment config, OF_GITHUB_APP_PRIVATE_KEY, never stored here).
     -- JIRA: the cloud site id (from the 3LO accessible-resources response).
     -- Opaque to of-core; of-trackers interprets it.
     external_id         TEXT NOT NULL,
@@ -185,7 +185,7 @@ CREATE TABLE tracker_connections (
     encrypted_credentials TEXT,
     -- Reserved for a per-connection webhook secret. NULL for both providers in
     -- Task 1: GitHub's webhook HMAC secret is a single App-level value
-    -- (DF_GITHUB_APP_WEBHOOK_SECRET, deployment config); JIRA's webhook
+    -- (OF_GITHUB_APP_WEBHOOK_SECRET, deployment config); JIRA's webhook
     -- authentication shape is decided in the task that builds the webhook
     -- route. The column exists now so that decision does not need a migration.
     encrypted_webhook_secret TEXT,
@@ -243,7 +243,7 @@ under `SET LOCAL ROLE df_app`, asserting zero rows are visible or mutable.
 
 ## §4 `of-core::crypto` (promoted from `of-auth::crypto`)
 
-`of-auth::crypto::Cipher`/`Sealed` (AES-256-GCM over `DF_ENCRYPTION_KEY`, already a
+`of-auth::crypto::Cipher`/`Sealed` (AES-256-GCM over `OF_ENCRYPTION_KEY`, already a
 required env var per `CLAUDE.md` / `Config::from_env`) move verbatim to
 `crates/of-core/src/crypto.rs`. `of-core::Error` gains two generic variants,
 `Config(String)` (bad/missing key material) and `Crypto(String)` (seal/open failure —

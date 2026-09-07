@@ -47,7 +47,7 @@ export interface Env {
   /** The built `web/build` bundle, uploaded with the Worker. */
   ASSETS: Fetcher;
   /** Where `of-server` actually listens, e.g. `https://otto-factory-mcp.fly.dev`. */
-  DF_ORIGIN: string;
+  OF_ORIGIN: string;
 }
 
 export default {
@@ -61,7 +61,7 @@ export default {
       return env.ASSETS.fetch(request);
     }
 
-    if (!env.DF_ORIGIN) {
+    if (!env.OF_ORIGIN) {
       // Loud, and in the one place it can be seen. Without this the failure is
       // a URL constructor throwing inside a proxy hop, which reaches the caller
       // as a bare 500 with nothing naming the cause.
@@ -69,18 +69,18 @@ export default {
         JSON.stringify({
           error: 'misconfigured',
           error_description:
-            'this Worker has no DF_ORIGIN, so it does not know where of-server is. ' +
-            'Deploy with --env production, or pass --var DF_ORIGIN:https://…'
+            'this Worker has no OF_ORIGIN, so it does not know where of-server is. ' +
+            'Deploy with --env production, or pass --var OF_ORIGIN:https://…'
         }),
         { status: 500, headers: { 'content-type': 'application/json' } }
       );
     }
 
-    const target = new URL(url.pathname + url.search, env.DF_ORIGIN);
+    const target = new URL(url.pathname + url.search, env.OF_ORIGIN);
     const headers = new Headers(request.headers);
 
     // The origin keys every per-IP throttle on this header
-    // (`DF_CLIENT_IP_HEADER=cf-connecting-ip`), so what it contains has to be
+    // (`OF_CLIENT_IP_HEADER=cf-connecting-ip`), so what it contains has to be
     // the platform's value and never the caller's. Cloudflare overwrites
     // `CF-Connecting-IP` before the Worker is invoked, which is what makes the
     // inbound value safe to forward: a request sent here with

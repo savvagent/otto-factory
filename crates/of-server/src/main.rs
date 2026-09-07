@@ -34,7 +34,7 @@ async fn main() -> Result<()> {
     // error naming the variable rather than a panic the first time something
     // needs to encrypt a secret hours later.
     of_core::crypto::Cipher::from_base64_key(&config.encryption_key)
-        .context("DF_ENCRYPTION_KEY is not a valid 32-byte base64 key")?;
+        .context("OF_ENCRYPTION_KEY is not a valid 32-byte base64 key")?;
 
     let db = Db::connect(&config.database_url)
         .await
@@ -47,7 +47,7 @@ async fn main() -> Result<()> {
         tracing::info!("applying migrations");
         db.migrate().await.context("migrations failed")?;
     } else {
-        tracing::warn!("DF_RUN_MIGRATIONS is off; assuming the schema is already current");
+        tracing::warn!("OF_RUN_MIGRATIONS is off; assuming the schema is already current");
     }
 
     // Prove tenant isolation before binding a port, never after. Row-level
@@ -73,8 +73,8 @@ async fn main() -> Result<()> {
         // `npm run build` was never run.
         tracing::warn!(
             dir = %config.static_dir.display(),
-            "no console bundle at DF_STATIC_DIR; the API will work and every console page will 404. \
-             Run `npm run build` in web/, or set DF_STATIC_DIR"
+            "no console bundle at OF_STATIC_DIR; the API will work and every console page will 404. \
+             Run `npm run build` in web/, or set OF_STATIC_DIR"
         );
     }
 

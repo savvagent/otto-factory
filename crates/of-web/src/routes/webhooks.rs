@@ -54,7 +54,7 @@ pub async fn receive(
                     // error-level log for operator alerting instead.
                     tracing::error!(
                         provider = %provider,
-                        "DF_GITHUB_APP_WEBHOOK_SECRET is not configured; rejecting all GitHub webhooks"
+                        "OF_GITHUB_APP_WEBHOOK_SECRET is not configured; rejecting all GitHub webhooks"
                     );
                     webhook_not_found()
                 })?;

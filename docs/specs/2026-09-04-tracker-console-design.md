@@ -55,8 +55,8 @@ the code as it stands.
   a repo's tracker binding.
 - GitHub App installation binding with user-to-server verification (§2).
 - JIRA 3LO binding, sealing the refresh token into `encrypted_credentials` (§2).
-- New deployment config: `DF_GITHUB_APP_SLUG`, `DF_GITHUB_APP_CLIENT_ID`,
-  `DF_GITHUB_APP_CLIENT_SECRET` (§5).
+- New deployment config: `OF_GITHUB_APP_SLUG`, `OF_GITHUB_APP_CLIENT_ID`,
+  `OF_GITHUB_APP_CLIENT_SECRET` (§5).
 - Console pages: an org-level `Trackers` page, a provider-agnostic OAuth return page, and a
   per-repo binding editor on the existing repos page (§6).
 - Removing `trackerBinding` from the console's repo write surface and TypeScript types (§7).
@@ -152,13 +152,13 @@ into silence.
 row carries `encrypted_credentials` and `encrypted_webhook_secret` and `#[derive(Serialize)]`
 would put both on the wire. Ciphertext is not a secret in the sense that leaking it grants
 access, but a console `GET` that returns a sealed refresh token to every admin's browser is
-gratuitous exposure of the exact material `DF_ENCRYPTION_KEY` exists to protect. The view is
+gratuitous exposure of the exact material `OF_ENCRYPTION_KEY` exists to protect. The view is
 `{id, provider, externalId, hasCredentials, createdAt, updatedAt}`, and a unit test asserts
 no serialization of it contains `"encrypted"`.
 
 `TrackerConnectionsView` wraps the list with what the deployment supports:
 `{connections: [...], github: {configured, installUrl}, jira: {configured, authorizeUrl}}`.
-The two URLs are built **server-side** from the App slug / client id and `DF_PUBLIC_URL`,
+The two URLs are built **server-side** from the App slug / client id and `OF_PUBLIC_URL`,
 and the console appends only `&state=`. Nothing about the deployment is baked into the
 bundle — a hard-coded App slug is how a staging console sends admins to install the
 production App. `configured: false` (the operator set no GitHub or no JIRA credentials) is
@@ -199,11 +199,11 @@ like every other one in the module, and get cross-org tests in `crates/of-core/t
 Three new optional vars, following `github_app_id`'s existing shape exactly — optional
 because a deployment that offers no GitHub integration has no App:
 
-- `DF_GITHUB_APP_SLUG` — the App's URL slug, for `https://github.com/apps/{slug}/installations/new`.
-- `DF_GITHUB_APP_CLIENT_ID`, `DF_GITHUB_APP_CLIENT_SECRET` — the App's OAuth credentials,
+- `OF_GITHUB_APP_SLUG` — the App's URL slug, for `https://github.com/apps/{slug}/installations/new`.
+- `OF_GITHUB_APP_CLIENT_ID`, `OF_GITHUB_APP_CLIENT_SECRET` — the App's OAuth credentials,
   for the user-to-server exchange in §2.
 
-`DF_JIRA_CLIENT_ID`/`DF_JIRA_CLIENT_SECRET` already exist and are already threaded to
+`OF_JIRA_CLIENT_ID`/`OF_JIRA_CLIENT_SECRET` already exist and are already threaded to
 `of-mcp`; Task 6 threads them to `of-web` as well.
 
 None of them parse to anything but a string, so there is no unparseable-value case to fail
@@ -277,7 +277,7 @@ column and its data are untouched, so the change is reversible by restoring two 
 - **The GitHub verification depends on an App setting the operator must have enabled.** If
   "Request user authorization (OAuth) during installation" is off, GitHub's redirect carries
   no `code`, and the connect flow fails with a message saying so rather than falling back to
-  trusting the installation id. Naming it in `.env.example` next to `DF_GITHUB_APP_CLIENT_ID`
+  trusting the installation id. Naming it in `.env.example` next to `OF_GITHUB_APP_CLIENT_ID`
   is the mitigation; there is no way for the server to detect the setting in advance.
 - **`state` lives in `sessionStorage`, so a connect flow that finishes in a different tab or
   after a browser restart fails the nonce check** and asks the admin to start again. Correct

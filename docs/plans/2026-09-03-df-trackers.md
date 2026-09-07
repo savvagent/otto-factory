@@ -30,7 +30,7 @@ because the four checkboxes below assumed console REST routes that did not exist
   self-attribution anywhere (commits, PR bodies, comments, docs).
 - Coordination stays anchored on repos: a tracker binding always names a `repo_id`, never
   a standalone tracker entity with no repo. Any `DF_*` config this milestone adds
-  (`DF_GITHUB_APP_ID`, `DF_GITHUB_APP_PRIVATE_KEY`, `DF_GITHUB_APP_WEBHOOK_SECRET`, later)
+  (`OF_GITHUB_APP_ID`, `OF_GITHUB_APP_PRIVATE_KEY`, `OF_GITHUB_APP_WEBHOOK_SECRET`, later)
   must fail `Config::from_env` loudly on an unparseable value, never default silently.
 - No credential is ever spent on a `GET` — the webhook route (Task 3) and any console
   binding action (Task 6) that consumes a one-time code must be a `POST`.
@@ -103,8 +103,8 @@ to consume. Consumes nothing new (no dependency edges added).
       `crates/of-auth/src/crypto.rs` to a new `crates/of-core/src/crypto.rs`. Add
       `pub mod crypto;` to `crates/of-core/src/lib.rs`.
 - [ ] Add `Error::Config(String)` and `Error::Crypto(String)` to `crates/of-core/src/error.rs`
-      (match the exact wording the moved tests assert: "DF_ENCRYPTION_KEY is not valid
-      base64", "DF_ENCRYPTION_KEY must decode to 32 bytes, got {n}", "failed to seal
+      (match the exact wording the moved tests assert: "OF_ENCRYPTION_KEY is not valid
+      base64", "OF_ENCRYPTION_KEY must decode to 32 bytes, got {n}", "failed to seal
       secret", "stored nonce has the wrong length", "failed to open secret — wrong key or
       tampered ciphertext").
 - [ ] Delete `Cipher`/`Sealed` and their tests from `crates/of-auth/src/crypto.rs`; keep
@@ -183,7 +183,7 @@ whichever task first constructs a `Tx` around a live call (Task 4 or 5).
 **Files:** `crates/of-trackers/src/github.rs`, `crates/of-trackers/src/jira.rs`,
 `crates/of-trackers/src/lib.rs`, `crates/of-trackers/Cargo.toml` (add `jsonwebtoken` for
 GitHub App JWT signing if not already present — check first), `crates/of-server` config
-(`DF_GITHUB_APP_ID`, `DF_GITHUB_APP_PRIVATE_KEY`, `DF_GITHUB_APP_WEBHOOK_SECRET` — new env
+(`OF_GITHUB_APP_ID`, `OF_GITHUB_APP_PRIVATE_KEY`, `OF_GITHUB_APP_WEBHOOK_SECRET` — new env
 vars, additive, documented in `.env.example` with the *why*).
 
 - [x] GitHub: mint a JWT from the App id + private key (RS256, 10-minute expiry per
@@ -243,7 +243,7 @@ design — verified by signature instead of a session/token) plus its handler mo
       test explaining why this isn't an RLS test, so a future reader doesn't mistake the
       absence of one for an oversight.
 - [ ] GitHub: HMAC-SHA256 verification of `X-Hub-Signature-256` against
-      `DF_GITHUB_APP_WEBHOOK_SECRET`, constant-time compare.
+      `OF_GITHUB_APP_WEBHOOK_SECRET`, constant-time compare.
 - [ ] JIRA: shared-secret verification per Automation webhook's configured header/query
       parameter (finalize exact mechanism against JIRA's current docs at implementation
       time — the spec left this as a Task-3 decision).
@@ -448,6 +448,6 @@ same as existing repo-registration console flows).
 - [x] `npm run check && npm run lint && npm test && npm run build`.
 - [x] Commit.
 
-**Out-of-band reminders for whichever task lands last:** confirm `DF_GITHUB_APP_PRIVATE_KEY`
+**Out-of-band reminders for whichever task lands last:** confirm `OF_GITHUB_APP_PRIVATE_KEY`
 and any other new `DF_*` vars are documented in `.env.example` with the *why*, and that
 `Config::from_env` errors (never silently defaults) on an unparseable value.

@@ -1,7 +1,7 @@
 //! Secret encryption.
 //!
 //! Nothing here invents a scheme. AES-256-GCM from RustCrypto, keyed by
-//! `DF_ENCRYPTION_KEY`, is the single recoverable-secret primitive this
+//! `OF_ENCRYPTION_KEY`, is the single recoverable-secret primitive this
 //! workspace shares.
 
 use aes_gcm::aead::{Aead, KeyInit};
@@ -16,7 +16,7 @@ use crate::error::{Error, Result};
 /// merely verifiable — IdP client secrets, tracker webhook/refresh secrets.
 /// Everything else is hashed, not encrypted.
 ///
-/// The key comes from `DF_ENCRYPTION_KEY` in the environment (or KMS) and never
+/// The key comes from `OF_ENCRYPTION_KEY` in the environment (or KMS) and never
 /// from the database, so a database dump alone yields no usable secret.
 #[derive(Clone)]
 pub struct Cipher {
@@ -46,11 +46,11 @@ impl Cipher {
         let raw = B64
             .decode(encoded.trim())
             .or_else(|_| URL_SAFE_NO_PAD.decode(encoded.trim()))
-            .map_err(|_| Error::Config("DF_ENCRYPTION_KEY is not valid base64".into()))?;
+            .map_err(|_| Error::Config("OF_ENCRYPTION_KEY is not valid base64".into()))?;
 
         if raw.len() != 32 {
             return Err(Error::Config(format!(
-                "DF_ENCRYPTION_KEY must decode to 32 bytes, got {}",
+                "OF_ENCRYPTION_KEY must decode to 32 bytes, got {}",
                 raw.len()
             )));
         }

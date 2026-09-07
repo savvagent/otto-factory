@@ -1470,7 +1470,7 @@ async fn a_binding_that_could_never_match_an_event_is_refused(pool: PgPool) {
 
 /// Ciphertext is not a secret in the sense that leaking it grants access, but a
 /// console `GET` handing every admin's browser the sealed JIRA refresh token is
-/// gratuitous exposure of exactly the material `DF_ENCRYPTION_KEY` exists to
+/// gratuitous exposure of exactly the material `OF_ENCRYPTION_KEY` exists to
 /// protect. The listing is a view type for this reason, not the domain row.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn the_connection_listing_never_carries_stored_secrets(pool: PgPool) {

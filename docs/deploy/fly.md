@@ -26,7 +26,7 @@ serverless model would fight. See `CLAUDE.md` for why the process must stay warm
   shared with nels' production database.
 
 - **Secrets staged** (not yet deployed — no image exists yet to receive them):
-  `DATABASE_URL`, `DF_ENCRYPTION_KEY`, `DF_SIGNING_KEY` (both generated with
+  `DATABASE_URL`, `OF_ENCRYPTION_KEY`, `OF_SIGNING_KEY` (both generated with
   `openssl rand -base64 32`, per `.env.example`).
 
 ## Tenant isolation on managed Postgres — and what the app role can actually reach
@@ -125,7 +125,7 @@ wanted; until then, treat `DATABASE_URL` as a credential to nels' database too.
 `of-server/src/main.rs` now assembles the real server:
 
 1. The Axum router merges of-mcp (`/mcp`, bearer-authenticated) and of-web
-   (console API, OAuth AS, `/.well-known/…`), bound to `DF_BIND`. of-mcp's own
+   (console API, OAuth AS, `/.well-known/…`), bound to `OF_BIND`. of-mcp's own
    copy of `/.well-known/oauth-protected-resource` is left out of the merge —
    see `of_mcp::mcp_endpoint` — since of-web already serves that path and
    Axum panics on two handlers for one path.
@@ -151,7 +151,7 @@ wanted; until then, treat `DATABASE_URL` as a credential to nels' database too.
 
 Everything. `/readyz` passes, the API works end to end for an MCP client, and the
 console is served — `web/` is built into `/srv/console` by the Dockerfile's console
-stage, which `DF_STATIC_DIR` points at.
+stage, which `OF_STATIC_DIR` points at.
 
 Onboarding is self-contained: **the product sends no email**. Signing up creates a passkey
 in the browser, so an account is created and signed in during a single visit to `/signup`,
@@ -159,20 +159,20 @@ with no mail provider in the loop and nothing to configure. Recovery is a second
 or an org admin clearing a member's keys and handing over the one-time code that comes
 back. Invitations are codes the admin copies out of the console.
 
-There is consequently no `DF_ALLOW_LOG_MAILER`, no `Mailer`, and no deployment state in
+There is consequently no `OF_ALLOW_LOG_MAILER`, no `Mailer`, and no deployment state in
 which links go to a log instead of a mailbox.
 
-### `DF_PUBLIC_URL`'s host is now load-bearing in a way it was not before
+### `OF_PUBLIC_URL`'s host is now load-bearing in a way it was not before
 
 A passkey is cryptographically bound to the WebAuthn **relying party id**, which
-`of-server` derives from `DF_PUBLIC_URL`'s host and asserts at startup (`of_web::relying_party`
+`of-server` derives from `OF_PUBLIC_URL`'s host and asserts at startup (`of_web::relying_party`
 refuses to boot on a mismatch rather than failing at somebody's first sign-in).
 
 **Changing that host invalidates every passkey ever registered.** Nothing can soften it;
 that is what binding a credential to an origin means. This is exactly why the hostname
 below was settled before the first account existed, and why moving the console behind the
 Cloudflare Worker in [issue #2](https://github.com/savvagent/dark-factory/issues/2) is
-designed to keep `DF_PUBLIC_URL` unchanged rather than to swap it for a new one.
+designed to keep `OF_PUBLIC_URL` unchanged rather than to swap it for a new one.
 
 Note also that account creation now requires a browser: there is no scripted signup, so
 `docs/clients/matrix.md`'s conformance sequence needs a real browser or a virtual
@@ -192,15 +192,15 @@ AAAA  df.savvagent.com  →  2a09:8280:1::181:a2ef:0   (this app's dedicated IPv
 in DNS is needed, because the dedicated IPv6 is what Fly validates ownership
 against.
 
-**This was decided before the first account existed, on purpose.** `DF_PUBLIC_URL`
+**This was decided before the first account existed, on purpose.** `OF_PUBLIC_URL`
 is the OAuth issuer, the token audience, and both discovery documents — and, as the
 section above lays out, it is also the WebAuthn relying party id that every passkey is
 cryptographically bound to. Doing it while the database held zero users cost nothing.
 
 A later move behind a Cloudflare Worker keeps this same hostname: a Worker custom
 domain serves `df.savvagent.com` directly and proxies to the Fly app, so
-`DF_ORIGIN` becomes `otto-factory-mcp.fly.dev` and `DF_PUBLIC_URL` does not
-change. See `cloudflare.md`, whose `DF_ALLOWED_HOSTS` trap is exactly about that
+`OF_ORIGIN` becomes `otto-factory-mcp.fly.dev` and `OF_PUBLIC_URL` does not
+change. See `cloudflare.md`, whose `OF_ALLOWED_HOSTS` trap is exactly about that
 split.
 
 Deploying is:

@@ -55,7 +55,7 @@ pub fn relying_party(
 ) -> anyhow::Result<std::sync::Arc<of_auth::passkeys::Webauthn>> {
     let rp_id = config.rp_id().ok_or_else(|| {
         anyhow::anyhow!(
-            "DF_PUBLIC_URL ({}) has no host, so there is nothing to bind passkeys to",
+            "OF_PUBLIC_URL ({}) has no host, so there is nothing to bind passkeys to",
             config.public_url
         )
     })?;

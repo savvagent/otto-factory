@@ -39,7 +39,7 @@ npx wrangler deploy --env production   # or: npm run deploy, which does both
 ```
 
 **Naming the environment is load-bearing.** The default configuration is the development
-one: a different Worker (`otto-factory-console-dev`) whose `DF_ORIGIN` is
+one: a different Worker (`otto-factory-console-dev`) whose `OF_ORIGIN` is
 `http://127.0.0.1:8080`. A bare `wrangler deploy` therefore cannot overwrite the Worker the
 console runs on, and cannot silently point a staging build at production — it deploys
 something that proxies to an origin nobody is running, which fails immediately and visibly.
@@ -49,7 +49,7 @@ Another environment is a block in `wrangler.jsonc` beside `production`, or a one
 override:
 
 ```bash
-npx wrangler deploy --var DF_ORIGIN:https://otto-factory-staging.fly.dev
+npx wrangler deploy --var OF_ORIGIN:https://otto-factory-staging.fly.dev
 ```
 
 Then attach the hostname the humans will use (`console.example.com`) to the Worker as a
@@ -62,16 +62,16 @@ Three environment variables on `of-server`, and none of them is optional.
 
 | Variable | Value | Why |
 |---|---|---|
-| `DF_PUBLIC_URL` | `https://console.example.com` | The Worker's hostname, never the origin's. The OAuth issuer and both discovery documents are built from it. Point it at the origin and the console tells agents to connect to a host the browser never uses. |
-| `DF_ALLOWED_HOSTS` | the origin's hostname, e.g. `otto-factory-mcp.fly.dev` | **See the trap below.** Without it every authenticated MCP call fails. |
-| `DF_CLIENT_IP_HEADER` | `cf-connecting-ip` | Cloudflare overwrites this header inbound. `fly-client-ip` would now hold a Cloudflare edge address, and every per-IP throttle would count all of Cloudflare as one caller. |
+| `OF_PUBLIC_URL` | `https://console.example.com` | The Worker's hostname, never the origin's. The OAuth issuer and both discovery documents are built from it. Point it at the origin and the console tells agents to connect to a host the browser never uses. |
+| `OF_ALLOWED_HOSTS` | the origin's hostname, e.g. `otto-factory-mcp.fly.dev` | **See the trap below.** Without it every authenticated MCP call fails. |
+| `OF_CLIENT_IP_HEADER` | `cf-connecting-ip` | Cloudflare overwrites this header inbound. `fly-client-ip` would now hold a Cloudflare edge address, and every per-IP throttle would count all of Cloudflare as one caller. |
 
-`DF_RESOURCE_URI` defaults to `$DF_PUBLIC_URL/mcp` and needs nothing.
+`OF_RESOURCE_URI` defaults to `$OF_PUBLIC_URL/mcp` and needs nothing.
 
-### Trap 1 — `DF_ALLOWED_HOSTS`, or the MCP endpoint refuses every call
+### Trap 1 — `OF_ALLOWED_HOSTS`, or the MCP endpoint refuses every call
 
 A Worker cannot set the `Host` header on a subrequest; it is derived from the URL being
-fetched, so the origin sees `Host: otto-factory-mcp.fly.dev` while `DF_PUBLIC_URL` says
+fetched, so the origin sees `Host: otto-factory-mcp.fly.dev` while `OF_PUBLIC_URL` says
 `console.example.com`. `rmcp` validates that header — the check exists because a hosted MCP
 server that answers to any `Host` is DNS-rebindable — and rejects the mismatch:
 
@@ -85,12 +85,12 @@ calls. An unauthenticated `POST /mcp` still answers `401` with a correct
 `WWW-Authenticate` challenge, so discovery, registration and the whole OAuth flow look
 healthy right up until the first tool call.
 
-Adding the origin's hostname to `DF_ALLOWED_HOSTS` fixes it. An entry with no port matches
+Adding the origin's hostname to `OF_ALLOWED_HOSTS` fixes it. An entry with no port matches
 any port, which is what the local verification below relies on.
 
 ### Trap 2 — the origin must refuse traffic that did not come through Cloudflare
 
-`DF_CLIENT_IP_HEADER=cf-connecting-ip` is safe only because Cloudflare overwrites that
+`OF_CLIENT_IP_HEADER=cf-connecting-ip` is safe only because Cloudflare overwrites that
 header. Anyone who can reach the Fly app directly sets it themselves, and then every
 per-IP throttle — on login, on passkey ceremonies, on client registration — counts a value
 the attacker chose, which is worse than having no throttle because it looks like it is
@@ -115,13 +115,13 @@ thing minus Cloudflare's own edge:
 
 ```bash
 # origin
-DF_PUBLIC_URL=http://localhost:8788 DF_BIND=127.0.0.1:8080 \
-DF_ALLOWED_HOSTS=127.0.0.1 DF_CLIENT_IP_HEADER=cf-connecting-ip \
+OF_PUBLIC_URL=http://localhost:8788 OF_BIND=127.0.0.1:8080 \
+OF_ALLOWED_HOSTS=127.0.0.1 OF_CLIENT_IP_HEADER=cf-connecting-ip \
   cargo run -p of-server
 
 # edge
 cd web && npm run build
-npx wrangler dev --port 8788 --var DF_ORIGIN:http://127.0.0.1:8080
+npx wrangler dev --port 8788 --var OF_ORIGIN:http://127.0.0.1:8080
 ```
 
 What that run established:
@@ -136,7 +136,7 @@ What that run established:
   driven through the Worker. (This run predates the removal of email and TOTP — see the
   milestone plan's Task 6 for what replaced them; a re-run today would drive a passkey
   ceremony instead.)
-- **The OAuth issuer names the edge**, because it is built from `DF_PUBLIC_URL`. The minted
+- **The OAuth issuer names the edge**, because it is built from `OF_PUBLIC_URL`. The minted
   PAT's audience came back as `http://localhost:8788/mcp`.
 - **`303`s pass through.** `POST /oauth/authorize` returned `303` with
   `Location: http://localhost:3118/callback?code=…` rather than a followed body — the Worker
@@ -145,7 +145,7 @@ What that run established:
 - **A forged client address does not reach the origin.** A request carrying
   `cf-connecting-ip: 9.9.9.9` was recorded by the origin under the throttle bucket
   `link:127.0.0.1`.
-- **Trap 1 reproduces and the fix works.** Without `DF_ALLOWED_HOSTS`, `whoami` over MCP
+- **Trap 1 reproduces and the fix works.** Without `OF_ALLOWED_HOSTS`, `whoami` over MCP
   returned `Forbidden: Host header is not allowed`; with it, `org: edge | kind: pat`.
 
 ## Caching
