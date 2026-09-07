@@ -37,7 +37,7 @@
   infrastructure, not a product capability, so there is no "could this live in a customer skill"
   question to ask.
 - The job needs no database service (unlike `rust`): the image build never runs `cargo test`,
-  only `cargo build --release -p df-server`, so nothing inside it touches Postgres.
+  only `cargo build --release -p of-server`, so nothing inside it touches Postgres.
 
 ## Premise corrections
 
@@ -191,7 +191,7 @@ per the issue's second acceptance criterion.
 ## Risks & Open Questions
 
 - **This PR can't self-verify the "PR touching Dockerfile" trigger path**, since it doesn't touch
-  any of the filtered paths itself. Mitigated by local verification (`podman build -t dark-factory
+  any of the filtered paths itself. Mitigated by local verification (`podman build -t otto-factory
   .`, this machine's available engine — functionally equivalent to `docker build` for this
   Dockerfile) and by the `push`-to-`master` path being unconditional, which the merge of this very
   PR will exercise for real once it lands. Whoever authors the next PR touching

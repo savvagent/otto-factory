@@ -8,10 +8,10 @@
   Rust build stage) with no change to the shipped runtime image's contents, no new public
   interface, and no schema/config/auth-spine/tenant-isolation/metering impact. The
   **content** of the change is trivial; only its **surface** (`Dockerfile`, i.e. deploy shape)
-  disqualifies it from `dark-factory-development`'s fast-path, per that skill's explicit
+  disqualifies it from `otto-factory-development`'s fast-path, per that skill's explicit
   exclusion of `Dockerfile` changes from the trivial-task carve-out. This spec exists to
   satisfy that rule, not because the change is architecturally complex.
-- Verified locally with `podman build -t dark-factory .` (succeeds) and by starting the
+- Verified locally with `podman build -t otto-factory .` (succeeds) and by starting the
   resulting image (`podman run`) — the binary starts and reaches the database-dial step with
   no dynamic-linking error, confirming `debian:bookworm-slim`'s existing `libssl3` (pulled in
   transitively, not by this change) satisfies the binary's runtime OpenSSL dependency.
@@ -52,12 +52,12 @@
 
 ## §1 Root cause
 
-`df-auth`'s dependency on `webauthn-rs` (introduced in `a12fdf9`, "Replace TOTP with
+`of-auth`'s dependency on `webauthn-rs` (introduced in `a12fdf9`, "Replace TOTP with
 passkeys") transitively pulls in `webauthn-attestation-ca`, which links `openssl` (via
 `openssl-sys`) for attestation certificate verification — confirmed via
-`cargo tree -p df-server -e normal | grep -B5 openssl-sys`, which shows the dependency path
+`cargo tree -p of-server -e normal | grep -B5 openssl-sys`, which shows the dependency path
 through `webauthn-rs` → `webauthn-rs-core` → `webauthn-attestation-ca` → `openssl`/`openssl-sys`.
-This is a **normal**, not dev-only, dependency of `df-server`'s release build — `reqwest` in
+This is a **normal**, not dev-only, dependency of `of-server`'s release build — `reqwest` in
 this workspace is already configured with `default-features = false, features =
 ["rustls-tls", "json"]` (`Cargo.toml`), so this is not a reqwest/TLS-backend regression; it is
 specifically the WebAuthn attestation stack.
@@ -67,7 +67,7 @@ development headers, so `openssl-sys`'s build script fails at compile time:
 `Could not find openssl via pkg-config` / `pkg-config command could not be found`. Since
 `.github/workflows/ci.yml` never builds the Docker image (only `cargo test`/`clippy`/`fmt` and
 the `web` job), this went undetected by CI. It surfaced only when a fresh `fly deploy` /
-`podman build` was attempted, which is why the live Fly.io deployment (`dark-factory-mcp`) has
+`podman build` was attempted, which is why the live Fly.io deployment (`otto-factory-mcp`) has
 silently continued running the pre-passkey (TOTP) build since the passkey merge — every image
 build attempted since then has failed outright, so nothing new was ever pushed.
 
@@ -91,7 +91,7 @@ The `runtime` stage is built independently, `FROM debian:bookworm-slim`, and rec
 compiled binary and static console assets via `COPY --from=build` / `COPY --from=console`. The
 `build` stage (carrying `pkg-config`/`libssl-dev`) is discarded entirely; neither package nor
 any part of a full OpenSSL dev toolchain reaches the shipped image. Confirmed by inspecting the
-built runtime image directly: `libssl.so.3` is dynamically linked by the `df-server` binary
+built runtime image directly: `libssl.so.3` is dynamically linked by the `of-server` binary
 (`ldd`), and is already present in `debian:bookworm-slim` as `libssl3` (a transitive base-image
 dependency, `dpkg -l | grep libssl` inside the built image) — unrelated to and unchanged by
 this fix, since `libssl3` is a runtime shared library, not the `-dev` headers package added to
@@ -99,7 +99,7 @@ the builder.
 
 ## §4 Testing
 
-- `podman build -t dark-factory .` — reproduced the failure before the fix, confirmed the fix
+- `podman build -t otto-factory .` — reproduced the failure before the fix, confirmed the fix
   resolves it (full image build completes).
 - `podman run` against the built image, with a deliberately invalid `DATABASE_URL` — confirmed
   the binary starts and reaches the database-connection attempt (fails only on DNS resolution

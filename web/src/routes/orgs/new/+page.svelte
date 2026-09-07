@@ -45,13 +45,13 @@
   }
 </script>
 
-<svelte:head><title>New organization · dark-factory</title></svelte:head>
+<svelte:head><title>New organization · otto-factory</title></svelte:head>
 
 <div class="mx-auto max-w-sm py-8">
   <h1 class="text-lg font-semibold">New organization</h1>
   <p class="mt-1 text-sm text-faint">
     {#if session.orgs.length === 0}
-      Everything in dark-factory belongs to an organization — repos, the queue, your agents' tokens.
+      Everything in otto-factory belongs to an organization — repos, the queue, your agents' tokens.
       Create one to get started.
     {:else}
       You will be its owner.

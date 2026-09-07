@@ -1,10 +1,10 @@
-# dark-factory — Design
+# otto-factory — Design
 
 Status: accepted (2026-09-01)
 
 ## Summary
 
-**dark-factory** is a hosted, multi-tenant **MCP server for coordinating agentic coding
+**otto-factory** is a hosted, multi-tenant **MCP server for coordinating agentic coding
 work** across enterprises and teams. It is *server-only*: no TUI, no PTY, no local bridge
 binary, no plugin to install.
 
@@ -22,13 +22,13 @@ That is the entire client-side install.
 ### Three constraints that shape everything below
 
 **1. It is about coordinating work — and coordination is anchored on repositories.**
-dark-factory must know the repos a team works in. A repo is a first-class, org-owned
+otto-factory must know the repos a team works in. A repo is a first-class, org-owned
 entity, not a config string: jobs belong to repos, agents announce which repo and branch
 they are working in, tracker bindings hang off repos, and the primitives that stop two
 agents colliding are repo-scoped. An agent that can't resolve its working directory to a
 registered repo gets a clear error telling it how to register one, not a silent default.
 
-**2. dark-factory is a substrate, not a workflow.** It deliberately does *less* than
+**2. otto-factory is a substrate, not a workflow.** It deliberately does *less* than
 dark-agent. It provides coordination primitives — a tenant-isolated queue with
 dependencies, atomic claiming, repo leases, change notification, and a message channel —
 and stops there. It ships no opinion about how work should be specified, planned,
@@ -50,7 +50,7 @@ incomplete (see *Client compatibility*).
 hosting a `claude` PTY, plus a queue server (`manager-mcp`) authenticated by AWS SigV4
 with an IAM-ARN allowlist, serving one shared queue for one team inside one AWS account.
 
-dark-factory takes the **server's** ideas, re-tenants them, and trims them. It is not a
+otto-factory takes the **server's** ideas, re-tenants them, and trims them. It is not a
 fork of the TUI and shares no code with it.
 
 | Taken from `manager-mcp` | Dropped |
@@ -94,38 +94,38 @@ skill can use to record whatever it wants to measure.
 
 ```
                    ┌────────────────────────────────────────────┐
-  coding agent ───▶│  df-mcp     Streamable HTTP MCP (/mcp)      │
+  coding agent ───▶│  of-mcp     Streamable HTTP MCP (/mcp)      │
   (any client)     │             OAuth resource server           │
                    ├────────────────────────────────────────────┤
-  browser ────────▶│  df-web     console API (/api) + OAuth AS   │
+  browser ────────▶│  of-web     console API (/api) + OAuth AS   │
                    ├────────────────────────────────────────────┤
-                   │  df-auth    OAuth 2.1 AS · passkeys · OIDC  │
-                   │  df-billing metering · tiers · Stripe       │
-                   │  df-trackers GitHub App · JIRA 3LO · hooks  │
+                   │  of-auth    OAuth 2.1 AS · passkeys · OIDC  │
+                   │  of-billing metering · tiers · Stripe       │
+                   │  of-trackers GitHub App · JIRA 3LO · hooks  │
                    ├────────────────────────────────────────────┤
-                   │  df-core    domain + Postgres (org-scoped)  │
+                   │  of-core    domain + Postgres (org-scoped)  │
                    └────────────────────────────────────────────┘
                                       │
                               Postgres (Aurora/Neon)
 ```
 
-One binary (`df-server`) mounts every HTTP surface on one port; the crates are a
+One binary (`of-server`) mounts every HTTP surface on one port; the crates are a
 compile-time layering discipline, not separate services. Split later if load demands it.
 
 ### Crates
 
 | Crate | Responsibility |
 |---|---|
-| `df-core` | Domain model + all SQL: orgs, teams, repos, jobs, leases, messages. Every public function takes an `OrgId`. No HTTP, no auth. |
-| `df-auth` | OAuth 2.1 authorization server, passkey (WebAuthn) registration/authentication, enterprise OIDC federation, personal access tokens, token issuance + introspection. |
-| `df-mcp` | `rmcp` Streamable HTTP server, the tool surface, the OAuth resource-server middleware. |
-| `df-billing` | Usage event recording, period counters, tier limits, Stripe sync. |
-| `df-trackers` | GitHub App + JIRA OAuth clients, webhook ingest, two-way sync engine. |
-| `df-web` | Console REST API, session cookies, the AS's HTML endpoints (login, consent). |
-| `df-server` | Binary: config, migrations, router assembly, graceful shutdown. |
+| `of-core` | Domain model + all SQL: orgs, teams, repos, jobs, leases, messages. Every public function takes an `OrgId`. No HTTP, no auth. |
+| `of-auth` | OAuth 2.1 authorization server, passkey (WebAuthn) registration/authentication, enterprise OIDC federation, personal access tokens, token issuance + introspection. |
+| `of-mcp` | `rmcp` Streamable HTTP server, the tool surface, the OAuth resource-server middleware. |
+| `of-billing` | Usage event recording, period counters, tier limits, Stripe sync. |
+| `of-trackers` | GitHub App + JIRA OAuth clients, webhook ingest, two-way sync engine. |
+| `of-web` | Console REST API, session cookies, the AS's HTML endpoints (login, consent). |
+| `of-server` | Binary: config, migrations, router assembly, graceful shutdown. |
 
 `web/` is the console: **SvelteKit 2 + Svelte 5 (runes) + Tailwind v4**, talking only to
-`df-web`'s API. Runes (`$state` / `$derived` / `$props` / `$effect`) throughout — no Svelte 4
+`of-web`'s API. Runes (`$state` / `$derived` / `$props` / `$effect`) throughout — no Svelte 4
 stores or `export let`. TypeScript, strict.
 
 ## Tenancy model
@@ -158,7 +158,7 @@ users ──┬── org_members ──── orgs ──┬── teams ──
 `org_id` is `NOT NULL` on every tenant table and participates in every unique key that a
 user-facing identifier appears in. Two independent guards:
 
-1. **`df-core` API shape.** Every query function's first parameter is `OrgId`, and every
+1. **`of-core` API shape.** Every query function's first parameter is `OrgId`, and every
    statement includes `org_id = $1`. There is no function that can read a job without
    naming an org. A test asserts every tenant-table query text contains `org_id`.
 2. **Postgres row-level security.** Each request opens its transaction with
@@ -204,10 +204,10 @@ Two layers that must not be conflated.
 
 ### Layer 1 — MCP client authorization (OAuth 2.1)
 
-dark-factory is both the **Authorization Server** and the **Resource Server** for v1,
+otto-factory is both the **Authorization Server** and the **Resource Server** for v1,
 implementing the MCP authorization spec:
 
-- `GET /.well-known/oauth-protected-resource` (RFC 9728) — advertises the AS. `df-mcp`
+- `GET /.well-known/oauth-protected-resource` (RFC 9728) — advertises the AS. `of-mcp`
   returns `401` with `WWW-Authenticate: Bearer resource_metadata="…"` so an
   unauthenticated client can discover where to authenticate.
 - `GET /.well-known/oauth-authorization-server` (RFC 8414) — AS metadata.
@@ -217,7 +217,7 @@ implementing the MCP authorization spec:
 - `POST /oauth/token` — `authorization_code` + `refresh_token` grants. **PKCE S256
   required**; no implicit grant, no password grant.
 - **Resource indicators (RFC 8707)** are required and enforced: a token is minted for a
-  named `resource`, and `df-mcp` rejects any token whose audience is not its own canonical
+  named `resource`, and `of-mcp` rejects any token whose audience is not its own canonical
   URI. This is the confused-deputy defense.
 
 Access tokens are opaque random strings stored only as SHA-256 hashes, 1-hour lifetime,
@@ -248,7 +248,7 @@ Details that matter:
 - Rate limited per account and per IP, with exponential lockout.
 - **Recovery** is a second passkey: the console pushes for one from the moment there is
   one, and removing a credential is refused when it is the last one. There is no recovery
-  code and no emailed link — dark-factory sends no mail at all. An org admin clearing a
+  code and no emailed link — otto-factory sends no mail at all. An org admin clearing a
   member's credential (`reset_member_passkeys`) is the only assisted path, and it
   issues a claim code in the same operation it clears the keys, so the account is never
   left both keyless and unclaimed.
@@ -328,7 +328,7 @@ which project or issue tracker a given repo's jobs map to.
 
 **Inbound.** Webhooks (`issues`, `issue_comment` from GitHub; Automation webhooks from
 JIRA) hit `/webhooks/{provider}`, are signature-verified, and resolve to an org via the
-installation/site id. An issue labelled for dark-factory creates or updates a job; closing
+installation/site id. An issue labelled for otto-factory creates or updates a job; closing
 the ticket cancels or completes the job.
 
 **Outbound.** Job transitions write back: `claim_jobs` comments that an agent picked the
@@ -356,12 +356,12 @@ an inbound event carrying a revision we just wrote is dropped rather than re-app
 `TIMEOUT`, so agents react to queue changes without polling. Self-authored message
 notifications are filtered out of the caller's own wake.
 
-Jobs carry a free-form `metadata` JSONB field. dark-factory never interprets it; it is
+Jobs carry a free-form `metadata` JSONB field. otto-factory never interprets it; it is
 where customers' own skills store whatever their methodology needs.
 
 ## Web console
 
-SvelteKit 2 / Svelte 5 (runes) / Tailwind v4, talking only to `df-web`:
+SvelteKit 2 / Svelte 5 (runes) / Tailwind v4, talking only to `of-web`:
 
 - **Members**: invite, assign role, remove, force-logout, mint/revoke PATs.
 - **Teams**: create, assign members, scope repos and queues.
@@ -379,17 +379,17 @@ Fly.io or ECS behind a TLS terminator; Neon or Aurora for Postgres.
 
 ## Testing
 
-- `df-core`: `#[sqlx::test]` integration tests against a real Postgres, one throwaway
+- `of-core`: `#[sqlx::test]` integration tests against a real Postgres, one throwaway
   database per test. Every tenant-scoped function gets a **cross-org negative test**
   asserting org B cannot see or mutate org A's row.
 - Repo resolution: a table-driven test over remote-URL forms (SSH, HTTPS, with and without
   `.git`, with embedded credentials, host aliases) proving they normalize to one row.
-- `df-auth`: passkey ceremony correctness (challenge/response, resident-key overrides),
+- `of-auth`: passkey ceremony correctness (challenge/response, resident-key overrides),
   PKCE, token audience enforcement, PAT scoping, and the enumeration-resistant signup shape.
-- `df-billing`: counter arithmetic, bucket boundaries, the free/billable split.
-- `df-trackers`: recorded-fixture tests for webhook signature verification and loop
+- `of-billing`: counter arithmetic, bucket boundaries, the free/billable split.
+- `of-trackers`: recorded-fixture tests for webhook signature verification and loop
   suppression.
-- `df-mcp`: tool-level tests driving handlers with an injected principal.
+- `of-mcp`: tool-level tests driving handlers with an injected principal.
 - Clients: a per-client manual conformance checklist behind the `docs/clients/` matrix.
 
 ## Open risks

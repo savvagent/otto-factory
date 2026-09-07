@@ -2,7 +2,7 @@
  * How to point a coding agent at this server.
  *
  * A data table rather than a page full of branches, and every entry has the
- * same shape, because **no client is first-class here**. dark-factory is
+ * same shape, because **no client is first-class here**. otto-factory is
  * coding-agent agnostic by constraint: Claude Code, Copilot CLI, Cursor, Codex
  * and anything else speaking MCP are equally supported, nothing depends on one
  * client's plugin or hook system, and `agentType` is never validated against a
@@ -43,11 +43,11 @@ export const CLIENTS: ClientRecipe[] = [
     id: 'claude-code',
     name: 'Claude Code',
     kind: 'command',
-    oauth: (url) => `claude mcp add --transport http dark-factory ${url}`,
+    oauth: (url) => `claude mcp add --transport http otto-factory ${url}`,
     token: (url, token) =>
-      `claude mcp add --transport http dark-factory ${url} \\\n  --header "Authorization: Bearer ${token || PLACEHOLDER}"`,
+      `claude mcp add --transport http otto-factory ${url} \\\n  --header "Authorization: Bearer ${token || PLACEHOLDER}"`,
     note:
-      'Then run `claude mcp login dark-factory` in an interactive terminal to consent — ' +
+      'Then run `claude mcp login otto-factory` in an interactive terminal to consent — ' +
       'a `-p` session cannot open a browser and will report the server as unauthenticated.'
   },
   {
@@ -56,12 +56,12 @@ export const CLIENTS: ClientRecipe[] = [
     kind: 'json',
     location: '~/.copilot/mcp-config.json',
     oauth: (url) =>
-      JSON.stringify({ mcpServers: { 'dark-factory': { type: 'http', url } } }, null, 2),
+      JSON.stringify({ mcpServers: { 'otto-factory': { type: 'http', url } } }, null, 2),
     token: (url, token) =>
       JSON.stringify(
         {
           mcpServers: {
-            'dark-factory': {
+            'otto-factory': {
               type: 'http',
               url,
               headers: { Authorization: `Bearer ${token || PLACEHOLDER}` }
@@ -80,12 +80,12 @@ export const CLIENTS: ClientRecipe[] = [
     name: 'Cursor',
     kind: 'json',
     location: '~/.cursor/mcp.json, or .cursor/mcp.json in a project',
-    oauth: (url) => JSON.stringify({ mcpServers: { 'dark-factory': { url } } }, null, 2),
+    oauth: (url) => JSON.stringify({ mcpServers: { 'otto-factory': { url } } }, null, 2),
     token: (url, token) =>
       JSON.stringify(
         {
           mcpServers: {
-            'dark-factory': {
+            'otto-factory': {
               url,
               headers: { Authorization: `Bearer ${token || PLACEHOLDER}` }
             }

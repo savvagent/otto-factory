@@ -73,7 +73,7 @@ Single task: this is one YAML addition to one existing file. No sequencing decis
       jobs are byte-for-byte unchanged (no accidental reflow/indentation change from an editor).
 - [x] Local equivalence check (no GitHub Actions runner available here): confirm the Dockerfile
       itself still builds with the engine available on this machine — `podman build -t
-      dark-factory-ci-check .` from the repo root — so a locally-detectable break isn't shipped
+      otto-factory-ci-check .` from the repo root — so a locally-detectable break isn't shipped
       inside the same PR as the new gate. Expect: build completes successfully (it already did as
       of #37's fix; this is a regression check, not new ground).
 - [x] Format and commit: `git commit -m "ci: build the Docker image on every PR/push touching Dockerfile, Cargo manifests, or web/"`.

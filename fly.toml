@@ -1,6 +1,6 @@
-# dark-factory on Fly.io, org "savvagent".
+# otto-factory on Fly.io, org "savvagent".
 #
-# Database: a dedicated `dark_factory` database and `dark-factory` schema_admin
+# Database: a dedicated `dark_factory` database and `otto-factory` schema_admin
 # role on the shared `savvagent-pg` managed Postgres cluster (kyzl60xmdjxopj9g),
 # isolated from the `light_factory` / nels-api databases on the same cluster.
 # DATABASE_URL is already staged as a secret via `fly mpg attach`.
@@ -9,7 +9,7 @@
 # DF_ENCRYPTION_KEY in the machine's environment. Everything below is
 # configuration a reader is meant to see.
 
-app = "dark-factory-mcp"
+app = "otto-factory-mcp"
 primary_region = "iad"
 
 [build]
@@ -19,12 +19,12 @@ primary_region = "iad"
   # Fly's proxy terminates TLS and forwards over the internal network, so the
   # process serves plain HTTP and the public origin is https.
   DF_BIND = "0.0.0.0:8080"
-  # The hostname a browser and an agent both see. `dark-factory-mcp.fly.dev`
+  # The hostname a browser and an agent both see. `otto-factory-mcp.fly.dev`
   # still answers, but nothing advertises it: every emailed-equivalent link, the
   # OAuth issuer, both discovery documents, and the token audience are built
   # from this value.
   #
-  # It is also the WebAuthn relying party id (`df-server` derives it from this
+  # It is also the WebAuthn relying party id (`of-server` derives it from this
   # host and asserts it at startup), which makes changing it more expensive than
   # it looks: **every passkey ever registered is bound to this hostname and
   # would stop working.** Settled deliberately while the database held no
@@ -34,7 +34,7 @@ primary_region = "iad"
   DF_RESOURCE_URI = "https://df.savvagent.com/mcp"
   DF_STATIC_DIR = "/srv/console"
   DF_LOG_FORMAT = "json"
-  RUST_LOG = "info,df_server=info,df_mcp=info,df_web=info"
+  RUST_LOG = "info,of_server=info,of_mcp=info,of_web=info"
 
   # `fly-client-ip`, deliberately not `x-forwarded-for`. fly-proxy *appends*
   # to X-Forwarded-For, so a caller sending its own value arrives as

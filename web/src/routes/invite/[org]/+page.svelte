@@ -50,7 +50,7 @@
   }
 </script>
 
-<svelte:head><title>Join {org} · dark-factory</title></svelte:head>
+<svelte:head><title>Join {org} · otto-factory</title></svelte:head>
 
 <div class="mx-auto max-w-sm py-8">
   <h1 class="text-lg font-semibold">Join {org}</h1>

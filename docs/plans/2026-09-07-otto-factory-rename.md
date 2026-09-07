@@ -2,7 +2,7 @@
 
 ## Goal
 
-Rename the project from **dark-factory** to **otto-factory** everywhere: prose, console UI,
+Rename the project from **otto-factory** to **otto-factory** everywhere: prose, console UI,
 crates (`df-*` → `of-*`), environment namespace (`DF_*` → `OF_*`), the `df_app` Postgres
 role, the `df_*_` token prefixes, the `__Host-df_session` cookie, and every deployment name.
 No backward-compatibility affordance is added anywhere.
@@ -45,9 +45,9 @@ to `savvagent/otto-factory`, the local checkout directory is `~/dev/otto-factory
 | `crates/of-auth/src/crypto.rs` | **Modify.** `ACCESS`/`SESSION`/`PAT`/`INVITE` prefixes. Task 4. |
 | `crates/of-web/src/session.rs` | **Modify.** `COOKIE_NAME`, clear-cookie literal, 8 negative tests. Task 4. |
 | `web/src/lib/clients.ts` | **Modify.** Every agent connect snippet. Task 5. |
-| `web/src/lib/openapi.ts`, `openapi.fixtures.ts`, `of-web/src/openapi.rs` | **Modify.** `x-dark-factory-auth` → `x-otto-factory-auth`. Task 5. |
-| `docs/specs/2026-09-01-dark-factory-design.md` | **Rename** → `…-otto-factory-design.md`, fix inbound links. Task 5. |
-| `.github/skills/dark-factory-development/` | **Rename** → `otto-factory-development/`. Task 6. |
+| `web/src/lib/openapi.ts`, `openapi.fixtures.ts`, `of-web/src/openapi.rs` | **Modify.** `x-otto-factory-auth` → `x-otto-factory-auth`. Task 5. |
+| `docs/specs/2026-09-01-otto-factory-design.md` | **Rename** → `…-otto-factory-design.md`, fix inbound links. Task 5. |
+| `.github/skills/otto-factory-development/` | **Rename** → `otto-factory-development/`. Task 6. |
 | `fly.toml`, `web/wrangler.jsonc`, `web/package.json`, `Dockerfile`, `.github/workflows/ci.yml` | **Modify.** Task 6. |
 
 ## Task Order & Rationale
@@ -67,17 +67,17 @@ task that is not find-and-replace and the only one that can be dropped without i
 Purely mechanical — ~1,460 identifier occurrences — but it must be done as one commit or the
 workspace does not build.
 
-- [ ] `git mv` each of the seven crate directories: `crates/df-core` → `crates/of-core`, and
-      the same for `df-auth`, `df-mcp`, `df-billing`, `df-trackers`, `df-web`, `df-server`.
+- [ ] `git mv` each of the seven crate directories: `crates/of-core` → `crates/of-core`, and
+      the same for `of-auth`, `of-mcp`, `of-billing`, `of-trackers`, `of-web`, `of-server`.
 - [ ] Root `Cargo.toml`: update the `members` list and every `[workspace.dependencies]` entry
-      (`df-core = { path = "crates/df-core" }` → `of-core = { path = "crates/of-core" }`).
+      (`of-core = { path = "crates/of-core" }` → `of-core = { path = "crates/of-core" }`).
 - [ ] Each crate `Cargo.toml`: `name = "df-x"` → `name = "of-x"`, and every intra-workspace
       dependency key.
-- [ ] Sweep the Rust sources: `df_core::` → `of_core::` and the same for the other six
+- [ ] Sweep the Rust sources: `of_core::` → `of_core::` and the same for the other six
       (hyphens in manifests and prose, underscores in `use` paths).
-- [ ] `Dockerfile`: `cargo build --release -p df-server`, both `cp`/`COPY` paths, and the
+- [ ] `Dockerfile`: `cargo build --release -p of-server`, both `cp`/`COPY` paths, and the
       `ENTRYPOINT` — four lines, all naming the binary.
-- [ ] `.github/workflows/ci.yml` and `CLAUDE.md`: `cargo test -p df-core --test isolation` and
+- [ ] `.github/workflows/ci.yml` and `CLAUDE.md`: `cargo test -p of-core --test isolation` and
       the crate-responsibility table.
 - [ ] `cargo build --workspace` — first proof the manifests are coherent.
 - [ ] `cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all`.
@@ -99,7 +99,7 @@ Full list: `DF_ALLOWED_HOSTS`, `DF_ALLOWED_ORIGINS`, `DF_ALLOW_LOG_MAILER`, `DF_
       does correctly once the name changes.
 - [ ] Rename the `DF_TEST_ABSENT_VAR_XYZ` / `DF_TEST_ABSENT_LIST_XYZ` fixtures in the
       `config.rs` tests to match.
-- [ ] `.env.example` — including the commented `#DF_TOTP_ISSUER=dark-factory` line, whose
+- [ ] `.env.example` — including the commented `#DF_TOTP_ISSUER=otto-factory` line, whose
       *value* is also the old product name.
 - [ ] `web/worker/index.ts` — the `DF_ORIGIN` binding, its interface field, its two error
       strings, and the `--var DF_ORIGIN:` guidance in the thrown message.
@@ -184,20 +184,20 @@ plus test fixtures across `of-auth`, `of-web`, `of-mcp`.
 **Files:** `README.md`, `CLAUDE.md`, `web/README.md`, `docs/specs/*`, `docs/plans/*`,
 `docs/clients/matrix.md`, `docs/deploy/*`, and ~20 files under `web/src/`.
 
-- [ ] `git mv docs/specs/2026-09-01-dark-factory-design.md
+- [ ] `git mv docs/specs/2026-09-01-otto-factory-design.md
       docs/specs/2026-09-01-otto-factory-design.md`, then fix every inbound link —
       `CLAUDE.md` (twice), `web/worker/index.ts`, and the dev skill both reference it by path.
-- [ ] Console page titles (`· dark-factory` → `· otto-factory`) in `login`, `signup`,
+- [ ] Console page titles (`· otto-factory` → `· otto-factory`) in `login`, `signup`,
       `settings`, `settings/billing`, `orgs/new`, `invite/[org]`, `o/[org]/+layout`.
 - [ ] `+layout.svelte` header `aria-label`; `orgs/new` body copy; `o/[org]/trackers` GitHub
       App and JIRA copy; `o/[org]/queue/[job]` metadata description and comment;
       `o/[org]/repos` slug placeholder.
 - [ ] **`web/src/lib/clients.ts` — every connect snippet.** Claude Code
-      (`claude mcp add --transport http dark-factory …` **and** the
-      `claude mcp login dark-factory` follow-up line), the two JSON `mcpServers` keys, and
+      (`claude mcp add --transport http otto-factory …` **and** the
+      `claude mcp login otto-factory` follow-up line), the two JSON `mcpServers` keys, and
       Codex's `[mcp_servers.dark_factory]` TOML table (which appears twice, once with the
       `.http_headers` sub-table). These are what a customer pastes into their agent config.
-- [ ] The `x-dark-factory-auth` OpenAPI extension → `x-otto-factory-auth`, in its producer
+- [ ] The `x-otto-factory-auth` OpenAPI extension → `x-otto-factory-auth`, in its producer
       (`crates/of-web/src/openapi.rs`) and its three consumers (`web/src/lib/openapi.ts`,
       `openapi.fixtures.ts`, and the `/docs/api` page's rendering).
 - [ ] `web/src/lib/types.ts` doc comment; `web/src/lib/clients.ts` header comment.
@@ -210,21 +210,21 @@ plus test fixtures across `of-auth`, `of-web`, `of-mcp`.
 ## Task 6 — Deployment names and the dev skill ⬜
 
 **Files:** `fly.toml`, `web/wrangler.jsonc`, `web/package.json`, `web/package-lock.json`,
-`.github/skills/dark-factory-development/`, `docs/deploy/*`.
+`.github/skills/otto-factory-development/`, `docs/deploy/*`.
 
-- [ ] `fly.toml`: `app = "dark-factory-mcp"` → `"otto-factory-mcp"`, plus the three header
+- [ ] `fly.toml`: `app = "otto-factory-mcp"` → `"otto-factory-mcp"`, plus the three header
       comments naming the app, database, and role.
-- [ ] `web/wrangler.jsonc`: `dark-factory-console-dev` and the production-env
-      `dark-factory-console`. Keep the comment warning about the top-level/env name split —
+- [ ] `web/wrangler.jsonc`: `otto-factory-console-dev` and the production-env
+      `otto-factory-console`. Keep the comment warning about the top-level/env name split —
       it is the reason a deploy once silently created `…-console-dev-production`.
 - [ ] `web/package.json` `name`, and regenerate `package-lock.json`.
-- [ ] `git mv .github/skills/dark-factory-development .github/skills/otto-factory-development`;
+- [ ] `git mv .github/skills/otto-factory-development .github/skills/otto-factory-development`;
       update the `name:` frontmatter, the description, and **all ~25
       `--repo savvagent/dark-factory` flags** in `SKILL.md` and `agent-prompts.md`. These are
       executed commands, not prose — the GitHub redirect is what makes leaving them dangerous
       rather than broken (spec decision 6).
-- [ ] `docs/deploy/{fly,cloudflare}.md`: the `[issue #2](…/dark-factory/issues/2)` links, the
-      `fly deploy -a` command, the Fly role/database names, and the `dark-factory-staging`
+- [ ] `docs/deploy/{fly,cloudflare}.md`: the `[issue #2](…/otto-factory/issues/2)` links, the
+      `fly deploy -a` command, the Fly role/database names, and the `otto-factory-staging`
       example.
 - [ ] `cd web && npm run check && npm run lint && npm test && npm run build`.
 - [ ] `podman build -t otto-factory .` — confirms the Dockerfile's Task 1 binary rename.

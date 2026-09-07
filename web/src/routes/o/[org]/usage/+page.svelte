@@ -12,7 +12,7 @@
    * The usage meter.
    *
    * Free to read, and readable by an org that has run out — the same
-   * `df_billing::Meter::report` the `usage` MCP tool calls, so the figure here
+   * `of_billing::Meter::report` the `usage` MCP tool calls, so the figure here
    * and the figure an agent sees cannot disagree. Nothing on this page charges
    * anything: billing a customer for looking at what they have been billed
    * costs more in trust than it could ever earn.

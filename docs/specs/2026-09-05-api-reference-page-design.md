@@ -7,7 +7,7 @@
 
 None — the issue's description of the current state matches the code: the footer link
 (`web/src/routes/+layout.svelte:166`) points at `/api/openapi.json`, which is `openapi::serve`
-(`crates/df-web/src/openapi.rs`), an `Auth::Public` handler returning `Json<Value>`.
+(`crates/of-web/src/openapi.rs`), an `Auth::Public` handler returning `Json<Value>`.
 
 ## Scope
 
@@ -15,7 +15,7 @@ None — the issue's description of the current state matches the code: the foot
 
 - A new SvelteKit route, `/docs/api`, that fetches `/api/openapi.json` at runtime and renders it:
   grouped by tag, each endpoint showing verb, path, summary, description, path parameters, request
-  and response schema references, and its `x-dark-factory-auth` level.
+  and response schema references, and its `x-otto-factory-auth` level.
 - The footer link in `web/src/routes/+layout.svelte` repointed from `/api/openapi.json` to
   `/docs/api`.
 - `/docs/api` exempted from the layout's routing guard so it renders without a session, without
@@ -38,7 +38,7 @@ None — the issue's description of the current state matches the code: the foot
   the console's only runtime dependency today is `qrcode`, every page here is `noindex` +
   `no-referrer` and mostly behind a login, and the document is small (currently ~30 endpoints) and
   self-generated — a plain Svelte renderer is both smaller and keeps the dependency surface where
-  it is today. This is also a `df-web`/`web` presentational task, not an occasion to add a new
+  it is today. This is also a `of-web`/`web` presentational task, not an occasion to add a new
   supply-chain dependency.
 - No change to `catalog.rs`, `openapi.rs`'s document shape, or any endpoint's summary/description
   text. Rendering only; the content rendered is exactly what `/api/openapi.json` already returns.
@@ -48,7 +48,7 @@ None — the issue's description of the current state matches the code: the foot
 - No new *auth* concept — the routing guard gains one new list (`UNGATED`, a single-entry array)
   purely to exempt one path from session-based gating; it introduces no new authentication or
   authorization state, just a rendering exemption for a page that talks to no session-gated data.
-- No server-side change. `crates/df-web` gains no new route; the existing `/api/openapi.json`
+- No server-side change. `crates/of-web` gains no new route; the existing `/api/openapi.json`
   handler is the only server surface this page talks to. Consistent with constraint 2 (substrate,
   not workflow): this is a console rendering concern, not new server behavior.
 
@@ -111,7 +111,7 @@ Exports:
 - `type OpenApiDocument` — the minimal shape this page reads: `paths` (map of path → map of verb →
   operation object), `components.schemas` (map of name → schema object). Loosely typed (`unknown`
   where the shape isn't relied on) since this mirrors a document generated elsewhere and is not
-  the place to fork `df-web`'s OpenAPI vocabulary into a second source of truth.
+  the place to fork `of-web`'s OpenAPI vocabulary into a second source of truth.
 - `interface EndpointEntry` — `{ method: string; path: string; operationId: string; summary:
 string; description: string; auth: string; parameters: ParamEntry[]; requestSchema?: string;
 responseSchema?: string }`.
@@ -136,7 +136,7 @@ responseSchema?: string }`.
 - Each endpoint renders as a `<article id={operationId}>` (the anchor target for deep-linking)
   showing:
   - A verb badge (`GET`/`POST`/etc.) and the path, monospace.
-  - The `x-dark-factory-auth` level, rendered prominently (a small badge, not buried in prose) —
+  - The `x-otto-factory-auth` level, rendered prominently (a small badge, not buried in prose) —
     the issue calls this out explicitly as "the single thing a reader most needs and the thing raw
     JSON buries."
   - Summary (as a subheading) and description (as body text).
@@ -216,7 +216,7 @@ one of them — so the array is split rather than overloaded:
 - **Unit test — `web/src/lib/openapi.test.ts` (new, vitest):** the concrete answer to the DoD's "a
   test that the page renders every endpoint the catalog declares, so a route added to `catalog.rs`
   cannot be silently missing from the reference." A vitest test in this repo cannot literally
-  invoke `crates/df-web/src/catalog.rs` — the two live in different languages and there is no
+  invoke `crates/of-web/src/catalog.rs` — the two live in different languages and there is no
   existing cross-language fixture pipeline (`types.ts` is hand-transcribed from the document, not
   generated). Instead, the guarantee is structural: `groupByTag` and the page built on it are
   data-driven with no allowlist or per-path branch, so a test against a synthetic `OpenApiDocument`
@@ -225,7 +225,7 @@ one of them — so the array is split rather than overloaded:
   - The number of `EndpointEntry` values returned equals the number of path+verb pairs in the
     fixture (nothing dropped, nothing deduplicated across verbs).
   - Every `(method, path)` pair in the fixture appears exactly once in the flattened output.
-  - Each entry's `auth` matches the fixture's `x-dark-factory-auth` value (the field the issue
+  - Each entry's `auth` matches the fixture's `x-otto-factory-auth` value (the field the issue
     calls out as most load-bearing).
   - An unrecognized/novel tag string still produces its own group (proves no hardcoded tag list).
 
@@ -248,7 +248,7 @@ one of them — so the array is split rather than overloaded:
     DOM element exists per fixture endpoint's `operationId` (`document.getElementById(id)`) —
     i.e., the anchor targets deep-linking depends on are actually present, not just present in the
     intermediate data structure.
-  - Asserts each rendered endpoint element's text content includes its `x-dark-factory-auth` value,
+  - Asserts each rendered endpoint element's text content includes its `x-otto-factory-auth` value,
     since that is the field the issue calls out as the one raw JSON buries and the one this page
     exists to surface.
   - This file needs the `jsdom` test environment; add `// @vitest-environment jsdom` at its top

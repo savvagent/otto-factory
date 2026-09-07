@@ -415,7 +415,7 @@
                             <span class="sr-only">{name} trigger label</span>
                             <input
                               class="df-input df-mono"
-                              placeholder="dark-factory"
+                              placeholder="otto-factory"
                               bind:value={labelDraft[key]}
                             />
                           </label>

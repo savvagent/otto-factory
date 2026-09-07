@@ -102,7 +102,7 @@
   }
 </script>
 
-<svelte:head><title>Settings · dark-factory</title></svelte:head>
+<svelte:head><title>Settings · otto-factory</title></svelte:head>
 
 <div class="space-y-5">
   <div>

@@ -26,23 +26,23 @@ jobs:
       # Same image, user, db name and port-mapping rationale as compose.yaml:
       # `cargo test` runs `#[sqlx::test]` against a real Postgres, no mocks.
       # The service account is a superuser, matching local `podman compose`,
-      # which is what lets 0007_rls.sql's `CREATE ROLE df_app` succeed and
+      # which is what lets 0007_rls.sql's `CREATE ROLE of_app` succeed and
       # exercise the explicit `SET LOCAL ROLE` guard the isolation tests pin.
       postgres:
         image: postgres:16
         env:
           POSTGRES_USER: factory
           POSTGRES_PASSWORD: factory
-          POSTGRES_DB: dark_factory
+          POSTGRES_DB: otto_factory
         ports:
           - 15433:5432
         options: >-
-          --health-cmd "pg_isready -U factory -d dark_factory"
+          --health-cmd "pg_isready -U factory -d otto_factory"
           --health-interval 5s
           --health-timeout 3s
           --health-retries 10
     env:
-      DATABASE_URL: postgres://factory:factory@localhost:15433/dark_factory
+      DATABASE_URL: postgres://factory:factory@localhost:15433/otto_factory
     steps:
       - uses: actions/checkout@v4
 
@@ -53,8 +53,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Pre-create df_app role
-        # 0007_rls.sql's CREATE ROLE df_app is guarded by a check-then-create
+      - name: Pre-create of_app role
+        # 0007_rls.sql's CREATE ROLE of_app is guarded by a check-then-create
         # that is idempotent across sequential migration runs but not atomic:
         # `#[sqlx::test]` migrates one throwaway database per test, many in
         # parallel, against this one cluster-scoped role. On a brand-new
@@ -64,8 +64,8 @@ jobs:
         # Creating it once, before any test runs, removes the race instead of
         # papering over it with --test-threads=1.
         run: |
-          psql "postgres://factory:factory@localhost:15433/dark_factory" \
-            -c "CREATE ROLE df_app NOLOGIN;"
+          psql "postgres://factory:factory@localhost:15433/otto_factory" \
+            -c "CREATE ROLE of_app NOLOGIN;"
 
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
@@ -78,7 +78,7 @@ jobs:
 
   # Mirrors web/README's three commands: check (svelte-check + tsc over
   # worker/), lint (prettier --check), test (vitest). No build here — the
-  # build step has no gate of its own beyond these three, and df-server's own
+  # build step has no gate of its own beyond these three, and of-server's own
   # startup requires `web/` to be built first, not CI.
   web:
     runs-on: ubuntu-latest

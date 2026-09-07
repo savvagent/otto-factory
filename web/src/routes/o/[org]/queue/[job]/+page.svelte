@@ -13,7 +13,7 @@
   /**
    * One job.
    *
-   * `metadata` is rendered as raw JSON on purpose. dark-factory never interprets
+   * `metadata` is rendered as raw JSON on purpose. otto-factory never interprets
    * it — it is where a customer's own skill keeps whatever its methodology needs
    * — so any attempt to lay it out prettily would be the console inventing a
    * schema the server promised not to have. Showing it verbatim is the honest
@@ -175,7 +175,7 @@
     {#if metadata}
       <Card
         title="Metadata"
-        description="Opaque to dark-factory — whatever the queueing skill put here."
+        description="Opaque to otto-factory — whatever the queueing skill put here."
       >
         <pre class="df-mono overflow-x-auto whitespace-pre text-muted">{metadata}</pre>
       </Card>

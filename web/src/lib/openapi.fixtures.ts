@@ -28,7 +28,7 @@ export const fixtureDoc: OpenApiDocument = {
             content: { 'application/json': { schema: { $ref: '#/components/schemas/Repo' } } }
           }
         },
-        'x-dark-factory-auth': 'org admin'
+        'x-otto-factory-auth': 'org admin'
       }
     },
     '/api/orgs/{org}/webhooks': {
@@ -38,7 +38,7 @@ export const fixtureDoc: OpenApiDocument = {
         description: 'From a tracker.',
         tags: ['a-brand-new-tag-nobody-has-seen'],
         responses: { '200': {} },
-        'x-dark-factory-auth': 'public'
+        'x-otto-factory-auth': 'public'
       }
     },
     '/api/orgs/{org}/teams/{team}': {
@@ -62,7 +62,7 @@ export const fixtureDoc: OpenApiDocument = {
             content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } }
           }
         },
-        'x-dark-factory-auth': 'org admin'
+        'x-otto-factory-auth': 'org admin'
       }
     }
   },

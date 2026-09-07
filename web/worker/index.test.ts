@@ -4,7 +4,7 @@ import { belongsToOrigin } from './index';
 
 /**
  * `belongsToOrigin` is a second copy of `API_PREFIXES` in
- * `crates/df-server/src/lib.rs`, in a different language, that nothing forces to
+ * `crates/of-server/src/lib.rs`, in a different language, that nothing forces to
  * agree with the first. The Rust side has
  * `api_prefixes_do_not_match_by_string_prefix_alone` asserting exactly these
  * cases; this is its other half.

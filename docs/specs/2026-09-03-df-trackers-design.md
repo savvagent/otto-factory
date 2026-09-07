@@ -1,11 +1,11 @@
-# df-trackers design — Milestone 2: GitHub App + JIRA two-way sync
+# of-trackers design — Milestone 2: GitHub App + JIRA two-way sync
 
 > **Status:** DRAFT — schema foundation, GitHub App/JIRA clients, webhook ingest
 > (including the org-resolution design in §5a), the two-way sync engine (§6), and the
 > `link_ticket`/`sync_ticket` MCP tools (§7) are implemented; the console UI for
 > connections/bindings remains.
 > **Implements:** the "Tracker integration (two-way)" and "Trackers — `link_ticket`,
-> `sync_ticket`" sections of `docs/specs/2026-09-01-dark-factory-design.md`.
+> `sync_ticket`" sections of `docs/specs/2026-09-01-otto-factory-design.md`.
 > **Depends on:** Milestone 1 (auth, queue, console skeleton) — merged.
 
 ## Goal & Success Criteria
@@ -20,29 +20,29 @@ missing column or a second crypto implementation. Success for Task 1 specificall
   and `Db::verify_tenant_isolation` vouches for both at startup with no code change.
 - A cross-org negative test exists for each new table and fails before the RLS policy is
   added (proving it isn't a false positive).
-- `df-core::trackers` CRUD compiles and is exercised by `#[sqlx::test]` integration tests
+- `of-core::trackers` CRUD compiles and is exercised by `#[sqlx::test]` integration tests
   with no mocks, matching `repos.rs`'s existing test shape.
-- `Cipher`/`Sealed` live in `df-core::crypto`; `df-auth` no longer defines them; every
-  existing `df-auth` test that exercised them (moved, not deleted) still passes from its
+- `Cipher`/`Sealed` live in `of-core::crypto`; `of-auth` no longer defines them; every
+  existing `of-auth` test that exercised them (moved, not deleted) still passes from its
   new location.
 - `cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`, and
   `cargo fmt --all --check` are green.
 
 ## Premise corrections
 
-- `docs/plans/2026-09-01-milestone-1.md` and `CLAUDE.md` both describe `df-trackers` as a
+- `docs/plans/2026-09-01-milestone-1.md` and `CLAUDE.md` both describe `of-trackers` as a
   one-line `lib.rs` stub. That is still accurate as of this spec: no tracker tables, no
   crypto, no HTTP client code exist yet. This spec starts from zero, not from a partial
   implementation.
-- The design doc's crate table describes `df-trackers` as owning "webhook ingest". This
+- The design doc's crate table describes `of-trackers` as owning "webhook ingest". This
   crate has no HTTP framework dependency (no `axum`) and, per `CLAUDE.md`, "every SQL
-  statement lives in `df-core`" and no crate outside `df-web`/`df-mcp`/`df-server` accepts
+  statement lives in `of-core`" and no crate outside `of-web`/`of-mcp`/`of-server` accepts
   inbound HTTP directly. This spec resolves that: the `/webhooks/{provider}` **route**
-  lives in `df-web` (the only crate that mounts arbitrary unauthenticated HTTP surfaces
-  today, alongside OAuth's HTML endpoints), and it calls into `df-trackers` functions for
-  signature verification and event parsing. `df-trackers` owns everything after the HTTP
+  lives in `of-web` (the only crate that mounts arbitrary unauthenticated HTTP surfaces
+  today, alongside OAuth's HTML endpoints), and it calls into `of-trackers` functions for
+  signature verification and event parsing. `of-trackers` owns everything after the HTTP
   layer: verification, parsing, GitHub App / JIRA API clients, and the sync engine that
-  reads and writes jobs through `df-core`.
+  reads and writes jobs through `of-core`.
 
 ## Scope
 
@@ -53,7 +53,7 @@ missing column or a second crypto implementation. Success for Task 1 specificall
 - A JIRA OAuth 2 (3LO) client: authorization code exchange, refresh-token rotation, issue
   API calls.
 - Webhook signature verification (GitHub HMAC-SHA256, JIRA shared-secret) and event
-  parsing, called from a new `/webhooks/{provider}` route in `df-web`.
+  parsing, called from a new `/webhooks/{provider}` route in `of-web`.
 - Inbound sync: a labelled issue creates/updates a job; closing the ticket
   cancels/completes the job.
 - Outbound sync: `claim_jobs`/`complete_job`/`fail_job` write back a comment and a state
@@ -69,19 +69,19 @@ missing column or a second crypto implementation. Success for Task 1 specificall
 spec draft right now):**
 - The `tracker_connections` / `tracker_bindings` schema, migration, RLS registration,
   cross-org negative tests.
-- `df-core::trackers` module: typed rows, CRUD functions taking `OrgId`/`RepoId` through
-  `Tx`, exactly like `df-core::repos`.
-- Promoting `Cipher`/`Sealed` (AES-256-GCM secret sealing) from `df-auth::crypto` to
-  `df-core::crypto` — the primitive `tracker_connections.encrypted_credentials` needs —
-  and deleting the now-dead copy from `df-auth` (see §4).
+- `of-core::trackers` module: typed rows, CRUD functions taking `OrgId`/`RepoId` through
+  `Tx`, exactly like `of-core::repos`.
+- Promoting `Cipher`/`Sealed` (AES-256-GCM secret sealing) from `of-auth::crypto` to
+  `of-core::crypto` — the primitive `tracker_connections.encrypted_credentials` needs —
+  and deleting the now-dead copy from `of-auth` (see §4).
 - No GitHub App / JIRA HTTP clients, no webhook route, no MCP tools, and no console UI
-  yet — those are later tasks in the Milestone 2 plan (docs/plans/2026-09-03-df-trackers.md).
+  yet — those are later tasks in the Milestone 2 plan (docs/plans/2026-09-03-of-trackers.md).
 
 **Out (all of Milestone 2, all tasks):**
 - Any tracker other than GitHub Issues and JIRA (e.g. Linear, Azure DevOps). Not asked
   for; the design doc names only these two.
 - A generic "webhook relay" product feature usable for anything other than the two
-  named trackers. Substrate-not-workflow: dark-factory ships an opinion about exactly the
+  named trackers. Substrate-not-workflow: otto-factory ships an opinion about exactly the
   two trackers it names, not a generic webhook receiver customers could build in their
   own skill. A generic inbound-webhook-to-job pipeline for arbitrary providers belongs in
   a customer's own skill, not the server.
@@ -93,20 +93,20 @@ spec draft right now):**
 
 ## Assumptions
 
-- **The webhook route belongs to `df-web`, not a new axum surface in `df-trackers`.**
-  Rationale above (Premise corrections). `df-trackers` gains no `axum`/`tower` dependency.
-- **The AES-256-GCM sealing primitive (`Cipher`/`Sealed`) moves from `df-auth::crypto` to
-  `df-core::crypto`, rather than being duplicated into `df-trackers`.** Verified against
-  the code: `df-auth::crypto::Cipher` and `Sealed` exist today but have **zero production
-  callers inside `df-auth`** — they are a leftover from the TOTP era (removed by the
-  `passkeys/webauthn` PR) and are exercised only by their own unit tests. `df-auth`
-  already depends on `df-core`, so promoting this primitive to `df-core::crypto` (adding
-  two generic `Error::Crypto` / `Error::Config` variants there) lets `df-trackers` use it
-  directly with no new inter-domain dependency, and lets `df-auth`'s copy be deleted
+- **The webhook route belongs to `of-web`, not a new axum surface in `of-trackers`.**
+  Rationale above (Premise corrections). `of-trackers` gains no `axum`/`tower` dependency.
+- **The AES-256-GCM sealing primitive (`Cipher`/`Sealed`) moves from `of-auth::crypto` to
+  `of-core::crypto`, rather than being duplicated into `of-trackers`.** Verified against
+  the code: `of-auth::crypto::Cipher` and `Sealed` exist today but have **zero production
+  callers inside `of-auth`** — they are a leftover from the TOTP era (removed by the
+  `passkeys/webauthn` PR) and are exercised only by their own unit tests. `of-auth`
+  already depends on `of-core`, so promoting this primitive to `of-core::crypto` (adding
+  two generic `Error::Crypto` / `Error::Config` variants there) lets `of-trackers` use it
+  directly with no new inter-domain dependency, and lets `of-auth`'s copy be deleted
   rather than kept as dead code. This corrects the original draft's plan to duplicate the
-  primitive into `df-trackers::crypto` — a second implementation of key parsing,
+  primitive into `of-trackers::crypto` — a second implementation of key parsing,
   nonce handling, and ciphertext format was the wrong call once a second real caller
-  existed. `Cipher`/`Sealed` move; `df-auth::crypto`'s token generation, hashing, and
+  existed. `Cipher`/`Sealed` move; `of-auth::crypto`'s token generation, hashing, and
   prefixes (`generate`, `hash`, `verify`, `prefix::*`) are genuinely auth-domain and stay
   put.
 - **`tracker_connections` is per-org; `tracker_bindings` is per-repo.** Matches the
@@ -123,8 +123,8 @@ spec draft right now):**
   `repos.tracker_binding` column's spirit (present since Milestone 1) without removing
   it — Task 1 does **not** touch the existing `repos.tracker_binding` column. Verified
   against the schema: it is `jsonb NOT NULL DEFAULT '{}'::jsonb`
-  (`crates/df-core/migrations/0002_repos.sql`), typed as `serde_json::Value` on `Repo`
-  (`crates/df-core/src/repos.rs`) — a free-form JSON blob, not plain text as an earlier
+  (`crates/of-core/migrations/0002_repos.sql`), typed as `serde_json::Value` on `Repo`
+  (`crates/of-core/src/repos.rs`) — a free-form JSON blob, not plain text as an earlier
   draft of this spec said. That column stays as the display/hint field on the repo row;
   the new `tracker_bindings` table is the structured, connection-linked source of truth
   the sync engine reads. Reconciling/removing the older JSON column is out of scope for
@@ -132,7 +132,7 @@ spec draft right now):**
 - **GitHub App credentials are deployment config, not a per-org secret — `tracker_connections`
   does not store the GitHub App private key or its webhook secret.** Verified against the
   design doc's own config section: "OAuth signing key, Stripe key, GitHub App private key
-  (…) come from the environment." One GitHub App is registered once by the dark-factory
+  (…) come from the environment." One GitHub App is registered once by the otto-factory
   operator; an org's `tracker_connections` row for `github` records only the
   **installation id** it was granted (`external_id`) — the thing that varies per org.
   Minting an installation access token needs the single global private key
@@ -162,7 +162,7 @@ spec draft right now):**
 
 ## §1 Schema
 
-New migration `crates/df-core/migrations/0011_trackers.sql`, additive only, no edits to
+New migration `crates/of-core/migrations/0011_trackers.sql`, additive only, no edits to
 any applied migration (Non-Negotiable Rule 6 / Load-Bearing Invariant 12).
 
 ```sql
@@ -175,7 +175,7 @@ CREATE TABLE tracker_connections (
     -- GitHub: the App installation id (the private key that mints tokens from
     -- it is deployment config, DF_GITHUB_APP_PRIVATE_KEY, never stored here).
     -- JIRA: the cloud site id (from the 3LO accessible-resources response).
-    -- Opaque to df-core; df-trackers interprets it.
+    -- Opaque to of-core; of-trackers interprets it.
     external_id         TEXT NOT NULL,
     -- AES-256-GCM ciphertext, canonically base64(nonce || ciphertext) — see §4
     -- for the encode/decode contract between this single column and
@@ -218,50 +218,50 @@ directly since it already ran; instead `0011_trackers.sql` creates its own
 `0007_rls.sql`'s shape exactly), and `Db::verify_tenant_isolation`'s discovery-by-naming-
 convention picks them up without code changes elsewhere.
 
-## §2 `df-core::trackers`
+## §2 `of-core::trackers`
 
-New module `crates/df-core/src/trackers.rs`, same shape as `repos.rs`:
+New module `crates/of-core/src/trackers.rs`, same shape as `repos.rs`:
 
 - `Provider` enum (`Github`, `Jira`) — `sqlx::Type` mapped to `tracker_provider`.
 - `TrackerConnection` struct (id, org_id, provider, external_id, encrypted fields as
-  opaque `String`s — `df-core` never decrypts; that is `df-trackers`'s job) +
+  opaque `String`s — `of-core` never decrypts; that is `of-trackers`'s job) +
   `FromRow`/`Serialize`/`JsonSchema`.
 - `TrackerBinding` struct similarly, plus a `resolve_binding(tx, repo_id, provider)` read
   used later by the sync engine.
 - CRUD: `upsert_connection`, `get_connection`, `delete_connection`, `upsert_binding`,
   `get_binding`, `delete_binding` — every function takes `&mut Tx` and an explicit
   `org_id` argument on every statement (Guard 1), consistent with `repos.rs`.
-- `df-core::lib.rs` gains `pub mod trackers;`.
+- `of-core::lib.rs` gains `pub mod trackers;`.
 
 ## §3 Cross-org negative tests
 
-`crates/df-core/tests/isolation.rs` gains `tracker_connections` and `tracker_bindings` to
+`crates/of-core/tests/isolation.rs` gains `tracker_connections` and `tracker_bindings` to
 its existing per-table cross-org `rls_scopes_*` coverage, following the same pattern as
 the `repos` table's existing case: two orgs, a connection/binding created in org A,
 unscoped `SELECT`/`UPDATE`/`DELETE` issued with `SET LOCAL app.org_id` pointed at org B
 under `SET LOCAL ROLE df_app`, asserting zero rows are visible or mutable.
 
-## §4 `df-core::crypto` (promoted from `df-auth::crypto`)
+## §4 `of-core::crypto` (promoted from `of-auth::crypto`)
 
-`df-auth::crypto::Cipher`/`Sealed` (AES-256-GCM over `DF_ENCRYPTION_KEY`, already a
+`of-auth::crypto::Cipher`/`Sealed` (AES-256-GCM over `DF_ENCRYPTION_KEY`, already a
 required env var per `CLAUDE.md` / `Config::from_env`) move verbatim to
-`crates/df-core/src/crypto.rs`. `df-core::Error` gains two generic variants,
+`crates/of-core/src/crypto.rs`. `of-core::Error` gains two generic variants,
 `Config(String)` (bad/missing key material) and `Crypto(String)` (seal/open failure —
-tampered ciphertext or a rotated key), matching the wording `df-auth::crypto`'s tests
-already assert. `df-auth::crypto.rs` deletes `Cipher`/`Sealed` and their tests (moved,
+tampered ciphertext or a rotated key), matching the wording `of-auth::crypto`'s tests
+already assert. `of-auth::crypto.rs` deletes `Cipher`/`Sealed` and their tests (moved,
 not duplicated) and keeps everything genuinely auth-domain: `generate`, `hash`, `verify`,
-`prefix::*`. `df-trackers` depends on `df-core` already (see Cargo.toml) and calls
-`df_core::crypto::Cipher` directly — no new inter-domain dependency, no duplicate
+`prefix::*`. `of-trackers` depends on `of-core` already (see Cargo.toml) and calls
+`of_core::crypto::Cipher` directly — no new inter-domain dependency, no duplicate
 implementation.
 
 **Canonical storage encoding (resolves a §1/§4 inconsistency from the first draft).**
 `Cipher::seal` returns a `Sealed { ciphertext: Vec<u8>, nonce: Vec<u8> }` — two values,
 by design, so a caller free to use two database columns can. The `TEXT` columns in §1
-are single-column, so `df-core::trackers`'s CRUD functions (not `Cipher` itself) own the
+are single-column, so `of-core::trackers`'s CRUD functions (not `Cipher` itself) own the
 encoding contract: `base64(nonce || ciphertext)` on write, split at the fixed 12-byte
 nonce prefix and re-assemble into `Sealed` on read. This encode/decode pair lives as two
-small private helpers in `crates/df-core/src/trackers.rs` (`encode_sealed`/
-`decode_sealed`), not in `df-core::crypto` itself — `Cipher`/`Sealed` stay storage-agnostic
+small private helpers in `crates/of-core/src/trackers.rs` (`encode_sealed`/
+`decode_sealed`), not in `of-core::crypto` itself — `Cipher`/`Sealed` stay storage-agnostic
 so a future caller that does have two columns available is not forced through this
 concatenation.
 
@@ -270,7 +270,7 @@ concatenation.
 Task 3's checklist in the plan says "resolve org via installation id / site id →
 `tracker_connections`" as if this were an ordinary tenant-scoped read. It is not, and the
 gap is worth naming precisely: `tracker_connections` is registered under `FORCE ROW LEVEL
-SECURITY` with an `org_id = current_org()` policy (§1), and every `df-core::trackers`
+SECURITY` with an `org_id = current_org()` policy (§1), and every `of-core::trackers`
 accessor takes `&mut Tx<'_>` — which cannot be constructed without an `OrgId` already
 known. A webhook delivers only a provider-native identifier (GitHub's installation id,
 JIRA's site id); the org is exactly the thing being looked up. There is no `OrgId` to pin
@@ -280,7 +280,7 @@ is unset (which is every request before the org is resolved).
 
 This is the same bootstrap problem `CLAUDE.md`'s auth tables solve: "authentication has to
 resolve a principal BEFORE an org is known, so pinning them to `current_org()` would make
-login impossible" (`0007_rls.sql`'s comment on `access_tokens` et al.). `df_auth::tokens::introspect`
+login impossible" (`0007_rls.sql`'s comment on `access_tokens` et al.). `of_auth::tokens::introspect`
 resolves this by never enabling RLS on `access_tokens` at all, and querying `db.pool()`
 directly — the table is simply outside the tenant_tables array, so no policy exists to
 consult regardless of role or deployment shape.
@@ -290,7 +290,7 @@ consult regardless of role or deployment shape.
 `access_tokens` exactly) would also expose `encrypted_credentials` — the sealed JIRA
 refresh token — to any unscoped query, which is a strictly larger blast radius than the
 bootstrap problem requires. Instead, a new migration
-(`crates/df-core/migrations/0012_tracker_connection_index.sql`) adds:
+(`crates/of-core/migrations/0012_tracker_connection_index.sql`) adds:
 
 ```sql
 CREATE TABLE tracker_connection_index (
@@ -305,7 +305,7 @@ CREATE TABLE tracker_connection_index (
 No RLS is enabled on this table — deliberately, by the same reasoning as `access_tokens`,
 and it is never added to `0007_rls.sql`'s or `0011_trackers.sql`'s `tenant_tables` arrays.
 It holds nothing secret: a provider tag, the provider's own (non-secret) installation/site
-id, and the two ids needed to say which org and which connection row own it. `df-core`
+id, and the two ids needed to say which org and which connection row own it. `of-core`
 maintains it transactionally alongside the real row, inside the same `Tx` that writes
 `tracker_connections`, so the two can never drift:
 
@@ -318,7 +318,7 @@ A new function, deliberately **not** taking a `Tx` (there is no org to pin one t
 ```rust
 /// Resolve which org owns a provider connection, from the provider's own
 /// identifier alone. This is the one place a tracker lookup runs before an
-/// `OrgId` is known — analogous to `df_auth::tokens::introspect` resolving a
+/// `OrgId` is known — analogous to `of_auth::tokens::introspect` resolving a
 /// principal before a session exists. It reads only `tracker_connection_index`
 /// (no RLS, no secret columns) and returns an `OrgId` for the caller to build
 /// a normal `Tx` from for every subsequent step. Never add a second unscoped
@@ -331,7 +331,7 @@ pub async fn resolve_connection_org(
 ) -> Result<Option<OrgId>>
 ```
 
-The webhook route in `df-web` calls this once per request to learn the org, then opens a
+The webhook route in `of-web` calls this once per request to learn the org, then opens a
 normal `Tx` for that `OrgId` and uses the existing `Tx`-scoped accessors
 (`get_connection`, `resolve_binding`, …) for everything else — the unscoped path is a
 one-hop bootstrap, never a substitute for the tenant-isolated one. This keeps guard 1 and
@@ -351,33 +351,33 @@ reader does not mistake the missing RLS test for an oversight.
 
 ## §6 Two-way sync engine (Task 4)
 
-This section is the Task 4 design: the concrete rules "an issue labelled for dark-factory
+This section is the Task 4 design: the concrete rules "an issue labelled for otto-factory
 creates or updates a job" and "job transitions write back" resolve to, and the concrete
 loop-safety mechanism. Read alongside §5a — Task 4 is the first consumer of
 `WebhookEvent` (parsed there) and the first place a live `Tx` exists around a tracker
 client call (closing Task 2's deferred JIRA-refresh-token write-back and GitHub
 `installation_id` bridging, per the plan's Task 2 "Remaining" note).
 
-**Where this lives.** `crates/df-trackers/src/sync.rs` holds the pure inbound-mapping
+**Where this lives.** `crates/of-trackers/src/sync.rs` holds the pure inbound-mapping
 logic (`WebhookEvent` → what job operation, if any) and the pure outbound-mapping logic
 (a job transition → what comment text and target ticket state) — no SQL, no HTTP, per
-`df-trackers`'s existing shape. The `df-web` webhook handler calls the inbound half inside
+`of-trackers`'s existing shape. The `of-web` webhook handler calls the inbound half inside
 its existing per-request `Tx` (§5a already opens one after `resolve_connection_org`). The
-outbound half is called from `df-mcp`'s `claim_jobs`/`complete_job`/`fail_job` handlers,
+outbound half is called from `of-mcp`'s `claim_jobs`/`complete_job`/`fail_job` handlers,
 but — see "Outbound" below — **after** that `Tx` commits, not inside it: an external HTTP
 call has no place holding a Postgres transaction open, and a tracker outage must not be
 able to block an agent from claiming or finishing work it already owns in this server's
 own queue.
 
 **Trigger label is per-binding config, not a hardcoded string.** `tracker_bindings` gains
-`trigger_label TEXT NOT NULL DEFAULT 'dark-factory'` (additive column, sane default —
+`trigger_label TEXT NOT NULL DEFAULT 'otto-factory'` (additive column, sane default —
 every binding created before this migration behaves exactly as if it had been set
 explicitly). The *mechanism* — "a label on the ticket is what makes the sync engine
 notice it" — is the substrate decision this design makes; the specific string is
 admin-configured per repo binding, so no org is forced to spell their trigger convention
 the same way another org does, and a customer who wants zero label-driven creation can
 set it to a value they will never apply. This is the substrate/workflow line drawn
-correctly: dark-factory ships the "labels gate inbound job creation" mechanism, not an
+correctly: otto-factory ships the "labels gate inbound job creation" mechanism, not an
 opinion about what any specific label should be named.
 
 **Inbound — job creation and update.** On a GitHub `issues` event with `action` in
@@ -385,17 +385,17 @@ opinion about what any specific label should be named.
 `event.issue.labels` contains the resolved binding's `trigger_label`
 (case-insensitive exact match):
 
-1. Resolve the repo binding via `df_core::trackers::find_binding_by_external_ref(tx,
+1. Resolve the repo binding via `of_core::trackers::find_binding_by_external_ref(tx,
    event.provider, &event.binding_external_ref)` (already exists, Task 3's
    loud-on-ambiguity version — this is a `tracker_bindings` lookup by the *webhook's*
    external reference, distinct from `resolve_binding`, which looks up by `repo_id`
-   for the outbound direction; both already exist in `df-core::trackers` and neither is
+   for the outbound direction; both already exist in `of-core::trackers` and neither is
    duplicated by this task). No binding, or a binding with `connection_id IS NULL`
    (declared but not yet activated, per the existing Assumptions section), or a binding
    whose `trigger_label` the event's labels do not contain → the event is acknowledged
    (still `200`, matching the existing "verified but not actionable" shape) and silently
    dropped; this is not an error, since an org may label issues in a repo it has not
-   finished configuring, or with a label that means nothing to dark-factory.
+   finished configuring, or with a label that means nothing to otto-factory.
 2. Compute the job-lookup `ticket_ref`: for JIRA, `event.issue.reference` directly
    (`"PROJ-123"` — already matches the format `add_job`'s doc comment names). **For
    GitHub, `format!("{}#{}", event.binding_external_ref, event.issue.reference)`**
@@ -409,13 +409,13 @@ opinion about what any specific label should be named.
 3. **New accessor**, scoped correctly (existing `get_job_by_ticket` takes only
    `ticket_ref`, org-wide, with no `repo_id`/`tracker` filter — safe for its current
    caller but not for this one, since ticket refs are never guaranteed unique across
-   repos in one org): `df_core::jobs::get_job_by_ticket_for_repo(tx, repo_id, tracker,
+   repos in one org): `of_core::jobs::get_job_by_ticket_for_repo(tx, repo_id, tracker,
    ticket_ref) -> Result<Option<Job>>`, `WHERE org_id = $1 AND repo_id = $2 AND tracker =
    $3 AND ticket_ref = $4 ORDER BY created_at DESC LIMIT 1` — same "newest wins on a
    duplicate" tolerance the existing function already documents, just properly scoped.
 4. **No existing job** → `add_job`-equivalent creation: `title = event.issue.title`,
    `description = event.issue.body`, `ticket_ref` = the value from step 2, `tracker =
-   event.provider`, `metadata = {}`. New function `df_core::jobs::create_from_ticket`
+   event.provider`, `metadata = {}`. New function `of_core::jobs::create_from_ticket`
    (thin wrapper around the existing insert path `NewJob` already uses — no new SQL
    shape, just a constructor that also sets `tracker`/`remote_revision`, which `add_job`'s
    MCP-facing `NewJob` intentionally leaves unset today).
@@ -440,9 +440,9 @@ opinion about what any specific label should be named.
      exactly the kind of guess `CLAUDE.md` prohibits.
    - **A resolved job whose current status is `Pending`** (nobody ever claimed it before
      the ticket closed) cannot go through the existing `complete_job`/`fail_job` MCP-tool
-     functions — both require `Status::InProgress` (`crates/df-core/src/jobs.rs`'s
+     functions — both require `Status::InProgress` (`crates/of-core/src/jobs.rs`'s
      `finalize`), a precondition this design does not relax for those two public
-     functions. **New `df-core` function `jobs::close_from_ticket(tx, id, to: Status,
+     functions. **New `of-core` function `jobs::close_from_ticket(tx, id, to: Status,
      result: Option<&str>, error: Option<&str>) -> Result<Job>`** allows the transition
      from `Pending` *or* `InProgress` to `Completed`/`Failed`, used only by this sync
      path — the `claim_jobs`/`complete_job`/`fail_job` MCP tools keep their existing
@@ -452,7 +452,7 @@ opinion about what any specific label should be named.
      over a state the queue had not yet observed any agent activity on.
    - **`IssueSnapshot` gains a new `state_reason: Option<String>` field** (GitHub's
      `issue.state_reason`; unused for JIRA, which uses `state` directly per above) —
-     additive to a type introduced in Task 3 that has exactly one caller (`df-web`'s
+     additive to a type introduced in Task 3 that has exactly one caller (`of-web`'s
      webhook route) and zero external consumers, so this is a same-task extension, not a
      breaking change to a shipped interface.
 7. Every apply in steps 4–6 also writes `jobs.remote_revision` to the normalized form of
@@ -463,11 +463,11 @@ opinion about what any specific label should be named.
 **`issue_comment` events are not applied by this task.** They arrive (Task 3 already
 parses them) and are acknowledged, but the sync engine's steps above only fire on
 `WebhookEventKind::Issue`. Comment-triggered job actions are not asked for by the design
-doc's own wording ("An issue labelled for dark-factory creates or updates a job; closing
+doc's own wording ("An issue labelled for otto-factory creates or updates a job; closing
 the ticket cancels or completes the job") and adding one would be speculative scope.
 
 **Loop-safety: `jobs.remote_revision`.** A new nullable `TEXT` column on `jobs`
-(migration `crates/df-core/migrations/0013_jobs_remote_revision.sql`, additive — a new
+(migration `crates/of-core/migrations/0013_jobs_remote_revision.sql`, additive — a new
 optional field on an already-public type per Non-Negotiable Rule 6, no version bump, no
 breaking-change writeup needed; no new RLS policy needed either, since `jobs` is already a
 tenant table under an existing policy that governs the whole row, not per-column). Holds
@@ -480,7 +480,7 @@ about a provider's exact offset/precision formatting). A value that fails to par
 treated the same as "no revision" below — never propagated as an opaque raw string that
 `<=` would compare byte-wise against a normalized one. **`IssueSnapshot` gains
 `updated_at: Option<String>`** (raw provider string, parsed at the point of comparison/
-storage, not at parse time — keeping `df-trackers::webhook` provider-format-agnostic per
+storage, not at parse time — keeping `of-trackers::webhook` provider-format-agnostic per
 its existing design) for this, populated by both `parse_github` and `parse_jira`.
 
 - **Inbound guard:** before applying steps 4–6, parse both the job's stored
@@ -503,7 +503,7 @@ its existing design) for this, populated by both `parse_github` and `parse_jira`
 `tracker` and `ticket_ref` set attempt a tracker write; a job with neither (the common
 case — most jobs have no ticket) is a no-op, checked first, before any tracker client is
 constructed. Resolving which connection to use uses the existing
-`df_core::trackers::resolve_binding(tx, repo_id, provider)` (already shipped in §2 — no
+`of_core::trackers::resolve_binding(tx, repo_id, provider)` (already shipped in §2 — no
 new accessor needed here, correcting an earlier draft of this section that proposed a
 redundant `binding_for_repo`), and a binding with `connection_id IS NULL` makes the
 write-back a no-op (declared, not active) rather than an error — a job can exist and be
@@ -512,7 +512,7 @@ tolerance.
 
 **Sequencing, and why it changed from an earlier draft of this section:** `claim_jobs`/
 `complete_job`/`fail_job` keep their existing shape exactly — `self.tx(...)` → `charge`
-→ the `df-core::jobs` status transition → `commit()` — completely unchanged. **After**
+→ the `of-core::jobs` status transition → `commit()` — completely unchanged. **After**
 that commit succeeds and the MCP response value is in hand, the tool handler performs the
 tracker write-back as a *separate* step: resolve the binding and connection by opening a
 second, short `Tx` (read-only for this part), release it, make the tracker HTTP call
@@ -537,7 +537,7 @@ allowed to fail independently.
   (`args.agent.map(|a| format!("Claimed by {a}.")).unwrap_or_else(|| "Claimed.".into())`)
   and, JIRA only, attempt a transition to a status named `"In Progress"`
   (case-insensitive exact match against the transitions the JIRA REST API reports as
-  reachable from the issue's current status — `crates/df-trackers/src/jira.rs` gains a
+  reachable from the issue's current status — `crates/of-trackers/src/jira.rs` gains a
   `list_transitions`/`transition_issue` pair for this, since today's client has neither).
   GitHub has no built-in "in progress" issue state, so GitHub is comment-only here.
   If no matching JIRA transition is reachable, skip the transition and post the comment
@@ -567,7 +567,7 @@ allowed to fail independently.
 **JIRA credential write-back (closes Task 2's deferred item).** Before constructing a
 `JiraClient` call, if the stored refresh token has rotated (the client's token-refresh
 path returns a new sealed pair per PR #20's `OAuthTokens`), the caller writes the new
-`encrypted_credentials` back via `df_core::trackers::upsert_connection`, in the same
+`encrypted_credentials` back via `of_core::trackers::upsert_connection`, in the same
 short follow-up `Tx` described above that writes `remote_revision` — this is the first
 place in the codebase that both holds a live `Tx` and calls a JIRA API, so it is where
 this plumbing was always going to land, per the Task 2 note.
@@ -585,13 +585,13 @@ needs the typed `i64`.
 
 ## §5 What Task 1 does NOT wire up yet
 
-No `df-trackers` dependency is added to `df-web` or `df-mcp` in this task — `df-core` gains
+No `of-trackers` dependency is added to `of-web` or `of-mcp` in this task — `of-core` gains
 the schema, the typed accessors, and the promoted crypto primitive, but nothing calls the
 tracker tables yet. This is deliberate: Task 1 is reviewable and mergeable in isolation
 (schema + tests + a crate-internal crypto move, no behavior change to any running
 surface), matching this repo's failing-test-first, one-task-at-a-time plan discipline.
 Tasks 2+ (GitHub App client, JIRA client, webhook route, sync engine, MCP tools, console
-UI) are recorded in `docs/plans/2026-09-03-df-trackers.md` and build on this foundation.
+UI) are recorded in `docs/plans/2026-09-03-of-trackers.md` and build on this foundation.
 
 ## Error Handling & Edge Cases
 
@@ -625,7 +625,7 @@ constructed` — a job with neither is a no-op) and resolves *which connection* 
 the existing repo-level `resolve_binding(tx, repo_id, provider)` — `link_ticket` supplies
 the other half that path needs and changes nothing about how the connection is resolved.
 
-**`link_ticket(job, tracker, ticketRef)`.** New `df-core` function
+**`link_ticket(job, tracker, ticketRef)`.** New `of-core` function
 `jobs::link_ticket(tx, id, tracker, ticket_ref) -> Result<Job>`:
 
 ```sql
@@ -661,9 +661,9 @@ UPDATE jobs SET tracker = $3, ticket_ref = $4 WHERE org_id = $1 AND id = $2 RETU
   is already linked to job {job} — unlink it there first, or use a different ticket_ref"`;
   `retriable()` → `false` (identical to `RemoteTaken`/`DependencyCycle`: retrying the same
   call cannot succeed, the caller's request itself needs to change).
-- No format validation on `ticket_ref` at this layer — `df-core` stays provider-agnostic
+- No format validation on `ticket_ref` at this layer — `of-core` stays provider-agnostic
   (matching `add_job`'s own "recorded, not resolved" framing for the same field).
-  Provider-specific grammar is `df-trackers::jira::validate_jira_issue_key`'s job, applied
+  Provider-specific grammar is `of-trackers::jira::validate_jira_issue_key`'s job, applied
   at the point an outbound call actually needs the string as a URL path segment; a
   malformed ref surfaces there, on the first `sync_ticket`/queue-transition write-back that
   touches it, exactly the way an unresolvable repo surfaces at `resolve_repo`, not earlier.
@@ -760,11 +760,11 @@ link was made.
   returned `remote_revision` reflects what was actually written, not stale state.
 
 **Scope and billing.** Both tools require the `trackers` scope — already declared in
-`df_auth::oauth::KNOWN_SCOPES` and described on the consent screen
-(`df-web/src/oauth.rs`: `"trackers" => "Link jobs to issues in JIRA or GitHub"`) since an
-earlier task anticipated it; `df-mcp`'s `scope` module gains
+`of_auth::oauth::KNOWN_SCOPES` and described on the consent screen
+(`of-web/src/oauth.rs`: `"trackers" => "Link jobs to issues in JIRA or GitHub"`) since an
+earlier task anticipated it; `of-mcp`'s `scope` module gains
 `pub const TRACKERS: &str = "trackers";` to match. Both are already predeclared in
-`df_billing::classify::BILLABLE` (Milestone 2 was priced ahead of being built, per that
+`of_billing::classify::BILLABLE` (Milestone 2 was priced ahead of being built, per that
 module's own comment) — this task's only billing-table change is removing the "unbuilt"
 carve-out in `classify::exhaustive_over` and its test's `built()` helper, now that both
 tools exist on the router and the exemption is no longer needed.
@@ -774,7 +774,7 @@ tools exist on the router and the exemption is no longer needed.
 `jobs_tenant_isolation`), but per Invariant 1 it still needs its own cross-org negative
 test: attempting `link_ticket` against another org's job id must be refused/invisible,
 exactly like the existing `create_from_ticket`/`update_from_ticket`/`close_from_ticket`/
-`set_remote_revision` cross-org coverage in `crates/df-core/tests/isolation.rs`.
+`set_remote_revision` cross-org coverage in `crates/of-core/tests/isolation.rs`.
 
 ## Risks & Open Questions
 
@@ -801,7 +801,7 @@ exactly like the existing `create_from_ticket`/`update_from_ticket`/`close_from_
   access — is a materially smaller leak than the credential-enumeration oracles this
   codebase actively defends against elsewhere (`CLAUDE.md`'s account-enumeration and
   redirect-URI-matching sections). Revisit only if a future threat model treats "is this
-  JIRA site connected to dark-factory" as itself sensitive.
+  JIRA site connected to otto-factory" as itself sensitive.
 - **An inbound event whose payload omits a revision timestamp is applied unconditionally
   rather than rejected or held.** GitHub's `issues`/`issue_comment` payloads and JIRA
   Automation's issue payloads have always carried `updated_at`/`fields.updated` in

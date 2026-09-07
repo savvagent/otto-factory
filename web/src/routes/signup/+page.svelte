@@ -83,7 +83,7 @@
   }
 </script>
 
-<svelte:head><title>Create an account · dark-factory</title></svelte:head>
+<svelte:head><title>Create an account · otto-factory</title></svelte:head>
 
 <div class="mx-auto max-w-sm py-8">
   {#if step === 'intro'}

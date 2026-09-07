@@ -1,13 +1,13 @@
-# Milestone 2 — df-trackers: GitHub App + JIRA two-way sync
+# Milestone 2 — of-trackers: GitHub App + JIRA two-way sync
 
-**Spec:** [`docs/specs/2026-09-03-df-trackers-design.md`](../specs/2026-09-03-df-trackers-design.md)
+**Spec:** [`docs/specs/2026-09-03-of-trackers-design.md`](../specs/2026-09-03-of-trackers-design.md)
 — read it first. This plan implements it exactly.
 
-Goal: turn `df-trackers` from a one-line stub into the two-way sync engine the design of
+Goal: turn `of-trackers` from a one-line stub into the two-way sync engine the design of
 record describes — GitHub App + JIRA connections bound per org, tracker bindings per repo,
 inbound webhook ingest that creates/updates jobs, outbound job-transition writeback, and
 the `link_ticket`/`sync_ticket` MCP tools — while keeping every existing invariant
-(tenant isolation's two guards, SQL confined to `df-core`, metering classification,
+(tenant isolation's two guards, SQL confined to `of-core`, metering classification,
 no AI attribution, forward-only migrations) intact.
 
 ## Status — 2026-09-03
@@ -19,12 +19,12 @@ because the four checkboxes below assumed console REST routes that did not exist
 
 ## Global Constraints
 
-- Every SQL statement lives in `df-core`. No query in `df-trackers`, `df-web`, or `df-mcp`.
+- Every SQL statement lives in `of-core`. No query in `of-trackers`, `of-web`, or `of-mcp`.
 - Every tenant-scoped function takes an explicit `OrgId` and threads it through `Tx`
   (Guard 1); every new tenant table gets a `<table>_tenant_isolation` FORCE RLS policy
   discovered by `Db::verify_tenant_isolation`'s naming convention (Guard 2), plus a
   cross-org negative test. Without the negative test the task is not done.
-- Migrations are forward-only, one file per concern, in `crates/df-core/migrations/`.
+- Migrations are forward-only, one file per concern, in `crates/of-core/migrations/`.
   Never edit an applied migration — add a new one.
 - Run `cargo fmt --all` before every Rust commit. No `unwrap()` outside tests. No AI
   self-attribution anywhere (commits, PR bodies, comments, docs).
@@ -37,9 +37,9 @@ because the four checkboxes below assumed console REST routes that did not exist
 - Tests need `podman compose up -d` and a `.env` with `DATABASE_URL`
   (`cp .env.example .env`). `#[sqlx::test]` gives each test a fresh throwaway database;
   there are no database mocks.
-- Any new MCP tool must be classified in `df-billing::classify` in the same task that adds
+- Any new MCP tool must be classified in `of-billing::classify` in the same task that adds
   it — `every_tool_has_a_price` fails otherwise.
-- `df-mcp` tools: the org comes from the token, never a tool argument; results are a
+- `of-mcp` tools: the org comes from the token, never a tool argument; results are a
   one-field object in `tools::out`; descriptions are written for an LLM caller with no docs.
 - A breaking change to a public interface (MCP tool surface, console API, config surface,
   schema) must be named explicitly and flagged to the architect reviewer. None is planned
@@ -50,24 +50,24 @@ because the four checkboxes below assumed console REST routes that did not exist
 
 | File | Responsibility |
 |---|---|
-| **Create.** `crates/df-core/migrations/0011_trackers.sql` | `tracker_connections`, `tracker_bindings`, RLS policies |
-| **Create.** `crates/df-core/src/crypto.rs` | `Cipher`/`Sealed` (promoted from `df-auth`) |
-| **Modify.** `crates/df-core/src/error.rs` | `Error::Config`, `Error::Crypto` variants |
-| **Modify.** `crates/df-core/src/lib.rs` | `pub mod crypto;`, `pub mod trackers;` |
-| **Create.** `crates/df-core/src/trackers.rs` | `TrackerConnection`/`TrackerBinding` rows + CRUD, sealed-value encoding |
-| **Modify.** `crates/df-core/Cargo.toml` | add `aes-gcm`, `rand`, `subtle`, `base64` |
-| **Modify.** `crates/df-core/tests/isolation.rs` | cross-org negative tests for both new tables |
-| **Modify.** `crates/df-auth/src/crypto.rs` | delete `Cipher`/`Sealed` and their tests (moved) |
-| **Modify.** `crates/df-auth/Cargo.toml` | drop now-unused crypto deps if nothing else in the crate uses them |
-| **Modify.** `crates/df-server/src/main.rs`, `crates/df-server/src/lib.rs` | `df_auth::crypto::Cipher` → `df_core::crypto::Cipher` |
-| **Modify.** `crates/df-web/src/state.rs`, `crates/df-web/src/lib.rs` | same import change |
-| **Modify.** `crates/df-web/tests/common/mod.rs` | same import change (test helper) |
-| **Create.** `crates/df-core/tests/trackers.rs` | integration tests for the new CRUD, mirroring `tests/queue.rs`'s shape |
-| (Task 2+, not this plan revision's active task) `crates/df-trackers/src/github.rs` | GitHub App client |
-| (Task 2+) `crates/df-trackers/src/jira.rs` | JIRA OAuth 3LO client |
-| (Task 3+) `crates/df-trackers/src/webhook.rs` + `crates/df-web/src/...` | signature verification + `/webhooks/{provider}` route |
-| (Task 4+) `crates/df-trackers/src/sync.rs` | inbound/outbound sync engine |
-| (Task 5+) `crates/df-mcp/src/tools/jobs.rs`, `crates/df-billing/src/classify.rs` | `link_ticket`/`sync_ticket` tools + pricing |
+| **Create.** `crates/of-core/migrations/0011_trackers.sql` | `tracker_connections`, `tracker_bindings`, RLS policies |
+| **Create.** `crates/of-core/src/crypto.rs` | `Cipher`/`Sealed` (promoted from `of-auth`) |
+| **Modify.** `crates/of-core/src/error.rs` | `Error::Config`, `Error::Crypto` variants |
+| **Modify.** `crates/of-core/src/lib.rs` | `pub mod crypto;`, `pub mod trackers;` |
+| **Create.** `crates/of-core/src/trackers.rs` | `TrackerConnection`/`TrackerBinding` rows + CRUD, sealed-value encoding |
+| **Modify.** `crates/of-core/Cargo.toml` | add `aes-gcm`, `rand`, `subtle`, `base64` |
+| **Modify.** `crates/of-core/tests/isolation.rs` | cross-org negative tests for both new tables |
+| **Modify.** `crates/of-auth/src/crypto.rs` | delete `Cipher`/`Sealed` and their tests (moved) |
+| **Modify.** `crates/of-auth/Cargo.toml` | drop now-unused crypto deps if nothing else in the crate uses them |
+| **Modify.** `crates/of-server/src/main.rs`, `crates/of-server/src/lib.rs` | `of_auth::crypto::Cipher` → `of_core::crypto::Cipher` |
+| **Modify.** `crates/of-web/src/state.rs`, `crates/of-web/src/lib.rs` | same import change |
+| **Modify.** `crates/of-web/tests/common/mod.rs` | same import change (test helper) |
+| **Create.** `crates/of-core/tests/trackers.rs` | integration tests for the new CRUD, mirroring `tests/queue.rs`'s shape |
+| (Task 2+, not this plan revision's active task) `crates/of-trackers/src/github.rs` | GitHub App client |
+| (Task 2+) `crates/of-trackers/src/jira.rs` | JIRA OAuth 3LO client |
+| (Task 3+) `crates/of-trackers/src/webhook.rs` + `crates/of-web/src/...` | signature verification + `/webhooks/{provider}` route |
+| (Task 4+) `crates/of-trackers/src/sync.rs` | inbound/outbound sync engine |
+| (Task 5+) `crates/of-mcp/src/tools/jobs.rs`, `crates/of-billing/src/classify.rs` | `link_ticket`/`sync_ticket` tools + pricing |
 | (Task 6+) `web/src/...` | console UI for binding a connection + per-repo tracker binding |
 
 ## Task Order & Rationale
@@ -84,49 +84,49 @@ whatever the server-side tasks exposed.
 
 ## Task 1 — Schema foundation: `tracker_connections`, `tracker_bindings`, promoted crypto ✅ (PR #18)
 
-**Files:** `crates/df-core/migrations/0011_trackers.sql`, `crates/df-core/src/crypto.rs`,
-`crates/df-core/src/trackers.rs`, `crates/df-core/src/error.rs`, `crates/df-core/src/lib.rs`,
-`crates/df-core/Cargo.toml`, `crates/df-core/tests/isolation.rs`,
-`crates/df-core/tests/trackers.rs`, `crates/df-auth/src/crypto.rs`,
-`crates/df-auth/Cargo.toml`, `crates/df-server/src/main.rs`, `crates/df-server/src/lib.rs`,
-`crates/df-web/src/state.rs`, `crates/df-web/src/lib.rs`, `crates/df-web/tests/common/mod.rs`.
+**Files:** `crates/of-core/migrations/0011_trackers.sql`, `crates/of-core/src/crypto.rs`,
+`crates/of-core/src/trackers.rs`, `crates/of-core/src/error.rs`, `crates/of-core/src/lib.rs`,
+`crates/of-core/Cargo.toml`, `crates/of-core/tests/isolation.rs`,
+`crates/of-core/tests/trackers.rs`, `crates/of-auth/src/crypto.rs`,
+`crates/of-auth/Cargo.toml`, `crates/of-server/src/main.rs`, `crates/of-server/src/lib.rs`,
+`crates/of-web/src/state.rs`, `crates/of-web/src/lib.rs`, `crates/of-web/tests/common/mod.rs`.
 
-**Interfaces:** produces `df_core::trackers::{Provider, TrackerConnection, TrackerBinding,
+**Interfaces:** produces `of_core::trackers::{Provider, TrackerConnection, TrackerBinding,
 upsert_connection, get_connection, delete_connection, upsert_binding, get_binding,
-delete_binding, resolve_binding}` and `df_core::crypto::{Cipher, Sealed}` for later tasks
+delete_binding, resolve_binding}` and `of_core::crypto::{Cipher, Sealed}` for later tasks
 to consume. Consumes nothing new (no dependency edges added).
 
-- [ ] Add `aes-gcm`, `rand`, `subtle`, `base64` to `crates/df-core/Cargo.toml` (all already
-      workspace dependencies used by `df-auth`; just add the `df-core` `[dependencies]`
+- [ ] Add `aes-gcm`, `rand`, `subtle`, `base64` to `crates/of-core/Cargo.toml` (all already
+      workspace dependencies used by `of-auth`; just add the `of-core` `[dependencies]`
       entries).
 - [ ] Move `Cipher`/`Sealed` (and their unit tests, unchanged) from
-      `crates/df-auth/src/crypto.rs` to a new `crates/df-core/src/crypto.rs`. Add
-      `pub mod crypto;` to `crates/df-core/src/lib.rs`.
-- [ ] Add `Error::Config(String)` and `Error::Crypto(String)` to `crates/df-core/src/error.rs`
+      `crates/of-auth/src/crypto.rs` to a new `crates/of-core/src/crypto.rs`. Add
+      `pub mod crypto;` to `crates/of-core/src/lib.rs`.
+- [ ] Add `Error::Config(String)` and `Error::Crypto(String)` to `crates/of-core/src/error.rs`
       (match the exact wording the moved tests assert: "DF_ENCRYPTION_KEY is not valid
       base64", "DF_ENCRYPTION_KEY must decode to 32 bytes, got {n}", "failed to seal
       secret", "stored nonce has the wrong length", "failed to open secret — wrong key or
       tampered ciphertext").
-- [ ] Delete `Cipher`/`Sealed` and their tests from `crates/df-auth/src/crypto.rs`; keep
-      `generate`, `hash`, `verify`, `prefix::*` (these are what `df-web/src/routes/auth.rs`
-      and `df-web/src/routes/orgs.rs` actually call — confirmed unaffected).
-- [ ] Update every `df_auth::crypto::Cipher` reference to `df_core::crypto::Cipher`:
-      `crates/df-server/src/main.rs`, `crates/df-server/src/lib.rs`,
-      `crates/df-web/src/state.rs` (`use df_auth::crypto::Cipher` → `use df_core::crypto::Cipher`),
-      `crates/df-web/src/lib.rs`, `crates/df-web/tests/common/mod.rs`.
-- [ ] Run `cargo build --workspace` and `cargo test -p df-auth` — confirm the move compiles
-      clean and every remaining `df-auth` test (the ones exercising `generate`/`hash`/
+- [ ] Delete `Cipher`/`Sealed` and their tests from `crates/of-auth/src/crypto.rs`; keep
+      `generate`, `hash`, `verify`, `prefix::*` (these are what `of-web/src/routes/auth.rs`
+      and `of-web/src/routes/orgs.rs` actually call — confirmed unaffected).
+- [ ] Update every `of_auth::crypto::Cipher` reference to `of_core::crypto::Cipher`:
+      `crates/of-server/src/main.rs`, `crates/of-server/src/lib.rs`,
+      `crates/of-web/src/state.rs` (`use of_auth::crypto::Cipher` → `use of_core::crypto::Cipher`),
+      `crates/of-web/src/lib.rs`, `crates/of-web/tests/common/mod.rs`.
+- [ ] Run `cargo build --workspace` and `cargo test -p of-auth` — confirm the move compiles
+      clean and every remaining `of-auth` test (the ones exercising `generate`/`hash`/
       `verify`/`prefix`) still passes. This proves the move is behavior-neutral before
       any new tracker code is written.
-- [ ] Write a failing test first in a new `crates/df-core/tests/trackers.rs` (mirrors the
-      `#[sqlx::test]` shape in `crates/df-core/tests/queue.rs` and the shared setup in
-      `crates/df-core/tests/common/mod.rs` — there is no `tests/repos.rs`; `queue.rs` is
+- [ ] Write a failing test first in a new `crates/of-core/tests/trackers.rs` (mirrors the
+      `#[sqlx::test]` shape in `crates/of-core/tests/queue.rs` and the shared setup in
+      `crates/of-core/tests/common/mod.rs` — there is no `tests/repos.rs`; `queue.rs` is
       the closest existing example of per-org CRUD + cross-org assertions in this crate).
       Cover: upsert/get/delete on both tables, the `ON CONFLICT (org_id, provider) DO
       UPDATE` replace-on-rebind behavior, and `connection_id` becoming `NULL` when a
       connection is deleted out from under a binding. Run it — confirm it fails to compile
       (the module and migration do not exist yet).
-- [ ] Write `crates/df-core/migrations/0011_trackers.sql`: `tracker_provider` enum
+- [ ] Write `crates/of-core/migrations/0011_trackers.sql`: `tracker_provider` enum
       (`github`, `jira`), `tracker_connections` (`org_id NOT NULL`, `provider`,
       `external_id`, nullable `encrypted_credentials`, nullable `encrypted_webhook_secret`,
       `UNIQUE (org_id, provider)`), `tracker_bindings` (`org_id NOT NULL`, `repo_id`,
@@ -139,7 +139,7 @@ to consume. Consumes nothing new (no dependency edges added).
       `CREATE POLICY <t>_tenant_isolation ON <t> USING (org_id = current_org()) WITH CHECK (org_id = current_org())`
       for `tracker_connections` and `tracker_bindings` — reusing the `current_org()`
       function `0007_rls.sql` already defined; do not redefine it.
-- [ ] Write `crates/df-core/src/trackers.rs`: `Provider` enum (`sqlx::Type` →
+- [ ] Write `crates/of-core/src/trackers.rs`: `Provider` enum (`sqlx::Type` →
       `tracker_provider`), `TrackerConnection`/`TrackerBinding` structs
       (`FromRow`/`Serialize`/`JsonSchema`, matching `repos.rs`'s derive list), private
       `encode_sealed`/`decode_sealed` helpers implementing the canonical
@@ -147,10 +147,10 @@ to consume. Consumes nothing new (no dependency edges added).
       (`upsert_connection`, `get_connection`, `delete_connection`, `upsert_binding`,
       `get_binding`, `delete_binding`, `resolve_binding`) each taking `&mut Tx` and an
       explicit `org_id` bind on every statement. Add `pub mod trackers;` to
-      `crates/df-core/src/lib.rs`. Run `crates/df-core/tests/trackers.rs` again — confirm
+      `crates/of-core/src/lib.rs`. Run `crates/of-core/tests/trackers.rs` again — confirm
       it now compiles and passes (migrations auto-apply against the throwaway
       `#[sqlx::test]` database; no manual migration step needed for this check).
-- [ ] Write a failing cross-org negative test in `crates/df-core/tests/isolation.rs` for
+- [ ] Write a failing cross-org negative test in `crates/of-core/tests/isolation.rs` for
       `tracker_connections` and `tracker_bindings`, following the file's existing pattern
       for another tenant table: create a row under org A inside a normal `Tx`, then open a
       second transaction with `SET LOCAL ROLE df_app; SET LOCAL app.org_id = '<org B>'`
@@ -159,20 +159,20 @@ to consume. Consumes nothing new (no dependency edges added).
       statements in `0011_trackers.sql` and confirm the new test fails (proving it isn't a
       false positive), then restore the policies and confirm it passes.
 - [ ] Confirm the production migration path once: `cp .env.example .env` if not already
-      present, `podman compose up -d`, then `cargo run -p df-server` briefly and check the
-      logs for `db.migrate().await` (the exact call in `crates/df-server/src/main.rs`)
+      present, `podman compose up -d`, then `cargo run -p of-server` briefly and check the
+      logs for `db.migrate().await` (the exact call in `crates/of-server/src/main.rs`)
       completing without error — this is the only place migrations run outside the test
       harness. `Ctrl-C` once it logs a successful bind.
-- [ ] `cargo test -p df-core --test isolation`, `cargo test -p df-core --test trackers`,
+- [ ] `cargo test -p of-core --test isolation`, `cargo test -p of-core --test trackers`,
       `cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`,
       `cargo fmt --all --check`. All green before commit.
-- [ ] `cargo fmt --all` (writes formatting), then commit: `df-core: tracker_connections, tracker_bindings, and the promoted crypto primitive`.
+- [ ] `cargo fmt --all` (writes formatting), then commit: `of-core: tracker_connections, tracker_bindings, and the promoted crypto primitive`.
 
 ---
 
 ## Task 2 — GitHub App + JIRA OAuth clients ✅ (PR #20)
 
-**Remaining (deferred to the sync-engine task, since `df-trackers` performs no SQL):**
+**Remaining (deferred to the sync-engine task, since `of-trackers` performs no SQL):**
 persisting a rotated JIRA refresh token back into `tracker_connections.encrypted_credentials`,
 and bridging `TrackerConnection.external_id: String` to `GithubAppClient`'s
 `installation_id: i64`. PR #20 shipped the client-side halves of both (`OAuthTokens`
@@ -180,9 +180,9 @@ returns the rotated pair and exposes `seal_refresh_token`/`open_refresh_token`; 
 client takes a typed `i64`) — the write-back and the parse-and-fail-loudly bridge belong to
 whichever task first constructs a `Tx` around a live call (Task 4 or 5).
 
-**Files:** `crates/df-trackers/src/github.rs`, `crates/df-trackers/src/jira.rs`,
-`crates/df-trackers/src/lib.rs`, `crates/df-trackers/Cargo.toml` (add `jsonwebtoken` for
-GitHub App JWT signing if not already present — check first), `crates/df-server` config
+**Files:** `crates/of-trackers/src/github.rs`, `crates/of-trackers/src/jira.rs`,
+`crates/of-trackers/src/lib.rs`, `crates/of-trackers/Cargo.toml` (add `jsonwebtoken` for
+GitHub App JWT signing if not already present — check first), `crates/of-server` config
 (`DF_GITHUB_APP_ID`, `DF_GITHUB_APP_PRIVATE_KEY`, `DF_GITHUB_APP_WEBHOOK_SECRET` — new env
 vars, additive, documented in `.env.example` with the *why*).
 
@@ -193,47 +193,47 @@ vars, additive, documented in `.env.example` with the *why*).
 - [x] GitHub: issue/comment API calls (`POST /repos/{owner}/{repo}/issues/{n}/comments`,
       label read, issue state PATCH) using the minted token.
 - [x] JIRA: authorization-code exchange for a refresh token pair, encrypted via
-      `df_core::crypto::Cipher` into `tracker_connections.encrypted_credentials`;
+      `of_core::crypto::Cipher` into `tracker_connections.encrypted_credentials`;
       refresh-token rotation on expiry, writing the new sealed value back. *(The
       exchange, rotation, and seal/open helpers shipped in PR #20; the actual write-back
-      into `tracker_connections` needs a `Tx`, which `df-trackers` cannot construct — see
+      into `tracker_connections` needs a `Tx`, which `of-trackers` cannot construct — see
       Remaining above.)*
 - [x] JIRA: issue API calls (comment, transition) using the site id (`external_id`) and
       the rotating access token.
 - [x] Recorded-fixture tests (no live network) for both clients, per the design doc's own
-      testing guidance for `df-trackers`.
-- [x] `cargo test -p df-trackers`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all`.
+      testing guidance for `of-trackers`.
+- [x] `cargo test -p of-trackers`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all`.
 - [x] Commit.
 
 ## Task 3 — Webhook ingest ✅ (PR #22)
 
-**Spec:** see §5a ("Webhook org resolution") in `docs/specs/2026-09-03-df-trackers-design.md`
+**Spec:** see §5a ("Webhook org resolution") in `docs/specs/2026-09-03-of-trackers-design.md`
 — read it first. It resolves a real gap the earlier checklist glossed over: every
-`df-core::trackers` accessor takes a `Tx` pinned to an already-known `OrgId`, but a webhook
+`of-core::trackers` accessor takes a `Tx` pinned to an already-known `OrgId`, but a webhook
 arrives with only a provider-native id (GitHub installation id / JIRA site id) — the org
 is exactly what's being looked up, so the normal RLS-scoped path cannot answer it (an
 unscoped query against `tracker_connections`, which is `FORCE ROW LEVEL SECURITY`, returns
 zero rows with no `app.org_id` set). §5a adds a narrow, secret-free reverse-index table
 (`tracker_connection_index`, deliberately outside RLS, mirroring `access_tokens`'s
 bootstrap exemption) and one new unscoped resolver function,
-`df_core::trackers::resolve_connection_org`, that the webhook route calls once per request
+`of_core::trackers::resolve_connection_org`, that the webhook route calls once per request
 before opening a normal `Tx` for everything else.
 
-**Files:** `crates/df-core/migrations/0012_tracker_connection_index.sql` (new, additive),
-`crates/df-core/src/trackers.rs` (add `tracker_connection_index` maintenance to
+**Files:** `crates/of-core/migrations/0012_tracker_connection_index.sql` (new, additive),
+`crates/of-core/src/trackers.rs` (add `tracker_connection_index` maintenance to
 `upsert_connection`/`delete_connection`, add `resolve_connection_org`),
-`crates/df-trackers/src/webhook.rs` (new — signature verification + event parsing),
-a new route added to `df-web`'s `catalog.rs` (`/webhooks/{provider}`, unauthenticated by
+`crates/of-trackers/src/webhook.rs` (new — signature verification + event parsing),
+a new route added to `of-web`'s `catalog.rs` (`/webhooks/{provider}`, unauthenticated by
 design — verified by signature instead of a session/token) plus its handler module.
 
 - [ ] Migration: add `tracker_connection_index` (provider, external_id, org_id,
       connection_id — PK `(provider, external_id)`), no RLS enabled, never added to any
       `tenant_tables` array. Confirm a fresh cluster applies cleanly
-      (`podman compose down -v && podman compose up -d`, `cargo test -p df-core`).
-- [ ] `df-core::trackers::upsert_connection` additionally upserts the matching
+      (`podman compose down -v && podman compose up -d`, `cargo test -p of-core`).
+- [ ] `of-core::trackers::upsert_connection` additionally upserts the matching
       `tracker_connection_index` row in the same `Tx`; `delete_connection` additionally
       deletes it. Both stay atomic with the real write — no separate transaction.
-- [ ] `df-core::trackers::resolve_connection_org(db: &Db, provider, external_id) ->
+- [ ] `of-core::trackers::resolve_connection_org(db: &Db, provider, external_id) ->
       Result<Option<OrgId>>` — deliberately takes `&Db`, not `&mut Tx`, and reads only
       `tracker_connection_index`. Doc-comment states it is the one place a tracker table is
       read without an org already pinned, and that a second such accessor must not be added.
@@ -248,25 +248,25 @@ design — verified by signature instead of a session/token) plus its handler mo
       parameter (finalize exact mechanism against JIRA's current docs at implementation
       time — the spec left this as a Task-3 decision).
 - [ ] Parse `issues`/`issue_comment` (GitHub) and Automation payloads (JIRA) into a
-      provider-neutral event type `df-trackers` exposes.
+      provider-neutral event type `of-trackers` exposes.
 - [ ] Webhook route: verify signature → parse event → extract provider id (installation id
       / site id) → `resolve_connection_org` → open a `Tx` for that `OrgId` → `get_connection`
       / `resolve_binding` for everything else. An id that resolves to no org is a `404`-shaped
       response with no detail (never confirm/deny which ids are registered to an attacker
       probing the endpoint), logged for operator visibility.
 - [ ] `catalog.rs` entry with summary/description; confirm route is reachable and add to
-      `the_whole_router_assembles`-style startup coverage if `df-server` needs updating.
+      `the_whole_router_assembles`-style startup coverage if `of-server` needs updating.
 - [ ] Recorded-fixture tests for signature verification (valid, tampered, replayed) and
       event parsing.
-- [ ] `cargo test -p df-core`, `cargo test -p df-trackers`, `cargo test -p df-web`, clippy, fmt.
+- [ ] `cargo test -p of-core`, `cargo test -p of-trackers`, `cargo test -p of-web`, clippy, fmt.
 - [ ] Commit.
 
 ## Task 4 — Two-way sync engine ✅ (PR #24)
 
-**Spec:** see §6 ("Two-way sync engine") in `docs/specs/2026-09-03-df-trackers-design.md`
+**Spec:** see §6 ("Two-way sync engine") in `docs/specs/2026-09-03-of-trackers-design.md`
 — read it first. It resolves the design decisions this checklist originally deferred:
 the trigger label (a new per-binding `tracker_bindings.trigger_label` column, defaulted
-to `dark-factory`, not hardcoded), the loop-safety mechanism (`jobs.remote_revision`, an
+to `otto-factory`, not hardcoded), the loop-safety mechanism (`jobs.remote_revision`, an
 RFC 3339 UTC string, parsed and compared as timestamps, not raw strings), how inbound job
 creation/update/close resolves against existing jobs (via a new repo/tracker-scoped
 `ticket_ref` lookup, no new resolution table), and where the outbound write-back — which
@@ -281,56 +281,56 @@ documents; and a `complete_job`/`fail_job` precondition (`InProgress`-only) that
 fire for a ticket closed before any agent claimed the job. Read §6 in full before touching
 any file below — it is long because each of those corrections is explained in place.
 
-**Files:** `crates/df-core/migrations/0013_jobs_remote_revision.sql` (new, additive:
-`jobs.remote_revision TEXT NULL`) and `crates/df-core/migrations/0014_trigger_label.sql`
-(new, additive: `tracker_bindings.trigger_label TEXT NOT NULL DEFAULT 'dark-factory'`) —
+**Files:** `crates/of-core/migrations/0013_jobs_remote_revision.sql` (new, additive:
+`jobs.remote_revision TEXT NULL`) and `crates/of-core/migrations/0014_trigger_label.sql`
+(new, additive: `tracker_bindings.trigger_label TEXT NOT NULL DEFAULT 'otto-factory'`) —
 two migrations, not one, since they touch two different tables and are two different
-concerns per this repo's "one file per concern" convention; `crates/df-core/src/jobs.rs`
+concerns per this repo's "one file per concern" convention; `crates/of-core/src/jobs.rs`
 (add `remote_revision` field, `create_from_ticket`, `get_job_by_ticket_for_repo`,
-`close_from_ticket`); `crates/df-core/src/trackers.rs` (add `trigger_label` field to
-`TrackerBinding`, thread it through `upsert_binding`); `crates/df-trackers/src/webhook.rs`
+`close_from_ticket`); `crates/of-core/src/trackers.rs` (add `trigger_label` field to
+`TrackerBinding`, thread it through `upsert_binding`); `crates/of-trackers/src/webhook.rs`
 (extend `IssueSnapshot` with `updated_at` and `state_reason`, extend
-`parse_github`/`parse_jira` to populate them); `crates/df-trackers/src/jira.rs` (add
-`list_transitions`/`transition_issue`); `crates/df-trackers/src/sync.rs` (new — pure
-inbound-mapping and outbound-mapping logic, no SQL/HTTP); `crates/df-web/src/routes/
+`parse_github`/`parse_jira` to populate them); `crates/of-trackers/src/jira.rs` (add
+`list_transitions`/`transition_issue`); `crates/of-trackers/src/sync.rs` (new — pure
+inbound-mapping and outbound-mapping logic, no SQL/HTTP); `crates/of-web/src/routes/
 webhooks.rs` (call the inbound half inside the existing per-request `Tx`);
-`crates/df-mcp/src/tools/jobs.rs` (call the outbound half after `claim_jobs`/
+`crates/of-mcp/src/tools/jobs.rs` (call the outbound half after `claim_jobs`/
 `complete_job`/`fail_job`'s existing `Tx` commits).
 
 - [ ] `jobs.remote_revision TEXT NULL` migration; confirm additive (no version bump,
       no breaking-change writeup, no new RLS policy needed — `jobs` is already governed
       by an existing tenant-isolation policy over the whole row).
-- [ ] `tracker_bindings.trigger_label TEXT NOT NULL DEFAULT 'dark-factory'` migration
+- [ ] `tracker_bindings.trigger_label TEXT NOT NULL DEFAULT 'otto-factory'` migration
       (separate file); add the field to `TrackerBinding` and thread it through
       `upsert_binding`'s existing column list.
 - [ ] `IssueSnapshot` gains `updated_at: Option<String>` and `state_reason: Option<String>`
       (GitHub only for the latter); update both GitHub payload structs and the JIRA
       payload struct in `webhook.rs`, and the existing fixture tests' assertions.
-- [ ] `df-core::jobs::get_job_by_ticket_for_repo(tx, repo_id, tracker, ticket_ref) ->
+- [ ] `of-core::jobs::get_job_by_ticket_for_repo(tx, repo_id, tracker, ticket_ref) ->
       Result<Option<Job>>` — `WHERE org_id = $1 AND repo_id = $2 AND tracker = $3 AND
       ticket_ref = $4 ORDER BY created_at DESC LIMIT 1`, matching the existing
       `get_job_by_ticket`'s newest-wins tolerance but properly scoped.
-- [ ] `df-core::jobs::create_from_ticket` (title/description/ticket_ref/tracker/
+- [ ] `of-core::jobs::create_from_ticket` (title/description/ticket_ref/tracker/
       remote_revision in one insert, thin wrapper over the existing `NewJob` insert path)
       and a `remote_revision`(+ title/description)-only update path, both taking `&mut Tx`
-      with an explicit `org_id` bind, matching every other `df-core::jobs` function.
-- [ ] `df-core::jobs::close_from_ticket(tx, id, to: Status, result: Option<&str>, error:
+      with an explicit `org_id` bind, matching every other `of-core::jobs` function.
+- [ ] `of-core::jobs::close_from_ticket(tx, id, to: Status, result: Option<&str>, error:
       Option<&str>) -> Result<Job>` — allows `Pending` *or* `InProgress` → `Completed`/
       `Failed`, used only by the sync engine; `complete_job`/`fail_job`'s existing
       `InProgress`-only precondition is unchanged for every other caller.
-- [ ] `crates/df-trackers/src/jira.rs`: `list_transitions(issue_key) ->
+- [ ] `crates/of-trackers/src/jira.rs`: `list_transitions(issue_key) ->
       Vec<Transition>` (each carrying its target status name and category) and
       `transition_issue(issue_key, transition_id)`, recorded-fixture tested like the
       rest of the client.
-- [ ] Inbound: a failing test first in `crates/df-trackers/tests/` for the pure mapping
+- [ ] Inbound: a failing test first in `crates/of-trackers/tests/` for the pure mapping
       function — label-on-event-but-not-matching-binding's-`trigger_label` → dropped;
       matching label, no existing job → create; matching label, existing non-terminal job
       → update; GitHub closed + `state_reason` → complete vs fail; JIRA closed-vocabulary
       state → complete vs fail; unrecognized JIRA "closed-looking" state → left as-is, not
       guessed; revision `<=` stored (RFC 3339 parsed) → dropped; unparseable/missing
       revision on either side → applied, stored revision left unchanged. Then implement
-      `df-trackers::sync`'s inbound half against it.
-- [ ] Wire the inbound half into `df-web`'s webhook route: after the existing
+      `of-trackers::sync`'s inbound half against it.
+- [ ] Wire the inbound half into `of-web`'s webhook route: after the existing
       `resolve_connection_org` → `Tx` → `get_connection` sequence, resolve the binding via
       `find_binding_by_external_ref`, call the sync engine, write `remote_revision` in the
       same `Tx`. No binding, `connection_id IS NULL`, or label mismatch → acknowledge
@@ -339,9 +339,9 @@ webhooks.rs` (call the inbound half inside the existing per-request `Tx`);
       `tracker`/`ticket_ref` → no-op; `claim_jobs`/`complete_job`/`fail_job` → the correct
       default-vs-supplied comment text + target ticket state/category per provider,
       matching §6's GitHub/JIRA asymmetry; no reachable transition → comment-only +
-      warning, not a failure). Then implement `df-trackers::sync`'s outbound half against
+      warning, not a failure). Then implement `of-trackers::sync`'s outbound half against
       it.
-- [ ] Wire the outbound half into `crates/df-mcp/src/tools/jobs.rs`'s `claim_jobs`/
+- [ ] Wire the outbound half into `crates/of-mcp/src/tools/jobs.rs`'s `claim_jobs`/
       `complete_job`/`fail_job`: **after** the existing `Tx` commits and the MCP response
       value is already computed, resolve the binding/connection in a short read-only `Tx`,
       release it, make the tracker HTTP call outside any `Tx`, then open a short follow-up
@@ -356,52 +356,52 @@ webhooks.rs` (call the inbound half inside the existing per-request `Tx`);
       defaulting.
 - [ ] Recorded-fixture tests for the extended `IssueSnapshot` fields and the new JIRA
       transition calls (no live network), per this crate's existing testing convention.
-- [ ] `cargo test -p df-core`, `cargo test -p df-trackers`, `cargo test -p df-mcp --test tools`,
-      `cargo test -p df-web`, `cargo test --workspace`, clippy, fmt.
+- [ ] `cargo test -p of-core`, `cargo test -p of-trackers`, `cargo test -p of-mcp --test tools`,
+      `cargo test -p of-web`, `cargo test --workspace`, clippy, fmt.
 - [ ] Commit.
 
 ## Task 5 — `link_ticket` / `sync_ticket` MCP tools ✅ (PR #26)
 
-**Spec:** `docs/specs/2026-09-03-df-trackers-design.md` §7 — read it first, it resolves
+**Spec:** `docs/specs/2026-09-03-of-trackers-design.md` §7 — read it first, it resolves
 the per-job-vs-repo-binding question and specifies exact error/billing/output shapes.
 
-**Files:** `crates/df-core/src/jobs.rs`, `crates/df-core/src/error.rs`,
-`crates/df-core/tests/isolation.rs`, `crates/df-core/tests/jobs.rs`,
-`crates/df-mcp/src/tools/jobs.rs`, `crates/df-mcp/src/tools/mod.rs`,
-`crates/df-billing/src/classify.rs`, `crates/df-mcp/tests/tools.rs`.
+**Files:** `crates/of-core/src/jobs.rs`, `crates/of-core/src/error.rs`,
+`crates/of-core/tests/isolation.rs`, `crates/of-core/tests/jobs.rs`,
+`crates/of-mcp/src/tools/jobs.rs`, `crates/of-mcp/src/tools/mod.rs`,
+`crates/of-billing/src/classify.rs`, `crates/of-mcp/tests/tools.rs`.
 
 - [ ] `Error::TicketAlreadyLinked { ticket_ref: String, job: JobId }` in
-      `crates/df-core/src/error.rs` — `code()` → `"ticket_already_linked"`, message per §7,
+      `crates/of-core/src/error.rs` — `code()` → `"ticket_already_linked"`, message per §7,
       `retriable()` → `false`.
-- [ ] Failing test first: `crates/df-core/tests/jobs.rs` — `link_ticket_sets_tracker_and_ticket_ref`,
+- [ ] Failing test first: `crates/of-core/tests/jobs.rs` — `link_ticket_sets_tracker_and_ticket_ref`,
       `link_ticket_clears_stale_remote_revision_on_relink`,
       `link_ticket_on_a_ticket_another_live_job_holds_returns_ticket_already_linked`,
-      `link_ticket_rejects_a_blank_ticket_ref`. Run `cargo test -p df-core --test jobs` and
+      `link_ticket_rejects_a_blank_ticket_ref`. Run `cargo test -p of-core --test jobs` and
       confirm they fail to compile/fail (no `link_ticket` yet).
 - [ ] Implement `jobs::link_ticket(tx, id, tracker, ticket_ref) -> Result<Job>` in
-      `crates/df-core/src/jobs.rs`: `UPDATE jobs SET tracker = $3, ticket_ref = $4,
+      `crates/of-core/src/jobs.rs`: `UPDATE jobs SET tracker = $3, ticket_ref = $4,
       remote_revision = NULL WHERE org_id = $1 AND id = $2 RETURNING …`, wrapped in
       `SAVEPOINT`/`ROLLBACK TO SAVEPOINT` to catch the unique-violation on
       `0015_jobs_ticket_ref_uniqueness.sql`'s existing partial index, then look up the
       existing holder (reuse `get_job_by_ticket_for_repo`) and return
       `Error::TicketAlreadyLinked`. `Error::JobNotFound` if the UPDATE returns no rows.
       `Error::Invalid` if `ticket_ref.trim().is_empty()`.
-- [ ] Cross-org negative test in `crates/df-core/tests/isolation.rs` —
+- [ ] Cross-org negative test in `crates/of-core/tests/isolation.rs` —
       `link_ticket_cannot_touch_another_orgs_job` (per Load-Bearing Invariant 1; `jobs` is
       already RLS-governed, no new policy needed, just the test).
-- [ ] Run the Task 5 `df-core` tests above; confirm green.
-- [ ] Refactor `crates/df-mcp/src/tools/jobs.rs`: factor `sync_job_after_transition`'s
+- [ ] Run the Task 5 `of-core` tests above; confirm green.
+- [ ] Refactor `crates/of-mcp/src/tools/jobs.rs`: factor `sync_job_after_transition`'s
       binding-resolution block (the `resolve_binding` + `get_connection` step) into its own
       private helper returning `enum BindingLookup { NotConfigured, Broken,
       Ready(TrackerBinding, TrackerConnection) }` (`Broken` keeps the existing
       log-and-continue invariant-violation case distinct from an ordinary "nothing
       configured" gap). Update `sync_job_after_transition` to call it and keep mapping both
       `NotConfigured` and `Broken` to `Ok(())` exactly as today (no behavior change for
-      `claim_jobs`/`complete_job`/`fail_job`) — run `cargo test -p df-mcp --test tools` to
+      `claim_jobs`/`complete_job`/`fail_job`) — run `cargo test -p of-mcp --test tools` to
       confirm no regression before proceeding.
 - [ ] New `#[tool(...)]` method `link_ticket` in the same `impl` block: args
       `{job: JobId, tracker: Tracker, ticket_ref: String}`, `scope::TRACKERS` (add
-      `pub const TRACKERS: &str = "trackers";` to `crates/df-mcp/src/tools/mod.rs`'s
+      `pub const TRACKERS: &str = "trackers";` to `crates/of-mcp/src/tools/mod.rs`'s
       `scope` module first), charges inside the same `Tx` as the `jobs::link_ticket` call
       (standard "charge before the work, same Tx" shape), returns `out::JobOut`. Tool
       description written for an LLM caller per house style.
@@ -419,18 +419,18 @@ the per-job-vs-repo-binding question and specifies exact error/billing/output sh
       after a successful outbound call must not roll back loop-safety state for a
       tracker call that already happened); returns the re-read `out::JobOut` reflecting
       the post-sync row.
-- [ ] Remove the "unbuilt tools" carve-out in `crates/df-billing/src/classify.rs`
+- [ ] Remove the "unbuilt tools" carve-out in `crates/of-billing/src/classify.rs`
       (`exhaustive_over()`'s exemption and the `built()` test helper) now that both tools
       exist on the router; confirm `tools_priced_ahead_of_being_built_are_not_reported`
       either still passes vacuously or is removed if it no longer has a case to cover.
-- [ ] Add `"link_ticket"`/`"sync_ticket"` to `crates/df-mcp/tests/tools.rs`'s
+- [ ] Add `"link_ticket"`/`"sync_ticket"` to `crates/of-mcp/tests/tools.rs`'s
       `the_advertised_surface_is_exactly_what_the_design_specifies` expected list; confirm
       `every_tool_has_a_price` passes without the carve-out.
 - [ ] Recorded-fixture / unit tests for `sync_ticket`'s transition-derivation mapping and
       its no-binding / not-configured / outbound-failure error paths (no live network),
       matching this crate's existing testing convention.
-- [ ] `cargo test -p df-core --test jobs`, `cargo test -p df-core --test isolation`,
-      `cargo test -p df-mcp --test tools`, `cargo test -p df-billing`,
+- [ ] `cargo test -p of-core --test jobs`, `cargo test -p of-core --test isolation`,
+      `cargo test -p of-mcp --test tools`, `cargo test -p of-billing`,
       `cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`,
       `cargo fmt --all`.
 - [ ] Commit.
@@ -438,7 +438,7 @@ the per-job-vs-repo-binding question and specifies exact error/billing/output sh
 ## Task 6 — Console UI: tracker connections + bindings ✅
 
 **Files:** `web/src/routes/o/[org]/settings/...` (org-level connection binding),
-`web/src/routes/o/[org]/repos/[repo]/...` (repo-level tracker binding), `df-web`'s
+`web/src/routes/o/[org]/repos/[repo]/...` (repo-level tracker binding), `of-web`'s
 `catalog.rs` if new read/write REST routes are needed (the console API stays read-only
 over the *queue* specifically — a tracker-connection admin action is not a queue write,
 same as existing repo-registration console flows).

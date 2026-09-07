@@ -4,7 +4,7 @@
 
 ## Problem
 
-The project is being renamed from **dark-factory** to **otto-factory**. The old name is
+The project is being renamed from **otto-factory** to **otto-factory**. The old name is
 present 317 times across 90 files as prose, and again as every internal identifier: the
 `df-*` crate prefix, the `DF_*` environment namespace, the `df_app` Postgres role, the
 `df_*_` token prefixes, and the `__Host-df_session` cookie.
@@ -48,7 +48,7 @@ END $$;
 
 The role is guard 2 of the two-guard tenant isolation rule, so this migration is the one
 part of the rename that can silently disable a security control. `Db::verify_tenant_isolation`
-is what catches it: it reads the effective role back out of the catalog and `df-server`
+is what catches it: it reads the effective role back out of the catalog and `of-server`
 refuses to bind a port unless the check passes. **The proof this task landed is the startup
 log line naming `of_app`, not a green test run** — `#[sqlx::test]` connects as a superuser
 and bypasses RLS, so the `rls_scopes_*` tests must be re-read to confirm they still issue
@@ -99,7 +99,7 @@ historical docs is the *product name in prose* and links that must still resolve
 
 ### 6a. The design-of-record spec is renamed too, and every inbound link follows it
 
-`docs/specs/2026-09-01-dark-factory-design.md` is `git mv`'d to
+`docs/specs/2026-09-01-otto-factory-design.md` is `git mv`'d to
 `docs/specs/2026-09-01-otto-factory-design.md`. `CLAUDE.md` links to it by path (twice), and
 `web/worker/index.ts` and the renamed dev skill each reference it — every one of those links
 is fixed in the same change, or the design of record 404s from its own linking documents.
@@ -109,14 +109,14 @@ is fixed in the same change, or the design of record 404s from its own linking d
 Per `CLAUDE.md`'s rule on public-interface changes, non-additive renames must be named
 explicitly rather than treated as incidental refactor side-effects. This rename touches
 several: the `DF_*` config env-var namespace, the `df_*_` token prefixes, the
-`__Host-df_session` cookie name, and the `x-dark-factory-auth` OpenAPI extension key (an
+`__Host-df_session` cookie name, and the `x-otto-factory-auth` OpenAPI extension key (an
 MCP/console-facing identifier, surfaced to every coding-agent client through
 `web/src/lib/openapi.ts`). None of these renames is additive — each is named here, flagged to
 the architect reviewer in the PR body, and recorded in `docs/clients/matrix.md` where it
 changes what a client sees. Decision 1 (no compatibility shim) is what makes each of these an
 explicit break rather than a silent one: there is no dual-read anywhere.
 
-### 6. `.github/skills/dark-factory-development/` is operational, not documentation
+### 6. `.github/skills/otto-factory-development/` is operational, not documentation
 
 The skill hard-codes `--repo savvagent/dark-factory` in ~25 commands it actually executes.
 GitHub's redirect keeps them working, which is the problem: they will quietly keep the old

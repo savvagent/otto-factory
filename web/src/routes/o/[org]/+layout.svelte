@@ -76,7 +76,7 @@
   }
 </script>
 
-<svelte:head><title>{context.title} · dark-factory</title></svelte:head>
+<svelte:head><title>{context.title} · otto-factory</title></svelte:head>
 
 {#if missing}
   <div class="mx-auto max-w-md py-10 text-center">

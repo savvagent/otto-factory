@@ -3,22 +3,22 @@
  *
  * Cloudflare serves the built SPA from its own network and forwards everything
  * dynamic — `/api`, `/oauth`, `/.well-known`, `/mcp`, and the health probes — to
- * `df-server`. The browser talks to exactly one hostname, which is not a
+ * `of-server`. The browser talks to exactly one hostname, which is not a
  * performance decision: the console's session is an `HttpOnly`, `__Host-`
  * prefixed cookie, and `__Host-` means the browser refuses to store it unless it
  * is `Secure`, has `Path=/`, and carries no `Domain`. Put the SPA on one
  * hostname and the API on another and that cookie cannot be sent at all — no
  * CORS header rescues it, and the fix would be a different auth transport, which
- * `docs/specs/2026-09-01-dark-factory-design.md` refuses on purpose.
+ * `docs/specs/2026-09-01-otto-factory-design.md` refuses on purpose.
  *
  * This Worker therefore proxies rather than redirects, and it is the reason the
  * split-origin option in the issue was never really an option.
  */
 
 /**
- * Path prefixes that belong to `df-server` rather than to the console's own
+ * Path prefixes that belong to `of-server` rather than to the console's own
  * client-side routing. **This list mirrors `API_PREFIXES` in
- * `crates/df-server/src/lib.rs`** and must not drift from it: the server keeps
+ * `crates/of-server/src/lib.rs`** and must not drift from it: the server keeps
  * the same list to decide what gets a JSON `404` instead of `index.html`, and a
  * prefix that exists on one side only is a route that behaves differently
  * depending on whether Cloudflare is in front.
@@ -46,7 +46,7 @@ export function belongsToOrigin(path: string): boolean {
 export interface Env {
   /** The built `web/build` bundle, uploaded with the Worker. */
   ASSETS: Fetcher;
-  /** Where `df-server` actually listens, e.g. `https://dark-factory-mcp.fly.dev`. */
+  /** Where `of-server` actually listens, e.g. `https://otto-factory-mcp.fly.dev`. */
   DF_ORIGIN: string;
 }
 
@@ -69,7 +69,7 @@ export default {
         JSON.stringify({
           error: 'misconfigured',
           error_description:
-            'this Worker has no DF_ORIGIN, so it does not know where df-server is. ' +
+            'this Worker has no DF_ORIGIN, so it does not know where of-server is. ' +
             'Deploy with --env production, or pass --var DF_ORIGIN:https://…'
         }),
         { status: 500, headers: { 'content-type': 'application/json' } }
