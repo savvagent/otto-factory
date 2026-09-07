@@ -76,7 +76,7 @@ fetched, so the origin sees `Host: otto-factory-mcp.fly.dev` while `OF_PUBLIC_UR
 server that answers to any `Host` is DNS-rebindable — and rejects the mismatch:
 
 ```
-$ curl -X POST https://console.example.com/mcp -H "authorization: Bearer df_pat_…" …
+$ curl -X POST https://console.example.com/mcp -H "authorization: Bearer of_pat_…" …
 Forbidden: Host header is not allowed
 ```
 
@@ -130,7 +130,7 @@ What that run established:
   `/mcp-guide` all render the SPA; `/api` and `/api/no/such/thing` answer the origin's JSON
   `404`; `/healthz` and `/readyz` answer JSON, not HTML. `/apiary` is the case that matters:
   it is a legal org slug, and a prefix test that is not segment-aware sends it to the origin.
-- **The session cookie survives the edge intact** — `__Host-df_session; Path=/; HttpOnly;
+- **The session cookie survives the edge intact** — `__Host-of_session; Path=/; HttpOnly;
   Secure; SameSite=Lax; Max-Age=1209600`, which is the whole of issue #2's third checkbox.
   Sign-up, emailed verification link, TOTP enrolment, org creation and PAT minting were all
   driven through the Worker. (This run predates the removal of email and TOTP — see the

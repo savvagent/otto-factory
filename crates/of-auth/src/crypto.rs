@@ -20,14 +20,14 @@ const TOKEN_BYTES: usize = 32;
 /// bug report, or a secret scanner. Distinct per kind so an access token
 /// pasted where a PAT belongs fails loudly rather than subtly.
 pub mod prefix {
-    pub const ACCESS: &str = "df_at_";
-    pub const REFRESH: &str = "df_rt_";
-    pub const AUTH_CODE: &str = "df_ac_";
-    pub const SESSION: &str = "df_ss_";
-    pub const PAT: &str = "df_pat_";
-    pub const MAGIC: &str = "df_ml_";
-    pub const INVITE: &str = "df_inv_";
-    pub const RECOVERY: &str = "df_rc_";
+    pub const ACCESS: &str = "of_at_";
+    pub const REFRESH: &str = "of_rt_";
+    pub const AUTH_CODE: &str = "of_ac_";
+    pub const SESSION: &str = "of_ss_";
+    pub const PAT: &str = "of_pat_";
+    pub const MAGIC: &str = "of_ml_";
+    pub const INVITE: &str = "of_inv_";
+    pub const RECOVERY: &str = "of_rc_";
 }
 
 /// A freshly minted credential: the plaintext to hand out **once**, and the
@@ -95,7 +95,7 @@ mod tests {
     fn generated_tokens_are_prefixed_and_unique() {
         let a = generate(prefix::ACCESS);
         let b = generate(prefix::ACCESS);
-        assert!(a.expose().starts_with("df_at_"));
+        assert!(a.expose().starts_with("of_at_"));
         assert_ne!(a.expose(), b.expose());
         assert_ne!(a.hash, b.hash);
     }
@@ -105,7 +105,7 @@ mod tests {
         let s = generate(prefix::PAT);
         assert_eq!(hash(s.expose()), s.hash);
         assert!(verify(&hash(s.expose()), &s.hash));
-        assert!(!verify(&hash("df_pat_wrong"), &s.hash));
+        assert!(!verify(&hash("of_pat_wrong"), &s.hash));
     }
 
     /// The plaintext must never reach a log through `Debug`, which is how

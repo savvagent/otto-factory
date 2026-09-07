@@ -275,7 +275,7 @@ Three supported connection paths, in preference order:
    nothing to copy and paste. Used when the client advertises OAuth support.
 2. **Streamable HTTP + personal access token** — for clients with partial or no OAuth. The
    user mints a scoped PAT in the console and the client sends
-   `Authorization: Bearer df_pat_…`. PATs carry the same `(user, org, scopes)` claims as
+   `Authorization: Bearer of_pat_…`. PATs carry the same `(user, org, scopes)` claims as
    OAuth tokens, are hashed at rest, have an expiry, and are revocable per-token from the
    console. This path exists so that "which agent are you using?" is never a blocker.
 3. **stdio via `npx mcp-remote`** — the community stdio→HTTP shim, documented for clients

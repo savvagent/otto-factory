@@ -219,8 +219,8 @@ mod tests {
     fn the_scheme_is_case_insensitive() {
         for prefix in ["Bearer", "bearer", "BEARER", "BeArEr"] {
             assert_eq!(
-                bearer(&headers(&format!("{prefix} df_at_abc"))),
-                Some("df_at_abc"),
+                bearer(&headers(&format!("{prefix} of_at_abc"))),
+                Some("of_at_abc"),
                 "{prefix} should be accepted"
             );
         }
@@ -228,7 +228,7 @@ mod tests {
 
     #[test]
     fn other_schemes_and_malformed_headers_carry_no_token() {
-        for bad in ["Basic dXNlcjpwdw==", "df_at_abc", "Bearer", "Bearer   ", ""] {
+        for bad in ["Basic dXNlcjpwdw==", "of_at_abc", "Bearer", "Bearer   ", ""] {
             assert_eq!(bearer(&headers(bad)), None, "{bad:?} should yield no token");
         }
         assert_eq!(bearer(&HeaderMap::new()), None);

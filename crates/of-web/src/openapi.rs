@@ -82,7 +82,7 @@ pub fn document(endpoints: &[Endpoint]) -> Value {
             "description":
                 "The console's REST surface, and the OAuth 2.1 authorization server \
                  in front of the MCP endpoint. Authentication is a session cookie \
-                 (`__Host-df_session`), set by the sign-in endpoints; the MCP surface \
+                 (`__Host-of_session`), set by the sign-in endpoints; the MCP surface \
                  itself uses bearer tokens and is described by its own metadata \
                  documents.",
         },
@@ -549,7 +549,7 @@ fn entity_schemas() -> Value {
             "type": "object",
             "description": "Shown once. Only a SHA-256 hash of `token` is stored.",
             "properties": {
-                "token": { "type": "string", "examples": ["df_pat_…"] },
+                "token": { "type": "string", "examples": ["of_pat_…"] },
                 "id": uuid,
                 "name": { "type": "string" },
                 "scopes": { "type": "array", "items": { "type": "string" } },

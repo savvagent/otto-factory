@@ -24,7 +24,7 @@
 //!
 //! ## `__Host-`
 //!
-//! The name is `__Host-df_session`. The prefix is not decoration: browsers
+//! The name is `__Host-of_session`. The prefix is not decoration: browsers
 //! refuse to store a `__Host-`-prefixed cookie unless it is `Secure`, has
 //! `Path=/`, and carries **no `Domain`** — which makes it impossible for a
 //! sibling subdomain to set one. Without it, an XSS on any `*.example.com` host
@@ -55,7 +55,7 @@ use crate::error::ApiError;
 use crate::state::AppState;
 
 /// The cookie name. See the module docs for why the prefix is there.
-pub const COOKIE_NAME: &str = "__Host-df_session";
+pub const COOKIE_NAME: &str = "__Host-of_session";
 
 /// Build the `Set-Cookie` value for a freshly opened session.
 ///
@@ -85,7 +85,7 @@ pub fn set_cookie(token: &str) -> HeaderValue {
 /// cookies and sends the stale one — a logout that appears to work and does not.
 pub fn clear_cookie() -> HeaderValue {
     HeaderValue::from_static(
-        "__Host-df_session=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0",
+        "__Host-of_session=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0",
     )
 }
 
@@ -279,23 +279,23 @@ mod tests {
 
     #[test]
     fn the_session_token_is_found_among_other_cookies() {
-        let parts = parts_with("theme=dark; __Host-df_session=df_ss_abc; locale=en");
-        assert_eq!(token_from(&parts), Some("df_ss_abc".into()));
+        let parts = parts_with("theme=dark; __Host-of_session=of_ss_abc; locale=en");
+        assert_eq!(token_from(&parts), Some("of_ss_abc".into()));
 
-        let parts = parts_with("__Host-df_session=df_ss_abc");
-        assert_eq!(token_from(&parts), Some("df_ss_abc".into()));
+        let parts = parts_with("__Host-of_session=of_ss_abc");
+        assert_eq!(token_from(&parts), Some("of_ss_abc".into()));
     }
 
     /// A cookie whose *name* merely ends in ours must not be read as ours —
-    /// `evil-__Host-df_session` is a name an attacker can set on a sibling host.
+    /// `evil-__Host-of_session` is a name an attacker can set on a sibling host.
     #[test]
     fn a_lookalike_cookie_name_is_not_the_session() {
         for cookie in [
-            "df_session=df_ss_abc",
-            "evil__Host-df_session=df_ss_abc",
-            "x__Host-df_session=df_ss_abc",
-            "__Host-df_session_other=df_ss_abc",
-            "__Host-df_session=",
+            "of_session=of_ss_abc",
+            "evil__Host-of_session=of_ss_abc",
+            "x__Host-of_session=of_ss_abc",
+            "__Host-of_session_other=of_ss_abc",
+            "__Host-of_session=",
             "theme=dark",
         ] {
             assert_eq!(
@@ -311,10 +311,10 @@ mod tests {
     /// test in the suite would notice.
     #[test]
     fn the_cookie_carries_every_attribute_that_protects_it() {
-        let cookie = set_cookie("df_ss_abc");
+        let cookie = set_cookie("of_ss_abc");
         let cookie = cookie.to_str().unwrap();
 
-        assert!(cookie.starts_with("__Host-df_session=df_ss_abc"));
+        assert!(cookie.starts_with("__Host-of_session=of_ss_abc"));
         assert!(cookie.contains("HttpOnly"), "script could read it");
         assert!(
             cookie.contains("Secure"),
@@ -340,7 +340,7 @@ mod tests {
     /// browser holding both, and sending the stale one.
     #[test]
     fn clearing_matches_the_cookie_it_clears() {
-        let set = set_cookie("df_ss_abc");
+        let set = set_cookie("of_ss_abc");
         let clear = clear_cookie();
         let (set, clear) = (set.to_str().unwrap(), clear.to_str().unwrap());
 

@@ -241,7 +241,7 @@ mod tests {
     #[test]
     fn debug_does_not_leak_the_cookie_value() {
         let s = NewSession {
-            token: "df_ss_supersecret".into(),
+            token: "of_ss_supersecret".into(),
             session: Session {
                 id: Uuid::nil(),
                 user_id: UserId::new(),

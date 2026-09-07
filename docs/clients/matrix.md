@@ -76,7 +76,7 @@ unauthenticated and stops; the flow needs `claude mcp login otto-factory` — or
 an interactive session — because Claude Code asks the terminal to fall back to a pasted
 redirect URL when the browser cannot reach it. Once a token is stored, `-p` sessions use it.
 
-**Token path**: `claude mcp add --transport http otto-factory <url> --header "Authorization: Bearer df_pat_…"`.
+**Token path**: `claude mcp add --transport http otto-factory <url> --header "Authorization: Bearer of_pat_…"`.
 Verified by listing all 28 tools and calling `whoami`.
 
 ## Copilot CLI 1.0.82

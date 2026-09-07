@@ -427,7 +427,7 @@ async fn pat_is_equivalent_to_an_oauth_token(pool: PgPool) {
     .unwrap();
 
     assert!(
-        pat.starts_with("df_pat_"),
+        pat.starts_with("of_pat_"),
         "PATs must be identifiable on sight"
     );
 
@@ -482,7 +482,7 @@ async fn revocation_is_scoped_to_the_owner(pool: PgPool) {
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn an_unknown_token_is_refused(pool: PgPool) {
     let (db, _, _) = fixture(pool).await;
-    assert!(tokens::introspect(&db, "df_at_totally-made-up", RESOURCE)
+    assert!(tokens::introspect(&db, "of_at_totally-made-up", RESOURCE)
         .await
         .is_err());
 }

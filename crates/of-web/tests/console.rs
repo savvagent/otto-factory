@@ -379,7 +379,7 @@ async fn an_invitation_code_is_handed_back_accepted_once_and_grants_its_role(poo
     // The code comes back to the admin — there is no mailbox it went to
     // instead — and the link is the same secret wrapped in a console URL.
     let token = invited.body["code"].as_str().expect("no code").to_string();
-    assert!(token.starts_with("df_inv_"), "unexpected code: {token}");
+    assert!(token.starts_with("of_inv_"), "unexpected code: {token}");
     assert_eq!(
         invited.body["link"],
         format!("https://console.otto-factory.test/invite/acme?token={token}")
@@ -946,7 +946,7 @@ async fn a_pat_is_shown_once_audienced_for_mcp_and_revocable(pool: PgPool) {
 
     let token = minted.body["token"].as_str().unwrap().to_string();
     let id = minted.body["id"].as_str().unwrap().to_string();
-    assert!(token.starts_with("df_pat_"));
+    assert!(token.starts_with("of_pat_"));
     assert_eq!(minted.body["resource"], common::RESOURCE);
 
     let principal = of_auth::tokens::introspect(&h.db, &token, common::RESOURCE)
@@ -1092,7 +1092,7 @@ async fn the_openapi_document_is_public_and_describes_the_surface(pool: PgPool) 
     assert!(doc.body["paths"]["/api/orgs/{org}/repos"]["post"].is_object());
     assert_eq!(
         doc.body["components"]["securitySchemes"]["sessionCookie"]["name"],
-        "__Host-df_session"
+        "__Host-of_session"
     );
 }
 
@@ -1250,7 +1250,7 @@ async fn a_reset_account_cannot_be_claimed_without_the_code(pool: PgPool) {
 
     // A stranger with a guessed code gets nowhere.
     let guessed = Call::post("/api/auth/claim/start")
-        .json(serde_json::json!({ "code": "df_inv_not-a-real-code" }))
+        .json(serde_json::json!({ "code": "of_inv_not-a-real-code" }))
         .send(&h.router)
         .await;
     assert_ne!(guessed.status, StatusCode::OK);

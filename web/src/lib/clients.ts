@@ -36,7 +36,7 @@ export interface ClientRecipe {
   note?: string;
 }
 
-const PLACEHOLDER = 'df_pat_…';
+const PLACEHOLDER = 'of_pat_…';
 
 export const CLIENTS: ClientRecipe[] = [
   {

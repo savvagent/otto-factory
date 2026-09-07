@@ -93,7 +93,7 @@ impl Reply {
             .iter()
             .filter_map(|v| v.to_str().ok())
             .find_map(|v| {
-                let value = v.strip_prefix("__Host-df_session=")?;
+                let value = v.strip_prefix("__Host-of_session=")?;
                 let value = value.split(';').next()?;
                 (!value.is_empty()).then(|| value.to_string())
             })
@@ -188,7 +188,7 @@ impl Call {
         if let Some(token) = &self.session {
             builder = builder.header(
                 http::header::COOKIE,
-                format!("__Host-df_session={token}; theme=dark"),
+                format!("__Host-of_session={token}; theme=dark"),
             );
         }
 
