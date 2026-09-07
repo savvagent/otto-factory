@@ -9,7 +9,7 @@ No backward-compatibility affordance is added anywhere.
 
 ## Status — 2026-09-07
 
-⬜ Not started. Closes `savvagent/otto-factory#50`.
+✅ Implemented. Merged in `savvagent/otto-factory#51`, closing `savvagent/otto-factory#50`.
 
 **Spec:** `docs/specs/2026-09-07-otto-factory-rename-design.md` — read it first. This plan
 implements it exactly.
@@ -58,7 +58,7 @@ path changes; role and cookie before prose because they are the two tasks with r
 modes and deserve a clean tree around them. The hostname move is last because it is the only
 task that is not find-and-replace and the only one that can be dropped without incoherence.
 
-## Task 1 — Crates `df-*` → `of-*` ⬜
+## Task 1 — Crates `df-*` → `of-*` ✅
 
 **Files:** `crates/df-{auth,billing,core,mcp,server,trackers,web}/` (rename), root `Cargo.toml`,
 7 crate `Cargo.toml`s, every `use df_*` in the workspace, `Dockerfile`, `.github/workflows/ci.yml`,
@@ -67,23 +67,23 @@ task that is not find-and-replace and the only one that can be dropped without i
 Purely mechanical — ~1,460 identifier occurrences — but it must be done as one commit or the
 workspace does not build.
 
-- [ ] `git mv` each of the seven crate directories: `crates/of-core` → `crates/of-core`, and
+- [x] `git mv` each of the seven crate directories: `crates/of-core` → `crates/of-core`, and
       the same for `of-auth`, `of-mcp`, `of-billing`, `of-trackers`, `of-web`, `of-server`.
-- [ ] Root `Cargo.toml`: update the `members` list and every `[workspace.dependencies]` entry
+- [x] Root `Cargo.toml`: update the `members` list and every `[workspace.dependencies]` entry
       (`of-core = { path = "crates/of-core" }` → `of-core = { path = "crates/of-core" }`).
-- [ ] Each crate `Cargo.toml`: `name = "df-x"` → `name = "of-x"`, and every intra-workspace
+- [x] Each crate `Cargo.toml`: `name = "df-x"` → `name = "of-x"`, and every intra-workspace
       dependency key.
-- [ ] Sweep the Rust sources: `of_core::` → `of_core::` and the same for the other six
+- [x] Sweep the Rust sources: `of_core::` → `of_core::` and the same for the other six
       (hyphens in manifests and prose, underscores in `use` paths).
-- [ ] `Dockerfile`: `cargo build --release -p of-server`, both `cp`/`COPY` paths, and the
+- [x] `Dockerfile`: `cargo build --release -p of-server`, both `cp`/`COPY` paths, and the
       `ENTRYPOINT` — four lines, all naming the binary.
-- [ ] `.github/workflows/ci.yml` and `CLAUDE.md`: `cargo test -p of-core --test isolation` and
+- [x] `.github/workflows/ci.yml` and `CLAUDE.md`: `cargo test -p of-core --test isolation` and
       the crate-responsibility table.
-- [ ] `cargo build --workspace` — first proof the manifests are coherent.
-- [ ] `cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all`.
-- [ ] Commit: `rename: df-* crates to of-*`.
+- [x] `cargo build --workspace` — first proof the manifests are coherent.
+- [x] `cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all`.
+- [x] Commit: `rename: df-* crates to of-*`.
 
-## Task 2 — Environment namespace `DF_*` → `OF_*` ⬜
+## Task 2 — Environment namespace `DF_*` → `OF_*` ✅
 
 **Files:** `crates/of-server/src/config.rs`, `.env.example`, `fly.toml`, `web/wrangler.jsonc`,
 `web/worker/index.ts`, `.github/workflows/ci.yml`, `docs/deploy/*`.
@@ -93,28 +93,28 @@ Full list: `OF_ALLOWED_HOSTS`, `OF_ALLOWED_ORIGINS`, `OF_ALLOW_LOG_MAILER`, `OF_
 (6), `OF_JIRA_*` (2), `OF_LOG_FORMAT`, `OF_ORIGIN`, `OF_PUBLIC_URL`, `OF_RESOURCE_URI`,
 `OF_RUN_MIGRATIONS`, `OF_SIGNING_KEY`, `OF_STATIC_DIR`, `OF_TOTP_ISSUER`, `OF_UPGRADE_URL`.
 
-- [ ] Rename every variable at its read site in `config.rs`. **Add no fallback** — per spec
+- [x] Rename every variable at its read site in `config.rs`. **Add no fallback** — per spec
       decision 1, a deployment still setting `OF_PUBLIC_URL` must fail to boot naming
       `OF_PUBLIC_URL`, which `Config::from_env`'s existing "required, no default" path already
       does correctly once the name changes.
-- [ ] Rename the `OF_TEST_ABSENT_VAR_XYZ` / `OF_TEST_ABSENT_LIST_XYZ` fixtures in the
+- [x] Rename the `OF_TEST_ABSENT_VAR_XYZ` / `OF_TEST_ABSENT_LIST_XYZ` fixtures in the
       `config.rs` tests to match.
-- [ ] `.env.example` — including the commented `#OF_TOTP_ISSUER=otto-factory` line, whose
+- [x] `.env.example` — including the commented `#OF_TOTP_ISSUER=otto-factory` line, whose
       *value* is also the old product name.
-- [ ] `web/worker/index.ts` — the `OF_ORIGIN` binding, its interface field, its two error
+- [x] `web/worker/index.ts` — the `OF_ORIGIN` binding, its interface field, its two error
       strings, and the `--var OF_ORIGIN:` guidance in the thrown message.
-- [ ] `web/wrangler.jsonc` `vars` block; `fly.toml` `[env]`; `.github/workflows/ci.yml`.
-- [ ] `docs/deploy/fly.md` and `docs/deploy/cloudflare.md` — including the config table whose
+- [x] `web/wrangler.jsonc` `vars` block; `fly.toml` `[env]`; `.github/workflows/ci.yml`.
+- [x] `docs/deploy/fly.md` and `docs/deploy/cloudflare.md` — including the config table whose
       `OF_ALLOWED_HOSTS` row documents the trap that breaks every authenticated MCP call.
-- [ ] **Rename every key in the local, developer `.env`** (the file `.env.example` is copied to,
+- [x] **Rename every key in the local, developer `.env`** (the file `.env.example` is copied to,
       gitignored) from `DF_*` to `OF_*`, keeping each value as-is. With no compatibility fallback
       (spec decision 1), `cargo run -p of-server` will refuse to boot on the old names — this step
       is what makes Task 3's later boot check pass rather than fail on an unrelated env-var error.
-- [ ] `cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`.
-- [ ] `cd web && npm run check && npm run lint && npm test`.
-- [ ] Commit: `rename: DF_ environment namespace to OF_`.
+- [x] `cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`.
+- [x] `cd web && npm run check && npm run lint && npm test`.
+- [x] Commit: `rename: DF_ environment namespace to OF_`.
 
-## Task 3 — Postgres role `df_app` → `of_app`, database `dark_factory` → `otto_factory` ⬜
+## Task 3 — Postgres role `df_app` → `of_app`, database `dark_factory` → `otto_factory` ✅
 
 **Files:** `crates/of-core/migrations/0018_rename_tenant_role.sql` (new),
 `crates/of-core/src/db.rs`, `crates/of-core/src/isolation.rs`, `crates/of-core/src/lib.rs`,
@@ -125,110 +125,110 @@ Full list: `OF_ALLOWED_HOSTS`, `OF_ALLOWED_ORIGINS`, `OF_ALLOW_LOG_MAILER`, `OF_
 two-guard tenant isolation rule is the role; `#[sqlx::test]` connects as a superuser and
 bypasses RLS, so a green suite is not evidence.
 
-- [ ] Write `0018_rename_tenant_role.sql`. `ALTER ROLE df_app RENAME TO of_app` when `df_app`
+- [x] Write `0018_rename_tenant_role.sql`. `ALTER ROLE df_app RENAME TO of_app` when `df_app`
       exists; otherwise create `of_app` under the same guarded, CREATEROLE-tolerant shape as
       `0007_rls.sql` (a deployment where the role cannot exist is supported, not a failure);
       `GRANT of_app TO CURRENT_USER` to mirror `0007`. Do **not** edit `0007` or `0008`.
-- [ ] `crates/of-core/src/db.rs`: `const TENANT_ROLE: &str = "of_app";` plus the doc comments
+- [x] `crates/of-core/src/db.rs`: `const TENANT_ROLE: &str = "of_app";` plus the doc comments
       on `Db::begin` and the `can_set_role` field.
-- [ ] `crates/of-core/src/isolation.rs`: the two remediation strings
+- [x] `crates/of-core/src/isolation.rs`: the two remediation strings
       (`"revoke SUPERUSER/BYPASSRLS from of_app"`, `"CREATE ROLE of_app NOLOGIN; GRANT of_app
       TO CURRENT_USER"`), the module docs, the `effective_role: "df_app"` unit fixture, and the
       `assert!(problems[0].contains("CREATE ROLE df_app"))` assertion.
-- [ ] `crates/of-core/src/lib.rs` module docs.
-- [ ] **Re-read every `rls_scopes_*` test in `crates/of-core/tests/isolation.rs`** and confirm
+- [x] `crates/of-core/src/lib.rs` module docs.
+- [x] **Re-read every `rls_scopes_*` test in `crates/of-core/tests/isolation.rs`** and confirm
       each still issues `SET LOCAL ROLE of_app` explicitly. These are the only tests that
       exercise guard 2 rather than guard 1; one that lost the statement passes against no
       policy at all.
-- [ ] `.github/workflows/ci.yml`: the `Pre-create df_app role` step name, its
+- [x] `.github/workflows/ci.yml`: the `Pre-create df_app role` step name, its
       `CREATE ROLE df_app NOLOGIN;` statement, and the comment explaining why the step exists.
-- [ ] Database name `dark_factory` → `otto_factory` in `compose.yaml` (both `POSTGRES_DB` and
+- [x] Database name `dark_factory` → `otto_factory` in `compose.yaml` (both `POSTGRES_DB` and
       the `pg_isready` healthcheck), `.env.example`'s `DATABASE_URL`, and the four places in
       `.github/workflows/ci.yml`.
-- [ ] Recreate the local database: `podman compose down -v && podman compose up -d`, then
+- [x] Recreate the local database: `podman compose down -v && podman compose up -d`, then
       update the local `.env` to the new `DATABASE_URL`.
-- [ ] `cargo test -p of-core --test isolation` — then `cargo test --workspace`.
-- [ ] **`cargo run -p of-server` and confirm the startup log reads
+- [x] `cargo test -p of-core --test isolation` — then `cargo test --workspace`.
+- [x] **`cargo run -p of-server` and confirm the startup log reads
       `tenant isolation enforced as role "of_app"`** (or, on a managed-Postgres shape, the
       owner-role equivalent). Per the spec, this line is the proof; the test run is not.
-- [ ] `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all`.
-- [ ] Commit: `rename: tenant role to of_app and database to otto_factory`.
+- [x] `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all`.
+- [x] Commit: `rename: tenant role to of_app and database to otto_factory`.
 
-## Task 4 — Token prefixes and the session cookie ⬜
+## Task 4 — Token prefixes and the session cookie ✅
 
 **Files:** `crates/of-auth/src/crypto.rs`, `crates/of-auth/src/sessions.rs`,
 `crates/of-web/src/session.rs`, `crates/of-web/src/openapi.rs`, `crates/of-mcp/src/auth.rs`,
 plus test fixtures across `of-auth`, `of-web`, `of-mcp`.
 
-- [ ] `crypto.rs`: `ACCESS` `df_at_` → `of_at_`, `SESSION` `df_ss_` → `of_ss_`, `PAT`
+- [x] `crypto.rs`: `ACCESS` `df_at_` → `of_at_`, `SESSION` `df_ss_` → `of_ss_`, `PAT`
       `df_pat_` → `of_pat_`, `INVITE` `df_inv_` → `of_inv_`, and the two in-module assertions.
-- [ ] `session.rs`: `COOKIE_NAME` → `"__Host-of_session"`, **and** the independent literal in
+- [x] `session.rs`: `COOKIE_NAME` → `"__Host-of_session"`, **and** the independent literal in
       the clear-cookie header (`"__Host-df_session=; Path=/; HttpOnly; …"`) — two separate
       strings, and the second is not covered by changing the constant.
-- [ ] **Re-read the eight negative cookie tests one at a time.** They construct near-miss
+- [x] **Re-read the eight negative cookie tests one at a time.** They construct near-miss
       names — `evil__Host-df_session`, `x__Host-df_session`, `__Host-df_session_other` — to
       prove the matcher is exact. A find-and-replace updates them in lockstep with the matcher
       and they keep passing while proving nothing. Each must still name something that
       *differs* from `__Host-of_session`.
-- [ ] Confirm the attribute assertions (`HttpOnly`, `Secure`, `Path=/`, `SameSite=Lax`,
+- [x] Confirm the attribute assertions (`HttpOnly`, `Secure`, `Path=/`, `SameSite=Lax`,
       `__Host-` prefix) are untouched — `SameSite=Lax` specifically, because `Strict` drops the
       cookie on the top-level navigation into `/oauth/authorize`.
-- [ ] `openapi.rs`: the `__Host-df_session` description and the `df_pat_…` example.
-- [ ] Sweep remaining fixtures: `df_ss_abc`, `df_at_abc`, `df_ss_supersecret`, `df_client_a`,
+- [x] `openapi.rs`: the `__Host-df_session` description and the `df_pat_…` example.
+- [x] Sweep remaining fixtures: `df_ss_abc`, `df_at_abc`, `df_ss_supersecret`, `df_client_a`,
       `df_client_x`, `df_changes`, `df-webhook`.
-- [ ] `cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all`.
-- [ ] Commit: `rename: token prefixes and session cookie to of_`.
+- [x] `cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all`.
+- [x] Commit: `rename: token prefixes and session cookie to of_`.
 
-## Task 5 — Product name in prose, docs, and the console UI ⬜
+## Task 5 — Product name in prose, docs, and the console UI ✅
 
 **Files:** `README.md`, `CLAUDE.md`, `web/README.md`, `docs/specs/*`, `docs/plans/*`,
 `docs/clients/matrix.md`, `docs/deploy/*`, and ~20 files under `web/src/`.
 
-- [ ] `git mv docs/specs/2026-09-01-otto-factory-design.md
+- [x] `git mv docs/specs/2026-09-01-otto-factory-design.md
       docs/specs/2026-09-01-otto-factory-design.md`, then fix every inbound link —
       `CLAUDE.md` (twice), `web/worker/index.ts`, and the dev skill both reference it by path.
-- [ ] Console page titles (`· otto-factory` → `· otto-factory`) in `login`, `signup`,
+- [x] Console page titles (`· otto-factory` → `· otto-factory`) in `login`, `signup`,
       `settings`, `settings/billing`, `orgs/new`, `invite/[org]`, `o/[org]/+layout`.
-- [ ] `+layout.svelte` header `aria-label`; `orgs/new` body copy; `o/[org]/trackers` GitHub
+- [x] `+layout.svelte` header `aria-label`; `orgs/new` body copy; `o/[org]/trackers` GitHub
       App and JIRA copy; `o/[org]/queue/[job]` metadata description and comment;
       `o/[org]/repos` slug placeholder.
-- [ ] **`web/src/lib/clients.ts` — every connect snippet.** Claude Code
+- [x] **`web/src/lib/clients.ts` — every connect snippet.** Claude Code
       (`claude mcp add --transport http otto-factory …` **and** the
       `claude mcp login otto-factory` follow-up line), the two JSON `mcpServers` keys, and
       Codex's `[mcp_servers.dark_factory]` TOML table (which appears twice, once with the
       `.http_headers` sub-table). These are what a customer pastes into their agent config.
-- [ ] The `x-otto-factory-auth` OpenAPI extension → `x-otto-factory-auth`, in its producer
+- [x] The `x-otto-factory-auth` OpenAPI extension → `x-otto-factory-auth`, in its producer
       (`crates/of-web/src/openapi.rs`) and its three consumers (`web/src/lib/openapi.ts`,
       `openapi.fixtures.ts`, and the `/docs/api` page's rendering).
-- [ ] `web/src/lib/types.ts` doc comment; `web/src/lib/clients.ts` header comment.
-- [ ] Prose sweep of `README.md`, `CLAUDE.md`, `web/README.md`, `docs/**`. Leave
+- [x] `web/src/lib/types.ts` doc comment; `web/src/lib/clients.ts` header comment.
+- [x] Prose sweep of `README.md`, `CLAUDE.md`, `web/README.md`, `docs/**`. Leave
       `savvagent/dark-factory#NN` history references intact (spec decision 5).
-- [ ] `cargo test --workspace` (the OpenAPI extension key is asserted server-side).
-- [ ] `cd web && npm run check && npm run lint && npm test && npm run build`.
-- [ ] Commit: `rename: product name in docs and console UI`.
+- [x] `cargo test --workspace` (the OpenAPI extension key is asserted server-side).
+- [x] `cd web && npm run check && npm run lint && npm test && npm run build`.
+- [x] Commit: `rename: product name in docs and console UI`.
 
-## Task 6 — Deployment names and the dev skill ⬜
+## Task 6 — Deployment names and the dev skill ✅
 
 **Files:** `fly.toml`, `web/wrangler.jsonc`, `web/package.json`, `web/package-lock.json`,
 `.github/skills/otto-factory-development/`, `docs/deploy/*`.
 
-- [ ] `fly.toml`: `app = "otto-factory-mcp"` → `"otto-factory-mcp"`, plus the three header
+- [x] `fly.toml`: `app = "otto-factory-mcp"` → `"otto-factory-mcp"`, plus the three header
       comments naming the app, database, and role.
-- [ ] `web/wrangler.jsonc`: `otto-factory-console-dev` and the production-env
+- [x] `web/wrangler.jsonc`: `otto-factory-console-dev` and the production-env
       `otto-factory-console`. Keep the comment warning about the top-level/env name split —
       it is the reason a deploy once silently created `…-console-dev-production`.
-- [ ] `web/package.json` `name`, and regenerate `package-lock.json`.
-- [ ] `git mv .github/skills/otto-factory-development .github/skills/otto-factory-development`;
+- [x] `web/package.json` `name`, and regenerate `package-lock.json`.
+- [x] `git mv .github/skills/otto-factory-development .github/skills/otto-factory-development`;
       update the `name:` frontmatter, the description, and **all ~25
       `--repo savvagent/dark-factory` flags** in `SKILL.md` and `agent-prompts.md`. These are
       executed commands, not prose — the GitHub redirect is what makes leaving them dangerous
       rather than broken (spec decision 6).
-- [ ] `docs/deploy/{fly,cloudflare}.md`: the `[issue #2](…/otto-factory/issues/2)` links, the
+- [x] `docs/deploy/{fly,cloudflare}.md`: the `[issue #2](…/otto-factory/issues/2)` links, the
       `fly deploy -a` command, the Fly role/database names, and the `otto-factory-staging`
       example.
-- [ ] `cd web && npm run check && npm run lint && npm test && npm run build`.
-- [ ] `podman build -t otto-factory .` — confirms the Dockerfile's Task 1 binary rename.
-- [ ] Commit: `rename: deployment names and dev skill`.
+- [x] `cd web && npm run check && npm run lint && npm test && npm run build`.
+- [x] `podman build -t otto-factory .` — confirms the Dockerfile's Task 1 binary rename.
+- [x] Commit: `rename: deployment names and dev skill`.
 
 **Out-of-band, not part of this task's commit** (no credentials/interactive browser access from
 this environment): creating the new Fly app and Cloudflare Workers under the new names and
@@ -275,12 +275,12 @@ afterwards, including for the operator running this task.
 
 ## Final Verification
 
-- [ ] `cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`,
+- [x] `cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`,
       `cargo fmt --all --check`.
-- [ ] `cd web && npm run check && npm run lint && npm test && npm run build`.
-- [ ] `podman build -t otto-factory .`.
-- [ ] `cargo run -p of-server` → `tenant isolation enforced as role "of_app"`.
-- [ ] `grep -rIn 'dark.factory\|\bdf[-_]\|\bDF_' --exclude-dir=.git --exclude-dir=node_modules
+- [x] `cd web && npm run check && npm run lint && npm test && npm run build`.
+- [x] `podman build -t otto-factory .`.
+- [x] `cargo run -p of-server` → `tenant isolation enforced as role "of_app"`.
+- [x] `grep -rIn 'dark.factory\|\bdf[-_]\|\bDF_' --exclude-dir=.git --exclude-dir=node_modules
       --exclude-dir=target .` returns only `savvagent/dark-factory#NN` history references.
-- [ ] Flip the spec's `> **Status:**` to IMPLEMENTED and this plan's markers to ✅ at
+- [x] Flip the spec's `> **Status:**` to IMPLEMENTED and this plan's markers to ✅ at
       record-as-shipped, after merge.

@@ -1,6 +1,7 @@
 # otto-factory rename — design
 
-> **Status:** DRAFT — closes savvagent/otto-factory#50.
+> **Status:** IMPLEMENTED — merged in savvagent/otto-factory#51, closing savvagent/otto-factory#50.
+> Task 7 (public hostname move) is manual and out-of-band; see the plan's Task 7 checklist.
 
 ## Problem
 
