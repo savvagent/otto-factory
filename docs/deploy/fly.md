@@ -13,16 +13,16 @@ serverless model would fight. See `CLAUDE.md` for why the process must stay warm
   (`kyzl60xmdjxopj9g`, region `iad`) also serves `light-factory` and `nels-api`. Isolation
   follows the cluster's existing per-app pattern — each app gets its own database and
   role, never a shared one:
-  - Database: `dark_factory`
-  - Role: `otto-factory` (a member of `schema_admin`). It owns the `dark_factory`
+  - Database: `otto_factory`
+  - Role: `otto-factory` (a member of `schema_admin`). It owns the `otto_factory`
     schema — but **not** only that: see "The app's credential can reach
     `light_factory`" below before treating this as isolation.
-  - Attached via `fly mpg attach kyzl60xmdjxopj9g -a otto-factory-mcp -d dark_factory
+  - Attached via `fly mpg attach kyzl60xmdjxopj9g -a otto-factory-mcp -d otto_factory
     -u otto-factory --variable-name DATABASE_URL` — this staged `DATABASE_URL` as an app
     secret.
 
   **Never** run `fly mpg` commands with a bare cluster-wide scope (e.g. resetting or
-  dropping without naming `dark_factory`/`otto-factory` explicitly) — the cluster is
+  dropping without naming `otto_factory`/`otto-factory` explicitly) — the cluster is
   shared with nels' production database.
 
 - **Secrets staged** (not yet deployed — no image exists yet to receive them):
@@ -35,25 +35,25 @@ Two facts about `savvagent-pg` decide how isolation works here. Both were verifi
 against the live cluster rather than reasoned about, because the first one was
 wrong in an earlier draft of this document.
 
-### `df_app` cannot exist on this cluster, and does not need to
+### `of_app` cannot exist on this cluster, and does not need to
 
-`0007_rls.sql` issues `CREATE ROLE df_app NOLOGIN` and `GRANT df_app TO
+`0007_rls.sql` issues `CREATE ROLE of_app NOLOGIN` and `GRANT of_app TO
 CURRENT_USER`. Both are cluster-level operations needing `CREATEROLE`. On this
 cluster the only role with it is `postgres`, and `fly mpg connect -u postgres`
 answers `cluster … or user postgres not found` — flyctl does not issue those
-credentials. `CREATE ROLE df_app NOLOGIN` as `otto-factory` fails with
+credentials. `CREATE ROLE of_app NOLOGIN` as `otto-factory` fails with
 *permission denied*, and `fly mpg users create` rejects the name outright
 (`user_name must contain only lowercase letters, numbers, and dashes`).
 
-That does not weaken isolation, because `df_app` was never the only guard. Every
+That does not weaken isolation, because `of_app` was never the only guard. Every
 tenant table is `FORCE ROW LEVEL SECURITY`, which makes the policies apply to the
 table's **owner** as well — and connecting as `otto-factory` lands in
 `schema_admin`, which owns the tables but is neither a superuser nor `BYPASSRLS`
-(`rolsuper=f`, `rolbypassrls=f`). Verified directly against `dark_factory` inside
+(`rolsuper=f`, `rolbypassrls=f`). Verified directly against `otto_factory` inside
 a rolled-back transaction: an unpinned `SELECT` over a policied table returned
 **0 rows**, and the same query pinned to one org returned that org's row only.
 
-So `Db::begin` issues `SET LOCAL ROLE df_app` **only when the role can actually be
+So `Db::begin` issues `SET LOCAL ROLE of_app` **only when the role can actually be
 assumed**, and `Db::verify_tenant_isolation` re-derives the whole question from the
 catalog at startup. `of-server` refuses to bind a port unless one of two things
 holds:
@@ -71,7 +71,7 @@ INFO of_server: tenant isolation enforced as role "otto-factory"
                 (connecting role, not exempt from RLS); 14 tenant tables, 14 forced
 ```
 
-The combination those two hide between them — no `df_app` *and* an exempt
+The combination those two hide between them — no `of_app` *and* an exempt
 connecting role — is a startup error naming the remediation. Nothing about that
 check is optional or best-effort: a deployment that cannot prove isolation does
 not serve.

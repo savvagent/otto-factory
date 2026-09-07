@@ -15,12 +15,12 @@ use tokio::sync::OnceCell;
 
 /// The application role that tenant transactions run as. Must match migration
 /// `0007_rls.sql`.
-const TENANT_ROLE: &str = "df_app";
+const TENANT_ROLE: &str = "of_app";
 
 #[derive(Clone, Debug)]
 pub struct Db {
     pool: PgPool,
-    /// Whether this connection can `SET LOCAL ROLE df_app`, resolved once and
+    /// Whether this connection can `SET LOCAL ROLE of_app`, resolved once and
     /// shared by every clone.
     ///
     /// Resolved lazily rather than in `connect`, because `from_pool` is sync and
@@ -48,7 +48,7 @@ impl Db {
         }
     }
 
-    /// Whether `SET LOCAL ROLE df_app` will succeed on this connection.
+    /// Whether `SET LOCAL ROLE of_app` will succeed on this connection.
     ///
     /// Two conditions, and asking the catalog is the only honest way to know
     /// both: the role has to exist, and the connecting role has to be a member of
@@ -98,7 +98,7 @@ impl Db {
     ///
     /// Two statements run before the caller gets control, and both are load-bearing:
     ///
-    /// - `SET LOCAL ROLE df_app` drops out of any superuser/owner identity for
+    /// - `SET LOCAL ROLE of_app` drops out of any superuser/owner identity for
     ///   the rest of the transaction. **Where the connecting role is exempt, RLS
     ///   does nothing without this** — Postgres exempts superusers and table
     ///   owners from their own policies, and the connecting user is frequently
@@ -107,7 +107,7 @@ impl Db {
     ///
     ///   Issued only when the role can actually be assumed. A managed Postgres
     ///   deployment is routinely handed a database-scoped role with no
-    ///   CREATEROLE, so `df_app` never gets created and this statement would
+    ///   CREATEROLE, so `of_app` never gets created and this statement would
     ///   abort every tenant transaction; there, `FORCE ROW LEVEL SECURITY`
     ///   carries the guarantee instead. Skipping it is safe *only* under
     ///   conditions this function cannot check per-transaction without paying

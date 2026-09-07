@@ -100,9 +100,9 @@ export const CLIENTS: ClientRecipe[] = [
     name: 'Codex CLI',
     kind: 'toml',
     location: '~/.codex/config.toml',
-    oauth: (url) => `[mcp_servers.dark_factory]\nurl = "${url}"`,
+    oauth: (url) => `[mcp_servers.otto_factory]\nurl = "${url}"`,
     token: (url, token) =>
-      `[mcp_servers.dark_factory]\nurl = "${url}"\n\n[mcp_servers.dark_factory.http_headers]\nAuthorization = "Bearer ${token || PLACEHOLDER}"`
+      `[mcp_servers.otto_factory]\nurl = "${url}"\n\n[mcp_servers.otto_factory.http_headers]\nAuthorization = "Bearer ${token || PLACEHOLDER}"`
   },
   {
     id: 'generic',

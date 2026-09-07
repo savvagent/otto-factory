@@ -541,7 +541,7 @@ async fn rls_scopes_tracker_connections(pool: PgPool) {
     tx.commit().await.unwrap();
 
     let mut tx = db.begin_unpinned().await.unwrap();
-    sqlx::query("SET LOCAL ROLE df_app")
+    sqlx::query("SET LOCAL ROLE of_app")
         .execute(&mut *tx)
         .await
         .unwrap();
@@ -605,7 +605,7 @@ async fn rls_scopes_tracker_bindings(pool: PgPool) {
     tx.commit().await.unwrap();
 
     let mut tx = db.begin_unpinned().await.unwrap();
-    sqlx::query("SET LOCAL ROLE df_app")
+    sqlx::query("SET LOCAL ROLE of_app")
         .execute(&mut *tx)
         .await
         .unwrap();
@@ -657,7 +657,7 @@ async fn rls_scopes_tracker_bindings(pool: PgPool) {
 
 /// The happy path, and the reason it is not trivial: `#[sqlx::test]` connects as
 /// the role Postgres was initialised with, which is a superuser. Isolation here
-/// is real only because `SET LOCAL ROLE df_app` drops out of it, so a passing
+/// is real only because `SET LOCAL ROLE of_app` drops out of it, so a passing
 /// assertion is evidence the role was genuinely assumed.
 #[sqlx::test]
 async fn isolation_verifies_on_a_healthy_database(pool: PgPool) {
@@ -669,10 +669,10 @@ async fn isolation_verifies_on_a_healthy_database(pool: PgPool) {
 
     assert!(
         report.tenant_role_assumed,
-        "the test database can create df_app, so it must have been assumed — \
+        "the test database can create of_app, so it must have been assumed — \
          a false here means begin() is no longer dropping out of the superuser"
     );
-    assert_eq!(report.effective_role, "df_app");
+    assert_eq!(report.effective_role, "of_app");
     assert!(!report.role_is_superuser && !report.role_bypasses_rls);
     assert!(
         report.tables.len() >= 13,
@@ -682,7 +682,7 @@ async fn isolation_verifies_on_a_healthy_database(pool: PgPool) {
     assert!(
         report.tables.iter().all(|t| t.rls_forced),
         "every tenant table must be FORCE ROW LEVEL SECURITY — that is what \
-         carries isolation on a deployment that cannot create df_app"
+         carries isolation on a deployment that cannot create of_app"
     );
 }
 
@@ -737,7 +737,7 @@ async fn isolation_refuses_a_database_with_no_policies(pool: PgPool) {
     assert!(err.to_string().contains("0007_rls.sql"), "{err}");
 }
 
-/// The verification must not leave the session pinned to `df_app`, or the
+/// The verification must not leave the session pinned to `of_app`, or the
 /// control plane — which runs unpinned, as the connecting role — would silently
 /// lose the privileges it needs on the very next checkout from the pool.
 #[sqlx::test]
@@ -751,7 +751,7 @@ async fn verifying_isolation_does_not_poison_the_pool(pool: PgPool) {
         .await
         .unwrap();
     tx.rollback().await.unwrap();
-    assert_ne!(role, "df_app", "verification leaked SET ROLE into the pool");
+    assert_ne!(role, "of_app", "verification leaked SET ROLE into the pool");
 
     // And the ordinary path still isolates afterwards.
     let a = tenant(&db, "acme", "git@github.com:acme/api.git").await;
@@ -767,13 +767,13 @@ async fn verifying_isolation_does_not_poison_the_pool(pool: PgPool) {
 // ---------------------------------------------------------------------------
 // The audit trail under row-level security.
 //
-// These tests all issue `SET LOCAL ROLE df_app` by hand, which is not how the
+// These tests all issue `SET LOCAL ROLE of_app` by hand, which is not how the
 // rest of the suite works and is the point: `#[sqlx::test]` connects as the
 // superuser Postgres was initialised with, and a superuser bypasses row-level
 // security even on a FORCE'd table. A test of an audit *policy* written the
 // ordinary way would pass against no policy at all.
 //
-// Dropping to `df_app` makes the policies apply, which is the same thing that
+// Dropping to `of_app` makes the policies apply, which is the same thing that
 // happens on a deployment connecting as a non-superuser schema owner — the
 // shape where `audit_events` previously rejected every login's audit row.
 // ---------------------------------------------------------------------------
@@ -789,7 +789,7 @@ const AUDIT_INSERT: &str = "INSERT INTO audit_events (org_id, actor_label, actio
 async fn the_control_plane_can_append_audit_rows_with_no_org(pool: PgPool) {
     let db = db(pool);
     let mut tx = db.begin_unpinned().await.unwrap();
-    sqlx::query("SET LOCAL ROLE df_app")
+    sqlx::query("SET LOCAL ROLE of_app")
         .execute(&mut *tx)
         .await
         .unwrap();
@@ -810,7 +810,7 @@ async fn the_control_plane_can_append_an_org_scoped_audit_row(pool: PgPool) {
     let a = tenant(&db, "acme", "git@github.com:acme/api.git").await;
 
     let mut tx = db.begin_unpinned().await.unwrap();
-    sqlx::query("SET LOCAL ROLE df_app")
+    sqlx::query("SET LOCAL ROLE of_app")
         .execute(&mut *tx)
         .await
         .unwrap();
@@ -851,7 +851,7 @@ async fn audit_rows_cannot_be_rewritten(pool: PgPool) {
     let a = tenant(&db, "acme", "git@github.com:acme/api.git").await;
 
     let mut tx = db.begin_unpinned().await.unwrap();
-    sqlx::query("SET LOCAL ROLE df_app")
+    sqlx::query("SET LOCAL ROLE of_app")
         .execute(&mut *tx)
         .await
         .unwrap();
@@ -893,7 +893,7 @@ async fn audit_rows_cannot_be_erased_from_a_request(pool: PgPool) {
     let a = tenant(&db, "acme", "git@github.com:acme/api.git").await;
 
     let mut tx = db.begin_unpinned().await.unwrap();
-    sqlx::query("SET LOCAL ROLE df_app")
+    sqlx::query("SET LOCAL ROLE of_app")
         .execute(&mut *tx)
         .await
         .unwrap();

@@ -8,10 +8,10 @@
 //!    method on [`Tx`], which cannot be constructed without one. There is no
 //!    function in this crate that reads a job without naming an org.
 //! 2. **Every tenant transaction runs pinned.** [`Db::begin`] issues
-//!    `SET LOCAL ROLE df_app` and `SET LOCAL app.org_id`, so Postgres row-level
+//!    `SET LOCAL ROLE of_app` and `SET LOCAL app.org_id`, so Postgres row-level
 //!    security applies even when the connecting user owns the tables. A query
 //!    that forgets its `org_id` predicate returns nothing instead of leaking.
-//!    Where `df_app` cannot exist — managed Postgres does not hand out the
+//!    Where `of_app` cannot exist — managed Postgres does not hand out the
 //!    cluster privilege to create it — `FORCE ROW LEVEL SECURITY` carries the
 //!    same guarantee, and [`Db::verify_tenant_isolation`] proves at startup that
 //!    one of the two is genuinely in force. See [`isolation`].

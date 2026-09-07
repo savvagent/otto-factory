@@ -22,7 +22,7 @@
 //!
 //! The two shapes that pass, and why both are legitimate:
 //!
-//! - **`SET LOCAL ROLE df_app` succeeded.** The effective role is `df_app`,
+//! - **`SET LOCAL ROLE of_app` succeeded.** The effective role is `of_app`,
 //!   which owns nothing and holds no exemption. This is local development and
 //!   `#[sqlx::test]`, where the connecting role is the superuser Postgres was
 //!   initialised with and dropping out of it is the only thing that makes the
@@ -34,7 +34,7 @@
 //!   does not have — verified against Fly's managed Postgres, where an unpinned
 //!   `SELECT` over a tenant table returns zero rows as the schema owner.
 //!
-//! What does **not** pass is the combination those two hide: no `df_app`, and a
+//! What does **not** pass is the combination those two hide: no `of_app`, and a
 //! connecting role that is exempt anyway. That deployment has one guard, not
 //! two, and nothing in the SQL would have told anyone.
 
@@ -75,7 +75,7 @@ impl TenantTable {
 pub struct IsolationReport {
     /// `current_user` inside a transaction shaped exactly like [`crate::Db::begin`].
     pub effective_role: String,
-    /// Whether `SET LOCAL ROLE df_app` was issued. False means the role does not
+    /// Whether `SET LOCAL ROLE of_app` was issued. False means the role does not
     /// exist or is not assumable — legitimate on managed Postgres.
     pub tenant_role_assumed: bool,
     /// The effective role is a superuser. Bypasses RLS unconditionally.
@@ -108,11 +108,11 @@ impl IsolationReport {
                  {}",
                 self.effective_role,
                 if self.tenant_role_assumed {
-                    "SET LOCAL ROLE df_app succeeded but landed on an exempt role: \
-                     revoke SUPERUSER/BYPASSRLS from df_app."
+                    "SET LOCAL ROLE of_app succeeded but landed on an exempt role: \
+                     revoke SUPERUSER/BYPASSRLS from of_app."
                 } else {
-                    "Either grant the application a df_app role to drop into \
-                     (CREATE ROLE df_app NOLOGIN; GRANT df_app TO CURRENT_USER), \
+                    "Either grant the application a of_app role to drop into \
+                     (CREATE ROLE of_app NOLOGIN; GRANT of_app TO CURRENT_USER), \
                      or connect as a role that is neither."
                 }
             ));
@@ -244,7 +244,7 @@ mod tests {
 
     fn report(tables: Vec<TenantTable>) -> IsolationReport {
         IsolationReport {
-            effective_role: "df_app".to_string(),
+            effective_role: "of_app".to_string(),
             tenant_role_assumed: true,
             role_is_superuser: false,
             role_bypasses_rls: false,
@@ -253,15 +253,15 @@ mod tests {
     }
 
     /// Local development and `#[sqlx::test]`: the connecting role is the
-    /// superuser Postgres was initialised with, and `SET LOCAL ROLE df_app` is
+    /// superuser Postgres was initialised with, and `SET LOCAL ROLE of_app` is
     /// the whole reason the policies apply.
     #[test]
-    fn assuming_df_app_is_enough() {
+    fn assuming_of_app_is_enough() {
         let r = report(vec![table("jobs", true, true, false)]);
         assert!(r.problems().is_empty());
     }
 
-    /// Managed Postgres: no CREATEROLE, so no `df_app`. The connecting role owns
+    /// Managed Postgres: no CREATEROLE, so no `of_app`. The connecting role owns
     /// the tables but is neither a superuser nor BYPASSRLS, and FORCE makes the
     /// policies apply to the owner. This is the shape verified against Fly.
     #[test]
@@ -288,7 +288,7 @@ mod tests {
         let problems = r.problems();
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert!(problems[0].contains("superuser"), "{problems:?}");
-        assert!(problems[0].contains("CREATE ROLE df_app"), "{problems:?}");
+        assert!(problems[0].contains("CREATE ROLE of_app"), "{problems:?}");
     }
 
     #[test]
@@ -322,7 +322,7 @@ mod tests {
         assert!(problems[0].contains("jobs"), "{problems:?}");
     }
 
-    /// Not owning it makes FORCE irrelevant — this is why `df_app` works at all.
+    /// Not owning it makes FORCE irrelevant — this is why `of_app` works at all.
     #[test]
     fn force_is_irrelevant_when_the_role_does_not_own_the_table() {
         let r = report(vec![table("jobs", true, false, false)]);
