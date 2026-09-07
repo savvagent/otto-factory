@@ -252,7 +252,7 @@ async fn a_token_for_another_resource_is_refused(pool: PgPool) {
         tokens::IssueParams {
             user_id: user,
             org_id: org,
-            client_id: Some("df_client_x"),
+            client_id: Some("of_client_x"),
             scopes: &["jobs:read".to_string()],
             resource: OTHER_RESOURCE,
             with_refresh: false,
@@ -378,7 +378,7 @@ async fn refresh_is_bound_to_its_client_and_resource(pool: PgPool) {
         tokens::IssueParams {
             user_id: user,
             org_id: org,
-            client_id: Some("df_client_a"),
+            client_id: Some("of_client_a"),
             scopes: &["jobs:read".to_string()],
             resource: RESOURCE,
             with_refresh: true,
@@ -395,13 +395,13 @@ async fn refresh_is_bound_to_its_client_and_resource(pool: PgPool) {
         "a refresh token must not be redeemable by another client"
     );
     assert!(
-        tokens::redeem_refresh(&db, &refresh, "df_client_a", OTHER_RESOURCE)
+        tokens::redeem_refresh(&db, &refresh, "of_client_a", OTHER_RESOURCE)
             .await
             .is_err(),
         "a refresh token must not be redeemable for another resource"
     );
     assert!(
-        tokens::redeem_refresh(&db, &refresh, "df_client_a", RESOURCE)
+        tokens::redeem_refresh(&db, &refresh, "of_client_a", RESOURCE)
             .await
             .is_ok()
     );

@@ -2,7 +2,7 @@
 //!
 //! GitHub signs the raw body with one deployment-wide secret. JIRA Automation
 //! does not sign payloads, so this crate expects an org-specific shared secret
-//! in `X-DF-Webhook-Secret` and a `?site=<cloud-id>` query parameter in the
+//! in `X-OF-Webhook-Secret` and a `?site=<cloud-id>` query parameter in the
 //! URL; the route resolves the site id to an org before it asks this module to
 //! verify the shared secret against that org's sealed value.
 
@@ -20,7 +20,7 @@ type HmacSha256 = Hmac<Sha256>;
 
 const GITHUB_SIGNATURE_HEADER: &str = "x-hub-signature-256";
 const GITHUB_EVENT_HEADER: &str = "x-github-event";
-pub const JIRA_WEBHOOK_SECRET_HEADER: &str = "x-df-webhook-secret";
+pub const JIRA_WEBHOOK_SECRET_HEADER: &str = "x-of-webhook-secret";
 
 #[derive(Debug, Clone)]
 pub enum Verification<'a> {

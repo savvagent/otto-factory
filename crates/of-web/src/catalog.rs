@@ -269,7 +269,7 @@ pub fn catalog() -> Vec<Endpoint> {
             .describe(
                 "Public by necessity: GitHub App deliveries are authenticated by \
                  `X-Hub-Signature-256`, and JIRA Automation deliveries by the \
-                 org's own `X-DF-Webhook-Secret` plus a `?site=<cloud-id>` URL \
+                 org's own `X-OF-Webhook-Secret` plus a `?site=<cloud-id>` URL \
                  parameter. This endpoint only verifies, parses, and resolves the \
                  owning org today; Task 4 turns accepted events into sync work. \
                  Bodies are capped at 1 MiB — far larger than any GitHub issue/\

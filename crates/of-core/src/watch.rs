@@ -6,7 +6,7 @@
 //! per-org channels mean a `LISTEN` per tenant on every connection, and the
 //! `LISTEN` set has to be rewritten every time an org is created.
 //!
-//! Instead one connection listens on `df_changes`, every payload carries its
+//! Instead one connection listens on `of_changes`, every payload carries its
 //! `org`, and this module dispatches to the waiters for that org. A payload for
 //! an org with nobody waiting is dropped, which is the common case and costs
 //! nothing.
@@ -77,7 +77,7 @@ impl Watcher {
         });
 
         let mut listener = PgListener::connect_with(&pool).await?;
-        listener.listen("df_changes").await?;
+        listener.listen("of_changes").await?;
 
         // A `Weak`, deliberately. The task holding a strong reference would be
         // a cycle — task keeps `Watcher` alive, `Watcher` holds the task's

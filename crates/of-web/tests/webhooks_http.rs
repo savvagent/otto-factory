@@ -269,7 +269,7 @@ async fn jira_webhooks_require_the_site_and_secret_but_acknowledge_a_valid_reque
         &h,
         "/webhooks/jira?site=cloud-123",
         JIRA_FIXTURE,
-        &[("x-df-webhook-secret", JIRA_SECRET)],
+        &[("x-of-webhook-secret", JIRA_SECRET)],
     )
     .await;
     assert_eq!(ok.status(), StatusCode::OK);
@@ -278,21 +278,21 @@ async fn jira_webhooks_require_the_site_and_secret_but_acknowledge_a_valid_reque
         &h,
         "/webhooks/jira?site=cloud-123",
         JIRA_FIXTURE,
-        &[("x-df-webhook-secret", "wrong-secret")],
+        &[("x-of-webhook-secret", "wrong-secret")],
     )
     .await;
     let unknown_site = post_webhook(
         &h,
         "/webhooks/jira?site=cloud-999",
         JIRA_FIXTURE,
-        &[("x-df-webhook-secret", JIRA_SECRET)],
+        &[("x-of-webhook-secret", JIRA_SECRET)],
     )
     .await;
     let missing_site = post_webhook(
         &h,
         "/webhooks/jira",
         JIRA_FIXTURE,
-        &[("x-df-webhook-secret", JIRA_SECRET)],
+        &[("x-of-webhook-secret", JIRA_SECRET)],
     )
     .await;
 
