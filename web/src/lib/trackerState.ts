@@ -23,7 +23,7 @@
  */
 import type { TrackerProvider } from './types';
 
-const KEY = 'of:tracker-connect';
+const KEY = 'df:tracker-connect';
 
 export interface PendingConnect {
   org: string;

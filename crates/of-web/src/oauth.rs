@@ -967,14 +967,14 @@ mod tests {
     #[test]
     fn the_consent_page_leads_with_the_redirect_host() {
         let client = oauth::Client {
-            client_id: "df_client_x".into(),
+            client_id: "of_client_x".into(),
             client_name: Some("<b>Claude Code</b>".into()),
             redirect_uris: vec!["http://127.0.0.1:1455/callback".into()],
             disabled: false,
         };
         let params = AuthorizeParams {
             response_type: "code".into(),
-            client_id: "df_client_x".into(),
+            client_id: "of_client_x".into(),
             redirect_uri: "http://127.0.0.1:1455/callback".into(),
             code_challenge: "x".repeat(43),
             code_challenge_method: "S256".into(),
