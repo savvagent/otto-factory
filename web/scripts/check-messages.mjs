@@ -12,7 +12,7 @@
  * is a hard compile error. Neither one notices an absent translation.
  *
  * Wired into `npm run check` so a partial translation cannot merge, which is
- * the requirement in savvagent/dark-factory#42.
+ * the requirement in savvagent/otto-factory#42.
  *
  * Run: `node scripts/check-messages.mjs`
  */

@@ -672,7 +672,7 @@ fn error_page_html(title: &str, body_html: &str, locale: Locale) -> Response {
         Html(format!(
             "<!doctype html><html lang={lang}><meta charset=utf-8><title>{title}</title>{STYLE}\
              <main><h1>{title}</h1><p>{body_html}</p>\
-             <p class=note>{closing}</p></main>"
+             <p class=note>{closing}</p></main></html>"
         )),
     )
         .into_response()
