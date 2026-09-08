@@ -3,6 +3,27 @@
 > **Status:** DRAFT — a `deploy` job in `.github/workflows/ci.yml` that runs `flyctl deploy` for
 > `otto-factory-mcp` after every push to `master` passes CI, closing savvagent/otto-factory#54.
 
+## Goal & Success Criteria
+
+Issue savvagent/otto-factory#54 ("Merge to master triggers deployment") has an empty body, so the
+goal below is the spec's own interpretation of the title, made explicit rather than left implicit:
+**a commit landing on `master` that passes CI results in that commit running in production on
+Fly.io, with no manual step.**
+
+- A push to `master` that passes `rust`, `web`, and `docker-build` triggers a new `deploy` job in
+  the same workflow run, with no separate manual command.
+- The `deploy` job runs `flyctl deploy --remote-only -a otto-factory-mcp`, and its success/failure
+  is visible as an ordinary GitHub Actions job status on that commit — the same place `rust`/`web`
+  results already show up.
+- A push to `master` that fails `rust`, `web`, or `docker-build` never reaches `flyctl deploy` —
+  `needs:` skips the job outright rather than attempting a deploy and letting Fly's own rollout
+  health check catch it.
+- A pull request, regardless of what it touches (including this workflow file itself), never
+  triggers a deploy.
+- `docs/deploy/fly.md` and `CLAUDE.md` are updated so the record of "deploys are manual" is
+  corrected the moment this ships — a doc that still says "manual" after this lands is itself a
+  defect (see Scope/In).
+
 ## Assumptions
 
 - **One workflow, one new job, not a new workflow file.** `.github/workflows/ci.yml` already runs
@@ -45,14 +66,20 @@
   This is an infrastructure change, not one of the public interfaces Non-Negotiable Rule 6 governs
   (MCP tools, console API, OAuth/discovery, `OF_*` config, schema), so it carries no
   breaking-change documentation obligation.
-- **The existing top-level `concurrency: cancel-in-progress: true` group is left as-is.** A second
-  push to `master` while a deploy is still running cancels the whole in-flight workflow run,
-  including a not-yet-finished `deploy` job. This already matches today's manual process (nothing
-  stops someone running `fly deploy` twice back-to-back), Fly's own release history serializes
-  concurrent deploys to the same app on its side, and the alternative (a job-scoped `concurrency:`
-  block that queues rather than cancels) would let a stale, already-superseded commit finish
-  deploying after a newer one — worse than the cancellation this accepts. Recorded as a risk below,
-  not engineered around.
+- **No job-level `concurrency:` block on `deploy` — the existing top-level
+  `concurrency: cancel-in-progress: true` group is the only concurrency control, left as-is.** A
+  second push to `master` while an earlier workflow run (including its `deploy` job, whether queued
+  or already started) is still in flight cancels that entire earlier run, because GitHub Actions
+  evaluates the shared `group: ci-${{ github.workflow }}-${{ github.ref }}` the moment the new run
+  starts — a job-level `concurrency:` block on `deploy` alone cannot prevent or soften that
+  whole-run cancellation, since the workflow-level group governs the run as a whole and is checked
+  first. Adding one would therefore be dead weight that implies a serialization guarantee ("queues
+  instead of cancelling") the workflow-level group does not honor, so this spec does not add one.
+  The net effect — of two rapid merges, the earlier run (deploy included) is cancelled outright and
+  only the later push's `deploy` job runs to completion — is accepted as correct: it deploys the
+  newest commit, matches this repository's already-established `cancel-in-progress: true`
+  convention, and is what today's manual process would produce too if someone ran `fly deploy`
+  twice back-to-back and killed the first with Ctrl-C on seeing a newer commit land. See Risks.
 - **Deploys are unconditional on every push to `master`.** No path filter (unlike `docker-build`'s
   PR-only filter): every commit that reaches `master` already passed `rust`+`web`+`docker-build`,
   and the issue's premise is that reaching `master` is itself the deploy trigger — filtering by
@@ -115,9 +142,6 @@ Appended to `.github/workflows/ci.yml`, after the existing `docker-build` job:
     runs-on: ubuntu-latest
     needs: [rust, web, docker-build]
     if: github.event_name == 'push'
-    concurrency:
-      group: fly-deploy-otto-factory-mcp
-      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
 
@@ -129,27 +153,29 @@ Appended to `.github/workflows/ci.yml`, after the existing `docker-build` job:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 ```
 
-The job-level `concurrency` block is a deliberate exception to the workflow-level
-`cancel-in-progress: true` group: cancelling a queued check run for a superseded commit is fine
-(that's what the top-level group is for), but two overlapping `flyctl deploy` invocations against
-the same app is a real race Fly's own release history would otherwise have to arbitrate, so this
-job queues rather than cancels. `needs: [rust, web, docker-build]` means the job is automatically
-skipped — not merely blocked — if any of those three fail, so a red `rust`/`web`/`docker-build`
-never reaches `flyctl deploy`.
+No job-level `concurrency:` block — see Assumptions for why one would be misleading rather than
+protective here. `needs: [rust, web, docker-build]` means the job is automatically skipped — not
+merely blocked — if any of those three fail, so a red `rust`/`web`/`docker-build` never reaches
+`flyctl deploy`.
 
 ## §2 Credential provisioning (out-of-band, done once)
 
 ```bash
-fly tokens create deploy -a otto-factory-mcp -n "github-actions-deploy"
-gh secret set FLY_API_TOKEN --repo savvagent/otto-factory --body "<token from above>"
+fly tokens create deploy -a otto-factory-mcp -n "github-actions-deploy" --json \
+  | jq -r .token \
+  | gh secret set FLY_API_TOKEN --repo savvagent/otto-factory
 ```
+
+The token is piped directly from `fly tokens create` into `gh secret set`'s stdin — it is never a
+literal command-line argument (so it never lands in shell history or a process list), never
+written to a temp file, and never printed to a terminal. `gh secret set` itself encrypts the value
+client-side against the repository's public key before it ever leaves the machine issuing the
+command, per GitHub's Actions secrets API.
 
 The minted token is scoped by Fly to `otto-factory-mcp` alone (`tokens create deploy` is
 documented as "limited to managing a single app and its resources") — it cannot deploy, read, or
-modify `nels-api`, `otto-factory-mcp-db`, or any other app on the `savvagent` org. It is never
-echoed into a log, a commit, or this document; only the `gh secret set` invocation (run directly
-against the GitHub API, value never printed to stdout) stages it. If it is ever rotated, the same
-two commands replace it — no workflow change needed.
+modify `nels-api`, `otto-factory-mcp-db`, or any other app on the `savvagent` org. If it is ever
+rotated, the same pipeline replaces it — no workflow change needed.
 
 ## §3 Failure semantics
 
@@ -182,26 +208,27 @@ deploy degrades to "the last good version keeps serving," never an outage.
   edits the deploy job itself.
 - **`rust`, `web`, or `docker-build` fails on a push to `master`.** `needs:` skips `deploy`
   automatically; no `flyctl deploy` is attempted against a commit that failed CI.
-- **Two merges land close together.** The job-level `concurrency: cancel-in-progress: false` group
-  queues the second `deploy` job behind the first rather than cancelling either — both eventually
-  run, in order, against the same app. (The top-level workflow-level group still cancels the
-  *rest* of the first run's now-superseded workflow if a third push arrives before the first
-  workflow's `deploy` job starts — see Risks.)
+- **Two merges land close together.** The workflow-level `cancel-in-progress: true` group cancels
+  the earlier push's entire workflow run — `deploy` included, whether it has started or not — the
+  moment the later push's run begins. Only the later push's `deploy` job runs to completion. See
+  Risks for why this is accepted rather than engineered around.
 - **`FLY_API_TOKEN` is missing or revoked.** `flyctl deploy` fails immediately with an
   authentication error, failing the job loudly — never silently skipping the deploy attempt.
 
 ## Risks & Open Questions
 
-- **The workflow-level `cancel-in-progress: true` group can still cancel an entire run, including
-  a `deploy` job, if a third push supersedes it before that run's `deploy` job has started** (the
-  job-level `concurrency` block above only serializes already-started `flyctl deploy` invocations
-  against each other; it doesn't stop the whole earlier workflow run from being cancelled pre-emptively
-  by a newer push). In practice this means: of three rapid merges, the first workflow run is
-  cancelled outright (including before `deploy` starts) and only the latest push's `deploy` job
-  runs — which is the desired outcome (deploy the newest commit, not an intermediate one) and
-  matches this repository's already-accepted `cancel-in-progress: true` convention. Called out
-  explicitly rather than engineered around, since building a merge queue is well outside this
-  issue's scope.
+- **The workflow-level `cancel-in-progress: true` group cancels an entire run, including an
+  already-started `deploy` job, the instant a newer push's run begins** — there is no partial
+  protection for a `flyctl deploy` that is mid-flight when this happens; GitHub Actions sends the
+  cancellation signal to every job in the run, including one already executing. In practice this
+  means: of several rapid merges, only the latest push's `deploy` job runs to completion, which is
+  the desired outcome (deploy the newest commit, not an intermediate one) and matches this
+  repository's already-accepted `cancel-in-progress: true` convention. A `flyctl deploy` killed
+  mid-rollout leaves Fly's own health-check gate in control — a machine that hasn't passed
+  `/readyz` never receives traffic — so the practical exposure is a cancelled CI job, not a bad
+  release serving requests. Called out explicitly rather than engineered around, since building a
+  merge queue or a job-level deploy lock that could shield a running deploy from cancellation is
+  well outside this issue's scope.
 - **Double image build cost** (see Assumptions) — `docker-build` and `flyctl deploy --remote-only`
   each build the image independently on every push to `master`. Accepted for now; if build time
   becomes a real cost, a follow-up could push `docker-build`'s image to a registry and deploy with
