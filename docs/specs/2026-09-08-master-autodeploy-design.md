@@ -1,9 +1,11 @@
 # Automatic deploy on merge to master design
 
-> **Status:** DRAFT — a `deploy` job in `.github/workflows/ci.yml` that runs `flyctl deploy` for
-> `otto-factory-mcp` after every push to `master` passes CI, closing savvagent/otto-factory#54.
-> Implemented in savvagent/otto-factory#55; status will flip to IMPLEMENTED in a follow-up
-> record-as-shipped PR once that PR is merged and the deploy is verified post-merge.
+> **Status:** IMPLEMENTED — shipped in savvagent/otto-factory#55 (merged as `996245ae`), closing
+> savvagent/otto-factory#54. A `deploy` job in `.github/workflows/ci.yml` runs `flyctl deploy` for
+> `otto-factory-mcp` after every push to `master` passes CI. Verified post-merge: the merge
+> commit's own `push` CI run executed the `deploy` job (not skipped) and
+> `fly releases -a otto-factory-mcp` shows release `v4` for that deploy, with the resulting
+> machine passing its `/readyz` health check.
 
 ## Goal & Success Criteria
 

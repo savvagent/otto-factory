@@ -9,11 +9,12 @@ both of which currently describe deploys as manual.
 
 ## Status — 2026-09-08
 
-✅ Done — implemented in this PR: Task 1 (`deploy` CI job), Task 2 (doc updates), and Task 3
-(the `FLY_API_TOKEN` secret provisioned and verified via `gh secret list`). Remaining: confirming,
-post-merge, that this PR's own merge-commit `push` run actually executes the `deploy` job (not
-skipped) and that `fly releases -a otto-factory-mcp` shows a new release for that commit SHA — see
-Out-of-band verification below.
+✅ Done and verified post-merge. Task 1 (`deploy` CI job), Task 2 (doc updates), and Task 3 (the
+`FLY_API_TOKEN` secret provisioned and verified via `gh secret list`) all shipped in
+savvagent/otto-factory#55 (merged as `996245ae`). Post-merge verification confirmed: the merge
+commit's own `push` CI run executed the `deploy` job (not skipped — see run 34231950841) and
+`fly releases -a otto-factory-mcp` shows release `v4` for that deploy, with the resulting machine
+passing its `/readyz` health check.
 
 ## Spec
 
@@ -137,16 +138,15 @@ avoidable by doing this task before merging.
 - [x] No commit — this step has no git artifact. Record completion in the PR body's test-plan
       checklist instead.
 
-## Out-of-band verification (Phase 5, step 14)
+## Out-of-band verification (Phase 5, step 14) — ✅ Confirmed 2026-09-08
 
-- **CI** — `.github/workflows/` changed: confirm the workflow parses (done in Task 1) and that the
-  new `deploy` job appears in the Actions UI on this PR (reporting skipped, since `if:
-  github.event_name == 'push'` never fires for a PR event — expected per spec §4/Testing, not a
-  defect). The real exercise of the job is the `push` event this PR's own merge commit produces:
-  after merging, confirm via `gh run list --repo savvagent/otto-factory --branch master --limit 5`
-  and `gh run watch <run-id>` that the merge commit's `deploy` job ran (not skipped) and passed,
-  then confirm via `fly releases -a otto-factory-mcp` (or `fly status -a otto-factory-mcp`) that a
-  new release exists carrying this merge's commit SHA.
+- **CI** — `.github/workflows/` changed: confirmed the workflow parses (done in Task 1) and that
+  the `deploy` job appeared correctly as skipped on the PR event (`if: github.event_name ==
+  'push'` never fires for a PR event — expected per spec §4/Testing, not a defect). After merging
+  (`996245ae`), confirmed via `gh run list --branch master` and `gh run watch 34231950841` that the
+  merge commit's `deploy` job ran (not skipped) and passed, then confirmed via
+  `fly releases -a otto-factory-mcp` that release `v4` carries this merge's deploy, with the
+  resulting machine passing its `/readyz` health check per `fly status -a otto-factory-mcp`.
 - **Config surface** — `FLY_API_TOKEN` is a new GitHub Actions secret, not an `OF_*` environment
   variable read by `Config::from_env`; `.env.example` is not touched and does not need an entry.
 - **Container image / Dockerfile / fly.toml** — not modified by this change.
