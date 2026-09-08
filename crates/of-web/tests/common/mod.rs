@@ -204,7 +204,7 @@ impl Call {
             );
         }
         for (name, value) in &self.headers {
-            builder = builder.header(*name, value);
+            builder = builder.header(*name, value.as_str());
         }
 
         let request = builder.body(self.body.unwrap_or_else(Body::empty)).unwrap();

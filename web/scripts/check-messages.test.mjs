@@ -110,6 +110,15 @@ describe('message catalog completeness', () => {
     complains(c, /de\.json "jobs" selector "countPlural" declares many, which de never selects/);
   });
 
+  it('catches a selector a translation drops while staying a variant', () => {
+    const c = catalogs();
+    // Still a variant array, but the `countPlural` selector base declares is
+    // gone entirely — a translator collapsing `{$count ->}` into one arm
+    // rather than dropping just one plural category.
+    c.de.jobs = [{ declarations: [], selectors: [], match: { '*': 'Aufträge' } }];
+    complains(c, /de\.json "jobs" is missing selector\(s\) countPlural that en declares/);
+  });
+
   it('catches a message whose shape changed between locales', () => {
     const c = catalogs();
     c.de.jobs = 'Aufträge';

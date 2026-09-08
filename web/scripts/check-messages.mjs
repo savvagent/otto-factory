@@ -186,6 +186,19 @@ export function check({ baseLocale, locales }, catalogs) {
       const mineArms = armsBySelector(here);
       const required = pluralCategories(locale);
 
+      // A selector `base` declares but this locale's variant drops entirely
+      // is invisible to the loop below, which only walks `mineArms` — and a
+      // translator deleting a whole `{$count ->}` branch is exactly the kind
+      // of drift the placeholder checks above are meant to catch.
+      const droppedSelectors = difference(new Set(baseArms.keys()), new Set(mineArms.keys()));
+      if (droppedSelectors.size > 0) {
+        problems.push(
+          `messages/${locale}.json "${key}" is missing selector(s) ` +
+            `${sorted(droppedSelectors).join(', ')} that ${baseLocale} declares — ` +
+            `the variant shapes have to match.`
+        );
+      }
+
       for (const [selector, armsHere] of mineArms) {
         // `*` is the catch-all; a message that supplies it covers every arm.
         if (armsHere.has('*')) continue;
