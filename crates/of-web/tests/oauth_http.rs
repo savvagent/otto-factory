@@ -673,3 +673,214 @@ async fn a_registered_client_is_usable_and_named_on_the_consent_screen(pool: PgP
     );
     assert!(page.text.contains("&lt;script&gt;"));
 }
+
+// ------------------------------------------------------------- language
+
+/// One assertion per locale: the negotiated `lang` attribute, and a string that
+/// could only have come from that locale's table.
+///
+/// **The fixture user must have chosen no locale.** Resolution is stored-choice
+/// first and header second, so a user with `locale` already set would satisfy
+/// every assertion here without `negotiate()` ever being reached — the headline
+/// requirement of #42 would pass while measuring nothing. `onboard` leaves
+/// `users.locale` NULL, which is what makes this test about the header.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn the_consent_page_negotiates_accept_language(pool: PgPool) {
+    let h = harness(pool);
+    let rob = onboard(&h, "rob@acme.test").await;
+    org_with_owner(&h, "acme", &rob).await;
+    let client_id = register(&h, "Test Agent", REDIRECT).await;
+    let (_, challenge) = pkce();
+
+    assert!(
+        h.db.get_user(rob.user)
+            .await
+            .unwrap()
+            .unwrap()
+            .locale
+            .is_none(),
+        "this test is about the header, so the account must have chosen nothing"
+    );
+
+    // Each pair is (Accept-Language, a phrase only that locale renders).
+    let expected = [
+        ("en", "en", "Authorize access to otto-factory"),
+        ("es", "es", "Autorizar acceso a otto-factory"),
+        ("de", "de", "Zugriff auf otto-factory autorisieren"),
+        ("fr", "fr", "Autoriser l&#39;accès à otto-factory"),
+        ("it", "it", "Autorizza l&#39;accesso a otto-factory"),
+        ("hi", "hi", "otto-factory तक पहुँच अधिकृत करें"),
+    ];
+
+    for (header, lang, phrase) in expected {
+        let page = Call::get(authorize_url(&client_id, &challenge, "jobs:read", "s"))
+            .with_session(&rob.session)
+            .header("accept-language", header)
+            .send(&h.router)
+            .await;
+        page.expect(StatusCode::OK);
+
+        assert!(
+            page.text.contains(&format!("<html lang={lang}>")),
+            "Accept-Language: {header} should render lang={lang}; got: {}",
+            &page.text[..page.text.len().min(120)]
+        );
+        assert!(
+            page.text.contains(phrase),
+            "Accept-Language: {header} should render {phrase:?}"
+        );
+    }
+}
+
+/// Weights and region subtags reach the page, not just bare tags.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn the_consent_page_honours_weights_and_region_subtags(pool: PgPool) {
+    let h = harness(pool);
+    let rob = onboard(&h, "rob@acme.test").await;
+    org_with_owner(&h, "acme", &rob).await;
+    let client_id = register(&h, "Test Agent", REDIRECT).await;
+    let (_, challenge) = pkce();
+
+    for (header, lang) in [
+        ("es-419,es;q=0.9", "es"),
+        ("de;q=0.3, it;q=0.9", "it"),
+        ("ja,ko;q=0.9,fr;q=0.4", "fr"),
+        ("en;q=0, de", "de"),
+        ("*", "en"),
+    ] {
+        let page = Call::get(authorize_url(&client_id, &challenge, "jobs:read", "s"))
+            .with_session(&rob.session)
+            .header("accept-language", header)
+            .send(&h.router)
+            .await;
+        page.expect(StatusCode::OK);
+        assert!(
+            page.text.contains(&format!("<html lang={lang}>")),
+            "Accept-Language: {header:?} should render lang={lang}"
+        );
+    }
+}
+
+/// The account's own choice outranks the browser's header.
+///
+/// The mirror of the test above, and the reason the stored locale exists at
+/// all: somebody who set Spanish on an English-configured work laptop meant it.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_stored_locale_beats_the_header(pool: PgPool) {
+    let h = harness(pool);
+    let rob = onboard(&h, "rob@acme.test").await;
+    org_with_owner(&h, "acme", &rob).await;
+    let client_id = register(&h, "Test Agent", REDIRECT).await;
+    let (_, challenge) = pkce();
+
+    h.db.set_profile(rob.user, None, None, Some(Some("de")))
+        .await
+        .unwrap();
+
+    let page = Call::get(authorize_url(&client_id, &challenge, "jobs:read", "s"))
+        .with_session(&rob.session)
+        .header("accept-language", "en-US,en;q=0.9")
+        .send(&h.router)
+        .await;
+    page.expect(StatusCode::OK);
+    assert!(page.text.contains("<html lang=de>"));
+    assert!(page.text.contains("Zugriff auf otto-factory autorisieren"));
+
+    // And clearing it hands the decision back to the header.
+    h.db.set_profile(rob.user, None, None, Some(None))
+        .await
+        .unwrap();
+
+    let after = Call::get(authorize_url(&client_id, &challenge, "jobs:read", "s"))
+        .with_session(&rob.session)
+        .header("accept-language", "en-US,en;q=0.9")
+        .send(&h.router)
+        .await;
+    after.expect(StatusCode::OK);
+    assert!(after.text.contains("<html lang=en>"));
+}
+
+/// The error page and the consent page are never in different languages.
+///
+/// This is the regression the design nearly shipped: an earlier draft had the
+/// error page negotiate on `Accept-Language` alone on the reasoning that it
+/// could be reached without a session. It cannot — so a user with a stored
+/// German locale would have got a German consent page and an English error
+/// page in the same flow.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn the_error_page_speaks_the_same_language_as_the_consent_page(pool: PgPool) {
+    let h = harness(pool);
+    let rob = onboard(&h, "rob@acme.test").await;
+    org_with_owner(&h, "acme", &rob).await;
+    let (_, challenge) = pkce();
+
+    h.db.set_profile(rob.user, None, None, Some(Some("de")))
+        .await
+        .unwrap();
+
+    // An unregistered client is refused as a *page*, because the redirect URI
+    // is exactly what could not be verified.
+    let refused = Call::get(authorize_url(
+        "client_does_not_exist",
+        &challenge,
+        "jobs:read",
+        "s",
+    ))
+    .with_session(&rob.session)
+    .header("accept-language", "en-US")
+    .send(&h.router)
+    .await;
+    refused.expect(StatusCode::BAD_REQUEST);
+
+    assert!(
+        refused.text.contains("<html lang=de>"),
+        "the error page must follow the same stored locale the consent page does"
+    );
+    assert!(
+        refused
+            .text
+            .contains("Diese Anfrage konnte nicht autorisiert werden"),
+        "the error page title must be translated"
+    );
+    assert!(
+        refused
+            .text
+            .contains("Es wurde nichts autorisiert. Du kannst dieses Fenster schließen."),
+        "the closing note must be translated"
+    );
+}
+
+/// A signed-in account with no org gets its own page, and it is fully
+/// translatable because the text is ours rather than an `AuthError`'s.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn the_no_organization_page_is_translated(pool: PgPool) {
+    let h = harness(pool);
+    let rob = onboard(&h, "rob@acme.test").await;
+    // A name with markup in it, because `client_name` is self-asserted through
+    // open registration and this page is where it is shown.
+    let client_id = register(&h, "<b>Test Agent</b>", REDIRECT).await;
+    let (_, challenge) = pkce();
+
+    let page = Call::get(authorize_url(&client_id, &challenge, "jobs:read", "s"))
+        .with_session(&rob.session)
+        .header("accept-language", "es")
+        .send(&h.router)
+        .await;
+    page.expect(StatusCode::BAD_REQUEST);
+
+    assert!(page.text.contains("<html lang=es>"));
+    assert!(page.text.contains("Todavía no hay ninguna organización"));
+    assert!(
+        page.text.contains("&lt;b&gt;Test Agent&lt;/b&gt;"),
+        "the client name has to be named, escaped exactly once: {}",
+        page.text
+    );
+    assert!(
+        !page.text.contains("<b>Test Agent</b>"),
+        "the client name reached the page as markup"
+    );
+    assert!(
+        !page.text.contains("&amp;lt;"),
+        "the client name was double-escaped, so the page misreports who is asking"
+    );
+}

@@ -87,6 +87,19 @@ pub struct ProfileRequest {
     pub email: Option<String>,
     #[serde(default)]
     pub name: Option<String>,
+    /// The console language, in three states rather than two.
+    ///
+    /// | Body | Effect |
+    /// |---|---|
+    /// | field absent | leave the stored locale alone |
+    /// | `"locale": "de"` | set it, if it is one of the supported locales |
+    /// | `"locale": null` | clear it — go back to following the browser |
+    ///
+    /// The third state is why this is a [`super::double_option`] and `email`
+    /// and `name` are not: "match my browser" is a real choice, and serde
+    /// would otherwise collapse it into "leave alone".
+    #[serde(default, deserialize_with = "super::double_option")]
+    pub locale: Option<Option<String>>,
 }
 
 /// Name a registered key.
@@ -444,7 +457,7 @@ pub async fn rename_passkey(
     Ok(http::StatusCode::NO_CONTENT.into_response())
 }
 
-/// `PATCH /api/me` — set the address and display name.
+/// `PATCH /api/me` — set the address, display name and console language.
 ///
 /// **The one place this product says "that address is taken."** It needs a
 /// session, which makes the answer attributable, rate-limited and auditable —
@@ -461,6 +474,14 @@ pub async fn set_profile(
             caller.user.id,
             req.email.as_deref().filter(|e| !e.trim().is_empty()),
             req.name.as_deref().filter(|n| !n.trim().is_empty()),
+            // Not filtered for emptiness the way the two above are: `""` is not
+            // a locale and has to be refused by name, whereas silently reading
+            // it as "leave alone" would make a broken picker look like it
+            // worked. `null` is the way to clear it, and that arrives here as
+            // `Some(None)`.
+            req.locale
+                .as_ref()
+                .map(|inner| inner.as_deref().map(str::trim)),
         )
         .await?;
     Ok(Json(updated))

@@ -1,6 +1,6 @@
 # CI Docker image build gate design
 
-> **Status:** IMPLEMENTED — shipped in savvagent/dark-factory#39
+> **Status:** IMPLEMENTED — shipped in savvagent/otto-factory#39
 > **Depends on:** `docs/specs/2026-09-04-dockerfile-openssl-design.md` (the incident this closes the gap for)
 
 ## Assumptions

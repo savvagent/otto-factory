@@ -1,5 +1,7 @@
 <script lang="ts">
-  import { api, ApiError } from '$lib/api';
+  import { api } from '$lib/api';
+  import { messageFor } from '$lib/errors';
+  import { m } from '$lib/paraglide/messages';
   import { useOrg } from '$lib/org.svelte';
   import { absolute, relative } from '$lib/format';
   import type { AuditEvent } from '$lib/types';
@@ -15,6 +17,11 @@
    * a low-privilege session would read before choosing whom to target — so the
    * server refuses a member, and this page is only in the sidebar for an admin.
    * The `403` is still the server's to give; hiding the link is a courtesy.
+   *
+   * **The rows themselves are not translated, and that is deliberate.** An
+   * action is a stable identifier (`member.role_changed`), and the detail is
+   * the server's JSON payload verbatim. A log read as evidence has to say the
+   * same thing to everyone who reads it; only the chrome around it is prose.
    */
 
   const org = useOrg();
@@ -36,7 +43,7 @@
         if (org.slug !== slug) return;
         events = found;
       } catch (e) {
-        error = e instanceof ApiError ? e.message : 'Could not read the audit log.';
+        error = messageFor(e, m.audit_error_load());
       } finally {
         loading = false;
       }
@@ -51,28 +58,28 @@
 
 <div class="space-y-5">
   <div>
-    <h1 class="text-lg font-semibold">Audit log</h1>
+    <h1 class="text-lg font-semibold">{m.audit_title()}</h1>
     <p class="mt-0.5 text-sm text-faint">
-      Who did what in {org.title}. Admins only.
+      {m.audit_subtitle({ org: org.title })}
     </p>
   </div>
 
   {#if error}
     <Alert>{error}</Alert>
   {:else if loading && events.length === 0}
-    <Loading what="Reading the audit log" />
+    <Loading what={m.audit_loading()} />
   {:else if events.length === 0}
-    <Empty title="Nothing recorded yet." />
+    <Empty title={m.audit_empty()} />
   {:else}
     <div class="of-card overflow-x-auto">
       <table class="w-full text-sm">
         <thead class="border-b border-edge/60 text-left text-xs text-faint">
           <tr>
-            <th class="px-4 py-2 font-medium">When</th>
-            <th class="px-4 py-2 font-medium">Action</th>
-            <th class="px-4 py-2 font-medium">Actor</th>
-            <th class="px-4 py-2 font-medium">Target</th>
-            <th class="px-4 py-2 font-medium">Detail</th>
+            <th class="px-4 py-2 font-medium">{m.audit_col_when()}</th>
+            <th class="px-4 py-2 font-medium">{m.audit_col_action()}</th>
+            <th class="px-4 py-2 font-medium">{m.audit_col_actor()}</th>
+            <th class="px-4 py-2 font-medium">{m.audit_col_target()}</th>
+            <th class="px-4 py-2 font-medium">{m.audit_col_detail()}</th>
           </tr>
         </thead>
         <tbody class="divide-y divide-edge/40">

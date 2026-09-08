@@ -416,12 +416,15 @@ pub fn catalog() -> Vec<Endpoint> {
         Endpoint::patch("/api/me", auth::set_profile)
             .takes("ProfileRequest")
             .returns("User")
-            .summary("Set the address and display name")
+            .summary("Set the address, display name and language")
             .describe(
                 "The one endpoint that will say an address is already in use. It \
                  needs a session, which makes that answer attributable and \
                  rate-limited rather than something a stranger can walk a list \
-                 against — which is why the address is set here and not at signup.",
+                 against — which is why the address is set here and not at signup. \
+                 `locale` takes three states, not two: omit it to leave the console \
+                 language alone, send a supported locale to set it, or send an \
+                 explicit `null` to clear it and go back to following the browser.",
             ),
         // ------------------------------------------------------------ orgs
         Endpoint::get("/api/orgs", orgs::list_orgs)

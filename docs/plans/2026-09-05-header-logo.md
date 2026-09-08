@@ -7,7 +7,7 @@ theme-aware rendering of the logo mark, preserving an accessible name on the hea
 
 ## Status — 2026-09-05
 
-✅ Shipped in `savvagent/dark-factory#44`.
+✅ Shipped in `savvagent/otto-factory#44`.
 
 **Spec:** `docs/specs/2026-09-05-header-logo-design.md` — read it first. This plan implements it
 exactly.

@@ -2,9 +2,12 @@
   import { page } from '$app/state';
   import { replaceState } from '$app/navigation';
 
-  import { api, ApiError } from '$lib/api';
+  import { api } from '$lib/api';
+  import { messageFor } from '$lib/errors';
+  import { m } from '$lib/paraglide/messages';
   import { useOrg } from '$lib/org.svelte';
   import { relative } from '$lib/format';
+  import { statusLabel } from '$lib/labels';
   import type { Job, JobStatus, Repo, Team } from '$lib/types';
   import Alert from '$lib/components/Alert.svelte';
   import Empty from '$lib/components/Empty.svelte';
@@ -91,7 +94,7 @@
         // An unregistered repo or team slug is a 404 naming what *is*
         // registered — better than an empty table, which reads as a quiet
         // queue rather than as a question nobody asked.
-        error = e instanceof ApiError ? e.message : 'Could not load the queue.';
+        error = messageFor(e, m.queue_load_failed());
         jobs = [];
       } finally {
         if (seq === latest) loading = false;
@@ -113,39 +116,41 @@
 
 <div class="space-y-4">
   <div class="flex flex-wrap items-baseline justify-between gap-2">
-    <h1 class="text-lg font-semibold">Queue</h1>
-    <p class="text-xs text-faint">Read-only. Jobs are queued and completed by agents over MCP.</p>
+    <h1 class="text-lg font-semibold">{m.queue_title()}</h1>
+    <p class="text-xs text-faint">{m.queue_read_only_note()}</p>
   </div>
 
   <div class="of-card flex flex-wrap items-end gap-3 px-4 py-3">
     <label class="block">
-      <span class="of-label">Status</span>
+      <span class="of-label">{m.queue_filter_status()}</span>
       <select
-        class="of-input w-40"
+        class="of-input min-w-40"
         value={status ?? ''}
         onchange={(e) => setFilter('status', e.currentTarget.value)}
       >
-        <option value="">Any</option>
+        <option value="">{m.queue_filter_any()}</option>
         {#each STATUSES as option (option)}
-          <option value={option}>{option}</option>
+          <!-- The value stays the wire enum; only the label is translated, and
+               it comes from the same helper the pills use. -->
+          <option value={option}>{statusLabel(option)}</option>
         {/each}
       </select>
     </label>
 
     <label class="block">
-      <span class="of-label">Repo</span>
+      <span class="of-label">{m.queue_filter_repo()}</span>
       <select
-        class="of-input w-44"
+        class="of-input min-w-44"
         value={repo ?? ''}
         onchange={(e) => setFilter('repo', e.currentTarget.value)}
       >
-        <option value="">Every repo</option>
+        <option value="">{m.queue_filter_every_repo()}</option>
         {#if repo && !repos.some((r) => r.slug === repo)}
           <!-- A slug from the URL that is not registered. Rendered so the
                picker shows what the page is actually filtering on; without it
                the select falls back to blank and the error above looks
                unrelated to anything the user can see. -->
-          <option value={repo}>{repo} (not registered)</option>
+          <option value={repo}>{m.queue_repo_not_registered({ repo })}</option>
         {/if}
         {#each repos as option (option.id)}
           <option value={option.slug}>{option.slug}</option>
@@ -155,15 +160,15 @@
 
     {#if teams.length > 0 || team}
       <label class="block">
-        <span class="of-label">Team</span>
+        <span class="of-label">{m.queue_filter_team()}</span>
         <select
-          class="of-input w-44"
+          class="of-input min-w-44"
           value={team ?? ''}
           onchange={(e) => setFilter('team', e.currentTarget.value)}
         >
-          <option value="">Every team</option>
+          <option value="">{m.queue_filter_every_team()}</option>
           {#if team && !teams.some((t) => t.slug === team)}
-            <option value={team}>{team} (no such team)</option>
+            <option value={team}>{m.queue_team_missing({ team })}</option>
           {/if}
           {#each teams as option (option.id)}
             <option value={option.slug}>{option.slug}</option>
@@ -178,7 +183,7 @@
         checked={mine}
         onchange={(e) => setFilter('mine', e.currentTarget.checked ? 'true' : undefined)}
       />
-      Only what I queued
+      {m.queue_only_mine()}
     </label>
 
     {#if filtered}
@@ -186,7 +191,7 @@
         class="ml-auto pb-2 text-xs text-muted underline hover:text-ink"
         onclick={() => replaceState(new URL(page.url.pathname, location.origin), page.state)}
       >
-        Clear filters
+        {m.queue_clear_filters()}
       </button>
     {/if}
   </div>
@@ -194,12 +199,14 @@
   {#if error}
     <Alert>{error}</Alert>
   {:else if loading && jobs.length === 0}
-    <Loading what="Loading the queue" />
+    <Loading what={m.queue_loading()} />
   {:else if jobs.length === 0}
-    <Empty title={filtered ? 'No jobs match these filters.' : 'Nothing has been queued yet.'}>
+    <Empty title={filtered ? m.queue_empty_filtered() : m.queue_empty_title()}>
       {#if !filtered}
-        Jobs are created by agents over MCP.
-        <a class="text-muted underline hover:text-ink" href="/o/{org.slug}/connect">Connect one</a>.
+        {m.queue_empty_hint()}
+        <a class="text-muted underline hover:text-ink" href="/o/{org.slug}/connect">
+          {m.queue_connect_one()}
+        </a>.
       {/if}
     </Empty>
   {:else}
@@ -207,11 +214,11 @@
       <table class="w-full text-sm">
         <thead class="border-b border-edge/60 text-left text-xs text-faint">
           <tr>
-            <th class="px-4 py-2 font-medium">Job</th>
-            <th class="px-4 py-2 font-medium">Status</th>
-            <th class="px-4 py-2 font-medium">Agent</th>
-            <th class="px-4 py-2 font-medium">Ticket</th>
-            <th class="px-4 py-2 font-medium">Queued</th>
+            <th class="px-4 py-2 font-medium">{m.queue_col_job()}</th>
+            <th class="px-4 py-2 font-medium">{m.queue_col_status()}</th>
+            <th class="px-4 py-2 font-medium">{m.queue_col_agent()}</th>
+            <th class="px-4 py-2 font-medium">{m.queue_col_ticket()}</th>
+            <th class="px-4 py-2 font-medium">{m.queue_col_queued()}</th>
           </tr>
         </thead>
         <tbody class="divide-y divide-edge/40">
@@ -235,9 +242,14 @@
       </table>
     </div>
 
+    <!--
+      Two sentences, not one built out of pieces. The count pluralizes and the
+      cap is a separate remark that only sometimes applies; welding them into a
+      single string would need a variant per plural category *and* per branch.
+    -->
     <p class="text-xs text-faint">
-      Showing {jobs.length}
-      {jobs.length === 1 ? 'job' : 'jobs'}{jobs.length === 200 ? ', the most recent 200' : ''}.
+      {m.queue_showing({ count: jobs.length })}
+      {#if jobs.length === 200}{m.queue_showing_capped({ limit: 200 })}{/if}
     </p>
   {/if}
 </div>

@@ -4,22 +4,25 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite dev",
-    "build": "vite build",
+    "dev": "npm run paraglide:compile && vite dev",
+    "build": "npm run paraglide:compile && vite build",
     "preview": "vite preview",
-    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json && npm run check:worker",
+    "check": "npm run paraglide:compile && npm run check:messages && svelte-kit sync && svelte-check --tsconfig ./tsconfig.json && npm run check:worker",
     "check:worker": "tsc -p worker/tsconfig.json --noEmit",
     "test": "vitest run",
-    "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
+    "check:watch": "npm run paraglide:compile && svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
     "format": "prettier --write .",
     "lint": "prettier --check .",
-    "deploy": "npm run build && wrangler deploy --env production"
+    "deploy": "npm run build && wrangler deploy --env production",
+    "paraglide:compile": "paraglide-js compile --project ./project.inlang --outdir ./src/lib/paraglide --emit-ts-declarations",
+    "check:messages": "node scripts/check-messages.mjs"
   },
   "dependencies": {
     "qrcode": "^1.5.4"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260902.1",
+    "@inlang/paraglide-js": "^2.25.0",
     "@sveltejs/adapter-static": "^3.0.10",
     "@sveltejs/kit": "^2.70.3",
     "@sveltejs/vite-plugin-svelte": "^7.3.0",

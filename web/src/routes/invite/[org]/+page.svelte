@@ -3,6 +3,8 @@
   import { page } from '$app/state';
 
   import { api, ApiError } from '$lib/api';
+  import { messageFor } from '$lib/errors';
+  import { m } from '$lib/paraglide/messages';
   import { session } from '$lib/session.svelte';
   import Alert from '$lib/components/Alert.svelte';
   import Button from '$lib/components/Button.svelte';
@@ -38,30 +40,25 @@
       await session.refresh();
       await goto(`/o/${joined.org.slug}`, { replaceState: true });
     } catch (e) {
-      if (e instanceof ApiError) {
-        wrongAccount = e.status === 403;
-        error = e.message;
-      } else {
-        error = 'That invitation could not be accepted.';
-      }
+      wrongAccount = e instanceof ApiError && e.status === 403;
+      error = messageFor(e, m.invite_error_fallback());
     } finally {
       pending = false;
     }
   }
 </script>
 
-<svelte:head><title>Join {org} · otto-factory</title></svelte:head>
+<svelte:head><title>{m.invite_page_title({ org })}</title></svelte:head>
 
 <div class="mx-auto max-w-sm py-8">
-  <h1 class="text-lg font-semibold">Join {org}</h1>
+  <h1 class="text-lg font-semibold">{m.invite_heading({ org })}</h1>
 
   {#if !token}
-    <Alert>This link is missing its token. Ask whoever invited you to send another.</Alert>
+    <Alert>{m.invite_missing_token()}</Alert>
   {:else}
     <p class="mt-1 text-sm text-faint">
-      You are signed in as <span class="text-muted"
-        >{session.me?.user.email ?? 'an account with no email set'}</span
-      >. An invitation can only be accepted by the address it was sent to.
+      {m.invite_signed_in_as({ email: session.me?.user.email ?? m.invite_no_email() })}
+      {m.invite_only_invited_address()}
     </p>
 
     {#if error}
@@ -69,16 +66,14 @@
         <Alert>
           {error}
           {#if wrongAccount}
-            <span class="mt-1 block">
-              Sign out and sign in as the invited address, then open this link again.
-            </span>
+            <span class="mt-1 block">{m.invite_wrong_account_hint()}</span>
           {/if}
         </Alert>
       </div>
     {/if}
 
     <div class="mt-6">
-      <Button {pending} onclick={accept}>Accept the invitation</Button>
+      <Button {pending} onclick={accept}>{m.invite_accept_button()}</Button>
     </div>
   {/if}
 </div>

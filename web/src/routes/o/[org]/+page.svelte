@@ -1,7 +1,11 @@
 <script lang="ts">
-  import { api, ApiError } from '$lib/api';
+  import { api } from '$lib/api';
+  import { messageFor } from '$lib/errors';
+  import { m } from '$lib/paraglide/messages';
+  import { currentLocale } from '$lib/locale';
   import { useOrg } from '$lib/org.svelte';
   import { relative } from '$lib/format';
+  import { roleLabel, statusLabel } from '$lib/labels';
   import type { Job, QueueStats, Repo, UsageStatus } from '$lib/types';
   import Alert from '$lib/components/Alert.svelte';
   import Card from '$lib/components/Card.svelte';
@@ -50,7 +54,7 @@
         repos = r;
         usage = u;
       } catch (e) {
-        error = e instanceof ApiError ? e.message : 'Could not load this organization.';
+        error = messageFor(e, m.overview_load_failed());
       } finally {
         loading = false;
       }
@@ -60,16 +64,21 @@
   const tiles = $derived(
     stats
       ? [
-          { label: 'Pending', value: stats.pending, tone: 'text-muted' },
-          { label: 'In progress', value: stats.inProgress, tone: 'text-busy' },
-          { label: 'Active', value: stats.active, tone: 'text-accent' },
+          // Four of these are job statuses, so they read from `statusLabel`
+          // rather than from tile-specific keys: a tile that said one word and
+          // the pill beside it another would look like two different things.
+          // `Blocked` is not a status — it is a pending job with an unmet
+          // dependency — and is the one label of its own.
+          { label: statusLabel('pending'), value: stats.pending, tone: 'text-muted' },
+          { label: statusLabel('in-progress'), value: stats.inProgress, tone: 'text-busy' },
+          { label: statusLabel('active'), value: stats.active, tone: 'text-accent' },
           {
-            label: 'Blocked',
+            label: m.overview_tile_blocked(),
             value: stats.blocked,
             tone: stats.blocked > 0 ? 'text-warn' : 'text-faint'
           },
           {
-            label: 'Failed',
+            label: statusLabel('failed'),
             value: stats.failed,
             tone: stats.failed > 0 ? 'text-bad' : 'text-faint'
           }
@@ -82,19 +91,24 @@
   <div>
     <h1 class="text-lg font-semibold">{org.title}</h1>
     <p class="mt-0.5 text-sm text-faint">
-      <code class="of-mono">{org.slug}</code> · {org.role ?? '—'} · {org.org?.plan ?? '—'} plan
+      <code class="of-mono">{org.slug}</code> · {m.overview_role_and_plan({
+        role: org.role ? roleLabel(org.role) : '—',
+        plan: org.org?.plan ?? '—'
+      })}
     </p>
   </div>
 
   {#if error}
     <Alert>{error}</Alert>
   {:else if loading && !stats}
-    <Loading what="Loading the overview" />
+    <Loading what={m.overview_loading()} />
   {:else}
     <div class="grid grid-cols-2 gap-3 sm:grid-cols-4">
       {#each tiles as tile (tile.label)}
         <div class="of-card px-4 py-3">
-          <div class="text-2xl font-semibold {tile.tone}">{tile.value.toLocaleString()}</div>
+          <div class="text-2xl font-semibold {tile.tone}">
+            {tile.value.toLocaleString(currentLocale())}
+          </div>
           <div class="mt-0.5 text-xs text-faint">{tile.label}</div>
         </div>
       {/each}
@@ -102,32 +116,31 @@
 
     {#if stats && stats.blocked > 0}
       <Alert tone="warn">
-        {stats.blocked} pending
-        {stats.blocked === 1 ? 'job is' : 'jobs are'} waiting on a dependency and cannot be claimed yet.
-        They are counted under Pending as well.
+        {m.overview_blocked_note({ count: stats.blocked })}
+        {m.overview_blocked_also_pending({ status: statusLabel('pending') })}
       </Alert>
     {/if}
 
     <div class="grid gap-6 lg:grid-cols-2">
-      <Card title="Recent jobs" description="Newest first, across every repo.">
+      <Card title={m.overview_recent_title()} description={m.overview_recent_description()}>
         {#snippet actions()}
           <a class="text-xs text-muted underline hover:text-ink" href="/o/{org.slug}/queue">
-            Open the queue
+            {m.overview_open_queue()}
           </a>
         {/snippet}
 
         {#if recent.length === 0}
-          <Empty title="Nothing has been queued yet.">
-            Jobs are created by agents over MCP.
+          <Empty title={m.overview_empty_title()}>
+            {m.overview_empty_hint()}
             <a class="text-muted underline hover:text-ink" href="/o/{org.slug}/connect">
-              Connect one
+              {m.overview_connect_one()}
             </a>.
           </Empty>
         {:else}
           <ul class="divide-y divide-edge/40">
             {#each recent as job (job.id)}
               <li class="flex items-center gap-3 py-2">
-                <span class="w-24 shrink-0"><StatusPill status={job.status} /></span>
+                <span class="min-w-24 shrink-0"><StatusPill status={job.status} /></span>
                 <a
                   class="min-w-0 flex-1 truncate text-sm text-ink hover:underline"
                   href="/o/{org.slug}/queue/{job.id}"
@@ -142,30 +155,30 @@
       </Card>
 
       <div class="space-y-6">
-        <Card title="This period" description="Metered tool calls against the plan.">
+        <Card title={m.overview_period_title()} description={m.overview_period_description()}>
           {#snippet actions()}
             <a class="text-xs text-muted underline hover:text-ink" href="/o/{org.slug}/usage">
-              Details
+              {m.overview_period_details()}
             </a>
           {/snippet}
 
           {#if usage}
             <Meter {usage} compact />
           {:else}
-            <Loading what="Reading the meter" />
+            <Loading what={m.overview_reading_meter()} />
           {/if}
         </Card>
 
-        <Card title="Repos" description="Coordination is anchored on these.">
+        <Card title={m.overview_repos_title()} description={m.overview_repos_description()}>
           {#snippet actions()}
             <a class="text-xs text-muted underline hover:text-ink" href="/o/{org.slug}/repos">
-              Manage
+              {m.overview_repos_manage()}
             </a>
           {/snippet}
 
           {#if repos.length === 0}
-            <Empty title="No repos registered.">
-              A job has to belong to one, so nothing can be queued until a repo exists.
+            <Empty title={m.overview_repos_empty_title()}>
+              {m.overview_repos_empty_hint()}
             </Empty>
           {:else}
             <ul class="flex flex-wrap gap-2">

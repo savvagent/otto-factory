@@ -2,7 +2,9 @@
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
 
-  import { api, ApiError } from '$lib/api';
+  import { api } from '$lib/api';
+  import { messageFor } from '$lib/errors';
+  import { m } from '$lib/paraglide/messages';
   import { completeConnect } from '$lib/trackerState';
   import Alert from '$lib/components/Alert.svelte';
   import Loading from '$lib/components/Loading.svelte';
@@ -35,25 +37,19 @@
     // on the consent screen lands here with `error` and nothing else.
     const denied = params.get('error_description') ?? params.get('error');
     if (denied) {
-      error = `${denied}. Nothing was connected.`;
+      error = m.trackercb_provider_refused({ reason: denied });
       return;
     }
 
     const pending = completeConnect(params.get('state'));
     if (!pending) {
-      error =
-        'This connect flow did not start in this tab, or it has already been completed. ' +
-        'Open your organization’s Trackers page and start it again.';
+      error = m.trackercb_no_pending_state();
       return;
     }
 
     const code = params.get('code');
     if (!code) {
-      error =
-        pending.provider === 'github'
-          ? 'GitHub sent no authorization code. The App must have "Request user authorization ' +
-            '(OAuth) during installation" enabled before an installation can be verified.'
-          : 'The provider sent no authorization code. Start the connect flow again.';
+      error = pending.provider === 'github' ? m.trackercb_github_no_code() : m.trackercb_no_code();
       return;
     }
 
@@ -70,7 +66,7 @@
         });
         await goto(`/o/${pending.org}/trackers`, { replaceState: true });
       } catch (e) {
-        error = e instanceof ApiError ? e.message : 'Could not finish connecting that tracker.';
+        error = messageFor(e, m.trackercb_error_fallback());
       }
     })();
   });
@@ -78,12 +74,12 @@
 
 <div class="mx-auto max-w-md py-10">
   {#if error}
-    <h1 class="text-lg font-semibold">That did not connect</h1>
+    <h1 class="text-lg font-semibold">{m.trackercb_failed_heading()}</h1>
     <div class="mt-3"><Alert>{error}</Alert></div>
     <p class="mt-4 text-sm text-faint">
-      <a class="underline hover:text-ink" href="/orgs">Back to your organizations</a>
+      <a class="underline hover:text-ink" href="/orgs">{m.trackercb_back_link()}</a>
     </p>
   {:else}
-    <Loading what="Finishing the connection" />
+    <Loading what={m.trackercb_loading()} />
   {/if}
 </div>

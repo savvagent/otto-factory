@@ -127,6 +127,7 @@ pub struct Call {
     session: Option<String>,
     body: Option<Body>,
     content_type: Option<&'static str>,
+    headers: Vec<(&'static str, String)>,
 }
 
 impl Call {
@@ -153,7 +154,18 @@ impl Call {
             session: None,
             body: None,
             content_type: None,
+            headers: Vec::new(),
         }
+    }
+
+    /// An arbitrary request header.
+    ///
+    /// Added for `Accept-Language`, which is the only input the browser-facing
+    /// pages take that is neither a cookie, a path, nor a body — and the one
+    /// the consent screen's language falls back to.
+    pub fn header(mut self, name: &'static str, value: impl Into<String>) -> Self {
+        self.headers.push((name, value.into()));
+        self
     }
 
     pub fn json(mut self, body: Value) -> Self {
@@ -190,6 +202,9 @@ impl Call {
                 http::header::COOKIE,
                 format!("__Host-of_session={token}; theme=dark"),
             );
+        }
+        for (name, value) in &self.headers {
+            builder = builder.header(*name, value.as_str());
         }
 
         let request = builder.body(self.body.unwrap_or_else(Body::empty)).unwrap();

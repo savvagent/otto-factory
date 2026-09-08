@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { UsageStatus } from '$lib/types';
-  import { plural } from '$lib/format';
+  import { m } from '$lib/paraglide/messages';
+  import { currentLocale } from '$lib/locale';
 
   /**
    * The usage meter.
@@ -37,14 +38,21 @@
     'aria-valuenow': Math.min(usage.billableUsed, usage.includedOps),
     'aria-valuemin': 0,
     'aria-valuemax': usage.includedOps,
-    'aria-valuetext': `${usage.billableUsed.toLocaleString()} of ${usage.includedOps.toLocaleString()} billable operations (${percent}%)`
+    'aria-valuetext': m.meter_aria_valuetext({
+      used: usage.billableUsed.toLocaleString(currentLocale()),
+      included: usage.includedOps.toLocaleString(currentLocale()),
+      percent
+    })
   });
 </script>
 
 <div>
   <div class="flex items-baseline justify-between gap-3">
     <span class="text-sm text-muted">
-      {usage.billableUsed.toLocaleString()} / {usage.includedOps.toLocaleString()} billable
+      {m.meter_billable_ratio({
+        used: usage.billableUsed.toLocaleString(currentLocale()),
+        included: usage.includedOps.toLocaleString(currentLocale())
+      })}
     </span>
     <span class="text-xs text-faint">{percent}%</span>
   </div>
@@ -53,18 +61,23 @@
     class="mt-1.5 h-2 overflow-hidden rounded-full bg-raised"
     role="meter"
     {...ariaRange}
-    aria-label="Billable operations used this period"
+    aria-label={m.meter_aria_label()}
   >
     <div class="h-full rounded-full transition-all {tone}" style="width: {width}%"></div>
   </div>
 
   {#if !compact}
+    <!--
+      Three complete sentences rather than one sentence assembled from
+      fragments. The counts pluralize independently, and a single sentence
+      carrying both would need a variant per combination of categories — nine
+      of them in Spanish, French and Italian — for a caption nobody reads
+      twice. `watch` is a tool name and stays verbatim in every language.
+    -->
     <p class="mt-2 text-xs text-faint">
-      {plural(usage.totalCalls, 'tool call')} recorded this period, {plural(
-        usage.billableUsed,
-        'billable call'
-      )} of them. Continuous polls such as <code class="of-mono">watch</code> are free, which is why the
-      two numbers differ.
+      {m.meter_calls_recorded({ count: usage.totalCalls })}
+      {m.meter_calls_billable({ count: usage.billableUsed })}
+      {m.meter_watch_note({ tool: 'watch' })}
     </p>
   {/if}
 </div>

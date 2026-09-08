@@ -1,5 +1,6 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
+  import { m } from '$lib/paraglide/messages';
   import { session } from '$lib/session.svelte';
   import Empty from '$lib/components/Empty.svelte';
   import Loading from '$lib/components/Loading.svelte';
@@ -23,13 +24,14 @@
   });
 </script>
 
-<svelte:head><title>Usage · otto-factory</title></svelte:head>
+<svelte:head><title>{m.billing_page_title()}</title></svelte:head>
 
 {#if session.ready && session.signedIn && !session.homeOrg}
-  <Empty title="You are not in an organization yet.">
-    Usage is measured per organization.
-    <a class="text-muted underline hover:text-ink" href="/orgs/new">Create one</a>.
+  <Empty title={m.billing_no_org_title()}>
+    {m.billing_no_org_hint()}
+    <a class="text-muted underline hover:text-ink" href="/orgs/new">{m.billing_create_one_link()}</a
+    >.
   </Empty>
 {:else}
-  <Loading what="Opening your usage" />
+  <Loading what={m.billing_loading()} />
 {/if}

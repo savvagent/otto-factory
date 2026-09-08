@@ -2,7 +2,9 @@
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
 
-  import { api, ApiError } from '$lib/api';
+  import { api } from '$lib/api';
+  import { messageFor } from '$lib/errors';
+  import { m } from '$lib/paraglide/messages';
   import { session } from '$lib/session.svelte';
   import * as webauthn from '$lib/webauthn';
   import Alert from '$lib/components/Alert.svelte';
@@ -34,31 +36,25 @@
     try {
       const started = await api.claimStart(code.trim());
       const credential = await webauthn.register(started.challenge as never);
-      await api.claimFinish(started.ceremonyId, code.trim(), credential, 'Replacement device');
+      await api.claimFinish(started.ceremonyId, code.trim(), credential, m.claim_device_name());
       await session.refresh();
       await goto('/', { replaceState: true });
     } catch (e) {
-      error =
-        e instanceof webauthn.WebauthnError || e instanceof ApiError
-          ? e.message
-          : 'That code was not accepted.';
+      error = messageFor(e, m.claim_error_fallback());
     } finally {
       pending = false;
     }
   }
 </script>
 
-<svelte:head><title>Register a new passkey · otto-factory</title></svelte:head>
+<svelte:head><title>{m.claim_page_title()}</title></svelte:head>
 
 <div class="mx-auto max-w-sm py-8">
-  <h1 class="text-lg font-semibold">Register a new passkey</h1>
-  <p class="mt-1 text-sm text-faint">
-    Use the one-time code an admin gave you. It works once and replaces every passkey the account
-    had.
-  </p>
+  <h1 class="text-lg font-semibold">{m.claim_heading()}</h1>
+  <p class="mt-1 text-sm text-faint">{m.claim_intro()}</p>
 
   <form class="mt-6 space-y-4" onsubmit={claim}>
-    <Field label="Recovery code">
+    <Field label={m.claim_code_label()}>
       <input
         class="of-input of-mono"
         type="text"
@@ -71,10 +67,10 @@
 
     {#if error}<Alert>{error}</Alert>{/if}
 
-    <Button type="submit" {pending}>Create a passkey</Button>
+    <Button type="submit" {pending}>{m.claim_submit()}</Button>
   </form>
 
   <p class="mt-6 text-xs text-faint">
-    <a class="text-muted underline hover:text-ink" href="/login">Back to sign in</a>
+    <a class="text-muted underline hover:text-ink" href="/login">{m.claim_back_to_sign_in()}</a>
   </p>
 </div>

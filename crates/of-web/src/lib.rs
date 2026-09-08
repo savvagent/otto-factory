@@ -33,6 +33,7 @@
 
 pub mod catalog;
 pub mod error;
+pub mod i18n;
 pub mod oauth;
 pub mod openapi;
 pub mod routes;

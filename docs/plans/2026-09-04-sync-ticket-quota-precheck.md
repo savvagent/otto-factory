@@ -12,7 +12,7 @@ GitHub/JIRA write-back is attempted, without disturbing the existing loop-safety
 
 ## Status — 2026-09-04
 
-Shipped in savvagent/dark-factory#30. Task 1 complete, covered by
+Shipped in savvagent/otto-factory#30. Task 1 complete, covered by
 `sync_ticket_refuses_before_the_outbound_call_when_over_budget` in
 `crates/of-mcp/tests/tools.rs`.
 

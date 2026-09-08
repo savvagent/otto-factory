@@ -4,11 +4,26 @@
   import type { Snippet } from 'svelte';
 
   import '../app.css';
-  import { api, ApiError } from '$lib/api';
+  import { api } from '$lib/api';
+  import { messageFor } from '$lib/errors';
+  import { m } from '$lib/paraglide/messages';
+  import { reconcile, resolveAtBoot } from '$lib/locale';
+  import { isServerRoute, safeNext } from '$lib/next';
   import { session } from '$lib/session.svelte';
   import Alert from '$lib/components/Alert.svelte';
   import Loading from '$lib/components/Loading.svelte';
   import Logo from '$lib/components/Logo.svelte';
+
+  /**
+   * Decide the language before anything renders.
+   *
+   * Top-level in this script rather than in `+layout.ts`, because `ssr = false`
+   * makes this file browser-only while a universal load module is also
+   * evaluated by the static build — where `document` and `localStorage` do not
+   * exist. It runs once, synchronously, ahead of the first paint, so no page
+   * ever renders English and then snaps to Spanish.
+   */
+  resolveAtBoot();
 
   let { children }: { children: Snippet } = $props();
 
@@ -27,9 +42,6 @@
    * session whose address matches the one invited, so it sends the visitor to
    * sign in first. That check is what keeps a code that goes astray from being
    * a free seat.
-   *
-   * A signed-in visitor on one of these gets bounced to `/` below — they are
-   * auth *flow* pages, not places to linger once signed in.
    */
   const PUBLIC = ['/login', '/signup', '/claim'];
 
@@ -56,10 +68,33 @@
     try {
       await session.refresh();
     } catch (error) {
-      fatal =
-        error instanceof ApiError ? error.message : 'Something went wrong resolving your session.';
+      fatal = messageFor(error, m.error_session_resolve_failed());
     }
   }
+
+  /**
+   * Apply the account's stored language whenever the session resolves.
+   *
+   * **An effect over `session.me`, not a line inside `resolve()`.** `resolve()`
+   * runs exactly once, on mount, and returns early forever after; every other
+   * path that establishes a session — signing in, signing up, redeeming a
+   * claim code or an invitation, and the settings page — calls
+   * `session.refresh()` directly and would never reach it. Reading
+   * `session.me` here makes this re-run for all of them.
+   *
+   * That is not a tidiness point: the case this whole mechanism exists for is
+   * **the first sign-in on a new device**, where the cache is empty and the
+   * browser's language differs from the account's. That is precisely the path
+   * `resolve()` cannot see, because the session became ready while the visitor
+   * was still signed out.
+   *
+   * `reconcile` no-ops unless the stored choice differs from what is rendering,
+   * so running it on every change is free — and it reloads at most once when
+   * they do differ, for the reason its own comment gives.
+   */
+  $effect(() => {
+    reconcile(session.me?.user.locale);
+  });
 
   /**
    * The routing guard, in one place.
@@ -99,7 +134,16 @@
     // exactly what it did until a browser test caught it.
     const needsProfile = session.me != null && session.me.user.email == null;
     if (isPublic && !needsProfile) {
-      void goto('/', { replaceState: true });
+      // Honour `next` rather than always landing on `/`. A language change
+      // detected at sign-in reloads this page, and the reload lands back here
+      // signed in — so without this, arriving with a stored locale that differs
+      // from the browser's silently costs the visitor their destination.
+      // `safeNext` is what makes an attacker-supplied `next` safe to follow;
+      // a server route needs a real navigation because the client router has
+      // no `/oauth/authorize` to render.
+      const next = safeNext(page.url.searchParams.get('next'));
+      if (next && isServerRoute(next)) location.assign(next);
+      else void goto(next ?? '/', { replaceState: true });
     }
   });
 
@@ -128,7 +172,7 @@
       </a>
 
       {#if session.signedIn}
-        <nav class="ml-2 hidden gap-1 text-sm sm:flex" aria-label="Organizations">
+        <nav class="ml-2 hidden gap-1 text-sm sm:flex" aria-label={m.nav_organizations()}>
           {#each session.orgs as membership (membership.orgId)}
             <a
               href="/o/{membership.orgSlug}"
@@ -142,7 +186,7 @@
           <a
             href="/orgs/new"
             class="rounded-md px-2.5 py-1 text-faint transition hover:bg-raised hover:text-ink"
-            title="Create an organization"
+            title={m.nav_create_org()}
           >
             +
           </a>
@@ -151,13 +195,15 @@
 
       <div class="ml-auto flex items-center gap-3 text-sm">
         {#if session.me}
-          <span class="hidden text-faint sm:inline">{session.me.user.email ?? 'no email set'}</span>
+          <span class="hidden text-faint sm:inline"
+            >{session.me.user.email ?? m.nav_no_email()}</span
+          >
           <button
             class="rounded-md border border-edge px-2.5 py-1 text-muted transition hover:bg-raised hover:text-ink disabled:opacity-50"
             onclick={signOut}
             disabled={signingOut}
           >
-            Sign out
+            {m.nav_sign_out()}
           </button>
         {/if}
       </div>
@@ -170,16 +216,17 @@
     {:else if fatal}
       <Alert>
         {fatal}
-        <button class="ml-2 underline" onclick={() => location.reload()}>Try again</button>
+        <button class="ml-2 underline" onclick={() => location.reload()}>{m.nav_try_again()}</button
+        >
       </Alert>
     {:else if !session.ready}
-      <Loading what="Checking your session" />
+      <Loading what={m.nav_checking_session()} />
     {:else}
       {@render children()}
     {/if}
   </main>
 
   <footer class="border-t border-edge/40 px-4 py-4 text-center text-xs text-faint">
-    <a class="hover:text-muted" href="/docs/api">API reference</a>
+    <a class="hover:text-muted" href="/docs/api">{m.nav_api_reference()}</a>
   </footer>
 </div>

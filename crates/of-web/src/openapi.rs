@@ -348,12 +348,26 @@ fn entity_schemas() -> Value {
     let uuid = json!({ "type": "string", "format": "uuid" });
     let role = json!({ "type": "string", "enum": ["owner", "admin", "member"] });
 
+    let locale = {
+        let mut values: Vec<Value> = of_core::i18n::SUPPORTED_LOCALES
+            .iter()
+            .map(|l| json!(l))
+            .collect();
+        values.push(Value::Null);
+        json!({
+            "type": ["string", "null"],
+            "enum": values,
+            "description": "The console language, or null to follow the browser's Accept-Language.",
+        })
+    };
+
     let user = json!({
         "type": "object",
         "properties": {
             "id": uuid,
             "email": { "type": "string", "format": "email" },
             "name": { "type": ["string", "null"] },
+            "locale": locale,
             "emailVerifiedAt": { "type": ["string", "null"], "format": "date-time" },
             "createdAt": timestamp,
             "disabledAt": { "type": ["string", "null"], "format": "date-time" },
@@ -804,6 +818,19 @@ fn response_schemas() -> Value {
 /// Request bodies.
 fn request_schemas() -> Value {
     let role = json!({ "type": "string", "enum": ["owner", "admin", "member"] });
+    let locale = {
+        let mut values: Vec<Value> = of_core::i18n::SUPPORTED_LOCALES
+            .iter()
+            .map(|l| json!(l))
+            .collect();
+        values.push(Value::Null);
+        json!({
+            "type": ["string", "null"],
+            "enum": values,
+            "description": "Absent leaves the stored locale alone; a supported locale sets it; \
+                null clears it back to following the browser's Accept-Language.",
+        })
+    };
 
     json!({
         "SignupRequest": {
@@ -858,6 +885,7 @@ fn request_schemas() -> Value {
             "properties": {
                 "email": { "type": ["string", "null"], "format": "email" },
                 "name": { "type": ["string", "null"] },
+                "locale": locale,
             },
         },
         "RenameKeyRequest": {

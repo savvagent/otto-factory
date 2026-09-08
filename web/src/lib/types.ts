@@ -24,6 +24,13 @@ export interface User {
   /** Absent until the account sets one — a passkey creates the account. */
   email: string | null;
   name: string | null;
+  /**
+   * The console language this account chose, or `null` for "never chose".
+   *
+   * `null` is not English — it is the state where the browser's own preference
+   * is still in charge. See `$lib/locale`.
+   */
+  locale: string | null;
   createdAt: string;
   disabledAt: string | null;
 }

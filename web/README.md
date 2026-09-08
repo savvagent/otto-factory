@@ -9,9 +9,9 @@ client how to connect.
 ```bash
 npm install
 npm run dev      # Vite on :5173, proxying /api /oauth /.well-known to OF_API_ORIGIN
-npm run check    # svelte-check + tsc over worker/ — the type gate
+npm run check    # compile messages, check completeness, then svelte-check + tsc
 npm run lint     # prettier --check
-npm test         # vitest — the Worker's routing rule, which mirrors the server's
+npm test         # vitest — the Worker's routing rule, locale resolution, the error map
 npm run build    # static bundle in build/
 npm run deploy   # build, then deploy the production Worker — docs/deploy/cloudflare.md
 ```
@@ -64,6 +64,89 @@ fact.
 grantable scopes come from `/.well-known/oauth-protected-resource` at runtime. A hard-coded
 MCP URL is how a staging or self-hosted deployment ends up printing a connect command that
 points at production.
+
+## Messages, and what a new string costs
+
+The console ships in **English, Spanish, German, French, Italian and Hindi**. Messages are
+compiled, not looked up at runtime: [Paraglide JS](https://inlang.com/m/gerre34r) turns
+`messages/{locale}.json` into tree-shaken functions under `src/lib/paraglide/`, which is what
+lets an i18n layer exist here at all without a SvelteKit server.
+
+```
+project.inlang/settings.json   the six locales and the base locale
+messages/{en,es,de,fr,it,hi}.json   the catalogs
+scripts/check-messages.mjs     the completeness gate, wired into `npm run check`
+src/lib/locale.ts              which language this document is in, and how it got there
+src/lib/errors.ts              ApiError.code / WebauthnError.code → a sentence
+src/lib/labels.ts              JobStatus / role → a word (the wire value never changes)
+src/lib/paraglide/**           generated. git-ignored, prettier-ignored, never edited.
+```
+
+**Adding a user-visible string costs six catalog entries, not one.** `npm run check` fails if
+any locale is missing a key, has a key the base locale does not, drops a `{placeholder}`, or
+gets its plural categories wrong. That is deliberate: Paraglide _silently_ falls back to the
+base locale for a missing key, so without the check a half-translated release looks fine in
+development and reaches a customer as half a page in the wrong language.
+
+```svelte
+<script lang="ts">
+  import { m } from '$lib/paraglide/messages';
+</script>
+
+<h1>{m.queue_title()}</h1><p>{m.queue_jobs_shown({ count: jobs.length })}</p>
+```
+
+Three things about the toolchain that the obvious reading gets wrong, all verified against
+`@inlang/paraglide-js` rather than assumed:
+
+- **Plurals use the variant form, not the ICU one-liner.** `"{count, plural, one {…} other {…}}"`
+  belongs to a different plugin and compiles here to the literal string `undefined other }`.
+  Write `[{ "declarations": ["input count", "local countPlural = count: plural"], "selectors":
+["countPlural"], "match": { "countPlural=one": "# job", "countPlural=other": "# jobs" } }]`.
+- **The required plural categories differ per locale, and the check enforces both directions.**
+  `en`, `de` and `hi` need exactly `one` and `other`; `es`, `fr` and `it` also need `many`
+  (Spanish 1 000 000 is "un millón _de_ trabajos"). Declaring `many` where the locale never
+  selects it fails too.
+- **`--emit-ts-declarations` is what makes a key a type error.** Without it Paraglide emits no
+  `.d.ts` at all and `m.no_such_key()` type-checks clean. It is in the `paraglide:compile`
+  script for that reason, not for tidiness.
+
+`src/lib/paraglide/` is generated and git-ignored, so `check` and `build` compile it first. A
+bare `npx svelte-check` in a fresh clone reports missing modules until `npm run paraglide:compile`
+has run once.
+
+**What is not translated, on purpose.** The MCP surface — `of-mcp` tool descriptions and
+`of-core` error messages — stays English: its reader is an LLM that has never seen these docs,
+and translating it would fragment the one audience it has. Commands, JSON/TOML snippets, config
+paths, product names, and every wire value stay verbatim; a translated `--transport http` is a
+broken command. The two server-rendered pages (`/oauth/authorize`'s consent screen and its error
+page) are localized, but by a hand-written table in `crates/of-web/src/i18n.rs`, because they
+have no client-side JS to swap strings and share no keys with these catalogs.
+
+## Which language, and how it is remembered
+
+Three tiers, each with one job:
+
+| Tier                        | Holds                                    | Authority                        |
+| --------------------------- | ---------------------------------------- | -------------------------------- |
+| `users.locale`              | the account's explicit choice, or `null` | **source of truth**              |
+| `localStorage['of.locale']` | a copy of it, for first paint            | cache only                       |
+| `navigator.languages`       | the browser's preference                 | fallback when nothing was chosen |
+
+The choice lives on the account so it follows the person to their next device; the cache exists
+so every load after the first paints in the right language instead of flashing English until
+`/api/me` returns. `null` means **"never chose"** — it is not "chose English", and collapsing
+the two would pin every account that never opened the picker to the base locale.
+
+A change of language **reloads the document**. Paraglide's `m.*()` are plain calls, not reactive
+reads, so Svelte has no dependency to invalidate when the locale changes underneath them.
+`locale.ts`'s `needsReload` is split out so the termination argument is a test rather than a
+comment: the cache is written _before_ the reload, so the next boot resolves to exactly the
+value that triggered it.
+
+`<html lang>` is set from script at boot. `app.html` ships `lang="en"` and is not templated per
+locale — `adapter-static` emits one shell for every route and there is no server to pick a
+language for it.
 
 ## Layout
 

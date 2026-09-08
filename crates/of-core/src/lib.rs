@@ -20,6 +20,7 @@ pub mod audit;
 pub mod crypto;
 pub mod db;
 pub mod error;
+pub mod i18n;
 pub mod ids;
 pub mod invites;
 pub mod isolation;

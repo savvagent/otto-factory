@@ -198,7 +198,15 @@ export const api = {
    * The one call that will say an address is already in use — which is safe
    * here precisely because it needs a session.
    */
-  setProfile: (profile: { email?: string; name?: string }) => patch<User>('/api/me', profile),
+  /**
+   * `locale` has three states, not two: omit it to leave the console language
+   * alone, pass a supported locale to set it, or pass an explicit `null` to
+   * clear it and go back to following the browser. `undefined` and `null` mean
+   * different things here, which is unusual enough to be worth saying — the
+   * server distinguishes them deliberately.
+   */
+  setProfile: (profile: { email?: string; name?: string; locale?: string | null }) =>
+    patch<User>('/api/me', profile),
 
   // ----------------------------------------------------------------- orgs
   orgs: () => get<Membership[]>('/api/orgs'),

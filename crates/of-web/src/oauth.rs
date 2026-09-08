@@ -43,6 +43,7 @@ use of_core::ids::OrgId;
 use serde::Deserialize;
 
 use crate::error::ApiError;
+use crate::i18n::{self, Key, Locale};
 use crate::session::CurrentUser;
 use crate::state::{client_ip, AppState};
 
@@ -183,6 +184,10 @@ pub async fn authorize_page(
         }
     };
 
+    // One resolution for every page this handler can render, so a consent
+    // screen and the error that replaces it are never in different languages.
+    let locale = page_locale(&caller, &parts);
+
     // Validated before anything is rendered. Every failure at this stage is a
     // page, never a redirect: the destination is what could not be verified.
     let client = match oauth::validate_authorize(
@@ -193,7 +198,7 @@ pub async fn authorize_page(
     .await
     {
         Ok(client) => client,
-        Err(e) => return error_page(&e),
+        Err(e) => return error_page(&e, locale),
     };
 
     if params.response_type != "code" {
@@ -211,12 +216,16 @@ pub async fn authorize_page(
 
     if orgs.is_empty() {
         return error_page_html(
-            "No organization yet",
-            &format!(
-                "{} is asking for access, but your account is not in any organization yet. \
-                 Create one in the console first — a token is always scoped to exactly one.",
-                escape(client.client_name.as_deref().unwrap_or("A client"))
-            ),
+            i18n::msg(locale, Key::ErrorNoOrgTitle),
+            // Escaped once, around the whole filled sentence. Escaping the name
+            // first as well double-encodes it, so a client called `<b>x</b>`
+            // renders as the literal text `&lt;b&gt;x&lt;/b&gt;` — which is safe
+            // but makes this page misreport the one fact it exists to show.
+            &escape(&i18n::fill(
+                i18n::msg(locale, Key::ErrorNoOrgBody),
+                client.client_name.as_deref().unwrap_or("A client"),
+            )),
+            locale,
         );
     }
 
@@ -233,7 +242,12 @@ pub async fn authorize_page(
         &params,
         &scopes,
         &orgs,
-        caller.user.email.as_deref().unwrap_or("this account"),
+        caller
+            .user
+            .email
+            .as_deref()
+            .unwrap_or_else(|| i18n::msg(locale, Key::ConsentThisAccount)),
+        locale,
     ))
     .into_response()
 }
@@ -307,12 +321,13 @@ pub async fn authorize_decision(
 ) -> Response {
     let params = form.params();
     let mut req = params.to_request(&state.config.resource_uri);
+    let locale = page_locale(&caller, &parts);
 
     // Re-validated on the way in. The form is user-supplied and could have been
     // edited between render and submit; nothing about having rendered a page is
     // evidence about what came back.
     if let Err(e) = oauth::validate_authorize(&state.db, &req, &state.config.resource_uri).await {
-        return error_page(&e);
+        return error_page(&e, locale);
     }
 
     // Normalize the same way `authorize_page` did before rendering the consent
@@ -364,7 +379,7 @@ pub async fn authorize_decision(
     let code =
         match oauth::issue_authorization_code(&state.db, &req, caller.user.id, form.org_id).await {
             Ok(code) => code,
-            Err(e) => return error_page(&e),
+            Err(e) => return error_page(&e, locale),
         };
 
     let _ = state
@@ -604,23 +619,60 @@ fn redirect_error(params: &AuthorizeParams, code: &str, description: &str) -> Re
         .into_response()
 }
 
+/// What language to render these two pages in.
+///
+/// **Stored choice first, header second, and both pages use this same rule.**
+/// The account's own setting is the better signal — somebody who set Spanish on
+/// an English-configured work laptop meant it — and `Accept-Language` is what
+/// answers when they have chosen nothing.
+///
+/// An earlier draft had the error page negotiate on the header alone, on the
+/// reasoning that it could be reached without a session. It cannot: every
+/// `error_page` call site here is downstream of a resolved [`CurrentUser`],
+/// because `authorize_page` bounces a signed-out visitor to `/login` and
+/// `authorize_decision` takes the extractor. Splitting the rule would have
+/// produced a German consent page and an English error page in one flow.
+fn page_locale(caller: &CurrentUser, parts: &Parts) -> Locale {
+    caller
+        .user
+        .locale
+        .as_deref()
+        .and_then(|l| l.parse::<Locale>().ok())
+        .unwrap_or_else(|| {
+            i18n::negotiate(
+                parts
+                    .headers
+                    .get(http::header::ACCEPT_LANGUAGE)
+                    .and_then(|v| v.to_str().ok()),
+            )
+        })
+}
+
 /// Render an error the user has to read, because it cannot safely be redirected.
-fn error_page(e: &AuthError) -> Response {
+///
+/// The body is the `AuthError`'s own text, which is English: translating the
+/// server's error strings is out of scope for #42, and they are also the
+/// strings an integrator pastes into a bug report. The page *around* it — its
+/// title, its closing note, and `<html lang>` — is localized, so the error
+/// reads as a scoped boundary rather than an untouched page.
+fn error_page(e: &AuthError, locale: Locale) -> Response {
     let detail = match e.oauth_code() {
         Some(_) => e.to_string(),
         None => e.public().to_string(),
     };
-    error_page_html("This request could not be authorized", &escape(&detail))
+    error_page_html(i18n::msg(locale, Key::ErrorTitle), &escape(&detail), locale)
 }
 
-fn error_page_html(title: &str, body_html: &str) -> Response {
+fn error_page_html(title: &str, body_html: &str, locale: Locale) -> Response {
     let title = escape(title);
+    let lang = locale.as_str();
+    let closing = escape(i18n::msg(locale, Key::ErrorNothingAuthorized));
     (
         http::StatusCode::BAD_REQUEST,
         Html(format!(
-            "<!doctype html><meta charset=utf-8><title>{title}</title>{STYLE}\
+            "<!doctype html><html lang={lang}><meta charset=utf-8><title>{title}</title>{STYLE}\
              <main><h1>{title}</h1><p>{body_html}</p>\
-             <p class=note>Nothing has been authorized. You can close this window.</p></main>"
+             <p class=note>{closing}</p></main></html>"
         )),
     )
         .into_response()
@@ -652,17 +704,18 @@ button.primary{background:#111;color:#fff;border-color:#111}\
 /// anybody. If a scope is added to `KNOWN_SCOPES` without a line here it renders
 /// as its bare name, which is ugly on purpose — the test at the bottom of this
 /// file fails instead.
-fn scope_description(scope: &str) -> &'static str {
-    match scope {
-        "jobs:read" => "See the work queue and job details",
-        "jobs:write" => "Create, claim, update, and complete jobs",
-        "repos:read" => "See which repositories are registered",
-        "repos:write" => "Register repositories and change their settings",
-        "messages" => "Read and send messages between agents",
-        "trackers" => "Link jobs to issues in JIRA or GitHub",
-        "org:admin" => "Administer the organization: members, teams, and connections",
-        _ => "",
-    }
+fn scope_description(locale: Locale, scope: &str) -> &'static str {
+    let key = match scope {
+        "jobs:read" => Key::ScopeJobsRead,
+        "jobs:write" => Key::ScopeJobsWrite,
+        "repos:read" => Key::ScopeReposRead,
+        "repos:write" => Key::ScopeReposWrite,
+        "messages" => Key::ScopeMessages,
+        "trackers" => Key::ScopeTrackers,
+        "org:admin" => Key::ScopeOrgAdmin,
+        _ => return "",
+    };
+    i18n::msg(locale, key)
 }
 
 fn consent_html(
@@ -671,6 +724,7 @@ fn consent_html(
     scopes: &[String],
     orgs: &[of_core::orgs::Membership],
     signed_in_as: &str,
+    locale: Locale,
 ) -> String {
     // The fact the user can actually judge. `client_name` is self-asserted
     // through open registration; the redirect host is where the code will
@@ -683,13 +737,18 @@ fn consent_html(
     let named = client
         .client_name
         .as_deref()
-        .map(|n| format!("<p class=name>It calls itself {}.</p>", escape(n)))
+        .map(|n| {
+            format!(
+                "<p class=name>{}</p>",
+                escape(&i18n::fill(i18n::msg(locale, Key::ConsentCallsItself), n))
+            )
+        })
         .unwrap_or_default();
 
     let scope_items = scopes
         .iter()
         .map(|s| {
-            let description = scope_description(s);
+            let description = scope_description(locale, s);
             if description.is_empty() {
                 format!("<li><code>{}</code></li>", escape(s))
             } else {
@@ -730,29 +789,47 @@ fn consent_html(
     .map(|(k, v)| format!("<input type=hidden name={k} value=\"{}\">", escape(v)))
     .collect::<String>();
 
+    // The redirect host is interpolated into the *middle* of a sentence whose
+    // word order differs by language, so the whole sentence is one message with
+    // one placeholder rather than two fragments concatenated around a span.
+    // Splitting it is what makes a sentence untranslatable.
+    let asking = i18n::fill(
+        i18n::msg(locale, Key::ConsentAsking),
+        &format!("<span class=host>{}</span>", escape(&host)),
+    );
+
     format!(
-        "<!doctype html><meta charset=utf-8><title>Authorize access</title>{STYLE}\
+        "<!doctype html><html lang={lang}><meta charset=utf-8><title>{title}</title>{STYLE}\
          <main>\
-         <h1>Authorize access to otto-factory</h1>\
-         <p>An application running on <span class=host>{host}</span> is asking to \
-            connect to your queue.</p>\
+         <h1>{heading}</h1>\
+         <p>{asking}</p>\
          {named}\
-         <p class=note>Only continue if you started this from that application. \
-            Any application can choose its own name.</p>\
-         <p>It is asking to:</p><ul>{scope_items}</ul>\
+         <p class=note>{warn}</p>\
+         <p>{asking_to}</p><ul>{scope_items}</ul>\
          <form method=post action=\"/oauth/authorize\">{hidden}\
-         <label for=org_id>Organization</label>\
+         <label for=org_id>{organization}</label>\
          <select id=org_id name=org_id>{org_options}</select>\
-         <p class=note>The token will act in this organization only, and cannot be \
-            moved to another.</p>\
+         <p class=note>{org_note}</p>\
          <div class=row>\
-         <button class=primary type=submit name=decision value=allow>Allow access</button>\
-         <button type=submit name=decision value=deny>Cancel</button>\
+         <button class=primary type=submit name=decision value=allow>{allow}</button>\
+         <button type=submit name=decision value=deny>{cancel}</button>\
          </div></form>\
-         <p class=note>Signed in as {signed_in}.</p>\
-         </main>",
-        host = escape(&host),
-        signed_in = escape(signed_in_as),
+         <p class=note>{signed_in}</p>\
+         </main></html>",
+        lang = locale.as_str(),
+        title = escape(i18n::msg(locale, Key::ConsentTitle)),
+        heading = escape(i18n::msg(locale, Key::ConsentHeading)),
+        // `asking` already carries escaped markup for the host span.
+        warn = escape(i18n::msg(locale, Key::ConsentWarnName)),
+        asking_to = escape(i18n::msg(locale, Key::ConsentItIsAskingTo)),
+        organization = escape(i18n::msg(locale, Key::ConsentOrganization)),
+        org_note = escape(i18n::msg(locale, Key::ConsentOrgScopeNote)),
+        allow = escape(i18n::msg(locale, Key::ConsentAllow)),
+        cancel = escape(i18n::msg(locale, Key::ConsentCancel)),
+        signed_in = escape(&i18n::fill(
+            i18n::msg(locale, Key::ConsentSignedInAs),
+            signed_in_as
+        )),
     )
 }
 
@@ -868,14 +945,20 @@ mod tests {
     /// A consent screen that lists `jobs:write` has not obtained informed
     /// consent from anyone. Every scope the authorization server will issue
     /// needs a sentence a person can actually weigh.
+    ///
+    /// **In every language.** A scope explained in English and blank in Hindi
+    /// is a Hindi-speaking user consenting to a bare token name, which is the
+    /// same failure this test was written to prevent — it just moved.
     #[test]
     fn every_issuable_scope_is_explained_in_words() {
         for scope in oauth::KNOWN_SCOPES {
-            assert!(
-                !scope_description(scope).is_empty(),
-                "{scope} has no description, so the consent screen would show \
-                 only its bare name"
-            );
+            for locale in Locale::ALL {
+                assert!(
+                    !scope_description(locale, scope).is_empty(),
+                    "{scope} has no {locale} description, so the consent screen \
+                     would show only its bare name"
+                );
+            }
         }
     }
 
@@ -914,6 +997,7 @@ mod tests {
             &["jobs:read".to_string()],
             &orgs,
             "rob@acme.test",
+            Locale::En,
         );
 
         assert!(

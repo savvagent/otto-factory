@@ -1,7 +1,9 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
 
-  import { api, ApiError } from '$lib/api';
+  import { api } from '$lib/api';
+  import { messageFor } from '$lib/errors';
+  import { m } from '$lib/paraglide/messages';
   import { session } from '$lib/session.svelte';
   import { slugPreview } from '$lib/format';
   import Alert from '$lib/components/Alert.svelte';
@@ -38,35 +40,31 @@
       session.lastOrg = org.slug;
       await goto(`/o/${org.slug}`, { replaceState: true });
     } catch (e) {
-      error = e instanceof ApiError ? e.message : 'Could not create that organization.';
+      error = messageFor(e, m.orgnew_error_fallback());
     } finally {
       pending = false;
     }
   }
 </script>
 
-<svelte:head><title>New organization · otto-factory</title></svelte:head>
+<svelte:head><title>{m.orgnew_page_title()}</title></svelte:head>
 
 <div class="mx-auto max-w-sm py-8">
-  <h1 class="text-lg font-semibold">New organization</h1>
+  <h1 class="text-lg font-semibold">{m.orgnew_heading()}</h1>
   <p class="mt-1 text-sm text-faint">
     {#if session.orgs.length === 0}
-      Everything in otto-factory belongs to an organization — repos, the queue, your agents' tokens.
-      Create one to get started.
+      {m.orgnew_intro_first()}
     {:else}
-      You will be its owner.
+      {m.orgnew_intro_owner()}
     {/if}
   </p>
 
   <form class="mt-6 space-y-4" onsubmit={submit}>
-    <Field label="Name">
+    <Field label={m.orgnew_name_label()}>
       <input class="of-input" type="text" required bind:value={name} />
     </Field>
 
-    <Field
-      label="Slug"
-      hint="Appears in URLs and in every agent's configuration. It cannot be changed later."
-    >
+    <Field label={m.orgnew_slug_label()} hint={m.orgnew_slug_hint()}>
       <input
         class="of-input of-mono"
         type="text"
@@ -81,6 +79,6 @@
 
     {#if error}<Alert>{error}</Alert>{/if}
 
-    <Button type="submit" {pending} disabled={!suggested}>Create organization</Button>
+    <Button type="submit" {pending} disabled={!suggested}>{m.orgnew_submit()}</Button>
   </form>
 </div>

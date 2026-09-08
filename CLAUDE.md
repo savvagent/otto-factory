@@ -152,7 +152,15 @@ every tool in it:
 
 `of-web` serves everything a human touches, plus the authorization server's HTTP endpoints
 — `/oauth/authorize` is a browser surface that needs the console's session cookie, which is
-why it lives here and not in `of-mcp`. Four conventions:
+why it lives here and not in `of-mcp`. Five conventions:
+
+- **The two browser-facing HTML pages negotiate a language.** `/oauth/authorize`'s consent
+  screen and its error page have no client-side JS to swap strings, so `crates/of-web/src/i18n.rs`
+  holds a hand-written `match` on `(Key, Locale)` — a new key with no Hindi translation fails to
+  compile. Both pages use one rule, resolved once per request: the caller's stored `locale`
+  first, `Accept-Language` second. **Both**, not just the consent page: every `error_page` call
+  site is downstream of a resolved `CurrentUser`, so splitting the rule would give one flow a
+  German consent screen and an English error page.
 
 - **Authorization is an extractor, not a handler's first line.** `OrgCtx` resolves the
   caller, the `{org}` path segment, and their role before any handler body runs;
@@ -188,7 +196,7 @@ audit trail that they did not observe.
 
 ## `web/` — the console UI
 
-Four things hold, and the first explains the other three.
+Five things hold, and the first explains the other four.
 
 - **It is a single-page app for a security reason, not a performance one.** The session is
   an `HttpOnly`, `__Host-`-prefixed cookie, which browsers refuse to store unless it is
@@ -214,6 +222,27 @@ Four things hold, and the first explains the other three.
 - **Every coding agent gets the same shape.** `src/lib/clients.ts` is one table with one
   entry per client and two forms each (OAuth, access token). A bespoke wizard for one agent
   and a footnote for the rest is the first place constraint 3 would quietly break.
+
+- **The console ships in six languages, and a new string costs six catalog entries.** Paraglide
+  compiles `web/messages/{en,es,de,fr,it,hi}.json` into tree-shaken message functions — no
+  runtime lookup, no SvelteKit server, which is what makes i18n compatible with the
+  `adapter-static` rule above. `npm run check` runs `scripts/check-messages.mjs` first and fails
+  on a key missing from any locale, a dropped `{placeholder}`, or the wrong plural categories,
+  because **Paraglide silently falls back to the base locale for a missing key** — without that
+  gate a half-translated release looks correct in development and reaches a customer as half a
+  page in the wrong language. Plural categories are genuinely per-locale: `en`/`de`/`hi` take
+  `one`/`other`, `es`/`fr`/`it` also take `many`.
+
+  The locale is the account's (`users.locale`, source of truth), cached in `localStorage` for
+  first paint, and detected from `navigator.languages` when nothing was chosen — where `NULL`
+  means "never chose", not "chose English". A change reloads the document, because `m.*()` are
+  plain calls with nothing for Svelte to invalidate. `of_core::i18n` owns the locale list and a
+  test reads `web/project.inlang/settings.json` to prove the two halves agree.
+
+  **The MCP surface stays English.** `of-mcp` tool descriptions and `of-core` error messages are
+  written for an LLM caller that has never read these docs; translating them fragments the one
+  audience they have. Commands, config paths, product names and every wire value stay verbatim
+  too — a translated `--transport http` is a broken command. `web/README.md` has the details.
 
 Runes throughout — `$state` / `$derived` / `$props` / `$effect`, no Svelte 4 stores, no
 `export let`. Shared state lives in `.svelte.ts` modules (`session.svelte.ts`) or in

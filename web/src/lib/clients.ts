@@ -22,18 +22,35 @@
  * `generic` exists so that a client nobody here has heard of is still a
  * first-class citizen: it is the endpoint and the two discovery documents, which
  * is all any conforming MCP client actually needs.
+ *
+ * ## What is translated here, and what is not
+ *
+ * **Prose is translated; anything a machine reads is verbatim.** `note` is
+ * advice to a person. `label` is prose for exactly one entry — "Any other MCP
+ * client" is a description, where `Claude Code` and `Cursor` are product names
+ * and stay as they are in every language. Commands, JSON and TOML snippets, and
+ * `location` paths like `~/.copilot/mcp-config.json` are never touched: a
+ * translated `--transport http` is a broken command and a translated config
+ * path is a file nobody has.
+ *
+ * `label` and `note` are functions rather than strings because this module is
+ * evaluated at import time, which can precede `resolveAtBoot()`. Resolving a
+ * message eagerly here would freeze the base locale into the table.
  */
+
+import { m } from '$lib/paraglide/messages';
 
 export interface ClientRecipe {
   id: string;
-  name: string;
+  /** What to call it in the picker. A product name, or — for `generic` — prose. */
+  label: () => string;
   /** How the snippet should be syntax-labelled, and what the reader is meant to do with it. */
   kind: 'command' | 'json' | 'toml';
   /** Where a config-file snippet belongs, when it is a file rather than a command. */
   location?: string;
   oauth: (mcpUrl: string) => string;
   token: (mcpUrl: string, token: string) => string;
-  note?: string;
+  note?: () => string;
 }
 
 const PLACEHOLDER = 'of_pat_…';
@@ -41,18 +58,16 @@ const PLACEHOLDER = 'of_pat_…';
 export const CLIENTS: ClientRecipe[] = [
   {
     id: 'claude-code',
-    name: 'Claude Code',
+    label: () => 'Claude Code',
     kind: 'command',
     oauth: (url) => `claude mcp add --transport http otto-factory ${url}`,
     token: (url, token) =>
       `claude mcp add --transport http otto-factory ${url} \\\n  --header "Authorization: Bearer ${token || PLACEHOLDER}"`,
-    note:
-      'Then run `claude mcp login otto-factory` in an interactive terminal to consent — ' +
-      'a `-p` session cannot open a browser and will report the server as unauthenticated.'
+    note: () => m.client_note_claude_code()
   },
   {
     id: 'copilot-cli',
-    name: 'Copilot CLI',
+    label: () => 'Copilot CLI',
     kind: 'json',
     location: '~/.copilot/mcp-config.json',
     oauth: (url) =>
@@ -71,13 +86,11 @@ export const CLIENTS: ClientRecipe[] = [
         null,
         2
       ),
-    note:
-      'Copilot only offers the browser consent from its interactive session; a `-p` run ' +
-      'with no credential reports no such tool rather than asking. Script it with a token.'
+    note: () => m.client_note_copilot()
   },
   {
     id: 'cursor',
-    name: 'Cursor',
+    label: () => 'Cursor',
     kind: 'json',
     location: '~/.cursor/mcp.json, or .cursor/mcp.json in a project',
     oauth: (url) => JSON.stringify({ mcpServers: { 'otto-factory': { url } } }, null, 2),
@@ -97,7 +110,7 @@ export const CLIENTS: ClientRecipe[] = [
   },
   {
     id: 'codex',
-    name: 'Codex CLI',
+    label: () => 'Codex CLI',
     kind: 'toml',
     location: '~/.codex/config.toml',
     oauth: (url) => `[mcp_servers.otto_factory]\nurl = "${url}"`,
@@ -106,12 +119,10 @@ export const CLIENTS: ClientRecipe[] = [
   },
   {
     id: 'generic',
-    name: 'Any other MCP client',
+    label: () => m.client_generic_name(),
     kind: 'command',
     oauth: (url) => url,
     token: (url, token) => `Authorization: Bearer ${token || PLACEHOLDER}\n\n${url}`,
-    note:
-      'Streamable HTTP. A conforming client needs nothing but this URL: the 401 it gets back ' +
-      'points at the protected-resource document, which points at the authorization server.'
+    note: () => m.client_note_generic()
   }
 ];

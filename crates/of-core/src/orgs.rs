@@ -80,6 +80,14 @@ pub struct User {
     /// nullability is the price and it is worth paying. Unique when set.
     pub email: Option<String>,
     pub name: Option<String>,
+    /// The console language this account chose, or `None` for "never chose".
+    ///
+    /// `None` is not English. It is the state where the browser's own
+    /// preference is still in charge, and collapsing the two would silently
+    /// pin every new account to the base locale. Always one of
+    /// [`crate::i18n::SUPPORTED_LOCALES`] when set — [`Db::set_profile`] is the
+    /// only writer and it validates.
+    pub locale: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub disabled_at: Option<chrono::DateTime<chrono::Utc>>,
 }
@@ -110,7 +118,7 @@ pub struct OrgMember {
 }
 
 const ORG_COLS: &str = "id, slug, name, plan, enforce_sso, created_at";
-const USER_COLS: &str = "id, email, name, created_at, disabled_at";
+const USER_COLS: &str = "id, email, name, locale, created_at, disabled_at";
 
 /// An org is addressed by its slug as one URL path segment for the rest of its
 /// life (`/api/orgs/{org}/...`), so the same character/length discipline team
@@ -237,18 +245,32 @@ impl Db {
         Ok(user)
     }
 
-    /// Set the address and display name on an account that has a passkey.
+    /// Set the address, display name and console language on an account that
+    /// has a passkey.
     ///
     /// The address is unique when set, so this is where "that address is taken"
     /// is discovered. Deliberately a *signed-in* operation: it is the one place
     /// the product will tell you whether an address is in use, and requiring a
     /// session makes that answer attributable, rate-limited, and auditable
     /// rather than something a stranger can walk a list against.
+    ///
+    /// `locale` has **three** states where `email` and `name` have two, and the
+    /// third is not a nicety: "match my browser" is a real choice somebody
+    /// makes after having picked Spanish once, and `COALESCE` cannot express
+    /// it — under `COALESCE` a `NULL` argument means "leave alone", so there is
+    /// no argument that means "set to NULL".
+    ///
+    /// | `locale` | Effect |
+    /// |---|---|
+    /// | `None` | leave the stored locale alone |
+    /// | `Some(Some("de"))` | set it, after validating against [`crate::i18n::SUPPORTED_LOCALES`] |
+    /// | `Some(None)` | clear it — go back to following the browser |
     pub async fn set_profile(
         &self,
         user: UserId,
         email: Option<&str>,
         name: Option<&str>,
+        locale: Option<Option<&str>>,
     ) -> Result<User> {
         if let Some(email) = email {
             let email = email.trim();
@@ -257,15 +279,25 @@ impl Db {
             }
         }
 
+        // Parsed rather than passed through, so an unsupported value is a
+        // refusal that names the six options instead of a row nothing can read.
+        let locale = match locale {
+            Some(Some(raw)) => Some(Some(raw.parse::<crate::i18n::Locale>()?.as_str())),
+            other => other,
+        };
+
         let updated = sqlx::query_as(&format!(
             "UPDATE users SET \
-               email = COALESCE($2, email), \
-               name  = COALESCE($3, name) \
+               email  = COALESCE($2, email), \
+               name   = COALESCE($3, name), \
+               locale = CASE WHEN $4 THEN $5 ELSE locale END \
              WHERE id = $1 RETURNING {USER_COLS}"
         ))
         .bind(user)
         .bind(email.map(str::trim))
         .bind(name.map(str::trim))
+        .bind(locale.is_some())
+        .bind(locale.flatten())
         .fetch_one(self.pool())
         .await
         .map_err(|e| match &e {
