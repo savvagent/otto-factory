@@ -200,6 +200,11 @@ export function needsReload(
   rendering: Locale,
   cached: Locale | undefined = readCached()
 ): boolean {
+  // `undefined` is "no information yet" — before `/api/me` resolves, and when
+  // signed out — not the account telling us anything. Only a resolved `null`
+  // is that: reload's whole reason to exist is reacting to what the server
+  // said, and it has not said anything yet.
+  if (stored === undefined) return false;
   if (isSupported(stored)) return stored !== rendering;
   // `null` means the account chose nothing, which leaves browser detection in
   // charge. It is not a request to switch to English — but a lingering cache

@@ -73,7 +73,15 @@ describe('needsReload', () => {
     // it as a request to switch to English would pin every account that never
     // touched the picker to the base locale.
     expect(needsReload(null, 'de', undefined)).toBe(false);
+  });
+
+  it('is false while the server has not answered yet, even with a stale cache', () => {
+    // `undefined` is what `session.me?.user.locale` reads before `/api/me`
+    // resolves and when signed out — no information, not the account clearing
+    // its choice. Treating it like `null` would reload on every boot with a
+    // cached locale, before the server ever got a chance to say otherwise.
     expect(needsReload(undefined, 'de', undefined)).toBe(false);
+    expect(needsReload(undefined, 'de', 'de')).toBe(false);
   });
 
   it('is true when the account cleared its choice but a stale cache remains', () => {
