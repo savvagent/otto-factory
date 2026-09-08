@@ -145,7 +145,7 @@ avoidable by doing this task before merging.
   'push'` never fires for a PR event — expected per spec §4/Testing, not a defect). After merging
   (`996245ae`), confirmed via `gh run list --branch master` and `gh run watch 34231950841` that the
   merge commit's `deploy` job ran (not skipped) and passed, then confirmed via
-  `fly releases -a otto-factory-mcp` that release `v4` carries this merge's deploy, with the
+  `fly releases -a otto-factory-mcp` that release `v4` carried this merge's deploy (observed at verification time; a later release does not invalidate this), with the
   resulting machine passing its `/readyz` health check per `fly status -a otto-factory-mcp`.
 - **Config surface** — `FLY_API_TOKEN` is a new GitHub Actions secret, not an `OF_*` environment
   variable read by `Config::from_env`; `.env.example` is not touched and does not need an entry.
