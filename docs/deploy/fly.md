@@ -158,8 +158,9 @@ split.
 Deploys are automatic: the `deploy` job in `.github/workflows/ci.yml` runs
 `flyctl deploy --remote-only -a otto-factory-mcp` on every push to `master` that passes
 the `rust`, `web`, and `docker-build` jobs, authenticated via the `FLY_API_TOKEN`
-repository secret (an app-scoped Fly deploy token, minted with `fly tokens create deploy
--a otto-factory-mcp` and never valid for any other app on the `savvagent` org). A push
+repository secret (an app-scoped Fly deploy token, minted with
+`fly tokens create deploy -a otto-factory-mcp` and never valid for any other app on the
+`savvagent` org). A push
 that fails CI never reaches the deploy step — `needs:` skips it outright — and a failed
 `flyctl deploy` leaves the previously-running machine serving traffic, since Fly's own
 rolling-deploy health check (`/readyz`) never cuts traffic to a machine that hasn't

@@ -1,7 +1,8 @@
 # Automatic deploy on merge to master design
 
-> **Status:** DRAFT — a `deploy` job in `.github/workflows/ci.yml` that runs `flyctl deploy` for
-> `otto-factory-mcp` after every push to `master` passes CI, closing savvagent/otto-factory#54.
+> **Status:** IMPLEMENTED — shipped in savvagent/otto-factory#55, closing savvagent/otto-factory#54.
+> A `deploy` job in `.github/workflows/ci.yml` runs `flyctl deploy` for `otto-factory-mcp` after
+> every push to `master` passes CI.
 
 ## Goal & Success Criteria
 
@@ -55,8 +56,8 @@ Fly.io, with no manual step.**
   personal apps on the same account. Stored as the `FLY_API_TOKEN` repository secret via
   `gh secret set` (this workflow's `FLY_API_TOKEN` name matches `superfly/flyctl-actions`'
   documented convention, so no extra `env:` remapping is needed).
-- **`superfly/flyctl-actions/setup-flyctl@v1`, then a plain `flyctl deploy` shell step** — the
-  first-party action installs the CLI; the deploy step itself is one line
+- **`superfly/flyctl-actions/setup-flyctl`, pinned to a commit SHA, then a plain `flyctl deploy`
+  shell step** — the first-party action installs the CLI; the deploy step itself is one line
   (`flyctl deploy --remote-only -a otto-factory-mcp`) rather than a bespoke deploy action, keeping
   the failure mode identical to running the command by hand per `docs/deploy/fly.md`.
 - **No new GitHub Environment / manual-approval gate.** The issue's literal ask is "merge to master
@@ -148,7 +149,7 @@ Appended to `.github/workflows/ci.yml`, after the existing `docker-build` job:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: superfly/flyctl-actions/setup-flyctl@v1
+      - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # v1
 
       - name: Deploy to Fly.io
         run: flyctl deploy --remote-only -a otto-factory-mcp
@@ -237,7 +238,12 @@ deploy degrades to "the last good version keeps serving," never an outage.
   becomes a real cost, a follow-up could push `docker-build`'s image to a registry and deploy with
   `flyctl deploy --image <ref>` instead — left as a possible future change, not implemented here.
 - **`superfly/flyctl-actions` is a third-party (Fly-maintained, not GitHub-first-party) action**,
-  pinned to `@v1` — the action does publish versioned tags (`v1`, `1.x`), so it is pinned the same
-  way this workflow already pins other third-party actions (`Swatinem/rust-cache@v2`,
-  `dorny/paths-filter@v3`), rather than tracking `@master`, which would silently pull in whatever
-  the action's default branch contains on a given run.
+  pinned to the commit SHA behind its `v1` tag
+  (`ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1`, annotated with a `# v1` comment for readability) —
+  a stricter pin than this workflow's existing third-party actions (`Swatinem/rust-cache@v2`,
+  `dorny/paths-filter@v3`, both pinned to a mutable major-version tag), chosen specifically because
+  this step is the one job in the workflow that runs with the `FLY_API_TOKEN` deploy credential in
+  its environment — a compromised or force-moved tag on a step holding that credential is a real
+  supply-chain exposure the other jobs don't carry. `Swatinem/rust-cache@v2` and
+  `dorny/paths-filter@v3` are left as major-version tags rather than retrofitted to SHAs here,
+  since neither runs with a secret in scope; tightening them is a separate, unrelated change.

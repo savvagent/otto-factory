@@ -1,11 +1,11 @@
 # Automatic deploy on merge to master — implementation plan
 
-**Goal:** Add a `deploy` job to `.github/workflows/ci.yml` that runs `flyctl deploy --remote-only
--a otto-factory-mcp` on every push to `master` that passes `rust`, `web`, and `docker-build`,
-authenticated via a newly-minted app-scoped Fly deploy token staged as the `FLY_API_TOKEN` GitHub
-secret. Closes savvagent/otto-factory#54. Corrects `docs/deploy/fly.md` and
-`.github/skills/otto-factory-development/SKILL.md`'s conventions table, both of which currently
-describe deploys as manual.
+**Goal:** Add a `deploy` job to `.github/workflows/ci.yml` that runs
+`flyctl deploy --remote-only -a otto-factory-mcp` on every push to `master` that passes `rust`,
+`web`, and `docker-build`, authenticated via a newly-minted app-scoped Fly deploy token staged as
+the `FLY_API_TOKEN` GitHub secret. Closes savvagent/otto-factory#54. Corrects
+`docs/deploy/fly.md` and `.github/skills/otto-factory-development/SKILL.md`'s conventions table,
+both of which currently describe deploys as manual.
 
 ## Status — 2026-09-08
 
@@ -62,7 +62,8 @@ merged job in Phase 5.
 
 **Interfaces:** Produces a new GitHub Actions job named `deploy` that runs on every push to
 `master`, gated on `rust`/`web`/`docker-build` passing. Consumes the `FLY_API_TOKEN` repository
-secret (provisioned in Task 3) and the `superfly/flyctl-actions/setup-flyctl@v1` action.
+secret (provisioned in Task 3) and the `superfly/flyctl-actions/setup-flyctl` action, pinned to
+the commit SHA behind its `v1` tag.
 
 - [x] Add the `deploy` job to `.github/workflows/ci.yml`, placed after the existing `docker-build`
       job, exactly per spec §1:
@@ -70,7 +71,7 @@ secret (provisioned in Task 3) and the `superfly/flyctl-actions/setup-flyctl@v1`
       - `needs: [rust, web, docker-build]`
       - `if: github.event_name == 'push'`
       - `actions/checkout@v4`
-      - `superfly/flyctl-actions/setup-flyctl@v1`
+      - `superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 (v1)`
       - a "Deploy to Fly.io" step: `run: flyctl deploy --remote-only -a otto-factory-mcp`, with
         `env: FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}`
       - a leading comment on the job explaining why it exists and why it doesn't reuse
