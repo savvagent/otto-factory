@@ -50,6 +50,11 @@
 
   async function changeLanguage(next: Locale | '') {
     if (savingLocale) return;
+    const previous = locale;
+    // Set optimistically so the <select> — bound to `locale` — reflects the
+    // pick immediately rather than snapping back to the old value for the
+    // moment the request is in flight; a failure below restores `previous`.
+    locale = next;
     savingLocale = true;
     localeError = undefined;
     try {
@@ -61,7 +66,7 @@
       applyLocale(next === '' ? undefined : next);
     } catch (e) {
       localeError = messageFor(e, m.settings_language_failed());
-      locale = session.me?.user.locale ? (session.me.user.locale as Locale) : '';
+      locale = previous;
       savingLocale = false;
     }
   }
