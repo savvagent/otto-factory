@@ -70,6 +70,9 @@ the commit SHA behind its `v1` tag.
       - `runs-on: ubuntu-latest`
       - `needs: [rust, web, docker-build]`
       - `if: github.event_name == 'push'`
+      - `timeout-minutes: 10`
+      - `permissions: contents: read` (the default `GITHUB_TOKEN` grant is unnecessarily broad for
+        a job that only checks out code and runs `flyctl deploy`)
       - `actions/checkout@v4`
       - `superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 (v1)`
       - a "Deploy to Fly.io" step: `run: flyctl deploy --remote-only -a otto-factory-mcp`, with

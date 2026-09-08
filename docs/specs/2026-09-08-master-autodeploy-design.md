@@ -147,6 +147,9 @@ Appended to `.github/workflows/ci.yml`, after the existing `docker-build` job:
     runs-on: ubuntu-latest
     needs: [rust, web, docker-build]
     if: github.event_name == 'push'
+    timeout-minutes: 10
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
