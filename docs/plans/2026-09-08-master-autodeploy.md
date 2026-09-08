@@ -9,7 +9,11 @@ describe deploys as manual.
 
 ## Status — 2026-09-08
 
-⬜ Not started.
+✅ Done — implemented in this PR: Task 1 (`deploy` CI job), Task 2 (doc updates), and Task 3
+(the `FLY_API_TOKEN` secret provisioned and verified via `gh secret list`). Remaining: confirming,
+post-merge, that this PR's own merge-commit `push` run actually executes the `deploy` job (not
+skipped) and that `fly releases -a otto-factory-mcp` shows a new release for that commit SHA — see
+Out-of-band verification below.
 
 ## Spec
 
@@ -52,7 +56,7 @@ ordering dependency on Task 1/2's commits landing first; it's listed last only b
 step this plan can't commit to git, and is the one most naturally verified against the actually-
 merged job in Phase 5.
 
-## Task 1 — Add the `deploy` CI job — ⬜
+## Task 1 — Add the `deploy` CI job — ✅
 
 **Files:** `.github/workflows/ci.yml`
 
@@ -60,7 +64,7 @@ merged job in Phase 5.
 `master`, gated on `rust`/`web`/`docker-build` passing. Consumes the `FLY_API_TOKEN` repository
 secret (provisioned in Task 3) and the `superfly/flyctl-actions/setup-flyctl@v1` action.
 
-- [ ] Add the `deploy` job to `.github/workflows/ci.yml`, placed after the existing `docker-build`
+- [x] Add the `deploy` job to `.github/workflows/ci.yml`, placed after the existing `docker-build`
       job, exactly per spec §1:
       - `runs-on: ubuntu-latest`
       - `needs: [rust, web, docker-build]`
@@ -72,21 +76,21 @@ secret (provisioned in Task 3) and the `superfly/flyctl-actions/setup-flyctl@v1`
       - a leading comment on the job explaining why it exists and why it doesn't reuse
         `docker-build`'s image (mirrors spec §1's comment)
       - **no job-level `concurrency:` block** (per spec Assumptions/Global Constraints above)
-- [ ] Validate the YAML parses: `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/ci.yml'))"`
+- [x] Validate the YAML parses: `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/ci.yml'))"`
       — expect no exception, and manually re-read the rendered file to confirm the `rust`, `web`,
       and `docker-build` jobs are byte-for-byte unchanged (no accidental reflow/indentation change
       from an editor).
-- [ ] Confirm the `flyctl deploy --remote-only -a otto-factory-mcp` invocation is syntactically
+- [x] Confirm the `flyctl deploy --remote-only -a otto-factory-mcp` invocation is syntactically
       valid against the locally installed `flyctl` (`flyctl deploy --help` to confirm `--remote-only`
       and `-a` are recognized flags) — this environment cannot run the step itself without
       `FLY_API_TOKEN` staged (Task 3), so this is a syntax/flag sanity check, not an end-to-end run.
-- [ ] Format and commit: `git commit -m "ci: deploy to Fly.io on every push to master that passes CI"`.
+- [x] Format and commit: `git commit -m "ci: deploy to Fly.io on every push to master that passes CI"`.
       Vacuous gates, stated explicitly: `cargo test --workspace`, `cargo clippy --all-targets --
       -D warnings`, `cargo fmt --all` do not apply (no Rust source changed);
       `cd web && npm run check && npm run lint && npm test && npm run build` does not apply (no
       console source changed).
 
-## Task 2 — Update deploy documentation — ⬜
+## Task 2 — Update deploy documentation — ✅
 
 **Files:** `docs/deploy/fly.md`, `.github/skills/otto-factory-development/SKILL.md`
 
@@ -94,20 +98,20 @@ secret (provisioned in Task 3) and the `superfly/flyctl-actions/setup-flyctl@v1`
 sync with Task 1's behavior change, per spec Goal & Success Criteria's explicit requirement that a
 doc still describing deploys as "manual" after this ships is itself a defect.
 
-- [ ] In `docs/deploy/fly.md`, replace the closing "Deploying is: `fly deploy -a otto-factory-mcp`"
+- [x] In `docs/deploy/fly.md`, replace the closing "Deploying is: `fly deploy -a otto-factory-mcp`"
       paragraph with a description that: (a) states deploys now happen automatically via the
       `deploy` job in `.github/workflows/ci.yml` on every push to `master` that passes CI, (b)
       keeps `fly deploy -a otto-factory-mcp` documented as the still-valid manual escape hatch
       (e.g. re-deploying without a new commit, deploying a specific historical SHA), matching spec
       Scope/In.
-- [ ] In `.github/skills/otto-factory-development/SKILL.md`'s Repository Conventions table, update
+- [x] In `.github/skills/otto-factory-development/SKILL.md`'s Repository Conventions table, update
       the "Deploy" row to remove "No deploy automation — deploys are manual and out of band" and
       state that pushes to `master` deploy automatically via the `deploy` CI job, keeping the
       existing Fly.io/Cloudflare Worker file references.
-- [ ] Format and commit: `git commit -m "docs: record automatic deploy-on-merge in fly.md and SKILL.md"`.
+- [x] Format and commit: `git commit -m "docs: record automatic deploy-on-merge in fly.md and SKILL.md"`.
       Vacuous gates (no Rust/`web/` change) stated explicitly, same as Task 1.
 
-## Task 3 — Provision the Fly deploy token (out-of-band, not a repo commit) — ⬜
+## Task 3 — Provision the Fly deploy token (out-of-band, not a repo commit) — ✅
 
 **Files:** none (GitHub repository secret only)
 
@@ -117,16 +121,16 @@ consumed by Task 1's `deploy` job. Must exist before the first real `push`-trigg
 token per spec §3/Error Handling — acceptable but pointless to hit on the very first run when it's
 avoidable by doing this task before merging.
 
-- [ ] Mint an app-scoped deploy token and stage it as the secret, per spec §2, in one pipeline with
+- [x] Mint an app-scoped deploy token and stage it as the secret, per spec §2, in one pipeline with
       no intermediate file and no literal token argument:
       ```bash
       fly tokens create deploy -a otto-factory-mcp -n "github-actions-deploy" --json \
         | jq -r .token \
         | gh secret set FLY_API_TOKEN --repo savvagent/otto-factory
       ```
-- [ ] Verify the secret exists (name only, never the value): `gh secret list --repo
+- [x] Verify the secret exists (name only, never the value): `gh secret list --repo
       savvagent/otto-factory` should list `FLY_API_TOKEN`.
-- [ ] No commit — this step has no git artifact. Record completion in the PR body's test-plan
+- [x] No commit — this step has no git artifact. Record completion in the PR body's test-plan
       checklist instead.
 
 ## Out-of-band verification (Phase 5, step 14)
