@@ -55,7 +55,7 @@ Fly.io, with no manual step.**
   personal apps on the same account. Stored as the `FLY_API_TOKEN` repository secret via
   `gh secret set` (this workflow's `FLY_API_TOKEN` name matches `superfly/flyctl-actions`'
   documented convention, so no extra `env:` remapping is needed).
-- **`superfly/flyctl-actions/setup-flyctl@master`, then a plain `flyctl deploy` shell step** — the
+- **`superfly/flyctl-actions/setup-flyctl@v1`, then a plain `flyctl deploy` shell step** — the
   first-party action installs the CLI; the deploy step itself is one line
   (`flyctl deploy --remote-only -a otto-factory-mcp`) rather than a bespoke deploy action, keeping
   the failure mode identical to running the command by hand per `docs/deploy/fly.md`.
@@ -148,7 +148,7 @@ Appended to `.github/workflows/ci.yml`, after the existing `docker-build` job:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - uses: superfly/flyctl-actions/setup-flyctl@v1
 
       - name: Deploy to Fly.io
         run: flyctl deploy --remote-only -a otto-factory-mcp
@@ -237,6 +237,7 @@ deploy degrades to "the last good version keeps serving," never an outage.
   becomes a real cost, a follow-up could push `docker-build`'s image to a registry and deploy with
   `flyctl deploy --image <ref>` instead — left as a possible future change, not implemented here.
 - **`superfly/flyctl-actions` is a third-party (Fly-maintained, not GitHub-first-party) action**,
-  pinned to `@master` per Fly's own documented usage (their action has no versioned release tags
-  as of this writing) — matches how `docs/deploy/fly.md` already treats `flyctl` as the trusted,
-  vendor-provided deploy tool for this exact app.
+  pinned to `@v1` — the action does publish versioned tags (`v1`, `1.x`), so it is pinned the same
+  way this workflow already pins other third-party actions (`Swatinem/rust-cache@v2`,
+  `dorny/paths-filter@v3`), rather than tracking `@master`, which would silently pull in whatever
+  the action's default branch contains on a given run.

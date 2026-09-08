@@ -58,7 +58,7 @@ merged job in Phase 5.
 
 **Interfaces:** Produces a new GitHub Actions job named `deploy` that runs on every push to
 `master`, gated on `rust`/`web`/`docker-build` passing. Consumes the `FLY_API_TOKEN` repository
-secret (provisioned in Task 3) and the `superfly/flyctl-actions/setup-flyctl@master` action.
+secret (provisioned in Task 3) and the `superfly/flyctl-actions/setup-flyctl@v1` action.
 
 - [ ] Add the `deploy` job to `.github/workflows/ci.yml`, placed after the existing `docker-build`
       job, exactly per spec §1:
@@ -66,7 +66,7 @@ secret (provisioned in Task 3) and the `superfly/flyctl-actions/setup-flyctl@mas
       - `needs: [rust, web, docker-build]`
       - `if: github.event_name == 'push'`
       - `actions/checkout@v4`
-      - `superfly/flyctl-actions/setup-flyctl@master`
+      - `superfly/flyctl-actions/setup-flyctl@v1`
       - a "Deploy to Fly.io" step: `run: flyctl deploy --remote-only -a otto-factory-mcp`, with
         `env: FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}`
       - a leading comment on the job explaining why it exists and why it doesn't reuse
