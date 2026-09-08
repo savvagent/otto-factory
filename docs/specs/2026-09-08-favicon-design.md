@@ -1,6 +1,6 @@
 # Favicon design
 
-> **Status:** DRAFT — replace the placeholder favicon with a small-scale mark derived from the logo
+> **Status:** IMPLEMENTED — replace the placeholder favicon with a small-scale mark derived from the logo
 
 > **Depends on:** `docs/specs/2026-09-05-header-logo-design.md` (`savvagent/otto-factory#44`) — that
 > task put the logo mark in the header; this one gives the same brand a matching tab icon.
