@@ -176,7 +176,7 @@ function applyLang(locale: Locale): void {
  */
 export function reconcile(stored: string | null | undefined): void {
   if (!needsReload(stored, current)) return;
-  writeCached(stored);
+  writeCached(isSupported(stored) ? stored : undefined);
   location.reload();
 }
 
@@ -189,15 +189,22 @@ export function reconcile(stored: string | null | undefined): void {
  * next boot resolves `current` to `stored`, and `needsReload(stored, stored)`
  * is false. A second reload would need the server's answer to change between
  * two loads — a real change made on another device, not a loop.
+ *
+ * A `null` server answer still needs a reload if a *stale* cache is why this
+ * document is rendering `rendering` at all — otherwise clearing the choice on
+ * another device would never take effect here, since the cache would keep
+ * winning over browser detection on every future boot.
  */
 export function needsReload(
   stored: string | null | undefined,
-  rendering: Locale
-): stored is Locale {
+  rendering: Locale,
+  cached: Locale | undefined = readCached()
+): boolean {
+  if (isSupported(stored)) return stored !== rendering;
   // `null` means the account chose nothing, which leaves browser detection in
-  // charge. It is not a request to switch to English.
-  if (!isSupported(stored)) return false;
-  return stored !== rendering;
+  // charge. It is not a request to switch to English — but a lingering cache
+  // entry from a choice that was since cleared has to go.
+  return cached !== undefined;
 }
 
 /**

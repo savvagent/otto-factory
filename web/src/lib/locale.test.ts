@@ -68,12 +68,20 @@ describe('detect', () => {
 });
 
 describe('needsReload', () => {
-  it('is false when the account has chosen nothing', () => {
+  it('is false when the account has chosen nothing and nothing is cached', () => {
     // null is "never chose", which leaves browser detection in charge. Reading
     // it as a request to switch to English would pin every account that never
     // touched the picker to the base locale.
-    expect(needsReload(null, 'de')).toBe(false);
-    expect(needsReload(undefined, 'de')).toBe(false);
+    expect(needsReload(null, 'de', undefined)).toBe(false);
+    expect(needsReload(undefined, 'de', undefined)).toBe(false);
+  });
+
+  it('is true when the account cleared its choice but a stale cache remains', () => {
+    // Server says "nothing chosen", but this boot is rendering `de` because a
+    // choice made on another device — and since cleared — is still sitting in
+    // the cache. Without this, clearing a locale server-side would never
+    // actually take effect in a browser that had cached the old one.
+    expect(needsReload(null, 'de', 'de')).toBe(true);
   });
 
   it('is false when the stored choice is already on screen', () => {

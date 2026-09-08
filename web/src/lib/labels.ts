@@ -67,6 +67,10 @@ export function roleLabel(role: Role): string {
 export const LINK = '::link::';
 
 export function around(sentence: string): [string, string] {
-  const [before = '', after = ''] = sentence.split(LINK);
-  return [before, after];
+  const at = sentence.indexOf(LINK);
+  if (at === -1) return [sentence, ''];
+  // `slice`, not `split` + destructure: a translation where the marker
+  // appears twice must keep everything after the first occurrence, not
+  // silently drop it at the second.
+  return [sentence.slice(0, at), sentence.slice(at + LINK.length)];
 }
