@@ -27,7 +27,7 @@ pub mod webhooks;
 /// org-wide, and a team with repos still on it can never be deleted. A user's
 /// `locale` has to be clearable or "match my browser" is a choice nobody can
 /// make twice.
-pub fn double_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+pub(crate) fn double_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
 where
     D: serde::Deserializer<'de>,
     T: serde::Deserialize<'de>,

@@ -8,7 +8,7 @@ serverless model would fight. See `CLAUDE.md` for why the process must stay warm
 
 - **Org**: `savvagent`.
 - **App**: `otto-factory-mcp`, freshly created rather than renamed in place — Fly does
-  not support renaming an app's slug, and the previous `otto-factory-mcp` app predates
+  not support renaming an app's slug, and the previous `dark-factory-mcp` app predates
   this rename.
 - **Database**: a dedicated, standalone (unmanaged) Fly Postgres app,
   `otto-factory-mcp-db` (region `iad`), created specifically for this app rather than

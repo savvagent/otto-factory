@@ -7,7 +7,7 @@
 //! |---|---|
 //! | `of_web::i18n` | `pub use of_core::i18n::Locale` — `of-core` cannot depend on `of-web`, so the enum lives here and the HTTP crate re-exports it |
 //! | `web/project.inlang/settings.json` | hand-written, and the one copy that cannot be a `use` — it is JSON read by a compiler in another language |
-//! | `web/src/lib/locale.svelte.ts` | imports `locales` from Paraglide's generated runtime, which is generated *from* that settings file |
+//! | `web/src/lib/locale.ts` | imports `locales` from Paraglide's generated runtime, which is generated *from* that settings file |
 //!
 //! That leaves exactly two hand-written lists, in two languages, and
 //! [`the_console_and_the_server_agree_on_the_locales`] is what stops them
