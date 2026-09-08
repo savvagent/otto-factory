@@ -5,6 +5,20 @@
 > **Depends on:** `docs/specs/2026-09-05-header-logo-design.md` (`savvagent/otto-factory#44`) — that
 > task put the logo mark in the header; this one gives the same brand a matching tab icon.
 
+## Goal & Success Criteria
+
+Replace the placeholder `favicon.svg` with a small-scale composition derived from the brand mark in
+`web/static/logo.svg`, shipped in every format modern browsers and platforms need, so the tab icon
+reads as "otto-factory" rather than a generic abstract shape.
+
+- A designed, legible favicon exists in `web/static/` as SVG, ICO, and PNG (32/192/512), plus an
+  Apple touch icon — not a placeholder.
+- The mark stays a crisp, high-contrast silhouette at 16×16 and 32×32 (verified by rendering).
+- `web/src/app.html` references the full set with correct `rel`/`sizes`/`type` attributes and a
+  working `.ico` fallback.
+- `favicon.ico` is a genuine multi-resolution ICO container, not a renamed PNG.
+- `npm run check`, `npm run lint`, `npm test`, `npm run build` all pass.
+
 ## Scope
 
 **In:**
@@ -130,7 +144,7 @@ but don't support SVG), then sized PNGs, then the Apple-specific tag:
 
 ```html
 <link rel="icon" href="%sveltekit.assets%/favicon.svg" type="image/svg+xml" />
-<link rel="icon" href="%sveltekit.assets%/favicon.ico" sizes="any" />
+<link rel="icon" href="%sveltekit.assets%/favicon.ico" sizes="any" type="image/x-icon" />
 <link rel="icon" type="image/png" sizes="32x32" href="%sveltekit.assets%/favicon-32x32.png" />
 <link
   rel="icon"
@@ -164,6 +178,9 @@ im = Image.open('web/static/favicon.ico'); print(im.info.get('sizes'))"` must re
   sizes, not a single-image file with a renamed extension.
 - `npm run check`, `npm run lint`, `npm run build` all pass (`app.html` is the only source file
   touched; the rest are static binary/vector assets `svelte-check`/`prettier` don't parse).
+- `npm test` (vitest) is also run for completeness against the repo's standard `web/` gate set, even
+  though it exercises the Cloudflare Worker (`web/worker/`) and has no code path that touches
+  `app.html` or `web/static/` — a vacuous pass, not a skipped gate.
 - Manual: serve the built SPA (or `npm run dev`) and load it in a Chromium-based browser and in
   Firefox; confirm the tab icon renders (not a broken-image glyph) in both.
 
