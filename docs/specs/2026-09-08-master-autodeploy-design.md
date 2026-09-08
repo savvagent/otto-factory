@@ -20,9 +20,9 @@ Fly.io, with no manual step.**
   health check catch it.
 - A pull request, regardless of what it touches (including this workflow file itself), never
   triggers a deploy.
-- `docs/deploy/fly.md` and `CLAUDE.md` are updated so the record of "deploys are manual" is
-  corrected the moment this ships — a doc that still says "manual" after this lands is itself a
-  defect (see Scope/In).
+- `docs/deploy/fly.md` and `.github/skills/otto-factory-development/SKILL.md`'s Repository
+  Conventions table are updated so the record of "deploys are manual" is corrected the moment this
+  ships — a doc that still says "manual" after this lands is itself a defect (see Scope/In).
 
 ## Assumptions
 
@@ -109,8 +109,11 @@ Fly.io, with no manual step.**
   (superseding its "Deploying is: `fly deploy -a otto-factory-mcp`" manual-only framing) while
   keeping the manual command documented as the still-valid escape hatch for an out-of-band deploy
   (e.g. re-deploying without a new commit, or deploying a specific historical SHA).
-- Updating `CLAUDE.md`'s "Deploy" table row, which currently reads "No deploy automation — deploys
-  are manual and out of band," since this PR is exactly that automation landing.
+- Updating `.github/skills/otto-factory-development/SKILL.md`'s Repository Conventions table
+  "Deploy" row, which currently reads "No deploy automation — deploys are manual and out of
+  band," since this PR is exactly that automation landing. (`CLAUDE.md` itself has no such row —
+  checked directly; it has no "Deploy" table at all, only prose about the deploy pipeline's
+  failure semantics scattered through other sections, none of which claims deploys are manual.)
 
 **Out:**
 - Any change to `Dockerfile`, `fly.toml`, or the `docker-build` CI job's own behavior.
