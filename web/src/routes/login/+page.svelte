@@ -64,8 +64,15 @@
       // from removing or renaming a key that is not yours, and this signal is
       // destructive: reaching it from a management error would evict a
       // perfectly good credential from the vault.
+      //
+      // Deliberately not awaited. This is the one call site with no enclosing
+      // handler left to report anything to, and awaiting it holds `pending`
+      // true — so a slow or hanging rp_id fetch would keep the sign-in button
+      // disabled and stop somebody retrying, for a hint they never see. Safe to
+      // fire and forget specifically here: unlike the other two helpers this one
+      // never calls `userHandle`, so it has no synchronous throw to lose.
       if (credential && e instanceof ApiError && e.code === 'unknown_credential') {
-        await webauthn.signalUnknownCredential(credential.rawId);
+        void webauthn.signalUnknownCredential(credential.rawId);
       }
     } finally {
       pending = false;

@@ -308,7 +308,7 @@ function signals(): SignalMethods | undefined {
 let resolvedRpId: Promise<string | null> | null = null;
 
 /**
- * The relying-party id, from the server, once per page.
+ * The relying-party id, from the server, fetched once and kept.
  *
  * **Never `location.hostname`.** An rp_id may be a registrable *parent* of the
  * origin, so a guess is wrong on exactly the deployments where the two differ —
@@ -318,8 +318,7 @@ let resolvedRpId: Promise<string | null> | null = null;
  * The same shape as the connect page reading the MCP endpoint out of the
  * discovery document: nothing about a deployment is baked into this bundle. The
  * promise is cached rather than the value, so concurrent callers share one
- * request; a failure is cached with it, because these are hints and a page that
- * could not fetch the rp_id once has nothing to retry for.
+ * request — but only a *successful* one is kept; see the retry in the body.
  */
 function rpId(): Promise<string | null> {
   // The *value* is cached; the failure is not. This module lives as long as the
