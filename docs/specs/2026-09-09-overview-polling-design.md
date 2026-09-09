@@ -1,7 +1,8 @@
 # Overview polling design
 
-> **Status:** IMPLEMENTED — the console overview refreshes itself every 30 seconds instead of
-> showing whatever was true when the tab was opened
+> **Status:** IMPLEMENTED — `savvagent/otto-factory#58` (merged as `6fdc7c7`) — the console
+> overview refreshes itself every 30 seconds instead of showing whatever was true when the tab was
+> opened
 
 > **Implements:** `savvagent/otto-factory#57`
 
@@ -71,7 +72,8 @@ itself, on an interval, without becoming worse than the static page it replaces.
   shown once a refresh has failed, because then it is the content of the message rather than chrome.
 - **No bound on the queries the tick repeats.** `Jobs::stats` is a full per-org aggregate and
   `list_repos` has no `LIMIT`; both were paid once per visit and are now paid every 30 seconds per
-  open tab. That is a server-side change with its own spec — see Risks.
+  open tab. That is a server-side change with its own spec — `savvagent/otto-factory#61`, and see
+  Risks.
 
 Checked against the three constraints in `CLAUDE.md`: coordination stays anchored on repos (nothing
 here touches repos or leases); the server gains no workflow opinion (this is entirely client-side,
@@ -347,6 +349,15 @@ Gates: `npm run check` (svelte-check + tsc + the message-catalog check), `npm ru
   only, so the interval and the backoff are the only limits that exist on this traffic.
 - **`parked` and `stale` are page-level notices, not a status bar.** If more pages adopt the poller,
   the two lines want a shared component rather than a copy each.
+- **`start` has no `key`, so every effect re-run is a full reload.** A same-key restart that kept
+  `value` would make "a refresh is not a load" a property of the `Poller` rather than of each call
+  site's dependency hygiene. Not needed while the only caller's effect depends on nothing but the
+  org slug; wanted before `/queue` adopts the helper with filters in scope.
+- **The public surface is four independent flags, not one state.** A `PollState<T>` discriminated
+  union — `loading` / `ready` with `stale` / `failed` — would make the illegal combinations
+  unrepresentable rather than merely unwritten, at the cost of a switch at every read site. The
+  fields are private behind getters so the class is the only writer, which buys most of it; revisit
+  when a second page adopts the helper and the states diverge.
 - **The interval is a constant, not configuration.** If a deployment ever needs a different value,
   it should arrive as a build-time constant rather than an `OF_*` key: the server holding an opinion
   about the console's refresh rate is the kind of workflow coupling constraint 2 exists to prevent.

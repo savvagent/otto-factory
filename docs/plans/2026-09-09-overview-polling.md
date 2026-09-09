@@ -45,19 +45,26 @@ exactly.
 
 ## File Structure
 
-| File                                    | Responsibility                                                          |
-| --------------------------------------- | ----------------------------------------------------------------------- |
-| `web/src/lib/poll.svelte.ts`            | **Create.** `Poller<T>`, the `Visibility` seam, `REFRESH_INTERVAL`.     |
-| `web/src/lib/poll.svelte.test.ts`       | **Create.** Vitest coverage of the four rules and the generation guard. |
-| `web/src/routes/o/[org]/+page.svelte`   | **Modify.** Fetch through the poller; render the stale marker.          |
-| `web/messages/{en,es,de,fr,it,hi}.json` | **Modify.** Add `overview_refresh_failed`.                              |
+| File | Responsibility |
+| --- | --- |
+| `web/src/lib/poll.svelte.ts` | **Create.** `Poller<T>`, the `Visibility`/`Activity` seams, `REFRESH_INTERVAL`, `LOAD_TIMEOUT`, `IDLE_AFTER`, `PollTimeout`. |
+| `web/src/lib/poll.svelte.test.ts` | **Create.** The six rules, the fatal classification, backoff, parking, and every branch of the generation guard. |
+| `web/src/lib/poll.dom.test.ts` | **Create.** jsdom cover for the shipped `documentVisibility` / `documentActivity` the unit suite replaces with fakes. |
+| `web/src/routes/o/[org]/+page.svelte` | **Modify.** Fetch through the poller; classify fatal failures; render the stale, parked, and retrying notices. |
+| `web/src/routes/o/[org]/OrgPageHarness.svelte` | **Create.** Mounts the page inside an org context, for the render test. |
+| `web/src/routes/o/[org]/page.render.test.ts` | **Create.** The stale banner and the error branch, asserted where a reader sees them. |
+| `web/messages/{en,es,de,fr,it,hi}.json` | **Modify.** Add `overview_refresh_failed`, `overview_paused`, `overview_retrying`. |
+| `web/README.md` | **Modify.** A Layout row for the helper, so the next page finds it. |
+| `CLAUDE.md` | **Modify.** The `web/` section gains the polling convention. |
 
 ## Task Order & Rationale
 
-Two tasks. The helper is written and proven first, against its own tests, because it is the part
+Four tasks. The helper is written and proven first, against its own tests, because it is the part
 with a state machine in it — generations, the in-flight guard, the visibility subscription — and
 proving that through the page would mean asserting a timing rule through four mocked endpoints and a
-context provider. The page then becomes a mechanical rewiring with nothing left to discover.
+context provider. The page then becomes a mechanical rewiring with nothing left to discover. Tasks 3
+and 4 are the documents and the review round; Task 4 exists because the review found enough to
+change the design, and a plan that hid that behind an amended Task 1 would be a worse record.
 
 ## Task 1 — `Poller<T>` and its tests ✅
 
