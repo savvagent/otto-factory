@@ -51,14 +51,22 @@
       if (session.me) await webauthn.signalAccount(session.me);
       await goto(next ?? '/', { replaceState: true });
     } catch (e) {
+      // The message is set first. `signalUnknownCredential` cannot throw today,
+      // but if it ever could, awaiting it before this line would leave someone
+      // watching a spinner stop with nothing said at all.
+      error = messageFor(e, m.error_could_not_sign_in());
       // The one signal that names no account, because this browser is not
       // signed into one. Somebody already locked out is offered the dead key
       // first — it is the oldest in the vault — and telling the vault to drop
       // it is the difference between a second attempt working and looping.
+      //
+      // Only from a *sign-in* failure. `unknown_credential` also comes back
+      // from removing or renaming a key that is not yours, and this signal is
+      // destructive: reaching it from a management error would evict a
+      // perfectly good credential from the vault.
       if (credential && e instanceof ApiError && e.code === 'unknown_credential') {
         await webauthn.signalUnknownCredential(credential.rawId);
       }
-      error = messageFor(e, m.error_could_not_sign_in());
     } finally {
       pending = false;
     }

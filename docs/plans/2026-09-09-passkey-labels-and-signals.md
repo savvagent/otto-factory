@@ -326,7 +326,7 @@ showed the cure was worse than the disease, and the reasoning that justified it 
 
 Doing it properly needs a rate-cap policy `ratelimit` does not have and a key an attacker cannot
 force a stranger to share. That is a design change to a security control and belongs in its own spec
-with its own review, not in a mid-PR patch. Filed instead.
+with its own review, not in a mid-PR patch. Filed as `savvagent/otto-factory#75` instead.
 
 ## Task 6 — The browser signal helpers ⬜
 

@@ -400,11 +400,12 @@ here rather than left to whoever writes the diff.
 
   Bounding it properly is a real design problem — a rate cap rather than a lockout, and a key an
   attacker cannot force someone else to share — and it belongs to `ratelimit` as a whole rather than
-  to one endpoint. Filed separately rather than guessed at mid-change.
+  to one endpoint. Filed as `savvagent/otto-factory#75` rather than guessed at mid-change, along
+  with the non-atomicity below — both are edits to the same module.
 - **`ratelimit::check` and `ratelimit::record` are not atomic**, so a burst of concurrent requests
   can all read a count below the threshold before any of their writes land, and exceed it before the
   next request sees a lockout. Pre-existing across every bucket in the module — signup and claim
-  included — and untouched by this work. Filed with the above.
+  included — and untouched by this work. Filed with the above, in `savvagent/otto-factory#75`.
 - **End-to-end behaviour is not test-covered.** `crates/of-auth/tests/passkeys.rs` uses a software
   authenticator with no vault to inspect, and signal methods are browser affordances. Verifying that
   a stale label is actually repaired needs the CDP virtual authenticator, which is how usernameless
