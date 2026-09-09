@@ -104,10 +104,17 @@ pub enum AuthError {
 impl AuthError {
     /// What the caller is told.
     ///
-    /// Every identity-related failure collapses to one string. This is the
-    /// enumeration defense: an attacker probing addresses must not be able to
-    /// tell "no such user" from "wrong code", and a user who has lost their
-    /// phone must not be told whether the address is registered.
+    /// Every failure that *resolved an account* collapses to one string. This
+    /// is the enumeration defense: an attacker probing addresses must not be
+    /// able to tell "no such user" from "wrong code", and a user who has lost
+    /// their phone must not be told whether the address is registered.
+    ///
+    /// The arms below it are the deliberate exceptions, and they are safe for
+    /// the same reason as each other: each is decided without reading a `users`
+    /// row, so none of them can answer a question about who holds an account.
+    /// `UnknownCredential` is the one to watch — [`passkeys::finish_authentication`]
+    /// returns it from sign-in, not only from key management, and it says a
+    /// credential is not stored here without saying whose it would have been.
     pub fn public(&self) -> &'static str {
         match self {
             AuthError::UnknownUser
