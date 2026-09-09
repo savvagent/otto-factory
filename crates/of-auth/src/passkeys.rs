@@ -114,6 +114,7 @@ pub fn relying_party(rp_id: &str, rp_origin: &str) -> Result<Webauthn> {
 /// The pair an authenticator files a credential under: `name` is what a
 /// credential manager sorts and searches by, `display_name` is the row a human
 /// reads when they are asked to choose.
+#[derive(Debug, Clone)]
 pub struct CredentialNames {
     pub name: String,
     pub display_name: String,
