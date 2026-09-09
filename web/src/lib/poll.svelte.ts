@@ -39,7 +39,11 @@
  *    runs from the end of one refresh to the start of the next — a chained
  *    `setTimeout`, never `setInterval` — so a slow response delays the next
  *    tick instead of stacking behind it, and consecutive failures widen the gap
- *    so an outage is not met with undiminished pressure from every open tab.
+ *    — doubling to a cap, jittered — so an outage is not met with undiminished
+ *    pressure from every open tab, nor by all of them at the same instant. A
+ *    healthy poll keeps the interval exactly; what is randomized there is the
+ *    phase, once per subscription and again on recovery, so tabs a returning
+ *    server answered together do not stay in lockstep forever.
  *    A load that never settles is failed by `timeout`, because a hung `fetch`
  *    would otherwise leave a dead poll wearing a healthy page's face.
  * 6. **A tab nobody has touched for hours parks itself.** `sessions.rs` slides
@@ -72,6 +76,9 @@ const MIN_INTERVAL = 1_000;
 
 /** Backoff caps at 8× the interval — four minutes at the default. */
 const MAX_BACKOFF = 8;
+
+/** How far a subscription's phase may be pushed: up to 30% of one interval. */
+const PHASE_SPREAD = 0.3;
 
 /** What `load` rejects with when it does not answer within `timeout`. */
 export class PollTimeout extends Error {
@@ -150,7 +157,7 @@ export interface PollOptions {
   fatal?: (failure: unknown) => boolean;
   visibility?: Visibility;
   activity?: Activity;
-  /** Jitter source, injectable so a test can make backoff deterministic. */
+  /** Randomness for the retry jitter and the phase offset, injectable for tests. */
   random?: () => number;
 }
 
@@ -232,6 +239,7 @@ export class Poller<T> {
   #unsubscribe: (() => void)[] = [];
   #inFlight = false;
   #lastActive = 0;
+  #phaseOwed = 0;
 
   /**
    * Which subscription a result belongs to.
@@ -268,6 +276,7 @@ export class Poller<T> {
     this.#visibility = options.visibility ?? documentVisibility;
     this.#random = options.random ?? Math.random;
     this.#lastActive = Date.now();
+    this.#drawPhase();
 
     const generation = this.#generation;
     this.#value = undefined;
@@ -334,6 +343,10 @@ export class Poller<T> {
       this.#error = undefined;
       this.#failed = false;
       this.#stale = false;
+      // Recovery is a synchronizing event: the server that just came back
+      // answered every waiting tab at once. Draw a new phase so they do not
+      // stay in the instant it put them in.
+      if (this.#failures > 0) this.#drawPhase();
       this.#failures = 0;
       return true;
     } catch (failure) {
@@ -404,13 +417,36 @@ export class Poller<T> {
   }
 
   /**
-   * The gap before the next tick: the interval, doubled per consecutive
-   * failure to a cap, and jittered so replicas coming back up are not hit by
-   * every open tab in lockstep.
+   * The gap before the next tick.
+   *
+   * A healthy poll runs at exactly the interval — "every 30 seconds" should mean
+   * that, and a tab whose period wanders by ±15% a tick has a refresh rate
+   * nobody can state. Randomness is spent on *phase* instead, once per
+   * subscription and once more whenever a failing poll recovers, so the period
+   * stays exact while two tabs do not.
+   *
+   * That second case is the one worth explaining, because it is not the one
+   * jitter is usually reached for. An outage knocks every open tab over at the
+   * same instant, and the failure path's jitter spreads their retries — but a
+   * server coming back answers the backlog together and re-synchronizes them
+   * all over again. With an exact period and nothing else, that lockstep would
+   * be permanent: every console tab hitting the same endpoints in the same
+   * millisecond, forever, against the instance that just recovered. Re-drawing
+   * the phase on recovery is what makes it transient instead.
    */
   #delay(): number {
+    if (this.#failures === 0) {
+      const phase = this.#phaseOwed;
+      this.#phaseOwed = 0;
+      return this.#interval + phase;
+    }
     const backoff = Math.min(2 ** this.#failures, MAX_BACKOFF);
     return Math.round(this.#interval * backoff * (0.85 + this.#random() * 0.3));
+  }
+
+  /** A one-off offset added to the next healthy gap. See `#delay`. */
+  #drawPhase(): void {
+    this.#phaseOwed = Math.round(this.#interval * this.#random() * PHASE_SPREAD);
   }
 
   #clearTimer(): void {

@@ -115,12 +115,25 @@ easy to omit one at a time. Each is stated with the failure it prevents:
 4. **A hidden tab does not poll**, and refreshes the moment it is shown again. The **first** load
    runs regardless of visibility: a tab opened in the background should have data ready when it is
    looked at; it is the repeat that is suppressed.
-5. **Refreshes never overlap and a failing one backs off.** The interval runs from the end of one
-   refresh to the start of the next — a chained `setTimeout`, never `setInterval` — so a slow
-   response delays the next tick instead of stacking behind it. Consecutive failures double the gap
-   to an 8× cap with ±15% jitter, so an outage is not met at full rate by every open tab. A load
-   that never settles is failed by a `timeout`: a hung `fetch` would otherwise leave `#inFlight`
-   set with no timer armed — a dead poll wearing a healthy page's face.
+5. **Refreshes never overlap, a failing one backs off, and tabs do not march in step.** The
+   interval runs from the end of one refresh to the start of the next — a chained `setTimeout`,
+   never `setInterval` — so a slow response delays the next tick instead of stacking behind it.
+   A healthy poll keeps the interval **exactly**: "every 30 seconds" should mean that, and a period
+   wandering by ±15% a tick is a refresh rate nobody can state. Randomness is spent on **phase**
+   instead — drawn once per subscription and once more whenever a failing poll recovers — because
+   the thing that must differ between two tabs is *when* their ticks fall, not how long their gaps
+   are. Consecutive failures double the gap to an 8× cap with ±15% jitter, so an outage is neither
+   met at full rate by every open tab nor by all of them in the same instant. A load that never
+   settles is failed by a `timeout`: a hung `fetch` would otherwise leave `#inFlight` set with no
+   timer armed — a dead poll wearing a healthy page's face.
+
+   The recovery re-draw is the non-obvious half. Backoff jitter spreads the *retries* an outage
+   knocked into lockstep, but the server coming back answers the whole backlog at once and
+   re-synchronizes every tab it just served. With an exact period and nothing else, that lockstep
+   would be permanent — every console tab hitting the same endpoints in the same millisecond,
+   forever, against the instance that has just recovered. Re-drawing the phase there makes it
+   transient. Nothing on the server would catch it if it were not: no console `GET` is throttled.
+
 6. **A tab nobody has touched parks itself** — §6.
 
 ## §2 `Poller<T>` — shape
@@ -154,7 +167,7 @@ interface PollOptions {
   fatal?: (failure: unknown) => boolean;
   visibility?: Visibility;
   activity?: Activity;
-  random?: () => number; // jitter source, injectable for deterministic tests
+  random?: () => number; // retry jitter + phase offset; injectable for exact tests
 }
 ```
 
