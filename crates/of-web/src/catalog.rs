@@ -369,6 +369,20 @@ pub fn catalog() -> Vec<Endpoint> {
             .returns("SessionOpened")
             .summary("Register the new passkey and sign in")
             .describe("Spends the claim code."),
+        Endpoint::get("/api/auth/webauthn", auth::webauthn_config)
+            .auth(Auth::Public)
+            .returns("WebauthnConfig")
+            .summary("The relying party this deployment signs passkeys with")
+            .describe(
+                "The WebAuthn rp_id — the identifier every passkey on this server is \
+                 bound to, and the one a console must name when it calls \
+                 PublicKeyCredential.signalCurrentUserDetails or its siblings. Read it \
+                 here rather than taking the page's hostname: an rp_id may be a \
+                 registrable parent domain of the origin, and a signal sent for the \
+                 wrong rp_id is discarded without an error. Public because the same \
+                 string is inside every creation challenge an unauthenticated caller \
+                 can already ask for.",
+            ),
         Endpoint::post("/api/auth/logout", auth::logout)
             .auth(Auth::Public)
             .status(204)
