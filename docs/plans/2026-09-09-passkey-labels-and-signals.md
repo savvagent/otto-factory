@@ -11,7 +11,7 @@ in once.
 
 ## Status — 2026-09-09
 
-⬜ All eight tasks open. Closes `savvagent/otto-factory#59` and `savvagent/otto-factory#60`, which
+⬜ Nine tasks (5b added mid-implementation). Closes `savvagent/otto-factory#59` and `savvagent/otto-factory#60`, which
 ship together on purpose — #59 fixes labels for accounts created after the deploy, and #60's
 `signalCurrentUserDetails` is the only thing that repairs the credentials that already exist.
 
@@ -302,6 +302,49 @@ reviewers.
 - [ ] Run `cargo test -p of-auth --test passkeys` and `cargo test --workspace` — expect green.
 - [ ] `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, commit as
       `of-auth: say when a presented credential is one this server never stored`.
+
+## Task 5b — Throttle `login/finish`, because Task 5 made it a probe ⬜
+
+**Files:** `crates/of-web/src/routes/auth.rs`, `crates/of-web/tests/console.rs`
+**Interfaces:** consumes Task 5. **Added mid-implementation**, not present in the original plan —
+Task 5's implementer flagged the consequence and it checks out.
+
+Task 5 made `POST /api/auth/login/finish` answer `unknown_credential` for a credential id this
+server has never stored. Three facts about that endpoint turn a defensible distinction into an
+unbounded oracle:
+
+1. **It is not throttled.** `throttle_by_source` is called from `signup_start` and `claim_start`
+   only. `login_finish` has never had it.
+2. **The branch is reached before signature verification.** `finish_authentication` looks the
+   credential id up first, so a caller needs no valid signature to get the answer — any bytes will
+   do.
+3. **It writes no audit row.** Correctly, per Task 5 — there is no account to attribute one to —
+   but it means nobody can see the probing afterwards either.
+
+`ratelimit`'s own module doc says throttling is "what keeps the surface safe under abuse" and names
+"a flood of forged or replayed authentication attempts" as the thing it exists to stop. The gap
+predates this work; Task 5 is what makes it matter, so it closes here rather than shipping.
+
+- [ ] Add a failing test to `crates/of-web/tests/console.rs`: from one client IP, repeated
+      `POST /api/auth/login/finish` presenting a credential id the server never stored is refused
+      with `rate_limited` after `of_auth::ratelimit::MAX_FAILURES` attempts, rather than answering
+      `unknown_credential` indefinitely. The harness needs a `client_ip_header` configured and the
+      `Call::header(...)` builder to set it — add a harness variant if there is not one already.
+- [ ] Run `cargo test -p of-web --test console` — expect failure.
+- [ ] Throttle `login_finish` on a **`login:{ip}` bucket, distinct from `signup:{ip}`** — sharing
+      one bucket would let failed sign-ins lock out signup and vice versa, which is a denial of
+      service dressed as a security control.
+- [ ] Use `ratelimit::check` before the credential work and `ratelimit::record(…, successful)`
+      after, **not** `charge`: `record` resets the count on success, so an office behind one NAT
+      that signs in successfully never accumulates toward a lockout. `charge` has no success to
+      reset and is for rate-limited-by-nature endpoints; this one is failure-counted.
+- [ ] Keep the existing "no trustworthy IP means no throttle" rule — a shared `unknown` bucket lets
+      the first attacker lock out everyone behind a proxy that strips the header.
+- [ ] A failure to *record* must not mask the authentication error the caller actually got. Log it
+      the way `passkeys::note_failure` does rather than `?`-ing it up.
+- [ ] Run `cargo test -p of-web --test console` and `cargo test --workspace` — expect green.
+- [ ] `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, commit as
+      `of-web: throttle login/finish by source`.
 
 ## Task 6 — The browser signal helpers ⬜
 
