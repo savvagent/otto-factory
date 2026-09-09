@@ -9,6 +9,7 @@
 
 mod common;
 
+use base64::Engine;
 use common::{add_member, harness, harness_with_trackers, onboard, org_with_owner, sign_in, Call};
 use http::StatusCode;
 use of_core::orgs::Role;
@@ -123,6 +124,124 @@ async fn signing_out_everywhere_ends_every_session(pool: PgPool) {
             .await
             .expect(StatusCode::UNAUTHORIZED);
     }
+}
+
+// -------------------------------------------------------- passkey signals
+
+/// The console repairs credentials registered before there was anything to name
+/// them with, and it needs the relying-party id to do it. That id is not the
+/// page's hostname: an rp_id may be a registrable parent domain of the origin,
+/// so a console reading `location.hostname` would signal against the wrong
+/// relying party on the day this deployment moves to a subdomain — silently,
+/// because a signal for an unknown rp_id is simply ignored.
+///
+/// Public because it must be: the same string is in every creation challenge an
+/// unauthenticated caller can ask for.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn the_relying_party_id_is_published_and_matches_the_challenge(pool: PgPool) {
+    let h = harness(pool);
+
+    let config = Call::get("/api/auth/webauthn").send(&h.router).await;
+    config.expect(StatusCode::OK);
+
+    let host = common::PUBLIC_URL.split("://").nth(1).unwrap();
+    assert_eq!(
+        config.body["rpId"], host,
+        "the published rp_id must be the one relying_party built the challenge from"
+    );
+
+    let started = Call::post("/api/auth/signup/start").send(&h.router).await;
+    started.expect(StatusCode::OK);
+    assert_eq!(
+        started.body["challenge"]["publicKey"]["rp"]["id"], config.body["rpId"],
+        "a console that signalled a different rp_id than the challenge carries \
+         would be writing to nothing"
+    );
+}
+
+/// `signalCurrentUserDetails` has to write byte-for-byte what a fresh
+/// registration would write, so the pair the console sends is the pair the
+/// server composes — never one TypeScript composed from the same rule.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn console_signal_matches_the_challenge(pool: PgPool) {
+    let h = harness(pool);
+    let rob = onboard(&h, "rob@acme.test").await;
+
+    let started = Call::post("/api/me/passkeys/start")
+        .with_session(&rob.session)
+        .send(&h.router)
+        .await;
+    started.expect(StatusCode::OK);
+
+    let me = Call::get("/api/me")
+        .with_session(&rob.session)
+        .send(&h.router)
+        .await;
+    me.expect(StatusCode::OK);
+
+    let user = &started.body["challenge"]["publicKey"]["user"];
+    assert_eq!(user["name"], me.body["credentialName"]);
+    assert_eq!(user["displayName"], me.body["credentialDisplayName"]);
+
+    assert_eq!(
+        me.body["credentialName"], "rob@acme.test",
+        "the address is what a credential manager sorts and searches by"
+    );
+
+    let label = me.body["user"]["label"].as_str().unwrap();
+    assert!(!label.is_empty(), "every account carries generated words");
+    assert_eq!(
+        me.body["credentialDisplayName"],
+        format!("otto-factory · {label}"),
+    );
+}
+
+/// `signalAllAcceptedCredentials` names the credentials that still exist, and a
+/// browser matches them by credential id — so a list that carries only a row's
+/// UUID leaves a deleted passkey being offered in the picker forever. The
+/// encoding is as load-bearing as the value: base64url **unpadded**, the same
+/// alphabet the ceremony speaks, so the console compares what the server sent
+/// against what the authenticator holds without re-encoding either.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn the_passkey_list_carries_the_credential_id_a_browser_matches_on(pool: PgPool) {
+    let h = harness(pool);
+    let rob = onboard(&h, "rob@acme.test").await;
+
+    let keys = Call::get("/api/me/passkeys")
+        .with_session(&rob.session)
+        .send(&h.router)
+        .await;
+    keys.expect(StatusCode::OK);
+
+    let listed = keys.body.as_array().unwrap();
+    assert_eq!(listed.len(), 1, "onboarding registers exactly one passkey");
+
+    for key in listed {
+        let id: uuid::Uuid = key["id"].as_str().unwrap().parse().unwrap();
+        let encoded = key["credentialId"]
+            .as_str()
+            .expect("every listed passkey carries its credential id");
+
+        let stored: Vec<u8> =
+            sqlx::query_scalar("SELECT credential_id FROM passkeys WHERE id = $1")
+                .bind(id)
+                .fetch_one(h.db.pool())
+                .await
+                .unwrap();
+
+        assert_eq!(
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(encoded)
+                .expect("the credential id must be unpadded base64url"),
+            stored,
+            "the console signals these bytes verbatim"
+        );
+    }
+
+    assert_eq!(
+        listed[0]["credentialId"], rob.credential_id,
+        "the id the list reports is the one the ceremony produced"
+    );
 }
 
 // ------------------------------------------------------------------- orgs

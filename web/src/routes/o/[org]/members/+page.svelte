@@ -211,7 +211,7 @@
           <li class="flex flex-wrap items-center gap-3 py-2.5">
             <div class="min-w-0 flex-1">
               <div class="flex items-center gap-2 text-sm">
-                <span class="text-ink">{person(member.name, member.email)}</span>
+                <span class="text-ink">{person(member.name, member.email, member.label)}</span>
                 {#if isMe}<span class="text-xs text-faint">{m.members_you()}</span>{/if}
                 {#if member.disabledAt}
                   <span class="rounded-full border border-bad/50 px-2 py-0.5 text-xs text-bad">
@@ -221,7 +221,7 @@
               </div>
               <p class="text-xs text-faint">
                 {m.members_row_meta({
-                  email: member.email ?? m.members_no_email(),
+                  email: member.email ?? member.label,
                   when: relative(member.joinedAt)
                 })}
               </p>
@@ -274,7 +274,7 @@
                     if (
                       confirm(
                         m.members_reset_confirm({
-                          who: member.email ?? m.members_this_account()
+                          who: member.email ?? member.label
                         })
                       )
                     ) {

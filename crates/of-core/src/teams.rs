@@ -36,6 +36,9 @@ pub struct TeamMember {
     pub user_id: UserId,
     pub email: String,
     pub name: Option<String>,
+    /// See [`crate::orgs::User::label`]. Carried here too because the console
+    /// renders one person row for both the org-members and the teams page.
+    pub label: String,
     pub joined_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -315,7 +318,7 @@ impl Tx<'_> {
     pub async fn list_team_members(&mut self, team: TeamId) -> Result<Vec<TeamMember>> {
         let org = self.org();
         let rows = sqlx::query_as(
-            "SELECT tm.user_id, u.email, u.name, tm.created_at AS joined_at \
+            "SELECT tm.user_id, u.email, u.name, u.label, tm.created_at AS joined_at \
              FROM team_members tm JOIN users u ON u.id = tm.user_id \
              WHERE tm.org_id = $1 AND tm.team_id = $2 ORDER BY u.email",
         )

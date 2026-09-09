@@ -29,6 +29,7 @@
 //! without being told which one — that is browser behaviour rather than this
 //! server's, and it is what `residentKey: required` asks for in production.
 
+use of_auth::error::AuthError;
 use of_auth::{login, passkeys};
 use of_core::ids::UserId;
 use of_core::Db;
@@ -346,5 +347,304 @@ async fn clearing_passkeys_leaves_no_way_in(pool: PgPool) {
     assert!(
         refused.is_err(),
         "a cleared account still accepted its old passkey"
+    );
+}
+
+// -------------------------- an unknown credential vs. a bad signature (#60)
+
+/// How many failed-sign-in rows this account has. The distinction #60 needs is
+/// only safe because the unknown-credential branch attributes nothing, so the
+/// count is part of the assertion rather than a detail.
+async fn login_failures(db: &Db, user: UserId) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM audit_events WHERE action = $1 AND actor_user_id = $2")
+        .bind(of_core::audit::action::LOGIN_FAILED)
+        .bind(user)
+        .fetch_one(db.pool())
+        .await
+        .unwrap()
+}
+
+/// A credential this server has never stored answers `unknown_credential`, and
+/// the assertion is a genuine one — the signature verifies, so the refusal can
+/// only be the lookup. That is what lets the console tell a vault to forget a
+/// key without evicting a good one after a cancelled prompt.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_credential_this_server_never_stored_says_so(pool: PgPool) {
+    let db = Db::from_pool(pool);
+    let webauthn = rp();
+    let mut stranger = authenticator();
+
+    // A real ceremony, deliberately never finished: the authenticator holds the
+    // key and will sign with it, and no `passkeys` row exists for it.
+    let ceremony = passkeys::start_registration(&db, &webauthn, None)
+        .await
+        .unwrap();
+    let credential = stranger
+        .do_registration(
+            Url::parse(ORIGIN).unwrap(),
+            for_soft_token(ceremony.challenge),
+        )
+        .unwrap();
+    let credential_id = credential.raw_id.as_ref().to_vec();
+
+    match sign_in(&db, &mut stranger, &credential_id).await {
+        Err(AuthError::UnknownCredential) => {}
+        other => panic!("a credential with no row answered {other:?}"),
+    }
+}
+
+/// Everything downstream of the lookup stays collapsed. A key this server does
+/// hold, presented with a signature that does not verify, is still
+/// `invalid_credentials` — telling a forger which part of the forgery failed is
+/// the leak the module exists to avoid.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_known_credential_with_a_bad_signature_is_still_invalid_credentials(pool: PgPool) {
+    use webauthn_rs::prelude::Base64UrlSafeData;
+
+    let db = Db::from_pool(pool);
+    let webauthn = rp();
+    let mut auth = authenticator();
+    let user = register_new(&db, &mut auth).await;
+    let ids = credential_ids(&db, user).await;
+
+    let ceremony = passkeys::start_authentication(&db, &webauthn)
+        .await
+        .unwrap();
+    let mut credential = auth
+        .do_authentication(
+            Url::parse(ORIGIN).unwrap(),
+            offer(ceremony.challenge, &ids[0]),
+        )
+        .unwrap();
+
+    // Corrupt the signature and nothing else: the credential id still resolves,
+    // so the lookup succeeds and only the verification can fail.
+    let mut signature = credential.response.signature.as_ref().to_vec();
+    let last = signature.len() - 1;
+    signature[last] ^= 0xff;
+    credential.response.signature = Base64UrlSafeData::from(signature);
+
+    match passkeys::finish_authentication(&db, &webauthn, ceremony.id, &credential, None).await {
+        Err(AuthError::InvalidCredentials) => {}
+        other => panic!("a bad signature against a stored key answered {other:?}"),
+    }
+
+    assert_eq!(
+        login_failures(&db, user).await,
+        1,
+        "a failure against a resolved account belongs in the audit trail"
+    );
+}
+
+/// The assisted-recovery case #60 was filed for. After an admin clears the
+/// keys, the old credential is gone from the table, so the answer is
+/// `unknown_credential` — which is what finally lets the vault stop offering a
+/// dead key to somebody who is already locked out. No audit row is written,
+/// because the lookup resolves no account to attribute one to.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_cleared_accounts_old_credential_is_unknown_and_unattributed(pool: PgPool) {
+    let db = Db::from_pool(pool);
+    let mut auth = authenticator();
+    let user = register_new(&db, &mut auth).await;
+    let ids = credential_ids(&db, user).await;
+
+    passkeys::clear(&db, user, None).await.unwrap();
+
+    match sign_in(&db, &mut auth, &ids[0]).await {
+        Err(AuthError::UnknownCredential) => {}
+        other => panic!("a cleared account's old key answered {other:?}"),
+    }
+
+    assert_eq!(
+        login_failures(&db, user).await,
+        0,
+        "a row was attributed to an account the lookup never resolved"
+    );
+}
+
+// ------------------------------------------------- naming the credential (#59)
+
+/// The words an authenticator will file the credential under, read off the
+/// challenge exactly as the browser would.
+fn names_in(challenge: &webauthn_rs::prelude::CreationChallengeResponse) -> (String, String) {
+    (
+        challenge.public_key.user.name.clone(),
+        challenge.public_key.user.display_name.clone(),
+    )
+}
+
+fn a_user(email: Option<&str>, name: Option<&str>, label: &str) -> of_core::orgs::User {
+    of_core::orgs::User {
+        id: UserId::new(),
+        email: email.map(str::to_string),
+        name: name.map(str::to_string),
+        locale: None,
+        label: label.to_string(),
+        created_at: chrono::Utc::now(),
+        disabled_at: None,
+    }
+}
+
+/// The bug #59 reports, at its source: a challenge named after the product
+/// leaves every account on this site as an identical row in a vault's picker.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_new_accounts_challenge_is_not_named_after_the_product(pool: PgPool) {
+    let db = Db::from_pool(pool);
+    let ceremony = passkeys::start_registration(&db, &rp(), None)
+        .await
+        .unwrap();
+    let (name, display_name) = names_in(&ceremony.challenge);
+
+    assert_ne!(
+        display_name, "otto-factory",
+        "the picker entry must name the account, not the site"
+    );
+    assert_ne!(
+        name, "otto-factory",
+        "the sortable name must name the account too"
+    );
+    assert!(
+        display_name.contains("otto-factory"),
+        "the site still belongs in the display name, beside the account: {display_name:?}"
+    );
+}
+
+/// Two signups, two picker entries a human can tell apart. Probabilistic by
+/// construction — the label space is ~576,000, so this fails about once in that
+/// many runs rather than never.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn two_new_accounts_are_named_differently(pool: PgPool) {
+    let db = Db::from_pool(pool);
+    let webauthn = rp();
+    let first = passkeys::start_registration(&db, &webauthn, None)
+        .await
+        .unwrap();
+    let second = passkeys::start_registration(&db, &webauthn, None)
+        .await
+        .unwrap();
+
+    assert_ne!(
+        names_in(&first.challenge).1,
+        names_in(&second.challenge).1,
+        "two accounts were handed the same picker entry"
+    );
+}
+
+/// The stability rule, and the exact confusion #59 is about: adding a second key
+/// must not file it under different words from the first.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_second_key_on_one_account_is_named_like_the_first(pool: PgPool) {
+    let db = Db::from_pool(pool);
+    let webauthn = rp();
+    let mut auth = authenticator();
+
+    let first = passkeys::start_registration(&db, &webauthn, None)
+        .await
+        .unwrap();
+    let (first_name, first_display) = names_in(&first.challenge);
+    let credential = auth
+        .do_registration(Url::parse(ORIGIN).unwrap(), for_soft_token(first.challenge))
+        .unwrap();
+    let user = passkeys::finish_registration(&db, &webauthn, first.id, &credential, None)
+        .await
+        .unwrap();
+
+    let second = passkeys::start_registration(&db, &webauthn, Some(user))
+        .await
+        .unwrap();
+    assert_eq!(names_in(&second.challenge), (first_name, first_display));
+}
+
+/// `credential_names` is a pure function of the account, so the precedence is
+/// testable without a ceremony — and it is the one place either half of the
+/// pair is composed.
+#[test]
+fn the_address_wins_then_the_name_then_the_label() {
+    let with_address = a_user(Some("ada@example.test"), Some("Ada"), "brisk-harbor-42");
+    let with_name = a_user(None, Some("Ada"), "brisk-harbor-42");
+    let bare = a_user(None, None, "brisk-harbor-42");
+
+    assert_eq!(
+        passkeys::credential_names(&with_address).name,
+        "ada@example.test"
+    );
+    assert_eq!(passkeys::credential_names(&with_name).name, "Ada");
+    assert_eq!(passkeys::credential_names(&bare).name, "brisk-harbor-42");
+
+    for user in [&with_address, &with_name, &bare] {
+        assert!(
+            passkeys::credential_names(user)
+                .display_name
+                .contains("brisk-harbor-42"),
+            "the generated words belong in every display name"
+        );
+    }
+}
+
+/// An account that later sets an address gets the better sortable name without
+/// losing the words its owner has already learned.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn setting_an_address_keeps_the_generated_words(pool: PgPool) {
+    let db = Db::from_pool(pool);
+    let webauthn = rp();
+    let mut auth = authenticator();
+    let user = register_new(&db, &mut auth).await;
+
+    let before = passkeys::start_registration(&db, &webauthn, Some(user))
+        .await
+        .unwrap();
+    let (_, display_before) = names_in(&before.challenge);
+
+    db.set_profile(user, Some("ada@example.test"), None, None)
+        .await
+        .unwrap();
+
+    let after = passkeys::start_registration(&db, &webauthn, Some(user))
+        .await
+        .unwrap();
+    let (name_after, display_after) = names_in(&after.challenge);
+
+    assert_eq!(name_after, "ada@example.test");
+    assert_eq!(
+        display_after, display_before,
+        "filling in a profile renamed the key its owner already knows"
+    );
+}
+
+/// The server half of an encoding pair: every WebAuthn signal method the console
+/// calls takes this handle back, and a base64url of the UUID's *text* would be
+/// accepted and match nothing.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn the_user_handle_is_base64url_of_the_uuids_sixteen_bytes(pool: PgPool) {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine;
+
+    let db = Db::from_pool(pool);
+    let webauthn = rp();
+    let ceremony = passkeys::start_registration(&db, &webauthn, None)
+        .await
+        .unwrap();
+
+    // Off the serialized challenge, because what the console has to match is the
+    // wire form and not the Rust type behind it.
+    let wire = serde_json::to_value(&ceremony.challenge).unwrap();
+    let handle = wire["publicKey"]["user"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let raw = URL_SAFE_NO_PAD
+        .decode(&handle)
+        .expect("base64url, unpadded");
+    assert_eq!(raw.len(), 16, "the handle is the UUID's raw bytes");
+
+    let user: UserId = sqlx::query_scalar("SELECT id FROM users")
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        handle,
+        URL_SAFE_NO_PAD.encode(user.as_uuid().as_bytes()),
+        "the console cannot reconstruct this handle from the UUID's text form"
     );
 }

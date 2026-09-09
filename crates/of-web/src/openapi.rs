@@ -365,14 +365,27 @@ fn entity_schemas() -> Value {
         "type": "object",
         "properties": {
             "id": uuid,
-            "email": { "type": "string", "format": "email" },
+            "email": {
+                "type": ["string", "null"],
+                "format": "email",
+                "description":
+                    "Absent until the account sets one. A passkey is what creates an \
+                     account, so there is a real window — and, for anyone who never \
+                     bothers, a permanent state — with no address.",
+            },
             "name": { "type": ["string", "null"] },
+            "label": {
+                "type": "string",
+                "description":
+                    "Generated words that name this account in a credential vault's \
+                     picker — never an identifier, and never unique.",
+                "examples": ["brisk-harbor-42"],
+            },
             "locale": locale,
-            "emailVerifiedAt": { "type": ["string", "null"], "format": "date-time" },
             "createdAt": timestamp,
             "disabledAt": { "type": ["string", "null"], "format": "date-time" },
         },
-        "required": ["id", "email", "createdAt"],
+        "required": ["id", "label", "createdAt"],
     });
 
     let org = json!({
@@ -406,14 +419,14 @@ fn entity_schemas() -> Value {
         "type": "object",
         "properties": {
             "id": uuid,
-            "email": { "type": "string" },
+            "email": { "type": ["string", "null"] },
             "name": { "type": ["string", "null"] },
+            "label": { "type": "string", "examples": ["brisk-harbor-42"] },
             "role": role,
             "joinedAt": timestamp,
-            "emailVerifiedAt": { "type": ["string", "null"], "format": "date-time" },
             "disabledAt": { "type": ["string", "null"], "format": "date-time" },
         },
-        "required": ["id", "email", "role", "joinedAt"],
+        "required": ["id", "label", "role", "joinedAt"],
     });
 
     let team = json!({
@@ -503,9 +516,10 @@ fn entity_schemas() -> Value {
                 "userId": uuid,
                 "email": { "type": "string" },
                 "name": { "type": ["string", "null"] },
+                "label": { "type": "string", "examples": ["brisk-harbor-42"] },
                 "joinedAt": timestamp,
             },
-            "required": ["userId", "email", "joinedAt"],
+            "required": ["userId", "email", "label", "joinedAt"],
         },
         "TeamMemberList": { "type": "array", "items": reference("TeamMember") },
         "Repo": repo,
@@ -712,10 +726,22 @@ fn response_schemas() -> Value {
             "properties": {
                 "user": reference("User"),
                 "orgs": reference("MembershipList"),
-                "mustEnrollTotp": { "type": "boolean" },
-                "recoveryCodesRemaining": { "type": "integer" },
+                "shouldAddPasskey": { "type": "boolean" },
+                "passkeyCount": { "type": "integer" },
+                "credentialName": {
+                    "type": "string",
+                    "description":
+                        "What a fresh registration would file this account's credential \
+                         under. Send it back verbatim through \
+                         PublicKeyCredential.signalCurrentUserDetails — composing it in \
+                         the browser gives a second copy of a rule that will drift.",
+                },
+                "credentialDisplayName": { "type": "string" },
             },
-            "required": ["user", "orgs", "mustEnrollTotp"],
+            "required": [
+                "user", "orgs", "shouldAddPasskey", "passkeyCount",
+                "credentialName", "credentialDisplayName",
+            ],
         },
         "Joined": {
             "type": "object",
@@ -726,9 +752,9 @@ fn response_schemas() -> Value {
             "type": "object",
             "properties": {
                 "user": reference("User"),
-                "mustEnrollTotp": { "type": "boolean" },
+                "shouldAddPasskey": { "type": "boolean" },
             },
-            "required": ["user", "mustEnrollTotp"],
+            "required": ["user", "shouldAddPasskey"],
         },
         "Enrollment": {
             "type": "object",
@@ -742,6 +768,21 @@ fn response_schemas() -> Value {
                 "recoveryCodes": { "type": "array", "items": { "type": "string" } },
             },
             "required": ["provisioningUri", "manualKey", "recoveryCodes"],
+        },
+        "WebauthnConfig": {
+            "type": "object",
+            "description":
+                "The relying party every passkey on this deployment is bound to.",
+            "properties": {
+                "rpId": {
+                    "type": "string",
+                    "description":
+                        "Name this when signalling credential state. It is the origin's \
+                         host or a registrable parent of it — not necessarily the host \
+                         the console was served from.",
+                },
+            },
+            "required": ["rpId"],
         },
         "RegistrationChallenge": {
             "type": "object",
@@ -776,11 +817,18 @@ fn response_schemas() -> Value {
             "type": "object",
             "properties": {
                 "id": { "type": "string", "format": "uuid" },
+                "credentialId": {
+                    "type": "string",
+                    "description":
+                        "The credential's own id, base64url without padding — what \
+                         `signalAllAcceptedCredentials` matches a browser's stored \
+                         credentials against.",
+                },
                 "nickname": { "type": ["string", "null"] },
                 "createdAt": { "type": "string", "format": "date-time" },
                 "lastUsedAt": { "type": ["string", "null"], "format": "date-time" },
             },
-            "required": ["id", "nickname", "createdAt", "lastUsedAt"],
+            "required": ["id", "credentialId", "nickname", "createdAt", "lastUsedAt"],
         },
         "PasskeyList": { "type": "array", "items": reference("Passkey") },
         "ClaimCode": {

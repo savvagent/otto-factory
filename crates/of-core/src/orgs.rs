@@ -8,6 +8,7 @@
 use crate::db::{Db, Tx};
 use crate::error::{Error, Result};
 use crate::ids::{OrgId, UserId};
+use crate::labels;
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
@@ -88,6 +89,16 @@ pub struct User {
     /// [`crate::i18n::SUPPORTED_LOCALES`] when set — [`Db::set_profile`] is the
     /// only writer and it validates.
     pub locale: Option<String>,
+    /// The words that name this account in a credential vault's picker.
+    ///
+    /// A name, not an identifier — nothing resolves an account from it, and two
+    /// accounts drawing the same words is a cosmetic annoyance rather than a
+    /// conflict, which is why there is no unique index behind it. It exists
+    /// because a passkey named with a constant leaves two accounts on this site
+    /// indistinguishable at exactly the moment somebody has to choose between
+    /// them. Set once at insert by [`crate::labels::generate`] and never
+    /// rewritten: the vault entry already carries the old words.
+    pub label: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub disabled_at: Option<chrono::DateTime<chrono::Utc>>,
 }
@@ -111,6 +122,9 @@ pub struct OrgMember {
     pub id: UserId,
     pub email: Option<String>,
     pub name: Option<String>,
+    /// See [`User::label`]. Carried here too because the console renders one
+    /// person row for both the org-members and the teams page.
+    pub label: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub disabled_at: Option<chrono::DateTime<chrono::Utc>>,
     pub role: Role,
@@ -118,7 +132,7 @@ pub struct OrgMember {
 }
 
 const ORG_COLS: &str = "id, slug, name, plan, enforce_sso, created_at";
-const USER_COLS: &str = "id, email, name, locale, created_at, disabled_at";
+const USER_COLS: &str = "id, email, name, locale, label, created_at, disabled_at";
 
 /// An org is addressed by its slug as one URL path segment for the rest of its
 /// life (`/api/orgs/{org}/...`), so the same character/length discipline team
@@ -238,8 +252,10 @@ impl Db {
     /// could not say.
     pub async fn create_unclaimed_user(&self) -> Result<User> {
         let user = sqlx::query_as(&format!(
-            "INSERT INTO users (email, name) VALUES (NULL, NULL) RETURNING {USER_COLS}"
+            "INSERT INTO users (email, name, label) VALUES (NULL, NULL, $1) \
+             RETURNING {USER_COLS}"
         ))
+        .bind(labels::generate())
         .fetch_one(self.pool())
         .await?;
         Ok(user)
@@ -321,12 +337,13 @@ impl Db {
         }
 
         let user = sqlx::query_as(&format!(
-            "INSERT INTO users (email, name) VALUES ($1, $2) \
+            "INSERT INTO users (email, name, label) VALUES ($1, $2, $3) \
              ON CONFLICT (lower(email)) DO UPDATE SET email = users.email \
              RETURNING {USER_COLS}"
         ))
         .bind(email)
         .bind(name)
+        .bind(labels::generate())
         .fetch_one(self.pool())
         .await?;
 
@@ -424,7 +441,7 @@ impl Db {
 
     pub async fn list_org_members(&self, org: OrgId) -> Result<Vec<OrgMember>> {
         let rows = sqlx::query_as(
-            "SELECT u.id, u.email, u.name, u.created_at, u.disabled_at, \
+            "SELECT u.id, u.email, u.name, u.label, u.created_at, u.disabled_at, \
                     m.role, m.created_at AS joined_at \
              FROM org_members m JOIN users u ON u.id = m.user_id \
              WHERE m.org_id = $1 ORDER BY u.email",

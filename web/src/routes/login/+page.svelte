@@ -2,7 +2,7 @@
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
 
-  import { api } from '$lib/api';
+  import { api, ApiError } from '$lib/api';
   import { messageFor } from '$lib/errors';
   import { m } from '$lib/paraglide/messages';
   import { session } from '$lib/session.svelte';
@@ -35,14 +35,45 @@
   async function signIn() {
     pending = true;
     error = undefined;
+    // Declared above the `try` rather than inside it so the `catch` can still
+    // name the key that was offered. An `unknown_credential` is a credential
+    // this deployment has no record of — the shape an admin's passkey reset
+    // leaves behind — and the id has to survive the throw that reports it.
+    let credential: { rawId: string } | undefined;
     try {
       const started = await api.loginStart();
-      const credential = await webauthn.authenticate(started.challenge as never);
+      credential = await webauthn.authenticate(started.challenge as never);
       await api.loginFinish(started.ceremonyId, credential);
       await session.refresh();
+      // Signing in once is what makes the label retroactive: a key registered
+      // before this account had an address is filed in the vault under words
+      // nobody chose, and no re-registration would replace them.
+      if (session.me) await webauthn.signalAccount(session.me);
       await goto(next ?? '/', { replaceState: true });
     } catch (e) {
+      // The message is set first. `signalUnknownCredential` cannot throw today,
+      // but if it ever could, awaiting it before this line would leave someone
+      // watching a spinner stop with nothing said at all.
       error = messageFor(e, m.error_could_not_sign_in());
+      // The one signal that names no account, because this browser is not
+      // signed into one. Somebody already locked out is offered the dead key
+      // first — it is the oldest in the vault — and telling the vault to drop
+      // it is the difference between a second attempt working and looping.
+      //
+      // Only from a *sign-in* failure. `unknown_credential` also comes back
+      // from removing or renaming a key that is not yours, and this signal is
+      // destructive: reaching it from a management error would evict a
+      // perfectly good credential from the vault.
+      //
+      // Deliberately not awaited. This is the one call site with no enclosing
+      // handler left to report anything to, and awaiting it holds `pending`
+      // true — so a slow or hanging rp_id fetch would keep the sign-in button
+      // disabled and stop somebody retrying, for a hint they never see. Safe to
+      // fire and forget specifically here: unlike the other two helpers this one
+      // never calls `userHandle`, so it has no synchronous throw to lose.
+      if (credential && e instanceof ApiError && e.code === 'unknown_credential') {
+        void webauthn.signalUnknownCredential(credential.rawId);
+      }
     } finally {
       pending = false;
     }

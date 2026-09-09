@@ -350,8 +350,15 @@ pub fn catalog() -> Vec<Endpoint> {
             .returns("SessionOpened")
             .summary("Present the signature and sign in")
             .describe(
-                "Failures are one answer whatever went wrong — unknown credential, \
-                 bad signature, wrong origin, disabled account.",
+                "Failures collapse into one `invalid_credentials` answer once an \
+                 account has been resolved — bad signature, wrong origin, no keys, \
+                 disabled account — because the differences would tell an attacker \
+                 holding a stolen device which part to work on. Two answers are \
+                 deliberately distinct. `unknown_credential` means this server has \
+                 no record of the credential you presented; it is decided before any \
+                 account is looked up, so it names no user, address or org, and it \
+                 is what lets a console retire a dead passkey from the browser's \
+                 vault instead of offering it forever.",
             ),
         Endpoint::post("/api/auth/claim/start", auth::claim_start)
             .auth(Auth::Public)
@@ -369,6 +376,20 @@ pub fn catalog() -> Vec<Endpoint> {
             .returns("SessionOpened")
             .summary("Register the new passkey and sign in")
             .describe("Spends the claim code."),
+        Endpoint::get("/api/auth/webauthn", auth::webauthn_config)
+            .auth(Auth::Public)
+            .returns("WebauthnConfig")
+            .summary("The relying party this deployment signs passkeys with")
+            .describe(
+                "The WebAuthn rp_id — the identifier every passkey on this server is \
+                 bound to, and the one a console must name when it calls \
+                 PublicKeyCredential.signalCurrentUserDetails or its siblings. Read it \
+                 here rather than taking the page's hostname: an rp_id may be a \
+                 registrable parent domain of the origin, and a signal sent for the \
+                 wrong rp_id is discarded without an error. Public because the same \
+                 string is inside every creation challenge an unauthenticated caller \
+                 can already ask for.",
+            ),
         Endpoint::post("/api/auth/logout", auth::logout)
             .auth(Auth::Public)
             .status(204)

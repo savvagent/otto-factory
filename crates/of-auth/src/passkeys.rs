@@ -40,8 +40,11 @@
 //!    modal.
 
 use crate::error::{AuthError, Result};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use of_core::audit::{action, Entry};
 use of_core::ids::UserId;
+use of_core::orgs::User;
 use of_core::Db;
 use uuid::Uuid;
 use webauthn_rs::prelude::*;
@@ -63,11 +66,27 @@ use webauthn_rs_proto::ResidentKeyRequirement;
 /// somebody can come back to.
 const CEREMONY_TTL_SECONDS: i64 = 300;
 
+/// The relying party's name, as both the challenge and the relying party itself
+/// report it. One constant so the two cannot disagree — an authenticator that
+/// was told one name and shown another has no way to reconcile them.
+const RP_NAME: &str = "otto-factory";
+
 /// A registered authenticator, as the console lists it.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RegisteredKey {
     pub id: Uuid,
+    /// The credential's own id, base64url **unpadded** — the same alphabet the
+    /// ceremony speaks, so the console can compare it to what an authenticator
+    /// reports without re-encoding either side.
+    ///
+    /// This is not a secret. It is a public handle the authenticator already
+    /// holds and hands to any origin it is asked to sign for; withholding it
+    /// protects nothing. It is here because `signalAllAcceptedCredentials`
+    /// cannot work without it: a browser matches the surviving credentials by
+    /// this id, so a list that omitted it would leave a deleted passkey being
+    /// offered in the picker forever. Do not remove it as a tightening.
+    pub credential_id: String,
     pub nickname: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub last_used_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -93,7 +112,7 @@ pub fn relying_party(rp_id: &str, rp_origin: &str) -> Result<Webauthn> {
     })?;
 
     WebauthnBuilder::new(rp_id, &origin)
-        .and_then(|b| b.rp_name("otto-factory").build())
+        .and_then(|b| b.rp_name(RP_NAME).build())
         .map_err(|e| {
             AuthError::Config(format!(
                 "could not build the WebAuthn relying party for rp_id {rp_id:?} \
@@ -104,6 +123,44 @@ pub fn relying_party(rp_id: &str, rp_origin: &str) -> Result<Webauthn> {
 }
 
 // ---------------------------------------------------------------- registration
+
+/// The pair an authenticator files a credential under: `name` is what a
+/// credential manager sorts and searches by, `display_name` is the row a human
+/// reads when they are asked to choose.
+#[derive(Debug, Clone)]
+pub struct CredentialNames {
+    pub name: String,
+    pub display_name: String,
+}
+
+/// Name a credential after the account rather than after the site.
+///
+/// **One function, and not two `format!`s at the call site**, because the
+/// console sends this same pair back through `signalCurrentUserDetails` to
+/// repair credentials that were registered before there was anything to name
+/// them with. A browser that composed the pair itself would hold a second copy
+/// of the prefix and of the email → name → label precedence, in TypeScript,
+/// with nothing keeping the two in step — and the drift would be silent: the
+/// signal is accepted either way, and it would write a label subtly unlike what
+/// a fresh registration writes, so "sign in once to fix the picker" would
+/// half-work and look like it worked. The console is handed this pair on
+/// `/api/me` instead.
+pub fn credential_names(user: &User) -> CredentialNames {
+    CredentialNames {
+        // The address when there is one: it is what a manager sorts and
+        // searches by, and the label is only ever a stand-in for it.
+        name: user
+            .email
+            .clone()
+            .or_else(|| user.name.clone())
+            .unwrap_or_else(|| user.label.clone()),
+        // The generated words, address or not. Someone who has learned which
+        // key is `otto-factory · brisk-harbor-42` does not lose that the day
+        // they fill in a profile — and the vault entry keeps the old words
+        // regardless, so a rename here would only make the two disagree.
+        display_name: format!("{RP_NAME} · {}", user.label),
+    }
+}
 
 /// Begin registering a passkey.
 ///
@@ -116,29 +173,25 @@ pub async fn start_registration(
     webauthn: &Webauthn,
     user: Option<UserId>,
 ) -> Result<Ceremony<CreationChallengeResponse>> {
-    let (user_id, handle, label) = match user {
-        Some(id) => {
-            let existing = db.get_user(id).await?.ok_or(AuthError::UnknownUser)?;
-            let label = existing
-                .email
-                .clone()
-                .or_else(|| existing.name.clone())
-                .unwrap_or_else(|| "otto-factory".to_string());
-            (id, id.as_uuid(), label)
-        }
-        None => {
-            let created = db.create_unclaimed_user().await?;
-            // The label is what the authenticator shows in its own list of
-            // saved keys. There is no address yet, so this is the best we can
-            // do — the console renames it later via the profile.
-            (created.id, created.id.as_uuid(), "otto-factory".to_string())
-        }
+    // Both arms end at the account's own row, because the names below are a
+    // function of it and nothing else — a brand-new account is named by the
+    // label its insert just generated, not by a stand-in.
+    let account = match user {
+        Some(id) => db.get_user(id).await?.ok_or(AuthError::UnknownUser)?,
+        None => db.create_unclaimed_user().await?,
     };
+    let user_id = account.id;
+    let names = credential_names(&account);
 
     let existing_credentials = credential_ids_for(db, user_id).await?;
 
     let (mut challenge, state) = webauthn
-        .start_passkey_registration(handle, &label, &label, Some(existing_credentials))
+        .start_passkey_registration(
+            user_id.as_uuid(),
+            &names.name,
+            &names.display_name,
+            Some(existing_credentials),
+        )
         .map_err(webauthn_failed)?;
 
     // See the module docs: webauthn-rs leaves resident keys optional, and a
@@ -262,9 +315,29 @@ pub async fn finish_authentication(
             .await?;
 
     let Some(user_id) = owner else {
-        // An unknown credential. Nothing to attribute an audit row to, and
-        // nothing to distinguish for the caller.
-        return Err(AuthError::InvalidCredentials);
+        // An unknown credential, and the one sign-in failure this server names.
+        //
+        // Nothing to attribute an audit row to, so `note_failure` is not called
+        // here — otherwise any id a stranger posted would write a row.
+        //
+        // Naming it is not the enumeration leak the rest of this module avoids.
+        // A credential ID is unguessable bytes minted by an authenticator and is
+        // never disclosed cross-origin, so the only caller who can ask this
+        // question is one already holding the answer's subject. And it resolves
+        // no account: the lookup above asks `passkeys` alone, no `users` row is
+        // read on this path, and there is no address or org anywhere in the
+        // answer. That ordering is the load-bearing half of the argument — the
+        // entropy is why the question is hard to ask, but the ordering is why
+        // the answer says nothing. Everything downstream stays collapsed into
+        // `InvalidCredentials`.
+        //
+        // The alternative is a console that cannot call
+        // `signalUnknownCredential` without guessing: signal on every failure
+        // and one cancelled prompt evicts a good passkey from somebody's vault;
+        // signal on none and a deleted key haunts the picker forever — worst for
+        // the person an admin has just reset, who is offered the dead key first
+        // because it is the oldest.
+        return Err(AuthError::UnknownCredential);
     };
 
     // Only this account's keys. Passing every key in the database would
@@ -317,16 +390,26 @@ pub async fn finish_authentication(
 // ------------------------------------------------------------------ management
 
 /// One row of the key list, before it becomes a [`RegisteredKey`].
-type KeyRow = (
-    Uuid,
-    Option<String>,
-    chrono::DateTime<chrono::Utc>,
-    Option<chrono::DateTime<chrono::Utc>>,
-);
+///
+/// A named struct rather than a tuple, and matched by **column name**. This was
+/// a four-element tuple decoded by position, which was survivable; adding
+/// `credential_id` made it five, with a bare `Vec<u8>` sitting between an id and
+/// two timestamps. At that width, inserting a column into the `SELECT` below or
+/// swapping two type-compatible neighbours would compile cleanly and file every
+/// key's data one field over — and nothing about that is visible until a browser
+/// is comparing credential ids that never match.
+#[derive(sqlx::FromRow)]
+struct KeyRow {
+    id: Uuid,
+    credential_id: Vec<u8>,
+    nickname: Option<String>,
+    created_at: chrono::DateTime<chrono::Utc>,
+    last_used_at: Option<chrono::DateTime<chrono::Utc>>,
+}
 
 pub async fn list(db: &Db, user: UserId) -> Result<Vec<RegisteredKey>> {
     let rows: Vec<KeyRow> = sqlx::query_as(
-        "SELECT id, nickname, created_at, last_used_at FROM passkeys \
+        "SELECT id, credential_id, nickname, created_at, last_used_at FROM passkeys \
              WHERE user_id = $1 ORDER BY created_at",
     )
     .bind(user)
@@ -335,11 +418,12 @@ pub async fn list(db: &Db, user: UserId) -> Result<Vec<RegisteredKey>> {
 
     Ok(rows
         .into_iter()
-        .map(|(id, nickname, created_at, last_used_at)| RegisteredKey {
-            id,
-            nickname,
-            created_at,
-            last_used_at,
+        .map(|row| RegisteredKey {
+            id: row.id,
+            credential_id: URL_SAFE_NO_PAD.encode(row.credential_id),
+            nickname: row.nickname,
+            created_at: row.created_at,
+            last_used_at: row.last_used_at,
         })
         .collect())
 }

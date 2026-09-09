@@ -107,6 +107,7 @@
       await api.addPasskeyFinish(started.ceremonyId, credential, m.settings_new_passkey_name());
       keys = await api.passkeys();
       await session.refresh();
+      await acceptedCredentials();
     } catch (e) {
       error = messageFor(e, m.error_could_not_add_passkey());
     } finally {
@@ -121,11 +122,25 @@
       await fn();
       keys = await api.passkeys();
       await session.refresh();
+      await acceptedCredentials();
     } catch (e) {
       error = messageFor(e, m.error_that_did_not_work());
     } finally {
       busy = undefined;
     }
+  }
+
+  /**
+   * Tell the vault which keys the server still has.
+   *
+   * Attached to every refresh of the list rather than to the remove button
+   * alone: after an add or a rename it is a no-op the vault already agrees
+   * with, and after a remove it is the only thing that stops the deleted key
+   * being offered in the picker forever. One call site per outcome would be
+   * one call site to forget.
+   */
+  async function acceptedCredentials() {
+    if (session.me) await webauthn.signalAcceptedCredentials(session.me, keys);
   }
 
   async function saveProfile(event: SubmitEvent) {
@@ -136,6 +151,10 @@
     try {
       await api.setProfile({ email: email.trim(), name: name.trim() });
       await session.refresh();
+      // The address just changed, so what a fresh registration would file this
+      // account under changed with it. Nothing but a signal can move the name
+      // on the keys already in somebody's vault.
+      if (session.me) await webauthn.signalAccount(session.me);
       profileSaved = true;
     } catch (e) {
       profileError = messageFor(e, m.error_could_not_save());

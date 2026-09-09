@@ -135,6 +135,40 @@ pub struct ChallengeResponse<T> {
     pub challenge: T,
 }
 
+/// What the browser needs before it can talk about credentials at all.
+///
+/// The one field is public by necessity: the same string is inside every
+/// creation challenge, and `/api/auth/signup/start` hands one to anybody who
+/// asks. Publishing it costs nothing and saves the console from guessing.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebauthnConfig {
+    pub rp_id: String,
+}
+
+/// `GET /api/auth/webauthn` — the relying party this deployment signs with.
+///
+/// Takes no session: a console needs this before anyone has signed in, and it
+/// reveals nothing a challenge does not.
+pub async fn webauthn_config(State(state): State<AppState>) -> ApiResult<Json<WebauthnConfig>> {
+    // Not an unwrap and not a null. `of_web::relying_party` refuses to build a
+    // relying party without a host, so a running server always has one and this
+    // arm is unreachable — but a `null` here would reach the console as a
+    // silently skipped signal rather than as a failure, and the console has no
+    // way to tell the two apart.
+    let rp_id = state.config.rp_id().ok_or_else(|| {
+        ApiError::internal(
+            "webauthn_config",
+            format!(
+                "OF_PUBLIC_URL ({}) has no host, so there is no relying party id to publish",
+                state.config.public_url
+            ),
+        )
+    })?;
+
+    Ok(Json(WebauthnConfig { rp_id }))
+}
+
 /// `POST /api/auth/signup/start` — create an account and challenge for a passkey.
 ///
 /// Takes **no body**. The account is created here with no address, because the
@@ -334,6 +368,19 @@ pub struct Me {
     /// One passkey. The console nags for a second; see [`SessionOpened`].
     pub should_add_passkey: bool,
     pub passkey_count: i64,
+    /// What a fresh registration would file this account's credential under.
+    ///
+    /// Handed over rather than derived in the browser, because the console
+    /// sends this pair straight back through `signalCurrentUserDetails` to
+    /// repair credentials registered before there was anything to name them
+    /// with. A second copy of the precedence and the prefix in TypeScript would
+    /// drift, and the drift would be silent — the signal is accepted either way
+    /// and would write words subtly unlike what registering again writes. See
+    /// `of_auth::passkeys::credential_names`.
+    pub credential_name: String,
+    /// The row a human reads when a vault asks them to choose a key. Same rule:
+    /// the console must never compose it.
+    pub credential_display_name: String,
 }
 
 /// `GET /api/me` — who is signed in, and what they can act in.
@@ -343,12 +390,15 @@ pub struct Me {
 pub async fn me(State(state): State<AppState>, caller: CurrentUser) -> ApiResult<Json<Me>> {
     let orgs = state.db.list_user_orgs(caller.user.id).await?;
     let passkey_count = passkeys::count(&state.db, caller.user.id).await?;
+    let names = passkeys::credential_names(&caller.user);
 
     Ok(Json(Me {
         user: caller.user,
         orgs,
         should_add_passkey: passkey_count < 2,
         passkey_count,
+        credential_name: names.name,
+        credential_display_name: names.display_name,
     }))
 }
 
