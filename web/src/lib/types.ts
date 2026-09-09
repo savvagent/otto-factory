@@ -25,6 +25,12 @@ export interface User {
   email: string | null;
   name: string | null;
   /**
+   * Generated words — `brisk-harbor-42` — that name this account in a
+   * credential vault's picker. Never an identifier and never unique; it exists
+   * so a key belonging to an account with no address is still nameable.
+   */
+  label: string;
+  /**
    * The console language this account chose, or `null` for "never chose".
    *
    * `null` is not English — it is the state where the browser's own preference
@@ -59,6 +65,20 @@ export interface Me {
   orgs: Membership[];
   shouldAddPasskey: boolean;
   passkeyCount: number;
+  /**
+   * What a fresh registration would file this account's credential under, as
+   * `of_auth::passkeys::credential_names` composed it.
+   *
+   * Handed over rather than derived here, and forwarded to
+   * `signalCurrentUserDetails` **verbatim**. A second copy of the
+   * email-then-name-then-label precedence in TypeScript would drift from the
+   * server's, and the drift would be silent: the signal is accepted either way
+   * and writes words subtly unlike what registering again writes, so "repair a
+   * stale label by signing in once" would half-work and look like it worked.
+   */
+  credentialName: string;
+  /** The row a human reads in a vault's picker. Same rule: never composed here. */
+  credentialDisplayName: string;
 }
 
 export interface Joined {
@@ -75,6 +95,8 @@ export interface OrgMember {
   id: string;
   email: string | null;
   name: string | null;
+  /** See `User.label` — what to render where an address is missing. */
+  label: string;
   role: Role;
   joinedAt: string;
   disabledAt: string | null;
@@ -106,6 +128,18 @@ export interface CreatedInvite extends Invite {
 /** A registered authenticator, as the console lists it. */
 export interface Passkey {
   id: string;
+  /**
+   * The credential's own id, base64url without padding — the same encoding the
+   * ceremony speaks, so it can be compared with what an authenticator reports
+   * without re-encoding either side.
+   *
+   * **A public handle, not a secret.** The authenticator hands it to any origin
+   * it is asked to sign for; withholding it protects nothing. It is here
+   * because `signalAllAcceptedCredentials` matches the surviving credentials by
+   * it, and a list that omitted it would leave a deleted passkey in the
+   * picker forever.
+   */
+  credentialId: string;
   nickname: string | null;
   createdAt: string;
   lastUsedAt: string | null;
@@ -143,6 +177,8 @@ export interface TeamMember {
   userId: string;
   email: string;
   name: string | null;
+  /** See `User.label` — what to render where an address is missing. */
+  label: string;
   joinedAt: string;
 }
 
@@ -325,6 +361,18 @@ export interface AuditEvent {
   userAgent: string | null;
   detail: Record<string, unknown>;
   createdAt: string;
+}
+
+/**
+ * The relying party every passkey on this deployment is bound to.
+ *
+ * Read from the server rather than taken from `location.hostname`: an rp_id may
+ * be a registrable *parent* of the origin, and a browser discards a signal that
+ * names the wrong one without an error — so a guess no-ops on exactly the
+ * deployments where it differs, and nobody finds out.
+ */
+export interface WebauthnConfig {
+  rpId: string;
 }
 
 /** RFC 9728, as `/.well-known/oauth-protected-resource` serves it. */

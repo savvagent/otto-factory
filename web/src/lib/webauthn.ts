@@ -15,6 +15,9 @@
  * conversion is worth not debugging that.
  */
 
+import { api } from './api';
+import type { Me, Passkey } from './types';
+
 /** base64url → bytes. Tolerates padding and the standard alphabet. */
 function fromBase64Url(value: string): Uint8Array {
   const padded = value.replace(/-/g, '+').replace(/_/g, '/');
@@ -23,7 +26,7 @@ function fromBase64Url(value: string): Uint8Array {
 }
 
 /** bytes → base64url, unpadded, which is what the server's decoder expects. */
-function toBase64Url(buffer: ArrayBuffer): string {
+function toBase64Url(buffer: ArrayBufferLike): string {
   const bytes = new Uint8Array(buffer);
   let binary = '';
   for (const b of bytes) binary += String.fromCharCode(b);
@@ -127,7 +130,9 @@ export async function register(challenge: CreationChallenge): Promise<unknown> {
  * tells it which account to look for. The server's `mediation` field is ignored
  * — it asks for the autofill flow, and this is a button.
  */
-export async function authenticate(challenge: RequestChallenge): Promise<unknown> {
+export async function authenticate(
+  challenge: RequestChallenge
+): Promise<{ rawId: string; [k: string]: unknown }> {
   const publicKey = {
     ...challenge.publicKey,
     challenge: fromBase64Url(challenge.publicKey.challenge),
@@ -240,4 +245,164 @@ function rethrow(e: unknown): never {
     );
   }
   throw e;
+}
+
+/**
+ * A UUID's *bytes*, base64url — the handle every signal method matches on.
+ *
+ * `webauthn-rs` puts `uuid.as_bytes()` into the challenge's `user.id`: sixteen
+ * raw bytes, not the thirty-six characters anyone reads. **Encoding the text
+ * instead is the one silent failure in this whole area.** The browser accepts
+ * either, and the wrong one matches no stored credential, forever, with no
+ * error on any side. Exported so it can be tested directly against the
+ * server's own encoding test rather than only through a signal nobody can
+ * observe.
+ */
+export function userHandle(uuid: string): string {
+  const hex = uuid.replace(/-/g, '');
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < bytes.length; i += 1) {
+    bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  }
+  return toBase64Url(bytes.buffer);
+}
+
+/**
+ * The three static methods this console signals with.
+ *
+ * Declared here rather than taken from `lib.dom.d.ts`, which does not have them
+ * yet, and read off `globalThis` rather than `window` so they are testable
+ * without a DOM. Optional one at a time on purpose: they landed together in one
+ * browser and will land separately in the next, so detection is per method and
+ * never per interface — and never per browser.
+ */
+type SignalMethods = {
+  signalCurrentUserDetails?: (options: {
+    rpId: string;
+    userId: string;
+    name: string;
+    displayName: string;
+  }) => Promise<void>;
+  signalAllAcceptedCredentials?: (options: {
+    rpId: string;
+    userId: string;
+    allAcceptedCredentialIds: string[];
+  }) => Promise<void>;
+  signalUnknownCredential?: (options: { rpId: string; credentialId: string }) => Promise<void>;
+};
+
+function signals(): SignalMethods | undefined {
+  return (globalThis as unknown as { PublicKeyCredential?: SignalMethods }).PublicKeyCredential;
+}
+
+let resolvedRpId: Promise<string | null> | null = null;
+
+/**
+ * The relying-party id, from the server, once per page.
+ *
+ * **Never `location.hostname`.** An rp_id may be a registrable *parent* of the
+ * origin, so a guess is wrong on exactly the deployments where the two differ —
+ * and a signal naming the wrong rp is discarded without an error. Nothing
+ * happens and nobody finds out, which is worse than not signalling at all.
+ *
+ * The same shape as the connect page reading the MCP endpoint out of the
+ * discovery document: nothing about a deployment is baked into this bundle. The
+ * promise is cached rather than the value, so concurrent callers share one
+ * request; a failure is cached with it, because these are hints and a page that
+ * could not fetch the rp_id once has nothing to retry for.
+ */
+function rpId(): Promise<string | null> {
+  resolvedRpId ??= api
+    .webauthnConfig()
+    .then((config) => config.rpId)
+    .catch(() => null);
+  return resolvedRpId;
+}
+
+/**
+ * Repair the name a credential vault shows for this account's passkeys.
+ *
+ * Registering again cannot do this — the label is baked in at creation — so
+ * this is the only way an account that had no address when it made its key ever
+ * stops being a blank row in somebody's picker.
+ *
+ * **The pair is forwarded exactly as `/api/me` gave it**, and nothing here
+ * composes, prefixes, or falls back to `email` or `label`. `credential_names`
+ * on the server is the one place that rule lives; a second copy here would
+ * drift, and the signal would keep being accepted while writing something a
+ * fresh registration would not have written.
+ */
+export async function signalAccount(me: Me): Promise<void> {
+  const pkc = signals();
+  if (!pkc?.signalCurrentUserDetails) return;
+  const rp = await rpId();
+  if (!rp) return;
+
+  try {
+    await pkc.signalCurrentUserDetails({
+      rpId: rp,
+      userId: userHandle(me.user.id),
+      name: me.credentialName,
+      displayName: me.credentialDisplayName
+    });
+  } catch {
+    // Swallowed deliberately, and this is the one place in this console where
+    // that is right: a signal is a hint to a password manager, attached to a
+    // flow that has already succeeded. Nobody should fail to sign in, or lose
+    // a profile edit, because a vault refused a hint.
+  }
+}
+
+/**
+ * Tell the vault which credentials this server still has.
+ *
+ * Anything it holds for this account and rp that is not in the list is stale —
+ * a passkey deleted here, or one cleared by an admin reset — and a vault that
+ * was never told keeps offering it in the picker forever. An empty list is
+ * legal and meaningful: it says this account has no accepted credentials.
+ *
+ * The ids go through **un-re-encoded**. `/api/me/passkeys` already speaks the
+ * ceremony's base64url, "so the console can compare without re-encoding"; a
+ * second encoding here would match nothing.
+ */
+export async function signalAcceptedCredentials(me: Me, keys: Passkey[]): Promise<void> {
+  const pkc = signals();
+  if (!pkc?.signalAllAcceptedCredentials) return;
+  const rp = await rpId();
+  if (!rp) return;
+
+  try {
+    await pkc.signalAllAcceptedCredentials({
+      rpId: rp,
+      userId: userHandle(me.user.id),
+      allAcceptedCredentialIds: keys.map((key) => key.credentialId)
+    });
+  } catch {
+    // Swallowed for the same reason as in `signalAccount`: the delete this is
+    // attached to already succeeded on the server, and a vault that refuses
+    // the hint must not turn that into a failed page.
+  }
+}
+
+/**
+ * Tell the vault about a credential this server has never heard of.
+ *
+ * The post-reset case: an account whose passkeys an admin cleared is offered
+ * the dead key first, because it is the oldest in the vault, and someone
+ * already locked out gets a refusal they cannot act on. This is the only signal
+ * that names no account — the browser is not signed into one — which is exactly
+ * why it says nothing beyond "not this credential".
+ */
+export async function signalUnknownCredential(credentialId: string): Promise<void> {
+  const pkc = signals();
+  if (!pkc?.signalUnknownCredential) return;
+  const rp = await rpId();
+  if (!rp) return;
+
+  try {
+    await pkc.signalUnknownCredential({ rpId: rp, credentialId });
+  } catch {
+    // Swallowed: this runs on a sign-in that has already failed, and the error
+    // the person needs to see is that one — not a second one about a hint.
+  }
 }
