@@ -20,6 +20,10 @@ ALTER TABLE users ADD COLUMN label TEXT;
 -- alternative, backfilling from application code, would mean a migration that
 -- only half-applies without a running binary. A short list is enough here for
 -- the same reason: it names the handful of rows that predate the column.
+--
+-- `WHERE label IS NULL` is redundant the one time this runs -- the column was
+-- added empty two statements ago -- and it is here so the paragraph above is
+-- enforced by the statement rather than only by the migration runner's bookkeeping.
 UPDATE users
 SET label =
   (ARRAY['amber','brisk','clever','golden','lively','nimble','quiet','rugged'])
@@ -28,6 +32,7 @@ SET label =
   (ARRAY['acorn','beacon','cedar','falcon','harbor','meadow','ridge','willow'])
     [floor(random() * 8)::int + 1]
   || '-' ||
-  (10 + floor(random() * 90)::int)::text;
+  (10 + floor(random() * 90)::int)::text
+WHERE label IS NULL;
 
 ALTER TABLE users ALTER COLUMN label SET NOT NULL;
