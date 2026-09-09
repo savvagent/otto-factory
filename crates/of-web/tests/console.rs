@@ -9,6 +9,7 @@
 
 mod common;
 
+use base64::Engine;
 use common::{add_member, harness, harness_with_trackers, onboard, org_with_owner, sign_in, Call};
 use http::StatusCode;
 use of_core::orgs::Role;
@@ -192,6 +193,54 @@ async fn console_signal_matches_the_challenge(pool: PgPool) {
     assert_eq!(
         me.body["credentialDisplayName"],
         format!("otto-factory · {label}"),
+    );
+}
+
+/// `signalAllAcceptedCredentials` names the credentials that still exist, and a
+/// browser matches them by credential id — so a list that carries only a row's
+/// UUID leaves a deleted passkey being offered in the picker forever. The
+/// encoding is as load-bearing as the value: base64url **unpadded**, the same
+/// alphabet the ceremony speaks, so the console compares what the server sent
+/// against what the authenticator holds without re-encoding either.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn the_passkey_list_carries_the_credential_id_a_browser_matches_on(pool: PgPool) {
+    let h = harness(pool);
+    let rob = onboard(&h, "rob@acme.test").await;
+
+    let keys = Call::get("/api/me/passkeys")
+        .with_session(&rob.session)
+        .send(&h.router)
+        .await;
+    keys.expect(StatusCode::OK);
+
+    let listed = keys.body.as_array().unwrap();
+    assert_eq!(listed.len(), 1, "onboarding registers exactly one passkey");
+
+    for key in listed {
+        let id: uuid::Uuid = key["id"].as_str().unwrap().parse().unwrap();
+        let encoded = key["credentialId"]
+            .as_str()
+            .expect("every listed passkey carries its credential id");
+
+        let stored: Vec<u8> =
+            sqlx::query_scalar("SELECT credential_id FROM passkeys WHERE id = $1")
+                .bind(id)
+                .fetch_one(h.db.pool())
+                .await
+                .unwrap();
+
+        assert_eq!(
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(encoded)
+                .expect("the credential id must be unpadded base64url"),
+            stored,
+            "the console signals these bytes verbatim"
+        );
+    }
+
+    assert_eq!(
+        listed[0]["credentialId"], rob.credential_id,
+        "the id the list reports is the one the ceremony produced"
     );
 }
 

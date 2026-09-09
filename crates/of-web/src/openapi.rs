@@ -812,11 +812,18 @@ fn response_schemas() -> Value {
             "type": "object",
             "properties": {
                 "id": { "type": "string", "format": "uuid" },
+                "credentialId": {
+                    "type": "string",
+                    "description":
+                        "The credential's own id, base64url without padding — what \
+                         `signalAllAcceptedCredentials` matches a browser's stored \
+                         credentials against.",
+                },
                 "nickname": { "type": ["string", "null"] },
                 "createdAt": { "type": "string", "format": "date-time" },
                 "lastUsedAt": { "type": ["string", "null"], "format": "date-time" },
             },
-            "required": ["id", "nickname", "createdAt", "lastUsedAt"],
+            "required": ["id", "credentialId", "nickname", "createdAt", "lastUsedAt"],
         },
         "PasskeyList": { "type": "array", "items": reference("Passkey") },
         "ClaimCode": {

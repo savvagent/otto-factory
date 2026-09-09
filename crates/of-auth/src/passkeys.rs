@@ -40,6 +40,8 @@
 //!    modal.
 
 use crate::error::{AuthError, Result};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use of_core::audit::{action, Entry};
 use of_core::ids::UserId;
 use of_core::orgs::User;
@@ -74,6 +76,17 @@ const RP_NAME: &str = "otto-factory";
 #[serde(rename_all = "camelCase")]
 pub struct RegisteredKey {
     pub id: Uuid,
+    /// The credential's own id, base64url **unpadded** — the same alphabet the
+    /// ceremony speaks, so the console can compare it to what an authenticator
+    /// reports without re-encoding either side.
+    ///
+    /// This is not a secret. It is a public handle the authenticator already
+    /// holds and hands to any origin it is asked to sign for; withholding it
+    /// protects nothing. It is here because `signalAllAcceptedCredentials`
+    /// cannot work without it: a browser matches the surviving credentials by
+    /// this id, so a list that omitted it would leave a deleted passkey being
+    /// offered in the picker forever. Do not remove it as a tightening.
+    pub credential_id: String,
     pub nickname: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub last_used_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -359,6 +372,7 @@ pub async fn finish_authentication(
 /// One row of the key list, before it becomes a [`RegisteredKey`].
 type KeyRow = (
     Uuid,
+    Vec<u8>,
     Option<String>,
     chrono::DateTime<chrono::Utc>,
     Option<chrono::DateTime<chrono::Utc>>,
@@ -366,7 +380,7 @@ type KeyRow = (
 
 pub async fn list(db: &Db, user: UserId) -> Result<Vec<RegisteredKey>> {
     let rows: Vec<KeyRow> = sqlx::query_as(
-        "SELECT id, nickname, created_at, last_used_at FROM passkeys \
+        "SELECT id, credential_id, nickname, created_at, last_used_at FROM passkeys \
              WHERE user_id = $1 ORDER BY created_at",
     )
     .bind(user)
@@ -375,12 +389,15 @@ pub async fn list(db: &Db, user: UserId) -> Result<Vec<RegisteredKey>> {
 
     Ok(rows
         .into_iter()
-        .map(|(id, nickname, created_at, last_used_at)| RegisteredKey {
-            id,
-            nickname,
-            created_at,
-            last_used_at,
-        })
+        .map(
+            |(id, credential_id, nickname, created_at, last_used_at)| RegisteredKey {
+                id,
+                credential_id: URL_SAFE_NO_PAD.encode(credential_id),
+                nickname,
+                created_at,
+                last_used_at,
+            },
+        )
         .collect())
 }
 
