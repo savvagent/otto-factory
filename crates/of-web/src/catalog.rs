@@ -350,8 +350,16 @@ pub fn catalog() -> Vec<Endpoint> {
             .returns("SessionOpened")
             .summary("Present the signature and sign in")
             .describe(
-                "Failures are one answer whatever went wrong — unknown credential, \
-                 bad signature, wrong origin, disabled account.",
+                "Failures collapse into one `invalid_credentials` answer once an \
+                 account has been resolved — bad signature, wrong origin, no keys, \
+                 disabled account — because the differences would tell an attacker \
+                 holding a stolen device which part to work on. Two answers are \
+                 deliberately distinct. `unknown_credential` means this server has \
+                 no record of the credential you presented; it is decided before any \
+                 account is looked up, so it names no user, address or org, and it \
+                 is what lets a console retire a dead passkey from the browser's \
+                 vault instead of offering it forever. `rate_limited` means this \
+                 source has failed too often; back off for the stated interval.",
             ),
         Endpoint::post("/api/auth/claim/start", auth::claim_start)
             .auth(Auth::Public)
