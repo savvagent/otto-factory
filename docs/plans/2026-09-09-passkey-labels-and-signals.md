@@ -133,7 +133,7 @@ nothing.
       and a required third argument has to compile at both. Leave `set_profile` alone.
       **Do not touch `TeamMember.email`.** It is `String` where `users.email` is nullable, which is
       a real pre-existing decode bug, but widening a non-null console field is a larger decision
-      than this change — file it as a follow-up issue instead (spec Risks).
+      than this change — it is filed as `savvagent/otto-factory#64` (spec Risks).
 - [ ] Run `cargo test -p of-core --test labels` — expect green.
 - [ ] Run `cargo test --workspace` — expect green (other crates may need `label` in `User`
       constructions; fix any that do not compile).

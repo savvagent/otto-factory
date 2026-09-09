@@ -371,7 +371,7 @@ here rather than left to whoever writes the diff.
   nullable — so listing a team that contains a member who never set an address fails to decode at
   runtime. This change adds a column to that struct and its query, so it is adjacent, but the fix
   widens a non-null field to nullable on a console response, which is a different and larger
-  decision than this work. **Filed as a follow-up issue rather than folded in**; nothing here makes
+  decision than this work. **Filed as `savvagent/otto-factory#64` rather than folded in**; nothing here makes
   it worse, and `person()`'s new required third argument compiles against the type as it stands.
 - **End-to-end behaviour is not test-covered.** `crates/of-auth/tests/passkeys.rs` uses a software
   authenticator with no vault to inspect, and signal methods are browser affordances. Verifying that
