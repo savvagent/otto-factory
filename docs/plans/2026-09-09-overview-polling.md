@@ -9,7 +9,8 @@ overlapping requests.
 
 ## Status — 2026-09-09
 
-✅ Shipped in `savvagent/otto-factory#58`, closing `savvagent/otto-factory#57`.
+🚧 Open as `savvagent/otto-factory#58`, closing `savvagent/otto-factory#57`. Tasks 1–4 are done;
+**Remaining:** merge, then the record-as-shipped pass that flips the spec's status to IMPLEMENTED.
 
 **This spec and plan were written alongside the pull request rather than ahead of it** — the change
 was implemented before the plan-by-plan discipline was applied to it, and the documents were
@@ -32,18 +33,20 @@ exactly.
   `scripts/check-messages.mjs` first and fails on a key missing from any locale.
 - No AI self-attribution anywhere — commits, comments, docs, PR body.
 - Gates, all four, before the PR: `npm run check`, `npm run lint`, `npm test`, `npm run build`.
+  They need `cd web && npm install` first — a fresh worktree has no `node_modules`, and every gate
+  fails as `command not found` without it.
 - Out-of-band artifacts: this touches the **console bundle** (`web/`), so `npm run build` is a
   required gate rather than an optional one. It does not touch the container image, the Cloudflare
   Worker (`web/worker/`), or `crates/of-core/migrations/`.
 
 ## File Structure
 
-| File | Responsibility |
-| --- | --- |
-| `web/src/lib/poll.svelte.ts` | **Create.** `Poller<T>`, the `Visibility` seam, `REFRESH_INTERVAL`. |
-| `web/src/lib/poll.svelte.test.ts` | **Create.** Vitest coverage of the four rules and the generation guard. |
-| `web/src/routes/o/[org]/+page.svelte` | **Modify.** Fetch through the poller; render the stale marker. |
-| `web/messages/{en,es,de,fr,it,hi}.json` | **Modify.** Add `overview_refresh_failed`. |
+| File                                    | Responsibility                                                          |
+| --------------------------------------- | ----------------------------------------------------------------------- |
+| `web/src/lib/poll.svelte.ts`            | **Create.** `Poller<T>`, the `Visibility` seam, `REFRESH_INTERVAL`.     |
+| `web/src/lib/poll.svelte.test.ts`       | **Create.** Vitest coverage of the four rules and the generation guard. |
+| `web/src/routes/o/[org]/+page.svelte`   | **Modify.** Fetch through the poller; render the stale marker.          |
+| `web/messages/{en,es,de,fr,it,hi}.json` | **Modify.** Add `overview_refresh_failed`.                              |
 
 ## Task Order & Rationale
 
@@ -73,8 +76,8 @@ nothing from the app — the loader is a callback the caller supplies.
       chained `setTimeout` (never `setInterval`) scheduled only when the tab is visible; the
       `Visibility` seam defaulting to `documentVisibility`.
 - [x] Run `cd web && npx vitest run src/lib/poll.svelte.test.ts` — expect all cases green.
-- [x] Format and commit with Task 2 (one logical change; the module has no caller until the page has
-      one).
+- [x] Format (`npm run format`) and commit with Task 2 — one logical change; the module has no
+      caller until the page has one.
 
 ## Task 2 — Wire the overview and add the stale marker ✅
 
@@ -109,6 +112,48 @@ nothing from the app — the loader is a callback the caller supplies.
 - [x] Write the design spec and this plan; commit them onto the PR branch.
 - [x] Dispatch the mandatory review trio — a Rust expert, an architect, and an independent security
       reviewer that receives only the diff — plus the conditional reviewers the diff triggers
-      (code review, silent-failure, test-coverage, comment, and type-design analysis).
+      (code review, silent-failure, test-coverage, comment, and type-design analysis) and the spec
+      and plan critiques.
 - [x] Aggregate the reports into one PR comment grouped Critical / Important / Suggestions /
       Strengths, then fix or explicitly dismiss every Critical and Important finding.
+
+## Task 4 — Address the review ✅
+
+**Files:** `web/src/lib/poll.svelte.ts`, `web/src/lib/poll.svelte.test.ts` (rewritten),
+`web/src/lib/poll.dom.test.ts` (new), `web/src/routes/o/[org]/+page.svelte`,
+`web/src/routes/o/[org]/OrgPageHarness.svelte` (new),
+`web/src/routes/o/[org]/page.render.test.ts` (new), `web/messages/*.json`, `web/README.md`,
+`CLAUDE.md`, and the spec
+**Interfaces:** `PollOptions` gains `timeout`, `idleAfter`, `fatal`, `activity`, and `random`;
+`Poller` gains `failed`, `failures`, `updatedAt`, `parked`, `stopped`; `refresh()` returns
+`Promise<boolean>`; the four reactive fields become getters over private `$state`.
+
+- [x] **Terminal vs transient failures** (security, architect, silent-failure, all agreeing): add
+      the `fatal` predicate, stop the poll on one, and have the page classify `401` (clearing the
+      session so the root layout routes to `/login`), `403`, and `404`. Spec §5.
+- [x] **`refresh()` after teardown could resurrect the previous org's poll** and arm a timer nothing
+      could stop: clear `#load` in `#stop()`, and return whether a refresh actually ran.
+- [x] **A hung `load` left a dead poll wearing a healthy page's face**: fail it with `PollTimeout`
+      after `LOAD_TIMEOUT`.
+- [x] **An outage was met at full rate by every open tab**: exponential backoff to an 8× cap with
+      ±15% jitter, reset on success.
+- [x] **An open tab defeated the server's 14-day idle session deadline** (architect, Critical): park
+      the poll after `IDLE_AFTER` with no user input, resume on any. Spec §6.
+- [x] **A failure that rejects with `undefined` rendered as a confident empty dashboard**: `failed`
+      becomes a flag rather than the `error !== undefined` sentinel.
+- [x] **The stale line said nothing useful**: it now carries the server's own sentence and the age
+      of the data, and it is a `role="status"` live region.
+- [x] **`documentVisibility` answered "visible" where it could not tell**: the no-`document` answer
+      is now "hidden", and every unit test injects both seams.
+- [x] Comment corrections from the comment review: the `LocaleStore` comparison (same seam, not the
+      same shape), the test file's rule count, the staggering rationale (what makes the page
+      coherent is one `Promise.all` landing as one value, not simultaneity), and the billing note,
+      which is a fact about the caller rather than the module.
+- [x] Test the mutations that survived the first suite: the guarded teardown, the superseded
+      rejection, `start` clearing value/error/stale, `#clearTimer` on teardown (via
+      `vi.getTimerCount()`), the `interval` option, and `refresh()` itself.
+- [x] Add `web/src/lib/poll.dom.test.ts` (jsdom) for the shipped seams and
+      `web/src/routes/o/[org]/page.render.test.ts` for the stale banner and the error branch.
+- [x] Record the convention: a Layout row in `web/README.md` and a sixth bullet in the root
+      `CLAUDE.md`'s `web/` section.
+- [x] Re-run all four gates, then commit as `web: distinguish fatal from transient poll failures`.

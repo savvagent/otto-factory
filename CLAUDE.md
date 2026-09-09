@@ -196,7 +196,7 @@ audit trail that they did not observe.
 
 ## `web/` — the console UI
 
-Five things hold, and the first explains the other four.
+Six things hold, and the first explains the four after it.
 
 - **It is a single-page app for a security reason, not a performance one.** The session is
   an `HttpOnly`, `__Host-`-prefixed cookie, which browsers refuse to store unless it is
@@ -243,6 +243,19 @@ Five things hold, and the first explains the other four.
   written for an LLM caller that has never read these docs; translating them fragments the one
   audience they have. Commands, config paths, product names and every wire value stay verbatim
   too — a translated `--transport http` is a broken command. `web/README.md` has the details.
+
+- **A page that shows live state polls through `Poller`, never a bare `setInterval`.**
+  `web/src/lib/poll.svelte.ts` holds six rules that are each easy to omit one at a time, and
+  omitting any one makes a polling page worse than the static page it replaced: a refresh is not a
+  load (no skeleton twice a minute); a failed refresh keeps the last good data and says how old it
+  is; a failure the caller calls **fatal** — a `401`, a `404` — stops the poll instead of
+  whispering, because a page still rendering data under a small warning is asserting access it no
+  longer has; a hidden tab does not poll; refreshes never overlap and a failing one backs off; and a
+  tab nobody has touched for hours parks itself, because `sessions.rs` slides the 14-day idle
+  deadline forward on every authenticated request and an open console would otherwise hold a session
+  open to the 90-day cap on an unattended desk. The console polls rather than consuming `of-core`'s
+  change stream on purpose: a feed to the browser would mean a new console route and a held
+  connection per open tab, for data that is a second stale at worst.
 
 Runes throughout — `$state` / `$derived` / `$props` / `$effect`, no Svelte 4 stores, no
 `export let`. Shared state lives in `.svelte.ts` modules (`session.svelte.ts`) or in

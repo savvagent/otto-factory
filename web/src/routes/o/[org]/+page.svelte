@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { api } from '$lib/api';
+  import { api, ApiError } from '$lib/api';
   import { messageFor } from '$lib/errors';
   import { m } from '$lib/paraglide/messages';
   import { currentLocale } from '$lib/locale';
@@ -7,6 +7,7 @@
   import { relative } from '$lib/format';
   import { roleLabel, statusLabel } from '$lib/labels';
   import { Poller } from '$lib/poll.svelte';
+  import { session } from '$lib/session.svelte';
   import type { Job, QueueStats, Repo, UsageStatus } from '$lib/types';
   import Alert from '$lib/components/Alert.svelte';
   import Card from '$lib/components/Card.svelte';
@@ -27,13 +28,16 @@
    * It polls, because it is the page describing something that changes while
    * nobody is touching the browser and the page most likely to be left open. A
    * `Poller` rather than a `setInterval` here: what makes polling bearable is
-   * four rules that are each easy to omit, and they are written down once, in
+   * six rules that are each easy to omit, and they are written down once, in
    * `poll.svelte.ts`, next to why each one exists.
    *
-   * All four requests go out together on every tick. Staggering them to spread
-   * the load would let the tiles and the job list describe the queue at two
-   * different instants, which is how a page shows five pending jobs above a
-   * list of six.
+   * The four requests are one `Promise.all` and land as one value, so a tick
+   * repaints the whole page or none of it. Four pollers, or a staggered fetch
+   * to spread the load, would let the usage meter and the job list come from
+   * different ticks — a meter reading beside a job that has already finished.
+   *
+   * Nothing polled here is billable: `of-billing` meters MCP tool calls, and
+   * these are console `GET`s.
    */
 
   const org = useOrg();
@@ -50,25 +54,65 @@
   $effect(() => {
     const slug = org.slug;
     if (!slug) return;
-    // Returned as the effect's teardown: the poll's lifetime is the page's, and
-    // switching orgs stops this subscription before starting the next one.
-    return overview.start(async () => {
-      const [stats, recent, repos, usage] = await Promise.all([
-        api.queueStats(slug),
-        api.jobs(slug, { limit: 8 }),
-        api.repos(slug),
-        api.usage(slug)
-      ]);
-      return { stats, recent, repos, usage };
-    });
+    // Switching orgs runs this effect's cleanup, which stops the poll before
+    // the next org's starts — see the generation counter in `poll.svelte.ts`.
+    return overview.start(
+      async () => {
+        const [stats, recent, repos, usage] = await Promise.all([
+          api.queueStats(slug),
+          api.jobs(slug, { limit: 8 }),
+          api.repos(slug),
+          api.usage(slug)
+        ]);
+        return { stats, recent, repos, usage };
+      },
+      { fatal }
+    );
   });
+
+  /**
+   * Which failures must not be retried.
+   *
+   * A `401` is a session that is gone: clearing the local copy is what lets the
+   * root layout's guard send this tab to `/login`, the same way every other
+   * flow does — the console never decides for itself that a cookie is still
+   * good. A `404` is the answer for an org that does not exist *and* for one
+   * this account is no longer in, which is deliberate (`CLAUDE.md`); either way
+   * the data on screen belongs to a page this reader can no longer see, so it
+   * goes rather than sitting under a small warning. Everything else — a `502`,
+   * a dropped connection, a timeout — is a blip worth retrying.
+   */
+  function fatal(failure: unknown): boolean {
+    if (!(failure instanceof ApiError)) return false;
+    if (failure.isUnauthenticated) {
+      session.clear();
+      return true;
+    }
+    return failure.isNotFound || failure.status === 403;
+  }
 
   const stats = $derived(overview.value?.stats);
   const recent = $derived(overview.value?.recent ?? []);
   const repos = $derived(overview.value?.repos ?? []);
   const usage = $derived(overview.value?.usage);
   const error = $derived(
-    overview.error === undefined ? undefined : messageFor(overview.error, m.overview_load_failed())
+    overview.failed ? messageFor(overview.error, m.overview_load_failed()) : undefined
+  );
+
+  /**
+   * Why the refresh failed and how old what you are reading is.
+   *
+   * `error_network` rather than a generic sentence as the fallback: everything
+   * that reaches here without being an `ApiError` is a timeout or a dead
+   * socket, and "check your connection" is the actionable version of that.
+   */
+  const staleNote = $derived(
+    m.overview_refresh_failed({
+      reason: messageFor(overview.error, m.error_network()),
+      age: relative(
+        overview.updatedAt === undefined ? undefined : new Date(overview.updatedAt).toISOString()
+      )
+    })
   );
 
   const tiles = $derived(
@@ -113,16 +157,28 @@
       Said only when there is something to say. A refresh failing on top of good
       data leaves the data on screen, so without this line the page would look
       current while quietly falling behind — and the page silently succeeding
-      needs no announcement.
+      needs no announcement. There is deliberately no "updated 12 seconds ago"
+      counterpart: keeping one honest needs a second timer at human resolution,
+      which is a lot of machinery to say nothing has gone wrong.
+
+      `role="status"` for the same reason `Alert` carries one — a warning that
+      exists only visually is a warning a blind reader has to guess at.
     -->
-    {#if overview.stale}
-      <p class="text-xs text-warn">{m.overview_refresh_failed()}</p>
+    {#if overview.parked}
+      <p role="status" class="max-w-xs text-right text-xs text-faint">{m.overview_paused()}</p>
+    {:else if overview.stale}
+      <p role="status" class="max-w-xs text-right text-xs text-warn">{staleNote}</p>
     {/if}
   </div>
 
   {#if error}
-    <Alert>{error}</Alert>
-  {:else if overview.loading}
+    <Alert>
+      {error}
+      {#if !overview.stopped}
+        {m.overview_retrying()}
+      {/if}
+    </Alert>
+  {:else if !overview.value}
     <Loading what={m.overview_loading()} />
   {:else}
     <div class="grid grid-cols-2 gap-3 sm:grid-cols-4">
