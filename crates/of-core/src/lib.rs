@@ -25,6 +25,7 @@ pub mod ids;
 pub mod invites;
 pub mod isolation;
 pub mod jobs;
+pub mod labels;
 pub mod leases;
 pub mod messages;
 pub mod orgs;
