@@ -196,7 +196,7 @@ audit trail that they did not observe.
 
 ## `web/` — the console UI
 
-Six things hold, and the first explains the four after it.
+Six things hold. The first explains the next four; the sixth stands on its own.
 
 - **It is a single-page app for a security reason, not a performance one.** The session is
   an `HttpOnly`, `__Host-`-prefixed cookie, which browsers refuse to store unless it is

@@ -9,8 +9,30 @@ overlapping requests.
 
 ## Status — 2026-09-09
 
-🚧 Open as `savvagent/otto-factory#58`, closing `savvagent/otto-factory#57`. Tasks 1–4 are done;
-**Remaining:** merge, then the record-as-shipped pass that flips the spec's status to IMPLEMENTED.
+✅ Shipped in `savvagent/otto-factory#58` (squashed to `6fdc7c7`), closing
+`savvagent/otto-factory#57`, and verified in production.
+
+- **`6fdc7c7`'s own push run failed `web`**, and the failure was real rather than flaky
+  infrastructure: `#delay()` applied its ±15% jitter to healthy ticks as well as retries, so the
+  page render test — which advances the clock by exactly one interval — fired only when the jitter
+  landed below 1.0. Green on the PR run, red on master, at roughly even odds.
+  `savvagent/otto-factory#63` (squashed to `d4ea65f`) moved the randomness from period to phase:
+  the interval is exact, a subscription's phase is drawn once and re-drawn when a failing poll
+  recovers, and four new cases fail deterministically if that ever regresses.
+- **Master run `34383047982` (`d4ea65f`) is green on all four jobs**, `deploy` included, so the
+  auto-deploy from `savvagent/otto-factory#55` carried it to Fly.
+- **Smoke:** `https://otto-factory.savvagent.com/healthz` and `/readyz` both answer `200`, and the
+  content-hashed chunk carrying the new `overview_refresh_failed` string —
+  `/_app/immutable/nodes/8.C2q-CMQn.js` — is served by the deployed console with the same hash a
+  local build of `master` produces. The console being served is this code.
+- **Gates at each merge:** `npm run check`, `npm run lint`, `npm test`, `npm run build`. No Rust in
+  either diff, so the workspace suite is vacuously satisfied rather than skipped; nothing here
+  touches a tenant table, an MCP tool, a migration, or the config surface, so no cross-org negative
+  test or `of-billing::classify` entry is owed.
+
+One finding was deliberately not fixed here and is tracked instead: the tick repeats two unbounded
+per-org queries (`Jobs::stats`, `list_repos`), which is server-side work with its own design —
+`savvagent/otto-factory#61`.
 
 **This spec and plan were written alongside the pull request rather than ahead of it** — the change
 was implemented before the plan-by-plan discipline was applied to it, and the documents were
@@ -41,19 +63,26 @@ exactly.
 
 ## File Structure
 
-| File                                    | Responsibility                                                          |
-| --------------------------------------- | ----------------------------------------------------------------------- |
-| `web/src/lib/poll.svelte.ts`            | **Create.** `Poller<T>`, the `Visibility` seam, `REFRESH_INTERVAL`.     |
-| `web/src/lib/poll.svelte.test.ts`       | **Create.** Vitest coverage of the four rules and the generation guard. |
-| `web/src/routes/o/[org]/+page.svelte`   | **Modify.** Fetch through the poller; render the stale marker.          |
-| `web/messages/{en,es,de,fr,it,hi}.json` | **Modify.** Add `overview_refresh_failed`.                              |
+| File | Responsibility |
+| --- | --- |
+| `web/src/lib/poll.svelte.ts` | **Create.** `Poller<T>`, the `Visibility`/`Activity` seams, `REFRESH_INTERVAL`, `LOAD_TIMEOUT`, `IDLE_AFTER`, `PollTimeout`. |
+| `web/src/lib/poll.svelte.test.ts` | **Create.** The six rules, the fatal classification, backoff, parking, and every branch of the generation guard. |
+| `web/src/lib/poll.dom.test.ts` | **Create.** jsdom cover for the shipped `documentVisibility` / `documentActivity` the unit suite replaces with fakes. |
+| `web/src/routes/o/[org]/+page.svelte` | **Modify.** Fetch through the poller; classify fatal failures; render the stale, parked, and retrying notices. |
+| `web/src/routes/o/[org]/OrgPageHarness.svelte` | **Create.** Mounts the page inside an org context, for the render test. |
+| `web/src/routes/o/[org]/page.render.test.ts` | **Create.** The stale banner and the error branch, asserted where a reader sees them. |
+| `web/messages/{en,es,de,fr,it,hi}.json` | **Modify.** Add `overview_refresh_failed`, `overview_paused`, `overview_retrying`. |
+| `web/README.md` | **Modify.** A Layout row for the helper, so the next page finds it. |
+| `CLAUDE.md` | **Modify.** The `web/` section gains the polling convention. |
 
 ## Task Order & Rationale
 
-Two tasks. The helper is written and proven first, against its own tests, because it is the part
+Four tasks. The helper is written and proven first, against its own tests, because it is the part
 with a state machine in it — generations, the in-flight guard, the visibility subscription — and
 proving that through the page would mean asserting a timing rule through four mocked endpoints and a
-context provider. The page then becomes a mechanical rewiring with nothing left to discover.
+context provider. The page then becomes a mechanical rewiring with nothing left to discover. Tasks 3
+and 4 are the documents and the review round; Task 4 exists because the review found enough to
+change the design, and a plan that hid that behind an amended Task 1 would be a worse record.
 
 ## Task 1 — `Poller<T>` and its tests ✅
 
