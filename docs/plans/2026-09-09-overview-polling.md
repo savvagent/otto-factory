@@ -9,8 +9,12 @@ overlapping requests.
 
 ## Status — 2026-09-09
 
-🚧 Open as `savvagent/otto-factory#58`, closing `savvagent/otto-factory#57`. Tasks 1–4 are done;
-**Remaining:** merge, then the record-as-shipped pass that flips the spec's status to IMPLEMENTED.
+✅ Shipped in `savvagent/otto-factory#58` (squashed to `6fdc7c7`), closing
+`savvagent/otto-factory#57`. All four tasks are done and the console gates were green at merge.
+
+One finding was deliberately not fixed here and is tracked instead: the tick repeats two unbounded
+per-org queries (`Jobs::stats`, `list_repos`), which is server-side work with its own design —
+`savvagent/otto-factory#61`.
 
 **This spec and plan were written alongside the pull request rather than ahead of it** — the change
 was implemented before the plan-by-plan discipline was applied to it, and the documents were

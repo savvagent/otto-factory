@@ -1,7 +1,7 @@
 # Overview polling design
 
-> **Status:** DRAFT — the console overview refreshes itself every 30 seconds instead of showing
-> whatever was true when the tab was opened
+> **Status:** IMPLEMENTED — the console overview refreshes itself every 30 seconds instead of
+> showing whatever was true when the tab was opened
 
 > **Implements:** `savvagent/otto-factory#57`
 
@@ -341,7 +341,8 @@ Gates: `npm run check` (svelte-check + tsc + the message-catalog check), `npm ru
   org's jobs with a correlated `EXISTS` per pending row, and `list_repos` has no `LIMIT`. Both were
   paid once per page visit and are now paid every 30 seconds per open tab. Nothing crosses a tenant
   boundary and nothing is billable, so this is cost and availability — but a large tenant's console
-  becomes a background load generator. Bounding them is a server-side change with its own spec.
+  becomes a background load generator. Bounding them is a server-side change with its own spec:
+  tracked as `savvagent/otto-factory#61`.
 - **No console `GET` is rate limited.** `of-auth`'s throttles cover login and client registration
   only, so the interval and the backoff are the only limits that exist on this traffic.
 - **`parked` and `stale` are page-level notices, not a status bar.** If more pages adopt the poller,
