@@ -110,6 +110,7 @@ Per Non-Negotiable Rule 6, named explicitly so the architect reviewer can check 
 | Console REST | `Passkey.credentialId` added to `GET /api/me/passkeys` | No — new field |
 | Console REST | `User.label` added everywhere `User` is returned (`/api/me`, `PATCH /api/me`) | No — new field |
 | Console REST | `OrgMember.label` added to `GET /api/orgs/{org}/members` | No — new field |
+| Console REST | `TeamMember.label` added to `GET /api/orgs/{org}/teams/{team}/members` | No — new field |
 | Console REST | `Me.credentialName` / `Me.credentialDisplayName` added to `GET /api/me` — see §7 | No — new fields |
 | Console REST | `GET /api/auth/webauthn` added to `catalog.rs`, `Auth::Public`, `.returns("WebauthnConfig")` | No — new route |
 | Auth errors | `finish_authentication` may now answer `unknown_credential` where it answered `invalid_credentials` | Behavioural, not structural; both codes already exist and are already documented. See §6. |
@@ -120,8 +121,9 @@ Per Non-Negotiable Rule 6, named explicitly so the architect reviewer can check 
 `crates/of-web/src/openapi.rs` gates this: `every_referenced_schema_is_defined` fails on a
 `.returns(…)` naming a component that does not exist. The document therefore needs a **new**
 `WebauthnConfig` component, and edits to four existing ones — `User` (`label`), `OrgMember`
-(`label`), `Me` (`credentialName`, `credentialDisplayName`), and `Passkey` (`credentialId`) — each
-added to its `properties` **and** to its `required` array, since none of the four is nullable.
+(`label`), `TeamMember` (`label`), `Me` (`credentialName`, `credentialDisplayName`), and `Passkey`
+(`credentialId`) — each added to its `properties` **and** to its `required` array, since none is
+nullable.
 
 ## §1 The label column
 
@@ -180,6 +182,10 @@ switched languages.
   admin picks whose passkeys to reset, and a list of rows reading "—" for every member without an
   address is exactly the ambiguity #59 is about, in the one place where picking wrong is
   destructive.
+- `TeamMember` gains `label: String` and its query selects it, for the same reason and because
+  `format.ts`'s `person()` is shared between the two pages: making its third parameter required is
+  what makes the `common_unnamed_account` fallback unreachable, and an optional parameter would
+  leave one page still able to render "unnamed account" for somebody the next page names.
 - `set_profile` does not touch it. Setting an address must not change the words somebody has already
   learned; #59 is explicit that the label survives an address being added.
 
@@ -271,7 +277,15 @@ contradicts the code is the defect, and the argument above is the text that repl
 
 **The console never composes a credential name.** `GET /api/me` gains `credentialName` and
 `credentialDisplayName`, both computed by `passkeys::credential_names` (§4) — the same function the
-challenge is built from. The console forwards two strings it was handed. That is what makes the
+challenge is built from. The console forwards two strings it was handed.
+
+**They are read off `session.me` after `session.refresh()`, never off the response the ceremony just
+returned.** `signup/finish`, `login/finish` and `claim/finish` all answer `SessionOpened`
+(`{ user, shouldAddPasskey }`) and `PATCH /api/me` answers a bare `User`; none of the four carries
+the pair, and none gains it. Every one of the call sites below already calls `session.refresh()`
+before it would signal, so the sequencing costs nothing — but the trap is real and worth naming:
+somebody reaching for the value the finish call returned will find the fields missing and close the
+gap by composing the pair in TypeScript, which is the exact failure §4 exists to prevent. That is what makes the
 promise in #60's first table row true: a signal writes byte-for-byte what a fresh registration would
 have written, and a `console_signal_matches_the_challenge` test asserts the two agree rather than
 trusting that two implementations of one rule stayed in step.
@@ -352,6 +366,13 @@ here rather than left to whoever writes the diff.
   everywhere else is a clean no-op. Not a reason to wait.
 - **`unknown_credential` from `login/finish` is a new answer** from the auth spine. §6 argues it is
   safe; the independent security review sees the diff without this document and gets to disagree.
+- **A pre-existing bug found next door, and deliberately not fixed here.** `TeamMember.email` is
+  `String`, not `Option<String>` (`crates/of-core/src/teams.rs:37`), while `users.email` is
+  nullable — so listing a team that contains a member who never set an address fails to decode at
+  runtime. This change adds a column to that struct and its query, so it is adjacent, but the fix
+  widens a non-null field to nullable on a console response, which is a different and larger
+  decision than this work. **Filed as a follow-up issue rather than folded in**; nothing here makes
+  it worse, and `person()`'s new required third argument compiles against the type as it stands.
 - **End-to-end behaviour is not test-covered.** `crates/of-auth/tests/passkeys.rs` uses a software
   authenticator with no vault to inspect, and signal methods are browser affordances. Verifying that
   a stale label is actually repaired needs the CDP virtual authenticator, which is how usernameless

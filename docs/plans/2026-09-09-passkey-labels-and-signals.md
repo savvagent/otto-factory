@@ -61,6 +61,7 @@ implements it exactly.
 | `crates/of-core/src/labels.rs` | **Create.** `generate() -> String` — `adjective-noun-NN`. |
 | `crates/of-core/src/lib.rs` | **Modify.** Declare and re-export the `labels` module. |
 | `crates/of-core/src/orgs.rs` | **Modify.** `User.label`, `OrgMember.label`, `USER_COLS`, both insert sites, the member query. |
+| `crates/of-core/src/teams.rs` | **Modify.** `TeamMember.label` and its query. |
 | `crates/of-core/tests/` | **Modify/Create.** Label generation, stability, and both insert paths. |
 | `crates/of-auth/src/passkeys.rs` | **Modify.** `RP_NAME`; name the challenge from the account; `credential_id` on `RegisteredKey`; `UnknownCredential` from `finish_authentication`. |
 | `crates/of-auth/tests/passkeys.rs` | **Modify.** Challenge naming, label stability, user-handle encoding, the unknown-credential answer. |
@@ -105,7 +106,7 @@ nothing.
       - `upsert_user` returns a non-empty `label` — the enterprise-OIDC insert path.
       - `get_user` reads back exactly the label the insert returned.
       - `set_profile` leaves the label alone when it sets an email and a name.
-      - `list_org_members` carries each member's label.
+      - `list_org_members` and `list_team_members` each carry the member's label.
 - [ ] Run `cargo test -p of-core --test labels` — expect compile failure (no `labels` module, no
       `label` field).
 - [ ] Create `crates/of-core/migrations/0022_user_label.sql`:
@@ -127,7 +128,12 @@ nothing.
       what it is for (a vault entry that names an account, not an identifier — nothing looks an
       account up by it); add `label` to `USER_COLS`; bind `labels::generate()` in
       `create_unclaimed_user` **and** `upsert_user`; add `label: String` to `OrgMember` and `u.label`
-      to the member query's column list. Leave `set_profile` alone.
+      to the member query's column list. Do the same for `TeamMember` in
+      `crates/of-core/src/teams.rs` — `person()` is shared between the org-members and teams pages,
+      and a required third argument has to compile at both. Leave `set_profile` alone.
+      **Do not touch `TeamMember.email`.** It is `String` where `users.email` is nullable, which is
+      a real pre-existing decode bug, but widening a non-null console field is a larger decision
+      than this change — file it as a follow-up issue instead (spec Risks).
 - [ ] Run `cargo test -p of-core --test labels` — expect green.
 - [ ] Run `cargo test --workspace` — expect green (other crates may need `label` in `User`
       constructions; fix any that do not compile).
@@ -238,8 +244,8 @@ pair the console's signal helpers send.
       **not** a secret, and it is here because `signalAllAcceptedCredentials` cannot work without it
       — so nobody removes it later assuming otherwise.
 - [ ] Add `credentialId` to the `Passkey` schema in `openapi.rs` — `properties` **and** `required`.
-      Add `label` to the `OrgMember` schema the same way (Task 1 added the field; the document has
-      to match or the console's generated reference lies about the shape).
+      Add `label` to the `OrgMember` and `TeamMember` schemas the same way (Task 1 added the
+      fields; the document has to match or the console's generated reference lies about the shape).
 - [ ] Run `cargo test -p of-web --test console` and `cargo test -p of-auth` — expect green.
 - [ ] `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, commit as
       `of-auth: return each passkey's credential id`.
@@ -312,7 +318,8 @@ reviewers.
         `location.hostname`.
 - [ ] Run `npx vitest run src/lib/webauthn.test.ts` — expect failure.
 - [ ] Add `WebauthnConfig` to `types.ts` and `webauthnConfig: () => get<WebauthnConfig>('/api/auth/webauthn')`
-      to `api.ts`. Add `label: string` to `User`, `label: string` to `OrgMember`, and
+      to `api.ts`. Add `credentialName` / `credentialDisplayName` to `Me`. Add `label: string` to
+      `User`, `OrgMember`, and `TeamMember`, and
       `credentialId: string` to `Passkey` in `types.ts`, with a doc comment on `credentialId`
       repeating that it is a public handle and not a secret.
 - [ ] Implement in `web/src/lib/webauthn.ts`: `userHandle(uuid)`; a module-level cached
@@ -338,8 +345,12 @@ reviewers.
 `web/messages/{en,es,de,fr,it,hi}.json`
 **Interfaces:** consumes Task 6.
 
-- [ ] Signal call sites, each after the existing `session.refresh()` so `session.me.user` is
-      current, each `await`ed but unable to throw:
+- [ ] Signal call sites, each **after** the existing `session.refresh()`, each `await`ed but unable
+      to throw. **Read `credentialName` / `credentialDisplayName` off `session.me`, never off the
+      response the ceremony just returned** — `signup/finish`, `login/finish` and `claim/finish`
+      answer `SessionOpened` and `PATCH /api/me` answers a bare `User`, and none of them carries the
+      pair. Finding the fields missing there and composing them in TypeScript instead is the exact
+      drift Task 2 exists to prevent:
       - `signup/+page.svelte` — after `signupFinish` succeeds → `signalAccount`. Also after
         `saveProfile` on the second step, which is where the address first exists.
       - `login/+page.svelte` — after `loginFinish` succeeds → `signalAccount`; in the `catch`, when
@@ -353,7 +364,8 @@ reviewers.
 - [ ] Render the label where the console names an account with no address:
       `format.ts`'s `person(name, email, label)` → `name ?? email ?? label`, losing its
       `common_unnamed_account()` fallback; `+layout.svelte:199` → `email ?? label`;
-      `members/+page.svelte` → `member.email ?? member.label` at both sites;
+      `members/+page.svelte` → `member.email ?? member.label` at both sites; the two `person()`
+      call sites in `o/[org]/teams/+page.svelte` pass `member.label` as the new third argument;
       `invite/[org]/+page.svelte` → `session.me?.user.email ?? session.me?.user.label ?? …`, keeping
       its existing fallback for the not-signed-in case.
 - [ ] Delete from all six `web/messages/*.json` the keys this leaves unreferenced — expected to be
