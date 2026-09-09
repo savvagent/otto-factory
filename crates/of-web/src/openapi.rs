@@ -365,7 +365,14 @@ fn entity_schemas() -> Value {
         "type": "object",
         "properties": {
             "id": uuid,
-            "email": { "type": "string", "format": "email" },
+            "email": {
+                "type": ["string", "null"],
+                "format": "email",
+                "description":
+                    "Absent until the account sets one. A passkey is what creates an \
+                     account, so there is a real window — and, for anyone who never \
+                     bothers, a permanent state — with no address.",
+            },
             "name": { "type": ["string", "null"] },
             "label": {
                 "type": "string",
@@ -375,11 +382,10 @@ fn entity_schemas() -> Value {
                 "examples": ["brisk-harbor-42"],
             },
             "locale": locale,
-            "emailVerifiedAt": { "type": ["string", "null"], "format": "date-time" },
             "createdAt": timestamp,
             "disabledAt": { "type": ["string", "null"], "format": "date-time" },
         },
-        "required": ["id", "email", "label", "createdAt"],
+        "required": ["id", "label", "createdAt"],
     });
 
     let org = json!({
@@ -413,15 +419,14 @@ fn entity_schemas() -> Value {
         "type": "object",
         "properties": {
             "id": uuid,
-            "email": { "type": "string" },
+            "email": { "type": ["string", "null"] },
             "name": { "type": ["string", "null"] },
             "label": { "type": "string", "examples": ["brisk-harbor-42"] },
             "role": role,
             "joinedAt": timestamp,
-            "emailVerifiedAt": { "type": ["string", "null"], "format": "date-time" },
             "disabledAt": { "type": ["string", "null"], "format": "date-time" },
         },
-        "required": ["id", "email", "label", "role", "joinedAt"],
+        "required": ["id", "label", "role", "joinedAt"],
     });
 
     let team = json!({

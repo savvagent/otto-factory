@@ -391,13 +391,13 @@ pub async fn finish_authentication(
 
 /// One row of the key list, before it becomes a [`RegisteredKey`].
 ///
-/// A named struct rather than a tuple, and matched by **column name**. The
-/// tuple this replaced decoded by position across five columns, two of them
-/// timestamps and one a bare `Vec<u8>` in the middle — so inserting a column
-/// into the `SELECT` below, or reordering two type-compatible neighbours, would
-/// have compiled cleanly and silently filed each key's data under the wrong
-/// field. Nothing about that failure is visible until a browser is comparing
-/// credential ids that never match.
+/// A named struct rather than a tuple, and matched by **column name**. This was
+/// a four-element tuple decoded by position, which was survivable; adding
+/// `credential_id` made it five, with a bare `Vec<u8>` sitting between an id and
+/// two timestamps. At that width, inserting a column into the `SELECT` below or
+/// swapping two type-compatible neighbours would compile cleanly and file every
+/// key's data one field over — and nothing about that is visible until a browser
+/// is comparing credential ids that never match.
 #[derive(sqlx::FromRow)]
 struct KeyRow {
     id: Uuid,
