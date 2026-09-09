@@ -106,24 +106,34 @@ describe('userHandle', () => {
 });
 
 describe('signal helpers, with no browser support', () => {
-  it('resolve and do nothing when PublicKeyCredential is undefined', async () => {
-    serving({ rpId: RP_ID });
+  // Both cases below assert the rp_id was never *fetched*, and that assertion is
+  // the whole test. Asserting only that the promise resolves proves nothing
+  // here: the `catch` inside each helper swallows the `TypeError` from calling
+  // an absent method just as quietly as the guard skips it, so a suite that
+  // stopped at `resolves.toBeUndefined()` passes with every guard deleted —
+  // verified by deleting them. The guard's observable job is to return *before*
+  // `await rpId()`, so a silent fetch is the thing that catches its removal.
+
+  it('resolve without fetching anything when PublicKeyCredential is undefined', async () => {
+    const fetched = serving({ rpId: RP_ID });
     vi.stubGlobal('PublicKeyCredential', undefined);
     const w = await load();
 
     await expect(w.signalAccount(fakeMe())).resolves.toBeUndefined();
     await expect(w.signalAcceptedCredentials(fakeMe(), [])).resolves.toBeUndefined();
     await expect(w.signalUnknownCredential('abc')).resolves.toBeUndefined();
+    expect(fetched).not.toHaveBeenCalled();
   });
 
-  it('resolve and do nothing when the interface exists but has no signal methods', async () => {
-    serving({ rpId: RP_ID });
+  it('resolve without fetching anything when the interface has no signal methods', async () => {
+    const fetched = serving({ rpId: RP_ID });
     browserWith({});
     const w = await load();
 
     await expect(w.signalAccount(fakeMe())).resolves.toBeUndefined();
     await expect(w.signalAcceptedCredentials(fakeMe(), [])).resolves.toBeUndefined();
     await expect(w.signalUnknownCredential('abc')).resolves.toBeUndefined();
+    expect(fetched).not.toHaveBeenCalled();
   });
 
   it('detect per method rather than per interface', async () => {
