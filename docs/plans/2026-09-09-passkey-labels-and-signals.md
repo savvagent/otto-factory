@@ -11,7 +11,17 @@ in once.
 
 ## Status — 2026-09-09
 
-⬜ Nine tasks (5b added mid-implementation). Closes `savvagent/otto-factory#59` and `savvagent/otto-factory#60`, which
+🚧 Tasks 1–7 implemented and reviewed; **Task 5b implemented and then reverted** (see its section).
+Open as `savvagent/otto-factory#74`, CI green. **Remaining:** human review and merge, then Task 8's
+record-as-shipped pass.
+
+Review found more than the tasks did, and the pattern is worth keeping: the independent
+security review — given only the diff, without this plan, the spec, the issues or the PR body —
+is what showed Task 5b's throttle was a shared-IP denial of service on the only sign-in path, after
+two earlier reviewers had accepted it. Four stale comments and one stale route description were
+found by reviewers rather than by the tasks that invalidated them, and two of those were written
+during this change while fixing something else. Deferred, filed rather than folded in:
+`#64`, `#72`, `#73`, `#75`, `#76`. Closes `savvagent/otto-factory#59` and `savvagent/otto-factory#60`, which
 ship together on purpose — #59 fixes labels for accounts created after the deploy, and #60's
 `signalCurrentUserDetails` is the only thing that repairs the credentials that already exist.
 
