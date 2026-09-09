@@ -35,4 +35,20 @@ SET label =
   (10 + floor(random() * 90)::int)::text
 WHERE label IS NULL;
 
+-- A DEFAULT as well as a NOT NULL, and the default is the point rather than a
+-- belt-and-braces gesture. Migrations run when a new machine boots, so during a
+-- rolling deploy an old one is still serving `INSERT INTO users (email, name)`
+-- against the migrated schema; without a default, every signup on it answers
+-- 500 until it is replaced. The Rust generator supplies a label on both insert
+-- sites and is what every row gets in steady state -- this only has to cover
+-- the minutes where code older than the schema is still answering.
+ALTER TABLE users ALTER COLUMN label SET DEFAULT
+  (ARRAY['amber','brisk','clever','golden','lively','nimble','quiet','rugged'])
+    [floor(random() * 8)::int + 1]
+  || '-' ||
+  (ARRAY['acorn','beacon','cedar','falcon','harbor','meadow','ridge','willow'])
+    [floor(random() * 8)::int + 1]
+  || '-' ||
+  (10 + floor(random() * 90)::int)::text;
+
 ALTER TABLE users ALTER COLUMN label SET NOT NULL;
