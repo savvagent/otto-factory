@@ -11,7 +11,7 @@ in once.
 
 ## Status — 2026-09-09
 
-⬜ All seven tasks open. Closes `savvagent/otto-factory#59` and `savvagent/otto-factory#60`, which
+⬜ All eight tasks open. Closes `savvagent/otto-factory#59` and `savvagent/otto-factory#60`, which
 ship together on purpose — #59 fixes labels for accounts created after the deploy, and #60's
 `signalCurrentUserDetails` is the only thing that repairs the credentials that already exist.
 
@@ -31,9 +31,16 @@ implements it exactly.
   the statements against the non-tenant `passkeys` / `webauthn_ceremonies` tables. Extend those in
   place; do not add a new SQL site in `of-web` or `of-mcp`, and do not refactor the existing
   `of-auth` ones (out of scope).
-- **`users` is not a tenant table.** It has no `org_id` and is not in `0007_rls.sql`'s
-  `tenant_tables`, so no policy, no `<table>_tenant_isolation` name, and no cross-org negative test
-  attaches to this work. `0007_rls.sql` is not edited and still runs last.
+- **No new tenant table and no new tenant-scoped function.** `users` itself has no `org_id` and is
+  absent from `0007_rls.sql`'s `tenant_tables`, so the new column carries no policy and needs no
+  `<table>_tenant_isolation` name. But Task 1 does edit two **org-scoped** queries —
+  `list_org_members` (`org_id = $1` on `Db`, guard 1) and `list_team_members` (`tm.org_id = $1` on
+  `Tx`, and `team_members` **is** a tenant table with an RLS policy). The rule that holds is
+  narrower than "users is not a tenant table": **`u.label` is one more column off the already-joined
+  non-tenant `users`, and no `WHERE` predicate moves.** Touch a predicate and the isolation coverage
+  in `crates/of-core/tests/membership.rs` and the `rls_scopes_*` cases in `tests/isolation.rs`
+  (which already exercise `list_team_members` cross-org) is what must stay green. `0007_rls.sql` is
+  not edited and still runs last.
 - **Migrations are forward-only.** `0022_user_label.sql` is a new file; no applied migration is
   edited.
 - **No new MCP tool**, so no `of-billing::classify` entry and no `tools::out` envelope changes;
@@ -82,7 +89,7 @@ implements it exactly.
 
 The column comes first because everything else reads it: the challenge (Task 2), the console's
 rendering (Task 7), and the signal payload (Task 6) all need a label to exist and to be stable.
-Tasks 3–5 are three independent server-side additions that the console half needs before it can be
+Task 8 is the close-out. Tasks 3–5 are three independent server-side additions that the console half needs before it can be
 written — the rp_id to send signals with, the credential ids to send, and the error code that says
 when to send `signalUnknownCredential`. They are separate tasks rather than one because they touch
 different surfaces and fail differently. Task 6 builds and proves the browser helpers against their
@@ -97,8 +104,11 @@ pages, with nothing left to discover.
 **Interfaces:** produces `of_core::labels::generate()`, `User.label`, `OrgMember.label`; consumes
 nothing.
 
-- [ ] Write the failing tests first, as `#[sqlx::test(migrations = "./migrations")]` cases in a new
-      `crates/of-core/tests/labels.rs` plus unit tests inside `labels.rs`:
+- [ ] Write the failing tests first, as bare `#[sqlx::test]` cases in a new
+      `crates/of-core/tests/labels.rs` plus unit tests inside `labels.rs`. Bare, not
+      `#[sqlx::test(migrations = "...")]` — `./migrations` is sqlx's default and every existing file
+      in `crates/of-core/tests/` relies on it; the explicit form is what `crates/of-web/tests/*`
+      needs only because its path is `../of-core/migrations`.
       - `generate()` matches `^[a-z]+-[a-z]+-[0-9]{2}$`, and 1,000 calls produce more than 900
         distinct values — the assertion that catches the failure that matters, a generator collapsed
         toward a constant. Do **not** assert two draws always differ: that is a ~1-in-576,000 flake.
@@ -210,9 +220,13 @@ pair the console's signal helpers send.
 - [ ] Add `credential_name` and `credential_display_name` to the `Me` struct in
       `crates/of-web/src/routes/auth.rs`, both filled by `passkeys::credential_names(&caller.user)`.
       Doc-comment them: the console must never compose these itself — see Task 2.
-- [ ] `openapi.rs`: add the new `WebauthnConfig` component, and add `label` to `User`,
-      `credentialName` / `credentialDisplayName` to `Me` — each in `properties` **and** in
-      `required`, since none is nullable. `every_referenced_schema_is_defined` is the gate that
+- [ ] `openapi.rs`: add the new `WebauthnConfig` component, and add `label` to `User`, `OrgMember`
+      **and** `TeamMember` (Task 1 added all three fields), plus `credentialName` /
+      `credentialDisplayName` to `Me` — each in `properties` **and** in `required`, since none is
+      nullable. All the schema work for the `label` column lands here, in one step, rather than
+      trailing into Task 4: nothing in the suite compares document fields against struct fields
+      (`every_referenced_schema_is_defined` only checks that named components *exist*), so a schema
+      step skipped in a task about something else ships silently. `every_referenced_schema_is_defined` is the gate that
       fails if a `.returns(…)` names a component that does not exist.
 - [ ] **While in `response_schemas()`, correct the two stale schemas it holds.** `Me` and
       `SessionOpened` still document `mustEnrollTotp` / `recoveryCodesRemaining`
@@ -244,8 +258,7 @@ pair the console's signal helpers send.
       **not** a secret, and it is here because `signalAllAcceptedCredentials` cannot work without it
       — so nobody removes it later assuming otherwise.
 - [ ] Add `credentialId` to the `Passkey` schema in `openapi.rs` — `properties` **and** `required`.
-      Add `label` to the `OrgMember` and `TeamMember` schemas the same way (Task 1 added the
-      fields; the document has to match or the console's generated reference lies about the shape).
+      (`OrgMember` and `TeamMember` gained `label` in Task 3's schema step, alongside `User`.)
 - [ ] Run `cargo test -p of-web --test console` and `cargo test -p of-auth` — expect green.
 - [ ] `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, commit as
       `of-auth: return each passkey's credential id`.
@@ -312,6 +325,10 @@ reviewers.
         **verbatim** — it must not compose, prefix, or fall back to `email`/`label` itself. A test
         that passes a `Me` whose `credentialDisplayName` is a sentinel string and asserts that exact
         string reaches `signalCurrentUserDetails` is what stops the duplication creeping back.
+      - `signalAcceptedCredentials` forwards each key's `credentialId` **un-re-encoded** into
+        `allAcceptedCredentialIds` — the second half of the same encoding-agreement risk the handle
+        test covers, and the invariant Task 4's doc comment states ("so the console can compare
+        without re-encoding").
       - A helper whose underlying method **rejects** still resolves — the caller can `await` it and
         nothing throws.
       - A helper does nothing when the rp_id could not be fetched, rather than falling back to
@@ -355,7 +372,9 @@ reviewers.
         `saveProfile` on the second step, which is where the address first exists.
       - `login/+page.svelte` — after `loginFinish` succeeds → `signalAccount`; in the `catch`, when
         the error's code is `unknown_credential`, → `signalUnknownCredential(credential.rawId)`.
-        Keep rendering the existing translated message; add no new string.
+        **Hoist `credential` to a `let` declared above the `try`**: it is `const`-declared inside the
+        block today (`:40`) and is not in scope in the `catch` at `:44`. Keep rendering the existing
+        translated message; add no new string.
       - `claim/+page.svelte` — after `claimFinish` succeeds → `signalAccount`.
       - `settings/+page.svelte` — after `saveProfile`'s `setProfile` succeeds → `signalAccount`;
         after every `keys = await api.passkeys()` refresh (both `addPasskey` and `act`) →
@@ -381,3 +400,24 @@ reviewers.
 - [ ] `npm run check` (which runs `scripts/check-messages.mjs` first), `npm run lint`, `npm test`,
       `npm run build` — all four green.
 - [ ] Commit as `web: signal credential changes and show the account label`.
+
+## Task 8 — Close out ⬜
+
+**Files:** this plan, `docs/specs/2026-09-09-passkey-labels-and-signals-design.md`
+**Interfaces:** consumes Tasks 1–7.
+
+The three things below have to reach the PR body, and each of them is a thing a reviewer needs and
+would not otherwise be told. They are a task rather than a memory:
+
+- [ ] Open the PR with `Closes #59` and `Closes #60`, and name in the body:
+      1. **The auth-spine behaviour change** (Task 5) — `finish_authentication` now answers
+         `unknown_credential` where it answered `invalid_credentials`, with the §6 argument for why
+         that is not an enumeration leak. The architect and security reviewers are the audience.
+      2. **The OpenAPI correction** (Task 3) — `Me` and `SessionOpened` had fields that no longer
+         exist; fixed because Task 3 opens that object anyway, not as scope creep.
+      3. **`savvagent/otto-factory#64` deferred, deliberately** (Task 1) — `TeamMember.email` is
+         non-null-typed over a nullable column; fixing it widens a console field and is its own
+         change.
+- [ ] After merge, flip the spec's `> **Status:**` to `IMPLEMENTED`, mark every task above ✅, and
+      rewrite the `## Status` block. Commit as `docs: record passkey labels and signals as shipped`,
+      through its own worktree and PR like any other change.
