@@ -62,6 +62,10 @@ because they change what gets built:
 - A label generator in `of-core` producing `adjective-noun-NN`.
 - `passkeys::start_registration` naming the credential from the account rather than from a constant.
 - `RegisteredKey.credentialId` on `GET /api/me/passkeys`, plus its OpenAPI schema and console type.
+  This adds one column to the `SELECT` already in `passkeys::list`. `of-auth` owning SQL against the
+  non-tenant `passkeys` table is a pre-existing exception to "every SQL statement lives in
+  `of-core`"; widening an existing statement by a column does not deepen it, and no new query site
+  is created anywhere.
 - A new **public** `GET /api/auth/webauthn` returning the relying-party id.
 - `finish_authentication` distinguishing an unknown credential id from a failed signature.
 - Signal helpers in `web/src/lib/webauthn.ts` and their four call sites in the console.
@@ -96,11 +100,19 @@ Per Non-Negotiable Rule 6, named explicitly so the architect reviewer can check 
 |---|---|---|
 | Console REST | `Passkey.credentialId` added to `GET /api/me/passkeys` | No — new field |
 | Console REST | `User.label` added everywhere `User` is returned (`/api/me`, `PATCH /api/me`) | No — new field |
-| Console REST | `GET /api/auth/webauthn` added to `catalog.rs`, `Auth::Public` | No — new route |
+| Console REST | `OrgMember.label` added to `GET /api/orgs/{org}/members` | No — new field |
+| Console REST | `Me.credentialName` / `Me.credentialDisplayName` added to `GET /api/me` — see §7 | No — new fields |
+| Console REST | `GET /api/auth/webauthn` added to `catalog.rs`, `Auth::Public`, `.returns("WebauthnConfig")` | No — new route |
 | Auth errors | `finish_authentication` may now answer `unknown_credential` where it answered `invalid_credentials` | Behavioural, not structural; both codes already exist and are already documented. See §6. |
 | Schema | `0022_user_label.sql` — new forward-only migration; no existing migration is edited | No |
 | Config | none | — |
 | MCP | none | — |
+
+`crates/of-web/src/openapi.rs` gates this: `every_referenced_schema_is_defined` fails on a
+`.returns(…)` naming a component that does not exist. The document therefore needs a **new**
+`WebauthnConfig` component, and edits to four existing ones — `User` (`label`), `OrgMember`
+(`label`), `Me` (`credentialName`, `credentialDisplayName`), and `Passkey` (`credentialId`) — each
+added to its `properties` **and** to its `required` array, since none of the four is nullable.
 
 ## §1 The label column
 
@@ -136,7 +148,15 @@ New module `crates/of-core/src/labels.rs`, `pub fn generate() -> String`.
   UUID.** #59 requires the label to be unguessable-from-anything-a-stranger-holds; a function of the
   primary key would let anybody who learned an id recover the label and vice versa.
 - Collision is acceptable and unhandled — see Scope/Out. The failure a collision causes is that two
-  strangers see the same words, which is only visible if both their keys are in one vault.
+  strangers see the same words, which is only visible if both their keys are in one vault. The
+  success criterion "two consecutive `signup/start` calls differ" is therefore probabilistic: it
+  fails about once in 576,000 runs, which is a tolerance worth stating rather than rediscovering as
+  a flake. The generator's own unit test samples 1,000 draws and requires more than 900 distinct
+  values, which catches the failure that actually matters — a generator that has collapsed toward a
+  constant.
+- The module's doc comment says which `labels` this is. `web/src/lib/labels.ts` already exists and
+  means something else entirely (translated words for `JobStatus` and `Role`); the two never meet,
+  but the names are one grep apart.
 
 **The label stays English.** It is a handle, not prose — the same rule that keeps
 `--transport http` and every wire value verbatim across the six locales (`web/README.md`,
@@ -154,22 +174,32 @@ switched languages.
 - `set_profile` does not touch it. Setting an address must not change the words somebody has already
   learned; #59 is explicit that the label survives an address being added.
 
-## §4 Naming the credential
+## §4 Naming the credential — one function, two callers
 
 `crates/of-auth/src/passkeys.rs`:
 
 - Extract the relying-party name to `const RP_NAME: &str = "otto-factory";` and use it in both
-  `relying_party()` and the challenge below, so the two cannot disagree.
-- `start_registration` resolves the account (existing, or the row `create_unclaimed_user` just
-  returned) and builds:
+  `relying_party()` and the naming below, so the two cannot disagree.
+- **The composition lives in exactly one function**, `pub fn credential_names(user: &User) -> CredentialNames`,
+  returning `{ name, display_name }`:
   - `name` = `email` → `name` → `label`. The address when there is one, because that is what a
     manager sorts and searches by; the label when there is not, because a blank is not an option.
   - `display_name` = `format!("{RP_NAME} · {label}")` — **always the label**, address or not. #59:
     "an account that later sets an address gets the better label without losing the one its owner
     already learned."
-- The constant `"otto-factory".to_string()` fallback at `passkeys.rs:134` disappears. Nothing else in
-  the ceremony changes: both webauthn-rs overrides, the exclude-credentials list, and the ceremony
-  storage are untouched.
+- `start_registration` resolves the account (existing, or the row `create_unclaimed_user` just
+  returned) and calls it. The constant `"otto-factory".to_string()` fallback at `passkeys.rs:134`
+  disappears. Nothing else in the ceremony changes: both webauthn-rs overrides, the
+  exclude-credentials list, and the ceremony storage are untouched.
+
+**Why a function rather than two `format!`s at the call site.** `signalCurrentUserDetails` sends the
+same pair from the browser, and a browser that composed it itself would hold a second copy of the
+`otto-factory · ` prefix and of the email → name → label precedence, in TypeScript, with nothing
+keeping the two in sync. The failure that produces is the quiet one: the signal is accepted and
+writes a label subtly unlike what a fresh registration would have written, so "repair a stale label
+by signing in once" half-works and looks like it worked. The console is therefore **given** the
+pair rather than deriving it — see §7 — and `credential_names` is the one place either half can
+change.
 
 ## §5 Exposing the relying-party id
 
@@ -218,15 +248,33 @@ forger which part of their forgery to fix. This distinction tells them nothing o
 attribute an audit row to. This is the one auth-spine behaviour change in the work and is flagged to
 the reviewers as such.
 
+**Two comments in the repository currently assert the opposite, and both are part of this change.**
+`credential_failures_are_one_answer` in `crates/of-web/src/error.rs` says in its doc comment that
+"an unknown credential, a bad signature, and a disabled account are one answer", and
+`crates/of-auth/src/passkeys.rs:266-268` says "An unknown credential. Nothing to attribute an audit
+row to, and nothing to distinguish for the caller." Neither is load-bearing on a test — the array
+that test iterates is `UnknownUser` / `NoPasskey` / `InvalidCredentials` / `Disabled`, and
+`UnknownCredential` was never in it — so nothing fails if they are left behind. That is exactly why
+they have to be named here: under the house rule that comments explain *why*, a comment that
+contradicts the code is the defect, and the argument above is the text that replaces them.
+
 ## §7 The console half
+
+**The console never composes a credential name.** `GET /api/me` gains `credentialName` and
+`credentialDisplayName`, both computed by `passkeys::credential_names` (§4) — the same function the
+challenge is built from. The console forwards two strings it was handed. That is what makes the
+promise in #60's first table row true: a signal writes byte-for-byte what a fresh registration would
+have written, and a `console_signal_matches_the_challenge` test asserts the two agree rather than
+trusting that two implementations of one rule stayed in step.
 
 `web/src/lib/webauthn.ts` gains, alongside the existing ceremony helpers:
 
 - `userHandle(uuid: string): string` — UUID text → base64url of the 16 raw bytes, matching what
   webauthn-rs put in `user.id`. Exported so it can be tested directly.
-- `signalCurrentUserDetails({ userId, name, displayName })`
-- `signalAllAcceptedCredentials({ userId, allAcceptedCredentialIds })`
-- `signalUnknownCredential({ credentialId })`
+- `signalAccount(me)` → `signalCurrentUserDetails({ rpId, userId, name, displayName })`, reading
+  `credentialName` / `credentialDisplayName` straight off `/api/me`.
+- `signalAcceptedCredentials(me, keys)` → `signalAllAcceptedCredentials({ rpId, userId, allAcceptedCredentialIds })`
+- `signalUnknownCredential(credentialId)` → `signalUnknownCredential({ rpId, credentialId })`
 
 Each of the three: reads the cached `rpId`, feature-detects the method on `PublicKeyCredential`,
 returns immediately if it is absent, and wraps the call in a `catch` that swallows. **The swallow
@@ -253,9 +301,15 @@ Every one of those is downstream of a completed ceremony or a live session cooki
 keeps this off the enumeration surface (#60's first rule).
 
 The console also renders `user.label` where it renders a no-email placeholder today
-(`+layout.svelte:199`, `invite/[org]/+page.svelte:60`) and in the org members list. No new
-translatable strings are introduced — the label is a value, not prose — so the six catalogs are
-untouched and `scripts/check-messages.mjs` has nothing new to gate.
+(`+layout.svelte:199`, `invite/[org]/+page.svelte:60`, `members/+page.svelte:224` and `:277`) and
+in `format.ts`'s `person()`, whose `name ?? email ?? unnamed` fallback becomes `name ?? email ??
+label` and can no longer be reached. No new translatable strings are introduced — the label is a
+value, not prose. Keys left unreferenced by that (`nav_no_email`, `members_no_email`,
+`common_unnamed_account`, and `members_this_account` if it also becomes unused) are **deleted from
+all six catalogs**; `invite_no_email` stays, because that page's placeholder also covers the
+not-signed-in case, which no label can fill. `scripts/check-messages.mjs` gates keys missing from a
+locale, not keys nothing references, so leaving dead ones would pass silently — the decision is made
+here rather than left to whoever writes the diff.
 
 ## Error Handling & Edge Cases
 
