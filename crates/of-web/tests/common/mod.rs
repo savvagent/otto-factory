@@ -71,6 +71,33 @@ pub fn harness_with_trackers(pool: PgPool) -> Harness {
     }
 }
 
+/// The client-address header [`harness_behind_proxy`] is configured to trust.
+///
+/// A real one: on Fly the proxy *overwrites* `fly-client-ip`, which is the only
+/// property that makes a throttle keyed on it worth anything.
+pub const CLIENT_IP_HEADER: &str = "fly-client-ip";
+
+/// A harness deployed the way production is — behind a proxy that stamps the
+/// caller's address onto every request.
+///
+/// The plain [`harness`] configures no header, and `oneshot` attaches no
+/// `ConnectInfo`, so under it every request arrives with **no** client address
+/// and every throttle keyed on one is silently a no-op. A test about rate
+/// limiting has to be able to say where the request came from.
+pub fn harness_behind_proxy(pool: PgPool) -> Harness {
+    let db = Db::from_pool(pool);
+    let mut config = Config::new(PUBLIC_URL, RESOURCE);
+    config.client_ip_header = Some(CLIENT_IP_HEADER.into());
+    let webauthn = of_web::relying_party(&config).expect("relying party");
+    let state = AppState::new(db.clone(), cipher(), webauthn, config);
+
+    Harness {
+        db,
+        router: of_web::router(state),
+        cipher: cipher(),
+    }
+}
+
 pub fn cipher() -> Cipher {
     Cipher::from_base64_key(&base64::engine::general_purpose::STANDARD.encode([9u8; 32])).unwrap()
 }
@@ -408,29 +435,67 @@ pub async fn finish_registration(
 
 /// Sign in again with an account's own authenticator.
 pub async fn sign_in(h: &Harness, account: &mut Account) -> Reply {
+    let credential_id = account.credential_id.clone();
+    present_credential(h, &mut account.auth, &credential_id, None).await
+}
+
+/// Drive a whole authentication ceremony and present the result to
+/// `login/finish`, as though the request arrived from `from`.
+pub async fn present_credential(
+    h: &Harness,
+    auth: &mut Authenticator,
+    credential_id: &str,
+    from: Option<&str>,
+) -> Reply {
     let started = Call::post("/api/auth/login/start").send(&h.router).await;
     started.expect(StatusCode::OK);
 
     let ceremony_id = started.body["ceremonyId"].as_str().unwrap().to_string();
-    let challenge: webauthn_rs::prelude::RequestChallengeResponse = serde_json::from_value(offer(
-        started.body["challenge"].clone(),
-        &account.credential_id,
-    ))
-    .unwrap();
+    let challenge: webauthn_rs::prelude::RequestChallengeResponse =
+        serde_json::from_value(offer(started.body["challenge"].clone(), credential_id)).unwrap();
 
-    let credential = account
-        .auth
+    let credential = auth
         .do_authentication(
             webauthn_rs::prelude::Url::parse(PUBLIC_URL).unwrap(),
             challenge,
         )
         .expect("the authenticator refused the sign-in challenge");
 
-    Call::post("/api/auth/login/finish")
-        .json(serde_json::json!({ "ceremonyId": ceremony_id, "credential": credential }))
-        .send(&h.router)
-        .await
+    let mut call = Call::post("/api/auth/login/finish")
+        .json(serde_json::json!({ "ceremonyId": ceremony_id, "credential": credential }));
+    if let Some(ip) = from {
+        call = call.header(CLIENT_IP_HEADER, ip);
+    }
+    call.send(&h.router).await
 }
+
+/// A key an authenticator will sign with and this server has no row for.
+///
+/// Registered against a signup ceremony that is deliberately never finished, so
+/// `passkeys` has nothing to resolve it to. That is what a stranger probing
+/// `login/finish` looks like — except that the signature is genuine, so a
+/// refusal can only be the lookup and never the verification.
+pub async fn unregistered_credential(h: &Harness) -> (Authenticator, String) {
+    use base64::Engine;
+
+    let mut auth = authenticator();
+
+    let started = Call::post("/api/auth/signup/start").send(&h.router).await;
+    started.expect(StatusCode::OK);
+    let challenge: webauthn_rs::prelude::CreationChallengeResponse =
+        serde_json::from_value(soften(started.body["challenge"].clone())).unwrap();
+
+    let credential = auth
+        .do_registration(
+            webauthn_rs::prelude::Url::parse(PUBLIC_URL).unwrap(),
+            challenge,
+        )
+        .expect("the authenticator refused the registration challenge");
+
+    let id = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(credential.raw_id.as_ref());
+    (auth, id)
+}
+
 /// An org with `owner` as its owner.
 pub async fn org_with_owner(h: &Harness, slug: &str, owner: &Account) -> OrgId {
     let created = Call::post("/api/orgs")

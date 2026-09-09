@@ -229,15 +229,42 @@ pub async fn login_finish(
     Json(req): Json<FinishAuthentication>,
 ) -> ApiResult<Response> {
     let ip = client_ip(&parts, &state.config);
-    let user = passkeys::finish_authentication(
+
+    // Throttled because this endpoint answers a question. `finish_authentication`
+    // resolves the credential id *before* it verifies anything, so a caller with
+    // no signature at all can learn whether an id is one this server stored —
+    // and the refusal writes no audit row, so unthrottled probing would also be
+    // invisible afterwards.
+    let bucket = source_bucket(&state, &parts, "login");
+    if let Some(bucket) = &bucket {
+        of_auth::ratelimit::check(&state.db, bucket).await?;
+    }
+
+    let outcome = passkeys::finish_authentication(
         &state.db,
         &state.webauthn,
         req.ceremony_id,
         &req.credential,
         ip.as_deref(),
     )
-    .await?;
+    .await;
 
+    if let Some(bucket) = &bucket {
+        // `record`, not `charge`: this bucket counts *failures*, and a success
+        // resets it. A whole office is one address, and one colleague getting in
+        // has to clear what another's flapping authenticator accumulated —
+        // otherwise the throttle eventually locks the building out. `charge` has
+        // no success to reset and belongs to the endpoints that are a rate by
+        // nature.
+        if let Err(e) = of_auth::ratelimit::record(&state.db, bucket, outcome.is_ok()).await {
+            // Deliberately not `?`. Failing to write the attempt down must not
+            // replace the answer the caller actually earned — least of all turn
+            // a refusal into a different-looking refusal.
+            tracing::error!(error = %e, "failed to record a sign-in attempt for throttling");
+        }
+    }
+
+    let user = outcome?;
     let opened = login::with_passkey(&state.db, user, ip.as_deref()).await?;
     signed_in_response(&state, opened).await
 }
@@ -305,16 +332,27 @@ pub async fn claim_finish(
 /// any more — it is what stops a script minting accounts, and what prices
 /// guessing at claim codes.
 async fn throttle_by_source(state: &AppState, parts: &Parts) -> ApiResult<()> {
-    let Some(ip) = client_ip(parts, &state.config) else {
-        // Nothing trustworthy to key on. Deliberately not a shared "unknown"
-        // bucket: the first attacker to trip it would lock out everyone else.
+    let Some(bucket) = source_bucket(state, parts, "signup") else {
         return Ok(());
     };
 
-    let bucket = format!("signup:{ip}");
     of_auth::ratelimit::check(&state.db, &bucket).await?;
     of_auth::ratelimit::charge(&state.db, &bucket).await?;
     Ok(())
+}
+
+/// The bucket one source's attempts against `surface` count against, or `None`
+/// when nothing trustworthy identifies the source.
+///
+/// `None` rather than a shared "unknown" bucket: behind a proxy that strips the
+/// header, the first attacker to trip it would lock out everyone else.
+///
+/// `surface` keeps the counts apart, and that separation is load-bearing. One
+/// bucket per address would let failed sign-ins exhaust the allowance for
+/// signing up and vice versa — a denial of service dressed as a security
+/// control, and reachable by anyone who can send requests.
+fn source_bucket(state: &AppState, parts: &Parts, surface: &str) -> Option<String> {
+    Some(format!("{surface}:{}", client_ip(parts, &state.config)?))
 }
 
 /// Attach the session cookie and describe the account that just signed in.
