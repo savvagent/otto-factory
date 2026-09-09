@@ -47,8 +47,13 @@ function fakeTab() {
   };
 
   return {
-    /** Injected into every `start` — jitter fixed so delays are exact. */
-    options: { visibility, activity, random: () => 0.5 } satisfies PollOptions,
+    /**
+     * Injected into every `start`. `random: () => 0` is not neutrality — it is
+     * the low edge, which makes the start phase zero and every healthy gap the
+     * plain interval, so a test that advances by one interval means it. The
+     * cases that are *about* randomness inject their own source.
+     */
+    options: { visibility, activity, random: () => 0 } satisfies PollOptions,
     visibility,
     listenerCount: () => watchers.size + actors.size,
     hide(next: boolean) {
@@ -199,10 +204,11 @@ describe('a failed refresh', () => {
     await vi.advanceTimersByTimeAsync(REFRESH_INTERVAL);
     expect(load).toHaveBeenCalledTimes(2);
 
-    // One failure doubles the gap: nothing at the plain interval...
+    // One failure doubles the gap (x0.85 at this jitter edge): nothing at the
+    // plain interval...
     await vi.advanceTimersByTimeAsync(REFRESH_INTERVAL);
     expect(load).toHaveBeenCalledTimes(2);
-    // ...and the retry at twice it.
+    // ...and the retry inside twice it.
     await vi.advanceTimersByTimeAsync(REFRESH_INTERVAL);
     expect(load).toHaveBeenCalledTimes(3);
 
@@ -417,6 +423,97 @@ describe('overlapping work', () => {
     slow.resolve('slow');
     await settle();
     await vi.advanceTimersByTimeAsync(REFRESH_INTERVAL);
+    expect(load).toHaveBeenCalledTimes(3);
+
+    stop();
+  });
+
+  it('keeps the healthy period exact whatever the jitter source says', async () => {
+    // The suite's default `random: () => 0.5` cannot see this: the old
+    // per-tick jitter was `0.85 + 0.5 * 0.3`, exactly 1. Only a source at the
+    // edge of the range tells the two implementations apart.
+    const tab = fakeTab();
+    const load = vi.fn().mockResolvedValue('a');
+    const poller = new Poller<string>();
+    const stop = poller.start(load, { ...tab.options, random: () => 0 });
+    await settle();
+
+    await vi.advanceTimersByTimeAsync(REFRESH_INTERVAL - 1);
+    expect(load).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(load).toHaveBeenCalledTimes(2);
+
+    await vi.advanceTimersByTimeAsync(REFRESH_INTERVAL);
+    expect(load).toHaveBeenCalledTimes(3);
+
+    stop();
+  });
+
+  it('offsets the phase once per subscription, then holds the period', async () => {
+    // What keeps two tabs apart is where their ticks fall, not how long their
+    // gaps are — so the randomness is spent once, up front.
+    const tab = fakeTab();
+    const load = vi.fn().mockResolvedValue('a');
+    const poller = new Poller<string>();
+    const stop = poller.start(load, { ...tab.options, random: () => 1 });
+    await settle();
+
+    const offset = REFRESH_INTERVAL * 0.3;
+    await vi.advanceTimersByTimeAsync(REFRESH_INTERVAL + offset - 1);
+    expect(load).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(load).toHaveBeenCalledTimes(2);
+
+    // Spent: every gap after it is the plain interval.
+    await vi.advanceTimersByTimeAsync(REFRESH_INTERVAL);
+    expect(load).toHaveBeenCalledTimes(3);
+
+    stop();
+  });
+
+  it('draws a new phase when a failing poll recovers', async () => {
+    // A server coming back answers every waiting tab at once; without this the
+    // lockstep it just created would be permanent.
+    const tab = fakeTab();
+    const load = vi.fn().mockResolvedValueOnce('good').mockRejectedValueOnce(new Error('502'));
+    const poller = new Poller<string>();
+    const stop = poller.start(load, { ...tab.options, random: () => 1 });
+    await settle();
+
+    // Past the start phase, into the failure, then through its jittered retry.
+    await vi.advanceTimersByTimeAsync(REFRESH_INTERVAL * 1.3);
+    expect(poller.stale).toBe(true);
+
+    load.mockResolvedValue('back');
+    await vi.advanceTimersByTimeAsync(REFRESH_INTERVAL * 2.3);
+    expect(poller.stale).toBe(false);
+    const afterRecovery = load.mock.calls.length;
+
+    // The next gap carries a fresh phase — nothing at the plain interval...
+    await vi.advanceTimersByTimeAsync(REFRESH_INTERVAL);
+    expect(load).toHaveBeenCalledTimes(afterRecovery);
+    // ...and the tick once the offset has elapsed too.
+    await vi.advanceTimersByTimeAsync(REFRESH_INTERVAL * 0.3);
+    expect(load).toHaveBeenCalledTimes(afterRecovery + 1);
+
+    stop();
+  });
+
+  it('jitters the retry after a failure, low edge', async () => {
+    const tab = fakeTab();
+    const load = vi.fn().mockResolvedValueOnce('good').mockRejectedValue(new Error('502'));
+    const poller = new Poller<string>();
+    const stop = poller.start(load, { ...tab.options, random: () => 0 });
+    await settle();
+
+    await vi.advanceTimersByTimeAsync(REFRESH_INTERVAL);
+    expect(load).toHaveBeenCalledTimes(2);
+    expect(poller.stale).toBe(true);
+
+    // One failure: 0.85 x 2 x interval with the source pinned to the low edge.
+    await vi.advanceTimersByTimeAsync(REFRESH_INTERVAL * 1.7 - 1);
+    expect(load).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
     expect(load).toHaveBeenCalledTimes(3);
 
     stop();

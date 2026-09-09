@@ -128,7 +128,10 @@ describe('the overview', () => {
     expect(container.querySelector('[role="status"]')).toBeNull();
 
     healthy = false;
-    await vi.advanceTimersByTimeAsync(REFRESH_INTERVAL);
+    // 1.4x, not 1x: the page cannot inject a random source, so the tick lands
+    // somewhere inside the subscription's phase offset (up to +30%). Exact
+    // timing is pinned in poll.svelte.test.ts, where the source is injectable.
+    await vi.advanceTimersByTimeAsync(REFRESH_INTERVAL * 1.4);
 
     // The whole point of the stale rule: one 502 must not cost the reader a
     // working dashboard.
