@@ -47,7 +47,16 @@ because they change what gets built:
    `finish_authentication` currently collapses both into `InvalidCredentials`
    (`crates/of-auth/src/passkeys.rs:263`). Reusing the existing variant is a smaller change than a
    new one — see §6, which is where the security argument for making the distinction lives.
-3. **The user handle is 16 raw UUID bytes, not the UUID's text form.**
+3. **The OpenAPI document's `Me` and `SessionOpened` schemas are stale.** Both still describe
+   `mustEnrollTotp` and `recoveryCodesRemaining` (`crates/of-web/src/openapi.rs:715-731`); the
+   structs they document carry `shouldAddPasskey` and `passkeyCount`
+   (`crates/of-web/src/routes/auth.rs:331`, `:114`) and have since TOTP was removed. §7 adds two
+   fields to `Me`, which means editing that exact object. **Corrected here rather than left
+   alone** — publishing a schema where two of four documented fields are fictional, while adding
+   two more beside them, is shipping a document known to be wrong. Four lines, named in the plan
+   and in the PR body so it is not mistaken for scope creep. `SessionOpened` is corrected in the
+   same pass for the same reason; nothing else in `response_schemas()` is touched.
+4. **The user handle is 16 raw UUID bytes, not the UUID's text form.**
    `start_passkey_registration` is handed `id.as_uuid()` (`passkeys.rs:126`) and webauthn-rs puts
    `user_unique_id.as_bytes()` on the wire. Every signal method takes that same handle, so the
    console needs a UUID-text → base64url-of-16-bytes conversion. Getting this wrong is invisible:

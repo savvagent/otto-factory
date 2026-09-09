@@ -208,6 +208,14 @@ pair the console's signal helpers send.
       `credentialName` / `credentialDisplayName` to `Me` — each in `properties` **and** in
       `required`, since none is nullable. `every_referenced_schema_is_defined` is the gate that
       fails if a `.returns(…)` names a component that does not exist.
+- [ ] **While in `response_schemas()`, correct the two stale schemas it holds.** `Me` and
+      `SessionOpened` still document `mustEnrollTotp` / `recoveryCodesRemaining`
+      (`openapi.rs:715-731`); the structs carry `shouldAddPasskey` and `passkeyCount`
+      (`routes/auth.rs:331`, `:114`) and have since TOTP was removed. Replace the fictional fields
+      with the real ones in both, and fix both `required` arrays. Nothing else in the function is
+      touched, and the correction is called out in the PR body so it is not read as scope creep —
+      it is here only because Task 3 has to edit `Me` anyway, and adding two true fields beside two
+      false ones would be shipping a document known to be wrong.
 - [ ] Run `cargo test -p of-web --test console` — expect green, including
       `every_documented_get_is_actually_mounted`, which now exercises the new route for free.
 - [ ] `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, commit as
