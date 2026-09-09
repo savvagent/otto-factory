@@ -1,8 +1,13 @@
 # Passkey account labels and WebAuthn credential signals design
 
-> **Status:** DRAFT — give every account a generated human-memorable label, use it to name the
+> **Status:** IMPLEMENTED — give every account a generated human-memorable label, use it to name the
 > credential, and adopt the three WebAuthn signal methods so the browser's vault and the `passkeys`
-> table stop drifting apart.
+> table stop drifting apart. Shipped in `savvagent/otto-factory#74`, deployed and verified against
+> `https://otto-factory.savvagent.com`: a signup challenge names the account
+> (`otto-factory · restless-juniper-97`), two consecutive challenges differ, `user.id` is the UUID's
+> sixteen bytes, and `GET /api/auth/webauthn` publishes the same `rp_id` the challenge is built
+> with. **One part of this document describes work that was reverted before merge** — the
+> `login/finish` throttle; see Risks.
 
 > **Implements:** `savvagent/otto-factory#59` (generated label) and `savvagent/otto-factory#60`
 > (signal methods). **They ship together on purpose:** #59 fixes the label for accounts created
