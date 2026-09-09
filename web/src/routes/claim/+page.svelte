@@ -38,6 +38,11 @@
       const credential = await webauthn.register(started.challenge as never);
       await api.claimFinish(started.ceremonyId, code.trim(), credential, m.claim_device_name());
       await session.refresh();
+      // The account's name reaches the vault by the same route on every
+      // ceremony. Nothing here is a special case, and that is the point: a
+      // signal attached to two of the three registration paths is the one that
+      // gets forgotten when a fourth is added.
+      if (session.me) await webauthn.signalAccount(session.me);
       await goto('/', { replaceState: true });
     } catch (e) {
       error = messageFor(e, m.claim_error_fallback());

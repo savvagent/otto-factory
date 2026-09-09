@@ -2,7 +2,7 @@
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
 
-  import { api } from '$lib/api';
+  import { api, ApiError } from '$lib/api';
   import { messageFor } from '$lib/errors';
   import { m } from '$lib/paraglide/messages';
   import { session } from '$lib/session.svelte';
@@ -35,13 +35,29 @@
   async function signIn() {
     pending = true;
     error = undefined;
+    // Declared above the `try` rather than inside it so the `catch` can still
+    // name the key that was offered. An `unknown_credential` is a credential
+    // this deployment has no record of — the shape an admin's passkey reset
+    // leaves behind — and the id has to survive the throw that reports it.
+    let credential: { rawId: string } | undefined;
     try {
       const started = await api.loginStart();
-      const credential = await webauthn.authenticate(started.challenge as never);
+      credential = await webauthn.authenticate(started.challenge as never);
       await api.loginFinish(started.ceremonyId, credential);
       await session.refresh();
+      // Signing in once is what makes the label retroactive: a key registered
+      // before this account had an address is filed in the vault under words
+      // nobody chose, and no re-registration would replace them.
+      if (session.me) await webauthn.signalAccount(session.me);
       await goto(next ?? '/', { replaceState: true });
     } catch (e) {
+      // The one signal that names no account, because this browser is not
+      // signed into one. Somebody already locked out is offered the dead key
+      // first — it is the oldest in the vault — and telling the vault to drop
+      // it is the difference between a second attempt working and looping.
+      if (credential && e instanceof ApiError && e.code === 'unknown_credential') {
+        await webauthn.signalUnknownCredential(credential.rawId);
+      }
       error = messageFor(e, m.error_could_not_sign_in());
     } finally {
       pending = false;

@@ -57,7 +57,9 @@
     <Alert>{m.invite_missing_token()}</Alert>
   {:else}
     <p class="mt-1 text-sm text-faint">
-      {m.invite_signed_in_as({ email: session.me?.user.email ?? m.invite_no_email() })}
+      {m.invite_signed_in_as({
+        email: session.me?.user.email ?? session.me?.user.label ?? m.invite_no_email()
+      })}
       {m.invite_only_invited_address()}
     </p>
 

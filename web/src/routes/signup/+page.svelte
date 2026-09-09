@@ -48,6 +48,11 @@
       const credential = await webauthn.register(started.challenge as never);
       await api.signupFinish(started.ceremonyId, credential, deviceName());
       await session.refresh();
+      // Agrees with what the ceremony just wrote — there is no address yet, so
+      // both name this account by its label. Sent anyway because "signal after
+      // every ceremony" is a rule with no exceptions to remember, and the one
+      // exception would be the account that never reaches the next step.
+      if (session.me) await webauthn.signalAccount(session.me);
       step = 'profile';
     } catch (e) {
       error = messageFor(e, m.error_could_not_create_account());
@@ -63,6 +68,10 @@
     try {
       await api.setProfile({ email: email.trim(), name: name.trim() });
       await session.refresh();
+      // Where the address first exists. The vault is still showing the label
+      // the key was created under, and only a signal can replace it —
+      // registering again would not, since the name is baked in at creation.
+      if (session.me) await webauthn.signalAccount(session.me);
       await goto('/', { replaceState: true });
     } catch (e) {
       error = messageFor(e, m.error_could_not_save());

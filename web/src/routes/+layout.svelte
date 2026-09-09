@@ -196,7 +196,7 @@
       <div class="ml-auto flex items-center gap-3 text-sm">
         {#if session.me}
           <span class="hidden text-faint sm:inline"
-            >{session.me.user.email ?? m.nav_no_email()}</span
+            >{session.me.user.email ?? session.me.user.label}</span
           >
           <button
             class="rounded-md border border-edge px-2.5 py-1 text-muted transition hover:bg-raised hover:text-ink disabled:opacity-50"

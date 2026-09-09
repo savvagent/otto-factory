@@ -11,7 +11,6 @@
  * ordinary module — no runes, nothing to keep in sync.
  */
 
-import { m } from '$lib/paraglide/messages';
 import { currentLocale } from '$lib/locale';
 
 /**
@@ -108,9 +107,15 @@ export async function copy(text: string): Promise<boolean> {
  *
  * An account exists from the moment a passkey is registered, so there is a real
  * window — and, for anyone who never bothers, a permanent state — where there
- * is no address and no name. Rendering `null` into a member list is the kind of
- * thing nobody notices until a customer screenshots it.
+ * is no address and no name.
+ *
+ * **The last resort is the server's `label`, not a translated "unnamed
+ * account".** The label is the same generated pair of words the account is
+ * filed under in a credential vault, so someone reading a member list and
+ * someone reading their password manager see the same account named the same
+ * way — which a per-language placeholder could never do, and which is the whole
+ * reason `label` exists.
  */
-export function person(name: string | null, email: string | null): string {
-  return name ?? email ?? m.common_unnamed_account();
+export function person(name: string | null, email: string | null, label: string): string {
+  return name ?? email ?? label;
 }
