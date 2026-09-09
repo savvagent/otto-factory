@@ -39,7 +39,9 @@
  *    runs from the end of one refresh to the start of the next — a chained
  *    `setTimeout`, never `setInterval` — so a slow response delays the next
  *    tick instead of stacking behind it, and consecutive failures widen the gap
- *    so an outage is not met with undiminished pressure from every open tab.
+ *    — doubling to a cap, jittered — so an outage is not met with undiminished
+ *    pressure from every open tab, nor by all of them at the same instant. A
+ *    healthy poll keeps the interval exactly.
  *    A load that never settles is failed by `timeout`, because a hung `fetch`
  *    would otherwise leave a dead poll wearing a healthy page's face.
  * 6. **A tab nobody has touched for hours parks itself.** `sessions.rs` slides
@@ -150,7 +152,7 @@ export interface PollOptions {
   fatal?: (failure: unknown) => boolean;
   visibility?: Visibility;
   activity?: Activity;
-  /** Jitter source, injectable so a test can make backoff deterministic. */
+  /** Backoff jitter source, injectable so a test can make the retries exact. */
   random?: () => number;
 }
 
@@ -404,11 +406,17 @@ export class Poller<T> {
   }
 
   /**
-   * The gap before the next tick: the interval, doubled per consecutive
-   * failure to a cap, and jittered so replicas coming back up are not hit by
-   * every open tab in lockstep.
+   * The gap before the next tick.
+   *
+   * A healthy poll runs at exactly the interval — "every 30 seconds" should mean
+   * that, and a tab drifting by ±15% a tick is a page whose refresh rate nobody
+   * can state. Jitter belongs to the failure path, where the tabs that are about
+   * to retry are the ones an outage knocked over together and would otherwise
+   * come back in lockstep; there the gap also doubles per consecutive failure,
+   * to a cap.
    */
   #delay(): number {
+    if (this.#failures === 0) return this.#interval;
     const backoff = Math.min(2 ** this.#failures, MAX_BACKOFF);
     return Math.round(this.#interval * backoff * (0.85 + this.#random() * 0.3));
   }

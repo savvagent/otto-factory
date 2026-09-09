@@ -134,6 +134,7 @@ describe('the overview', () => {
     // working dashboard.
     expect(container.textContent).toContain('Wire the webhook ingest');
     const note = container.querySelector('[role="status"]');
+    expect(note).not.toBeNull();
     expect(note?.textContent).toContain('Refresh failed');
 
     healthy = true;

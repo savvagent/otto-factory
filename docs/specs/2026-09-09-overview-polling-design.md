@@ -117,9 +117,10 @@ easy to omit one at a time. Each is stated with the failure it prevents:
    looked at; it is the repeat that is suppressed.
 5. **Refreshes never overlap and a failing one backs off.** The interval runs from the end of one
    refresh to the start of the next — a chained `setTimeout`, never `setInterval` — so a slow
-   response delays the next tick instead of stacking behind it. Consecutive failures double the gap
-   to an 8× cap with ±15% jitter, so an outage is not met at full rate by every open tab. A load
-   that never settles is failed by a `timeout`: a hung `fetch` would otherwise leave `#inFlight`
+   response delays the next tick instead of stacking behind it. A healthy poll keeps the interval
+   exactly — "every 30 seconds" should mean that — while consecutive failures double the gap to an
+   8× cap with ±15% jitter, so an outage is neither met at full rate by every open tab nor by all
+   of them at the same instant. A load that never settles is failed by a `timeout`: a hung `fetch` would otherwise leave `#inFlight`
    set with no timer armed — a dead poll wearing a healthy page's face.
 6. **A tab nobody has touched parks itself** — §6.
 
