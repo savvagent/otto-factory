@@ -303,48 +303,30 @@ reviewers.
 - [ ] `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, commit as
       `of-auth: say when a presented credential is one this server never stored`.
 
-## Task 5b — Throttle `login/finish`, because Task 5 made it a probe ⬜
+## Task 5b — Throttle `login/finish` — **implemented, then reverted** ⬜→✅(reverted)
 
-**Files:** `crates/of-web/src/routes/auth.rs`, `crates/of-web/tests/console.rs`
-**Interfaces:** consumes Task 5. **Added mid-implementation**, not present in the original plan —
-Task 5's implementer flagged the consequence and it checks out.
+**Files:** none, in the end. Implemented as `1b6ec94` and reverted in full.
 
-Task 5 made `POST /api/auth/login/finish` answer `unknown_credential` for a credential id this
-server has never stored. Three facts about that endpoint turn a defensible distinction into an
-unbounded oracle:
+Added mid-implementation because Task 5's implementer flagged that `login/finish` had never been
+throttled, reaches its new `unknown_credential` branch before verifying a signature, and writes no
+audit row — an unbounded, untraceable probe. The independent security review of the finished PR then
+showed the cure was worse than the disease, and the reasoning that justified it was wrong:
 
-1. **It is not throttled.** `throttle_by_source` is called from `signup_start` and `claim_start`
-   only. `login_finish` has never had it.
-2. **The branch is reached before signature verification.** `finish_authentication` looks the
-   credential id up first, so a caller needs no valid signature to get the answer — any bytes will
-   do.
-3. **It writes no audit row.** Correctly, per Task 5 — there is no account to attribute one to —
-   but it means nobody can see the probing afterwards either.
+- `ratelimit` is an exponential **lockout**, not a rate cap. Keyed on a shared source address, ~12
+  unauthenticated requests lock every account behind an office NAT, a CGNAT pool or a VPN exit out
+  of the console for thirty minutes, renewably — on the only human sign-in path this product has.
+- The `record`-not-`charge` argument (a colleague's success clears what another's flapping
+  authenticator accumulated) does not survive contact with the order of operations: `check` runs
+  before the credential work, so past the threshold nobody can reach the success that resets it.
+- A success resets the bucket, so it never bounded the oracle: one throwaway account buys four free
+  probes per authentication, indefinitely.
+- The distinction was already observable by **timing** before Task 5 touched any error code — the
+  known-credential path fetches keys, verifies a signature and writes an audit row; the unknown path
+  does none of them. The throttle was never the control closing this.
 
-`ratelimit`'s own module doc says throttling is "what keeps the surface safe under abuse" and names
-"a flood of forged or replayed authentication attempts" as the thing it exists to stop. The gap
-predates this work; Task 5 is what makes it matter, so it closes here rather than shipping.
-
-- [ ] Add a failing test to `crates/of-web/tests/console.rs`: from one client IP, repeated
-      `POST /api/auth/login/finish` presenting a credential id the server never stored is refused
-      with `rate_limited` after `of_auth::ratelimit::MAX_FAILURES` attempts, rather than answering
-      `unknown_credential` indefinitely. The harness needs a `client_ip_header` configured and the
-      `Call::header(...)` builder to set it — add a harness variant if there is not one already.
-- [ ] Run `cargo test -p of-web --test console` — expect failure.
-- [ ] Throttle `login_finish` on a **`login:{ip}` bucket, distinct from `signup:{ip}`** — sharing
-      one bucket would let failed sign-ins lock out signup and vice versa, which is a denial of
-      service dressed as a security control.
-- [ ] Use `ratelimit::check` before the credential work and `ratelimit::record(…, successful)`
-      after, **not** `charge`: `record` resets the count on success, so an office behind one NAT
-      that signs in successfully never accumulates toward a lockout. `charge` has no success to
-      reset and is for rate-limited-by-nature endpoints; this one is failure-counted.
-- [ ] Keep the existing "no trustworthy IP means no throttle" rule — a shared `unknown` bucket lets
-      the first attacker lock out everyone behind a proxy that strips the header.
-- [ ] A failure to *record* must not mask the authentication error the caller actually got. Log it
-      the way `passkeys::note_failure` does rather than `?`-ing it up.
-- [ ] Run `cargo test -p of-web --test console` and `cargo test --workspace` — expect green.
-- [ ] `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, commit as
-      `of-web: throttle login/finish by source`.
+Doing it properly needs a rate-cap policy `ratelimit` does not have and a key an attacker cannot
+force a stranger to share. That is a design change to a security control and belongs in its own spec
+with its own review, not in a mid-PR patch. Filed instead.
 
 ## Task 6 — The browser signal helpers ⬜
 

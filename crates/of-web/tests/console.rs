@@ -10,10 +10,7 @@
 mod common;
 
 use base64::Engine;
-use common::{
-    add_member, harness, harness_behind_proxy, harness_with_trackers, onboard, org_with_owner,
-    present_credential, sign_in, unregistered_credential, Call, CLIENT_IP_HEADER,
-};
+use common::{add_member, harness, harness_with_trackers, onboard, org_with_owner, sign_in, Call};
 use http::StatusCode;
 use of_core::orgs::Role;
 use sqlx::PgPool;
@@ -126,69 +123,6 @@ async fn signing_out_everywhere_ends_every_session(pool: PgPool) {
             .send(&h.router)
             .await
             .expect(StatusCode::UNAUTHORIZED);
-    }
-}
-
-/// `login/finish` names an unknown credential, so it answers a question — and a
-/// question anyone may ask without a signature, as often as they like, is an
-/// oracle. The lookup happens before verification, so any bytes reach it; the
-/// throttle is the only thing that prices the asking.
-#[sqlx::test(migrations = "../of-core/migrations")]
-async fn probing_login_finish_for_unknown_credentials_is_throttled(pool: PgPool) {
-    let h = harness_behind_proxy(pool);
-    let (mut stranger, credential_id) = unregistered_credential(&h).await;
-    let prober = "203.0.113.7";
-
-    for attempt in 1..=of_auth::ratelimit::MAX_FAILURES {
-        let reply = present_credential(&h, &mut stranger, &credential_id, Some(prober)).await;
-        assert_eq!(
-            reply.error_code(),
-            Some("unknown_credential"),
-            "attempt {attempt} should still be answered"
-        );
-    }
-
-    let refused = present_credential(&h, &mut stranger, &credential_id, Some(prober)).await;
-    refused.expect(StatusCode::TOO_MANY_REQUESTS);
-    assert_eq!(refused.error_code(), Some("rate_limited"));
-
-    // Separate buckets, and this is why: one shared `{ip}` bucket would let a
-    // flood of forged sign-ins close the door on signing up from the same
-    // address — a denial of service wearing a security control's clothes.
-    Call::post("/api/auth/signup/start")
-        .header(CLIENT_IP_HEADER, prober)
-        .send(&h.router)
-        .await
-        .expect(StatusCode::OK);
-}
-
-/// Why the throttle records an *outcome* rather than charging an allowance: an
-/// office is one address, and somebody signing in successfully there must clear
-/// what their colleague's flapping authenticator accumulated. Charging would
-/// count both alike and lock the building out.
-#[sqlx::test(migrations = "../of-core/migrations")]
-async fn a_successful_sign_in_clears_what_the_same_source_accumulated(pool: PgPool) {
-    let h = harness_behind_proxy(pool);
-    let mut rob = onboard(&h, "rob@acme.test").await;
-    let (mut stranger, unknown) = unregistered_credential(&h).await;
-    let office = "198.51.100.4";
-
-    for _ in 1..of_auth::ratelimit::MAX_FAILURES {
-        present_credential(&h, &mut stranger, &unknown, Some(office)).await;
-    }
-
-    let credential_id = rob.credential_id.clone();
-    present_credential(&h, &mut rob.auth, &credential_id, Some(office))
-        .await
-        .expect(StatusCode::OK);
-
-    for attempt in 1..of_auth::ratelimit::MAX_FAILURES {
-        let reply = present_credential(&h, &mut stranger, &unknown, Some(office)).await;
-        assert_eq!(
-            reply.error_code(),
-            Some("unknown_credential"),
-            "attempt {attempt} after a success should start from zero again"
-        );
     }
 }
 

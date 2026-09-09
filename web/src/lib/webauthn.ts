@@ -334,7 +334,6 @@ function rpId(): Promise<string | null> {
  */
 export async function signalAccount(me: Me): Promise<void> {
   const pkc = signals();
-  if (!pkc?.signalCurrentUserDetails) return;
   const rp = await rpId();
   if (!rp) return;
 
@@ -367,7 +366,6 @@ export async function signalAccount(me: Me): Promise<void> {
  */
 export async function signalAcceptedCredentials(me: Me, keys: Passkey[]): Promise<void> {
   const pkc = signals();
-  if (!pkc?.signalAllAcceptedCredentials) return;
   const rp = await rpId();
   if (!rp) return;
 
@@ -395,7 +393,6 @@ export async function signalAcceptedCredentials(me: Me, keys: Passkey[]): Promis
  */
 export async function signalUnknownCredential(credentialId: string): Promise<void> {
   const pkc = signals();
-  if (!pkc?.signalUnknownCredential) return;
   const rp = await rpId();
   if (!rp) return;
 
