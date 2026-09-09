@@ -323,10 +323,13 @@ pub async fn finish_authentication(
         // Naming it is not the enumeration leak the rest of this module avoids.
         // A credential ID is unguessable bytes minted by an authenticator and is
         // never disclosed cross-origin, so the only caller who can ask this
-        // question is one already holding the answer's subject. It resolves no
-        // account, address, or org — this branch is reached *before* any account
-        // is looked up, which is what keeps the ordering safe. Everything
-        // downstream stays collapsed into `InvalidCredentials`.
+        // question is one already holding the answer's subject. And it resolves
+        // no account: the lookup above asks `passkeys` alone, no `users` row is
+        // read on this path, and there is no address or org anywhere in the
+        // answer. That ordering is the load-bearing half of the argument — the
+        // entropy is why the question is hard to ask, but the ordering is why
+        // the answer says nothing. Everything downstream stays collapsed into
+        // `InvalidCredentials`.
         //
         // The alternative is a console that cannot call
         // `signalUnknownCredential` without guessing: signal on every failure

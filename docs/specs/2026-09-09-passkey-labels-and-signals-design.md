@@ -373,6 +373,28 @@ here rather than left to whoever writes the diff.
   widens a non-null field to nullable on a console response, which is a different and larger
   decision than this work. **Filed as `savvagent/otto-factory#64` rather than folded in**; nothing here makes
   it worse, and `person()`'s new required third argument compiles against the type as it stands.
+- **The `login/finish` throttle is weaker than "5 failures per 15 minutes" reads as, and this is
+  accepted rather than fixed.** `ratelimit::record` resets a bucket on success, so an attacker
+  holding one throwaway account can interleave `[4 probes][1 real sign-in]` from one IP forever and
+  never lock out — roughly four free probes per authentication rather than five per window. Raised
+  by review; dismissed deliberately, for three reasons. **First, the enumeration-safety argument in
+  §6 never rested on the throttle** — it rests on the answer being decided before any `users` row is
+  read. The throttle prices bulk abuse; it is not what makes the answer safe, so weakening it does
+  not reopen §6. **Second, the oracle needs credential ids the attacker already holds**, and the
+  parties who hold one are the authenticator that minted it and the relying parties it was
+  registered with — an attacker with that already has the more interesting target. **Third, the
+  obvious hardening is worse for the people this change exists to help.** A probe counter that a
+  success cannot reset would, after a bulk admin reset, let several colleagues each retrying a dead
+  key lock their whole office out of sign-in on one shared NAT address — an availability harm to
+  users who are already locked out, traded for a marginal gain against an adversary who already has
+  the bytes. The success-reset is what keeps an office that signs in successfully from ever
+  accumulating toward a lockout, and that is the case worth optimising for. Named here and in the
+  PR body so nobody reads the throttle as stronger than it is.
+- **`ratelimit::check` and `ratelimit::record` are not atomic**, so a burst of concurrent requests
+  can all read a count below the threshold before any of their writes land, and exceed it before the
+  next request sees a lockout. Pre-existing across every bucket in the module — signup and claim
+  included — and untouched by this work, but it bears on how hard the ceiling above actually is.
+  Filed separately rather than fixed here.
 - **End-to-end behaviour is not test-covered.** `crates/of-auth/tests/passkeys.rs` uses a software
   authenticator with no vault to inspect, and signal methods are browser affordances. Verifying that
   a stale label is actually repaired needs the CDP virtual authenticator, which is how usernameless
