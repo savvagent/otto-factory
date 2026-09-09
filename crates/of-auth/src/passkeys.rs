@@ -315,9 +315,26 @@ pub async fn finish_authentication(
             .await?;
 
     let Some(user_id) = owner else {
-        // An unknown credential. Nothing to attribute an audit row to, and
-        // nothing to distinguish for the caller.
-        return Err(AuthError::InvalidCredentials);
+        // An unknown credential, and the one sign-in failure this server names.
+        //
+        // Nothing to attribute an audit row to, so `note_failure` is not called
+        // here — otherwise any id a stranger posted would write a row.
+        //
+        // Naming it is not the enumeration leak the rest of this module avoids.
+        // A credential ID is unguessable bytes minted by an authenticator and is
+        // never disclosed cross-origin, so the only caller who can ask this
+        // question is one already holding the answer's subject. It resolves no
+        // account, address, or org — this branch is reached *before* any account
+        // is looked up, which is what keeps the ordering safe. Everything
+        // downstream stays collapsed into `InvalidCredentials`.
+        //
+        // The alternative is a console that cannot call
+        // `signalUnknownCredential` without guessing: signal on every failure
+        // and one cancelled prompt evicts a good passkey from somebody's vault;
+        // signal on none and a deleted key haunts the picker forever — worst for
+        // the person an admin has just reset, who is offered the dead key first
+        // because it is the oldest.
+        return Err(AuthError::UnknownCredential);
     };
 
     // Only this account's keys. Passing every key in the database would

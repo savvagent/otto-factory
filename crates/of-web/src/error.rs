@@ -287,13 +287,22 @@ mod tests {
         );
     }
 
-    /// Every credential failure must be indistinguishable from the outside.
+    /// Every credential failure that names an account must be
+    /// indistinguishable from the outside.
     ///
     /// Narrower than it was, and for a good reason: with a discoverable
     /// credential there is no address to leak, so sign-in has far less to hide.
-    /// It still hides it — an unknown credential, a bad signature, and a
-    /// disabled account are one answer, because the differences would tell an
-    /// attacker holding a stolen device which part to work on.
+    /// What it still hides is everything downstream of resolving the account —
+    /// an unknown user, an account with no keys, a bad signature, and a disabled
+    /// account are one answer, because the differences would tell an attacker
+    /// holding a stolen device which part to work on.
+    ///
+    /// `UnknownCredential` is deliberately outside this set. It is answered
+    /// before any account is resolved, so it distinguishes no user, address, or
+    /// org; a credential ID is unguessable and never disclosed cross-origin, so
+    /// the caller asking already holds it. Telling it apart is what lets the
+    /// console signal a deleted passkey to the browser's vault without evicting
+    /// a good one. See `passkeys::finish_authentication`.
     #[test]
     fn credential_failures_are_one_answer() {
         let seen: Vec<(u16, &str, String)> = [
