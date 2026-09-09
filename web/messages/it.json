@@ -218,6 +218,7 @@
   "orgnav_sections_aria": "Sezioni di {org}",
   "orgnav_loading": "Caricamento di {org}",
   "overview_load_failed": "Impossibile caricare questa organizzazione.",
+  "overview_refresh_failed": "Aggiornamento non riuscito — viene mostrato l'ultimo risultato.",
   "overview_tile_blocked": "Bloccato",
   "overview_role_and_plan": "{role} · piano {plan}",
   "overview_loading": "Caricamento della panoramica",

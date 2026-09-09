@@ -216,6 +216,7 @@
   "orgnav_sections_aria": "Bereiche von {org}",
   "orgnav_loading": "{org} wird geladen",
   "overview_load_failed": "Diese Organisation konnte nicht geladen werden.",
+  "overview_refresh_failed": "Aktualisierung fehlgeschlagen — es wird das letzte Ergebnis angezeigt.",
   "overview_tile_blocked": "Blockiert",
   "overview_role_and_plan": "{role} · Tarif {plan}",
   "overview_loading": "Übersicht wird geladen",

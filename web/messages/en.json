@@ -216,6 +216,7 @@
   "orgnav_sections_aria": "{org} sections",
   "orgnav_loading": "Loading {org}",
   "overview_load_failed": "Could not load this organization.",
+  "overview_refresh_failed": "Refresh failed — showing the last result.",
   "overview_tile_blocked": "Blocked",
   "overview_role_and_plan": "{role} · {plan} plan",
   "overview_loading": "Loading the overview",

@@ -218,6 +218,7 @@
   "orgnav_sections_aria": "Sections de {org}",
   "orgnav_loading": "Chargement de {org}",
   "overview_load_failed": "Impossible de charger cette organisation.",
+  "overview_refresh_failed": "Échec de l'actualisation — le dernier résultat est affiché.",
   "overview_tile_blocked": "Bloqué",
   "overview_role_and_plan": "{role} · forfait {plan}",
   "overview_loading": "Chargement de l'aperçu",

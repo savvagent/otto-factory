@@ -6,6 +6,7 @@
   import { useOrg } from '$lib/org.svelte';
   import { relative } from '$lib/format';
   import { roleLabel, statusLabel } from '$lib/labels';
+  import { Poller } from '$lib/poll.svelte';
   import type { Job, QueueStats, Repo, UsageStatus } from '$lib/types';
   import Alert from '$lib/components/Alert.svelte';
   import Card from '$lib/components/Card.svelte';
@@ -22,44 +23,53 @@
    * `pending`. A queue with four pending jobs where three are waiting on a
    * dependency is not idle — it is stuck, and that is a different thing to go
    * and fix.
+   *
+   * It polls, because it is the page describing something that changes while
+   * nobody is touching the browser and the page most likely to be left open. A
+   * `Poller` rather than a `setInterval` here: what makes polling bearable is
+   * four rules that are each easy to omit, and they are written down once, in
+   * `poll.svelte.ts`, next to why each one exists.
+   *
+   * All four requests go out together on every tick. Staggering them to spread
+   * the load would let the tiles and the job list describe the queue at two
+   * different instants, which is how a page shows five pending jobs above a
+   * list of six.
    */
 
   const org = useOrg();
 
-  let stats = $state<QueueStats | undefined>(undefined);
-  let recent = $state<Job[]>([]);
-  let repos = $state<Repo[]>([]);
-  let usage = $state<UsageStatus | undefined>(undefined);
-  let loading = $state(true);
-  let error = $state<string | undefined>(undefined);
+  interface Overview {
+    stats: QueueStats;
+    recent: Job[];
+    repos: Repo[];
+    usage: UsageStatus;
+  }
+
+  const overview = new Poller<Overview>();
 
   $effect(() => {
     const slug = org.slug;
     if (!slug) return;
-
-    loading = true;
-    error = undefined;
-
-    void (async () => {
-      try {
-        const [s, jobs, r, u] = await Promise.all([
-          api.queueStats(slug),
-          api.jobs(slug, { limit: 8 }),
-          api.repos(slug),
-          api.usage(slug)
-        ]);
-        if (org.slug !== slug) return;
-        stats = s;
-        recent = jobs;
-        repos = r;
-        usage = u;
-      } catch (e) {
-        error = messageFor(e, m.overview_load_failed());
-      } finally {
-        loading = false;
-      }
-    })();
+    // Returned as the effect's teardown: the poll's lifetime is the page's, and
+    // switching orgs stops this subscription before starting the next one.
+    return overview.start(async () => {
+      const [stats, recent, repos, usage] = await Promise.all([
+        api.queueStats(slug),
+        api.jobs(slug, { limit: 8 }),
+        api.repos(slug),
+        api.usage(slug)
+      ]);
+      return { stats, recent, repos, usage };
+    });
   });
+
+  const stats = $derived(overview.value?.stats);
+  const recent = $derived(overview.value?.recent ?? []);
+  const repos = $derived(overview.value?.repos ?? []);
+  const usage = $derived(overview.value?.usage);
+  const error = $derived(
+    overview.error === undefined ? undefined : messageFor(overview.error, m.overview_load_failed())
+  );
 
   const tiles = $derived(
     stats
@@ -88,19 +98,31 @@
 </script>
 
 <div class="space-y-6">
-  <div>
-    <h1 class="text-lg font-semibold">{org.title}</h1>
-    <p class="mt-0.5 text-sm text-faint">
-      <code class="of-mono">{org.slug}</code> · {m.overview_role_and_plan({
-        role: org.role ? roleLabel(org.role) : '—',
-        plan: org.org?.plan ?? '—'
-      })}
-    </p>
+  <div class="flex flex-wrap items-start justify-between gap-2">
+    <div>
+      <h1 class="text-lg font-semibold">{org.title}</h1>
+      <p class="mt-0.5 text-sm text-faint">
+        <code class="of-mono">{org.slug}</code> · {m.overview_role_and_plan({
+          role: org.role ? roleLabel(org.role) : '—',
+          plan: org.org?.plan ?? '—'
+        })}
+      </p>
+    </div>
+
+    <!--
+      Said only when there is something to say. A refresh failing on top of good
+      data leaves the data on screen, so without this line the page would look
+      current while quietly falling behind — and the page silently succeeding
+      needs no announcement.
+    -->
+    {#if overview.stale}
+      <p class="text-xs text-warn">{m.overview_refresh_failed()}</p>
+    {/if}
   </div>
 
   {#if error}
     <Alert>{error}</Alert>
-  {:else if loading && !stats}
+  {:else if overview.loading}
     <Loading what={m.overview_loading()} />
   {:else}
     <div class="grid grid-cols-2 gap-3 sm:grid-cols-4">

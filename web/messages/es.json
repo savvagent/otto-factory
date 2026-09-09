@@ -218,6 +218,7 @@
   "orgnav_sections_aria": "Secciones de {org}",
   "orgnav_loading": "Cargando {org}",
   "overview_load_failed": "No se pudo cargar esta organización.",
+  "overview_refresh_failed": "Error al actualizar — se muestra el último resultado.",
   "overview_tile_blocked": "Bloqueado",
   "overview_role_and_plan": "{role} · plan {plan}",
   "overview_loading": "Cargando el resumen",
