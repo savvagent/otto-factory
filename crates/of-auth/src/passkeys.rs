@@ -387,13 +387,22 @@ pub async fn finish_authentication(
 // ------------------------------------------------------------------ management
 
 /// One row of the key list, before it becomes a [`RegisteredKey`].
-type KeyRow = (
-    Uuid,
-    Vec<u8>,
-    Option<String>,
-    chrono::DateTime<chrono::Utc>,
-    Option<chrono::DateTime<chrono::Utc>>,
-);
+///
+/// A named struct rather than a tuple, and matched by **column name**. The
+/// tuple this replaced decoded by position across five columns, two of them
+/// timestamps and one a bare `Vec<u8>` in the middle — so inserting a column
+/// into the `SELECT` below, or reordering two type-compatible neighbours, would
+/// have compiled cleanly and silently filed each key's data under the wrong
+/// field. Nothing about that failure is visible until a browser is comparing
+/// credential ids that never match.
+#[derive(sqlx::FromRow)]
+struct KeyRow {
+    id: Uuid,
+    credential_id: Vec<u8>,
+    nickname: Option<String>,
+    created_at: chrono::DateTime<chrono::Utc>,
+    last_used_at: Option<chrono::DateTime<chrono::Utc>>,
+}
 
 pub async fn list(db: &Db, user: UserId) -> Result<Vec<RegisteredKey>> {
     let rows: Vec<KeyRow> = sqlx::query_as(
@@ -406,15 +415,13 @@ pub async fn list(db: &Db, user: UserId) -> Result<Vec<RegisteredKey>> {
 
     Ok(rows
         .into_iter()
-        .map(
-            |(id, credential_id, nickname, created_at, last_used_at)| RegisteredKey {
-                id,
-                credential_id: URL_SAFE_NO_PAD.encode(credential_id),
-                nickname,
-                created_at,
-                last_used_at,
-            },
-        )
+        .map(|row| RegisteredKey {
+            id: row.id,
+            credential_id: URL_SAFE_NO_PAD.encode(row.credential_id),
+            nickname: row.nickname,
+            created_at: row.created_at,
+            last_used_at: row.last_used_at,
+        })
         .collect())
 }
 
