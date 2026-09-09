@@ -10,7 +10,25 @@ overlapping requests.
 ## Status — 2026-09-09
 
 ✅ Shipped in `savvagent/otto-factory#58` (squashed to `6fdc7c7`), closing
-`savvagent/otto-factory#57`. All four tasks are done and the console gates were green at merge.
+`savvagent/otto-factory#57`, and verified in production.
+
+- **`6fdc7c7`'s own push run failed `web`**, and the failure was real rather than flaky
+  infrastructure: `#delay()` applied its ±15% jitter to healthy ticks as well as retries, so the
+  page render test — which advances the clock by exactly one interval — fired only when the jitter
+  landed below 1.0. Green on the PR run, red on master, at roughly even odds.
+  `savvagent/otto-factory#63` (squashed to `d4ea65f`) moved the randomness from period to phase:
+  the interval is exact, a subscription's phase is drawn once and re-drawn when a failing poll
+  recovers, and four new cases fail deterministically if that ever regresses.
+- **Master run `34383047982` (`d4ea65f`) is green on all four jobs**, `deploy` included, so the
+  auto-deploy from `savvagent/otto-factory#55` carried it to Fly.
+- **Smoke:** `https://otto-factory.savvagent.com/healthz` and `/readyz` both answer `200`, and the
+  content-hashed chunk carrying the new `overview_refresh_failed` string —
+  `/_app/immutable/nodes/8.C2q-CMQn.js` — is served by the deployed console with the same hash a
+  local build of `master` produces. The console being served is this code.
+- **Gates at each merge:** `npm run check`, `npm run lint`, `npm test`, `npm run build`. No Rust in
+  either diff, so the workspace suite is vacuously satisfied rather than skipped; nothing here
+  touches a tenant table, an MCP tool, a migration, or the config surface, so no cross-org negative
+  test or `of-billing::classify` entry is owed.
 
 One finding was deliberately not fixed here and is tracked instead: the tick repeats two unbounded
 per-org queries (`Jobs::stats`, `list_repos`), which is server-side work with its own design —
