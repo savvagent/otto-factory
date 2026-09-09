@@ -260,6 +260,16 @@ function rethrow(e: unknown): never {
  */
 export function userHandle(uuid: string): string {
   const hex = uuid.replace(/-/g, '');
+  // Refuse rather than guess, because guessing here is invisible.
+  // `Number.parseInt('zz', 16)` is `NaN` and `Uint8Array` writes `NaN` as `0`,
+  // so a malformed id would silently produce a *well-formed* handle of the
+  // right length that the browser accepts and that matches no credential ever.
+  // That is the failure this module's docs call the one silent one in the area;
+  // the throw is deliberately raised outside the signal helpers' `catch`, which
+  // exists for a vault refusing a hint and not for a bug of ours.
+  if (!/^[0-9a-f]{32}$/i.test(hex)) {
+    throw new TypeError(`not a UUID, so no credential could match it: ${uuid}`);
+  }
   const bytes = new Uint8Array(hex.length / 2);
   for (let i = 0; i < bytes.length; i += 1) {
     bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
@@ -312,10 +322,19 @@ let resolvedRpId: Promise<string | null> | null = null;
  * could not fetch the rp_id once has nothing to retry for.
  */
 function rpId(): Promise<string | null> {
+  // The *value* is cached; the failure is not. This module lives as long as the
+  // tab does — `adapter-static` means a navigation is not a reload — so caching
+  // a rejection would let one 502 during a rolling deploy disable every signal
+  // for the rest of the session, including a passkey deletion half an hour
+  // later that is exactly when a stale credential gets stranded in a vault.
+  // Retrying costs one GET to a public, sessionless endpoint.
   resolvedRpId ??= api
     .webauthnConfig()
     .then((config) => config.rpId)
-    .catch(() => null);
+    .catch(() => {
+      resolvedRpId = null;
+      return null;
+    });
   return resolvedRpId;
 }
 
@@ -338,13 +357,19 @@ export async function signalAccount(me: Me): Promise<void> {
   const rp = await rpId();
   if (!rp) return;
 
+  // Built before the `try`, deliberately. `userHandle` throws on an id that is
+  // not a UUID, and that is our bug, not a vault refusing a hint — inside the
+  // block below it would be swallowed as though the password manager had said
+  // no, which is the one thing the swallow must not be allowed to cover.
+  const details = {
+    rpId: rp,
+    userId: userHandle(me.user.id),
+    name: me.credentialName,
+    displayName: me.credentialDisplayName
+  };
+
   try {
-    await pkc.signalCurrentUserDetails({
-      rpId: rp,
-      userId: userHandle(me.user.id),
-      name: me.credentialName,
-      displayName: me.credentialDisplayName
-    });
+    await pkc.signalCurrentUserDetails(details);
   } catch {
     // Swallowed deliberately, and this is the one place in this console where
     // that is right: a signal is a hint to a password manager, attached to a
@@ -371,12 +396,15 @@ export async function signalAcceptedCredentials(me: Me, keys: Passkey[]): Promis
   const rp = await rpId();
   if (!rp) return;
 
+  // Outside the `try` for the same reason as in `signalAccount`.
+  const accepted = {
+    rpId: rp,
+    userId: userHandle(me.user.id),
+    allAcceptedCredentialIds: keys.map((key) => key.credentialId)
+  };
+
   try {
-    await pkc.signalAllAcceptedCredentials({
-      rpId: rp,
-      userId: userHandle(me.user.id),
-      allAcceptedCredentialIds: keys.map((key) => key.credentialId)
-    });
+    await pkc.signalAllAcceptedCredentials(accepted);
   } catch {
     // Swallowed for the same reason as in `signalAccount`: the delete this is
     // attached to already succeeded on the server, and a vault that refuses

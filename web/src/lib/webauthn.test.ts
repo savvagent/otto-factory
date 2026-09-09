@@ -103,6 +103,16 @@ describe('userHandle', () => {
     // decoder rejects.
     expect(userHandle('fbf0ffbe-fbef-bfbe-fbef-bfbefbefbfbe')).toBe('-_D_vvvvv77777-----_vg');
   });
+
+  it('refuses an id that is not a UUID rather than encoding a plausible wrong one', async () => {
+    // `parseInt('zz', 16)` is NaN and Uint8Array writes NaN as 0, so without the
+    // guard every one of these returns a well-formed handle of the right length
+    // that matches no credential anywhere, silently and forever.
+    const { userHandle } = await load();
+    for (const bad of ['', 'not-a-uuid', '00112233', 'zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz']) {
+      expect(() => userHandle(bad), `${JSON.stringify(bad)} should be refused`).toThrow(TypeError);
+    }
+  });
 });
 
 describe('signal helpers, with no browser support', () => {
@@ -290,5 +300,33 @@ describe('the rp_id', () => {
     await w.signalUnknownCredential('abc');
 
     expect(fetched).toHaveBeenCalledOnce();
+  });
+
+  it('is retried after a failure rather than giving up for the session', async () => {
+    // The value is cached; the rejection is not. This module lives as long as
+    // the tab does — adapter-static means a navigation is not a reload — so
+    // caching the failure would let one 502 during a rolling deploy disable
+    // every signal until a hard refresh, including a passkey deletion later in
+    // the session, which is exactly when a stale credential gets stranded.
+    const signalCurrentUserDetails = vi.fn(async () => {});
+    browserWith({ signalCurrentUserDetails });
+    const fetched = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('gateway'))
+      .mockResolvedValue(
+        new Response(JSON.stringify({ rpId: RP_ID }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' }
+        })
+      );
+    vi.stubGlobal('fetch', fetched);
+    const w = await load();
+
+    await w.signalAccount(fakeMe());
+    expect(signalCurrentUserDetails).not.toHaveBeenCalled();
+
+    await w.signalAccount(fakeMe());
+    expect(fetched).toHaveBeenCalledTimes(2);
+    expect(signalCurrentUserDetails).toHaveBeenCalledOnce();
   });
 });
