@@ -26,6 +26,14 @@ pub const DEFAULT_TTL_SECS: i64 = 900;
 /// take an effectively permanent lease and only an admin could clear it.
 pub const MAX_TTL_SECS: i64 = 4 * 3600;
 
+/// Upper bound on a resource string's length, matching
+/// [`crate::idempotency::MAX_KEY_LEN`]'s reasoning: long enough for any
+/// reasonable caller-chosen name, short enough that a released lease's row
+/// (kept for the console's history, never deleted) cannot become unbounded
+/// free storage. Generalizing `resource` past a git branch name removed the
+/// informal length ceiling a branch name used to imply.
+pub const MAX_RESOURCE_LEN: usize = 200;
+
 #[derive(Debug, Clone, PartialEq, Serialize, FromRow, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Lease {
@@ -68,6 +76,12 @@ impl Tx<'_> {
         let resource = resource.trim();
         if resource.is_empty() {
             return Err(Error::Invalid("lease resource must not be empty".into()));
+        }
+        if resource.len() > MAX_RESOURCE_LEN {
+            return Err(Error::Invalid(format!(
+                "lease resource is {} bytes; the limit is {MAX_RESOURCE_LEN}",
+                resource.len()
+            )));
         }
         let ttl = ttl_secs.unwrap_or(DEFAULT_TTL_SECS).clamp(60, MAX_TTL_SECS);
         let org = self.org();

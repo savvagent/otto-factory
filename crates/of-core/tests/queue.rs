@@ -1458,6 +1458,32 @@ async fn leases_are_per_resource_not_just_branch(pool: PgPool) {
     );
 }
 
+/// A free-form resource has no natural length ceiling the way a branch name
+/// used to imply, and a released lease row is kept for history rather than
+/// deleted — without a cap, the column becomes unbounded free storage, and an
+/// oversized value that only fails at the database's btree index limit would
+/// surface to a caller as a retriable internal error instead of a clear,
+/// non-retriable refusal.
+#[sqlx::test]
+async fn an_oversized_resource_is_refused_before_it_reaches_the_database(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+
+    let too_long = "x".repeat(of_core::leases::MAX_RESOURCE_LEN + 1);
+    let mut tx = db.begin(t.org).await.unwrap();
+    let err = tx
+        .acquire_lease(t.repo, &too_long, t.user, None, None, None)
+        .await
+        .unwrap_err();
+    tx.rollback().await.unwrap();
+
+    assert_eq!(err.code(), "invalid_argument");
+    assert!(
+        !err.retriable(),
+        "an oversized resource is never fixed by retrying"
+    );
+}
+
 /// Re-acquiring your own lease renews it rather than failing, so an agent that
 /// lost track of its own state converges instead of deadlocking against itself.
 #[sqlx::test]
