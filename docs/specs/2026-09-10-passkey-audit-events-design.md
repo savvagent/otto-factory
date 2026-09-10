@@ -11,14 +11,22 @@
 > (a false atomicity claim in a doc comment, a missing IP on the admin-reset's audit row, an
 > incomplete historical-constant doc comment).
 >
-> **`savvagent/otto-factory#87` is the one to track before treating this area as closed**: the
-> admin-assisted passkey reset is not atomic (a partial failure can leave an account with no
-> passkeys and no outstanding claim code — the exact takeover window the claim-code coupling exists
-> to close), and its global audit row may not name the admin who performed it. Two lower-severity
-> gaps were also filed rather than folded in — `savvagent/otto-factory#88` (registration's audit
-> row can't distinguish signup/claim/add-key and carries no IP), `savvagent/otto-factory#89`
-> (`passkeys::remove`/`rename` write no audit row; `login::logout` still discards its write
-> silently).
+> **`savvagent/otto-factory#87` is fixed.** `reset_member_passkeys` now clears passkeys, revokes
+> sessions, mints the claim code, and writes the org-scoped `org.member.passkeys_reset` row in one
+> transaction (`of_auth::passkeys::clear_tx`, `of_auth::sessions::revoke_all_tx`,
+> `of_core::invites::create_account_claim_tx` — each a connection-taking sibling of the existing
+> pool-based function, following the pattern already established by
+> `of_auth::tokens::revoke_all_in_org_tx`), so a failure partway through rolls back the whole reset
+> instead of leaving the account cleared with no way back in. `clear`'s global `PASSKEY_CLEARED` row
+> now takes the acting principal separately from the affected account and is written
+> `.actor(admin).target("user", member)`, fixing the misattribution — it could not be folded into
+> the same transaction: `audit_events`'s RLS append policy accepts a null-`org_id` row only when
+> `current_org()` is itself unset, and the reset's transaction is pinned to the org for the whole of
+> its (org-scoped) write, so the global row is written on the unpinned pool after commit, best-effort
+> like every other `audit_global` call. Two lower-severity gaps were also filed rather than folded
+> in — `savvagent/otto-factory#88` (registration's audit row can't distinguish signup/claim/add-key
+> and carries no IP), `savvagent/otto-factory#89` (`passkeys::remove`/`rename` write no audit row;
+> `login::logout` still discards its write silently).
 
 ## Goal & Success Criteria
 
@@ -232,6 +240,12 @@ bound in an `.await?` call that was already error-propagating, so no runtime beh
 that this write already propagates its error and this spec has no reason to change that, not that
 the write is atomic with anything else. Filing the actual non-atomicity as a separate concern is
 out of scope for this rename.
+
+**Superseded by `savvagent/otto-factory#87`.** The paragraph above described the state this spec's
+own PR (`#86`) shipped, not the state today: `#87` moved `passkeys::clear`, `sessions::revoke_all`,
+and the claim-code insert onto this same `tx`'s connection (via `clear_tx`/`revoke_all_tx`/
+`create_account_claim_tx`), so this `tx.audit(...)` write for `MEMBER_PASSKEYS_RESET` now commits
+together with all three, not after them. See the status block at the top of this file.
 
 ## §2 Stop discarding the two audit writes
 

@@ -339,7 +339,7 @@ async fn clearing_passkeys_leaves_no_way_in(pool: PgPool) {
     let user = register_new(&db, &mut auth).await;
     let ids = credential_ids(&db, user).await;
 
-    let removed = passkeys::clear(&db, user, None).await.unwrap();
+    let removed = passkeys::clear(&db, user, user, None).await.unwrap();
     assert_eq!(removed, 1);
     assert!(!passkeys::has_credential(&db, user).await.unwrap());
 
@@ -405,7 +405,7 @@ async fn clearing_writes_the_passkey_cleared_action(pool: PgPool) {
     let mut auth = authenticator();
     let user = register_new(&db, &mut auth).await;
 
-    passkeys::clear(&db, user, None).await.unwrap();
+    passkeys::clear(&db, user, user, None).await.unwrap();
 
     assert_eq!(
         action_count(&db, of_core::audit::action::PASSKEY_CLEARED, user).await,
@@ -528,7 +528,7 @@ async fn a_cleared_accounts_old_credential_is_unknown_and_unattributed(pool: PgP
     let user = register_new(&db, &mut auth).await;
     let ids = credential_ids(&db, user).await;
 
-    passkeys::clear(&db, user, None).await.unwrap();
+    passkeys::clear(&db, user, user, None).await.unwrap();
 
     match sign_in(&db, &mut auth, &ids[0]).await {
         Err(AuthError::UnknownCredential) => {}
