@@ -261,7 +261,7 @@ checked, so the next contributor with the same question does not have to re-run 
 
 - **A future contributor adds a migration with this exact shape anyway.** Nothing enforces the §1
   rule automatically — it is documentation plus a worked example, not a lint. This spec accepts that
-  gap explicitly rather than building migration-file static analysis for a two-migration-in-25
+  gap explicitly rather than building migration-file static analysis for a two-migration-in-26
   occurrence rate; see Risks below.
 - **The FORCE-RLS-fallback shape becomes this deployment's actual shape** (a future move to shared
   managed Postgres, per `docs/deploy/fly.md`'s own stated possibility). Nothing in this change alters
