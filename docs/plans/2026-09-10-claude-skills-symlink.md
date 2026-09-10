@@ -52,7 +52,9 @@ Single task — there is only one change to make.
 **Interfaces:** none — no code path consumes or produces anything; this only changes what Claude
 Code's skill-discovery glob finds on disk.
 
-- [x] Create the directory `.claude/` if it doesn't already exist as a tracked path.
+- [x] Create the `.claude/` directory in the working tree if it doesn't already exist (git does
+      not track empty directories — only the `.claude/skills` symlink entry created next is what
+      git actually tracks; creating `.claude/` first is just so `ln -s` has somewhere to put it).
 - [x] Create `.claude/skills` as a symlink to `../.github/skills` (relative, so it resolves the
       same way regardless of where the repo is cloned): `ln -s ../.github/skills .claude/skills`.
 - [x] Verify it resolves: `ls .claude/skills/otto-factory-development/SKILL.md` must show the real
