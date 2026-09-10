@@ -569,6 +569,73 @@ async fn cancel_job_on_a_pending_job_is_refused(pool: PgPool) {
     );
 }
 
+/// `cancel_job` accepts no note at all — an agent complying with a stop
+/// request has nothing more to say. `error` must end up `None`, not some
+/// invented default string.
+#[sqlx::test]
+async fn cancel_job_with_no_note_leaves_error_unset(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let j = tx.add_job(job(&t, "long running")).await.unwrap();
+    tx.claim_jobs(std::slice::from_ref(&j.id), t.user, None)
+        .await
+        .unwrap();
+    tx.request_cancel(&j.id, t.user, Some("stop please"))
+        .await
+        .unwrap();
+
+    let cancelled = tx.cancel_job(&j.id, None).await.unwrap();
+    tx.commit().await.unwrap();
+
+    assert_eq!(cancelled.status, Status::Cancelled);
+    assert!(cancelled.error.is_none());
+}
+
+/// Cancelling a pending job leaves anything that depends on it permanently
+/// blocked, the same as `fail_job` — `ready`/`blocked` only treat a dependency
+/// as satisfied once it is `completed`. Unblocking it is a job for
+/// `repend_job` or `set_dependencies`, not something `request_cancel` does on
+/// its own.
+#[sqlx::test]
+async fn request_cancel_on_pending_leaves_dependents_blocked(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let dependency = tx.add_job(job(&t, "migration")).await.unwrap();
+    let dependent = tx.add_job(job(&t, "use the new column")).await.unwrap();
+    tx.set_dependencies(&dependent.id, std::slice::from_ref(&dependency.id), &[])
+        .await
+        .unwrap();
+
+    let cancelled = tx
+        .request_cancel(&dependency.id, t.user, Some("no longer needed"))
+        .await
+        .unwrap();
+    assert_eq!(cancelled.status, Status::Cancelled);
+
+    let blocked: Vec<String> = tx
+        .blocked(None)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|j| j.id.0)
+        .collect();
+    let ready: Vec<String> = tx
+        .ready(None)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|j| j.id.0)
+        .collect();
+    tx.commit().await.unwrap();
+
+    assert_eq!(blocked, vec![dependent.id.0.clone()]);
+    assert!(!ready.contains(&dependent.id.0));
+}
+
 /// A repended cancelled job gets a clean slate: no stale cancellation request
 /// should follow it into its next attempt.
 #[sqlx::test]

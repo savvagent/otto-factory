@@ -36,7 +36,9 @@ pub enum Status {
     /// Terminal. Reached either directly from `Pending` (via `request_cancel`,
     /// which finalizes immediately since there is no holder to wait on) or
     /// from `InProgress`/`Active` once the holder confirms it stopped (via
-    /// `cancel_job`).
+    /// `cancel_job`). Invariant: every `Cancelled` job has a non-null
+    /// `cancel_requested_at`, enforced by `Tx::request_cancel`/`Tx::cancel_job`
+    /// — never construct one otherwise.
     Cancelled,
 }
 
@@ -110,11 +112,23 @@ pub struct Job {
     pub created_by: Option<UserId>,
     pub claimed_by: Option<UserId>,
     pub claimed_by_label: Option<String>,
+    /// Set by `request_cancel`. `None` means nobody has ever asked this job to
+    /// stop. **Check `status` before acting on this**: it is only a live "stop,
+    /// please" while `status` is `in-progress` or `active` — that is when you,
+    /// as the holder, should call `cancel_job` once you actually stop (or
+    /// `fail_job`, if you are stopping for your own reasons unrelated to this
+    /// request). `complete_job`, `fail_job`, and the immediate pending-finalize
+    /// path inside `request_cancel` itself do **not** clear this field, so a
+    /// `Completed`, `Failed`, or `Cancelled` job can still show it set — at
+    /// that point it is history, not a pending request. Only `repend_job`
+    /// clears it.
     pub cancel_requested_at: Option<chrono::DateTime<chrono::Utc>>,
-    /// Set by `request_cancel`. `None` means nobody has asked this job to
-    /// stop. If you are this job's holder and this is set, call `cancel_job`
-    /// once you actually stop — or `fail_job` if you are stopping for your
-    /// own reasons unrelated to this request.
+    /// Who asked, at the time `cancel_requested_at` was last set. Can be
+    /// `None` even while a request is still live: the column is
+    /// `ON DELETE SET NULL`, so a requester whose account is later deleted
+    /// leaves `cancel_requested_at`/`cancel_reason` in place with this field
+    /// cleared. So `cancel_requested_by == None` does **not** mean "no
+    /// request" — only `cancel_requested_at == None` means that.
     pub cancel_requested_by: Option<UserId>,
     pub cancel_reason: Option<String>,
 }

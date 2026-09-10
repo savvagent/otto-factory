@@ -6,10 +6,14 @@
 -- ordering here does not matter because nothing compares job_status by its
 -- enum ordinal.
 --
--- This is its own migration file, separate from 0024's column changes,
--- because Postgres refuses to let a new enum value be *used* (even as a
--- string literal) in the same transaction that added it ("unsafe use of new
--- value ... New enum values must be committed before they can be used") —
--- and sqlx runs each migration file in its own transaction, so the two steps
--- cannot share one file.
+-- This is its own migration file, kept separate from 0024's column changes as
+-- its own concern (a new enum value vs. plain columns), following the pattern
+-- 0016/0017 established for 'active'. Note that pattern's actual necessity —
+-- Postgres refuses to let a new enum value be *used*, even as a string
+-- literal, in the same transaction that added it ("unsafe use of new value
+-- ... New enum values must be committed before they can be used") — does not
+-- itself force the split here: unlike 0017, which does reference 'active' in
+-- an index WHERE clause, 0024 never references the 'cancelled' literal. The
+-- Postgres fact is real and worth knowing; it just is not why *this* pair had
+-- to be two files.
 ALTER TYPE job_status ADD VALUE 'cancelled';
