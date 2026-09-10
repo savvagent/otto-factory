@@ -261,6 +261,12 @@ pub async fn finish_registration(
     let encoded = serde_json::to_value(&passkey)
         .map_err(|e| AuthError::Config(format!("could not store a passkey: {e}")))?;
 
+    // The credential and its audit row commit together: a live credential
+    // with no audit row is exactly the gap #108 exists to close, most of all
+    // on the `claim` path, which is the one event that proves who actually
+    // completed an admin-assisted takeover (#88).
+    let mut tx = db.begin_unpinned().await?;
+
     // The unique index on credential_id is the real guard: an authenticator
     // must not be registrable twice, to two accounts, which is what the
     // exclude-credentials list asks for politely and this enforces.
@@ -272,7 +278,7 @@ pub async fn finish_registration(
     .bind(&credential_id)
     .bind(&encoded)
     .bind(nickname)
-    .execute(db.pool())
+    .execute(&mut *tx)
     .await
     .map_err(|e| match &e {
         sqlx::Error::Database(db_err) if db_err.is_unique_violation() => {
@@ -281,21 +287,16 @@ pub async fn finish_registration(
         _ => AuthError::from(e),
     })?;
 
-    if let Err(e) = db
-        .audit_global(
-            Entry::new(action::PASSKEY_REGISTERED)
-                .actor(user_id)
-                .detail(serde_json::json!({ "via": via.as_str() }))
-                .from_request(ip, None),
-        )
-        .await
-    {
-        tracing::error!(
-            error = %e,
-            user_id = %user_id,
-            "failed to write audit event for passkey registration"
-        );
-    }
+    Db::audit_global_on(
+        &mut *tx,
+        Entry::new(action::PASSKEY_REGISTERED)
+            .actor(user_id)
+            .detail(serde_json::json!({ "via": via.as_str() }))
+            .from_request(ip, None),
+    )
+    .await?;
+
+    tx.commit().await?;
 
     Ok(user_id)
 }
