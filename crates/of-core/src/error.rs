@@ -41,8 +41,8 @@ pub enum Error {
         expected: String,
     },
 
-    #[error("job {job} was claimed by someone else")]
-    AlreadyClaimed { job: JobId },
+    #[error("job {job} is currently claimed by {holder}")]
+    AlreadyClaimed { job: JobId, holder: String },
 
     #[error(
         "ticket {ticket_ref} is already linked to job {job} — unlink it there first, \

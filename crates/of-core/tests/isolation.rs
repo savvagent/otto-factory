@@ -109,7 +109,7 @@ async fn cross_org_mutation_is_refused(pool: PgPool) {
     // only be attributed to the org-scoping predicate finding no row.
     let mut tx = db.begin(a.org).await.unwrap();
     let claimed = tx.add_job(job(&a, "acme in-flight work")).await.unwrap();
-    tx.claim_jobs(std::slice::from_ref(&claimed.id), a.user, None)
+    tx.claim_jobs(std::slice::from_ref(&claimed.id), a.user, None, None)
         .await
         .unwrap();
     let claimed = tx
@@ -128,12 +128,26 @@ async fn cross_org_mutation_is_refused(pool: PgPool) {
         .is_err());
     assert!(tx.delete_job(&target.id).await.is_err());
     assert!(tx
-        .claim_jobs(std::slice::from_ref(&target.id), b.user, None)
+        .claim_jobs(std::slice::from_ref(&target.id), b.user, None, None)
         .await
         .is_err());
     assert!(tx.repend_job(&target.id).await.is_err());
     assert!(tx.request_cancel(&target.id, b.user, None).await.is_err());
     assert!(tx.cancel_job(&claimed.id, None).await.is_err());
+    // The GH#65 claim-expiry additions: `claimed` is a real, live claim held
+    // by A in A's org, so a call that reached the row would succeed. From B's
+    // pinned transaction the row must not even be found — guard 1's org_id
+    // predicate, not the claimer check inside `ensure_claim_held`, is what
+    // has to refuse these.
+    assert!(tx.renew_claim(&claimed.id, b.user, None).await.is_err());
+    assert!(tx
+        .complete_job(&claimed.id, b.user, Some("pwned"))
+        .await
+        .is_err());
+    assert!(tx
+        .fail_job(&claimed.id, b.user, Some("pwned"))
+        .await
+        .is_err());
     let _ = tx.rollback().await;
 
     // A's jobs are untouched — including `claimed`'s in-progress status and
@@ -148,6 +162,11 @@ async fn cross_org_mutation_is_refused(pool: PgPool) {
     assert_eq!(after_claimed.status, of_core::jobs::Status::InProgress);
     assert!(after_claimed.cancel_requested_at.is_some());
     assert_eq!(after_claimed.cancel_reason.as_deref(), Some("stop"));
+    assert_eq!(
+        after_claimed.claimed_by,
+        Some(a.user),
+        "B's cross-org renew/complete/fail attempts must not have touched the claim"
+    );
 }
 
 /// The idempotency-key unique index is `(org_id, idempotency_key)`, not a
