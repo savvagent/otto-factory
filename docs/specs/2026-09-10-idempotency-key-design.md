@@ -210,8 +210,9 @@ pub fn fingerprint(payload: &serde_json::Value) -> Vec<u8> {
 }
 ```
 
-`of-core/Cargo.toml` gains `sha2.workspace = true` (already a workspace dependency, used
-today only by `of-auth`).
+`of-core/Cargo.toml` gains `sha2.workspace = true` (already a workspace dependency; `of-auth`,
+`of-billing`, `of-trackers`, and `of-web` already depend on it directly — `of-core` is simply
+adding itself to that list, not introducing the crate).
 
 ## §4 — `crates/of-core/src/jobs.rs`
 
@@ -271,19 +272,39 @@ pub async fn find_replayed_job(&mut self, new: &NewJob) -> Result<Option<Job>> {
 
 ```rust
 fn job_idempotency_fingerprint(new: &NewJob) -> Vec<u8> {
-    let mut depends_on: Vec<&str> = new.depends_on.iter().map(|j| j.0.as_str()).collect();
+    // Named-field destructure with no `..` — this is deliberate: adding a
+    // field to `NewJob` without deciding whether it belongs in the
+    // fingerprint fails to *compile*, not just to be noticed on review.
+    // Match ergonomics bind each of these by reference from `new: &NewJob`.
+    let NewJob {
+        repo_id,
+        team_id,
+        title,
+        description,
+        ticket_ref,
+        tracker,
+        agent_type,
+        metadata,
+        depends_on,
+        created_by,
+        // The key names the replay lookup; it is never part of what makes
+        // two calls "the same call".
+        idempotency_key: _,
+    } = new;
+
+    let mut depends_on: Vec<&str> = depends_on.iter().map(|j| j.0.as_str()).collect();
     depends_on.sort_unstable();
     crate::idempotency::fingerprint(&serde_json::json!({
-        "repoId": new.repo_id,
-        "teamId": new.team_id,
-        "title": new.title.trim(),
-        "description": new.description,
-        "ticketRef": new.ticket_ref,
-        "tracker": new.tracker,
-        "agentType": new.agent_type,
-        "metadata": new.metadata,
+        "repoId": repo_id,
+        "teamId": team_id,
+        "title": title.trim(),
+        "description": description,
+        "ticketRef": ticket_ref,
+        "tracker": tracker,
+        "agentType": agent_type,
+        "metadata": metadata,
         "dependsOn": depends_on,
-        "createdBy": new.created_by,
+        "createdBy": created_by,
     }))
 }
 ```
@@ -455,8 +476,31 @@ pub idempotency_key: Option<String>,
 ```
 
 `add_job`'s handler is restructured so metering only happens for a call that actually does
-something — see `Factory::charge`'s doc comment in `crates/of-mcp/src/server.rs`, which
-this adds as a third named exception alongside `watch` and `sync_ticket`:
+something. `Factory::charge`'s doc comment in `crates/of-mcp/src/server.rs` names two
+existing exceptions to "charge first" (`watch`, `sync_ticket`), and both are there because
+of an *unrollbackable external effect*: `watch` cannot hold a transaction open across a
+30-second poll, and `sync_ticket` has already made an outbound call to the tracker before
+any `Tx` opens, so a quota refusal must not roll back the loop-safety state that call needs
+recorded. The idempotency-key case is a different shape of exception and should be
+documented as a third, separate one rather than grouped with those two as if the reasoning
+were identical: `find_replayed_job` is a **read**, inside the *same* transaction `charge`
+would run in, with no external effect and nothing to lose to a rollback — it just has to
+run first so a replay can be told apart from new work before `charge` is called at all
+(a replay must never be billed, and there is no way to "un-charge" after the fact). Add
+this to the doc comment as its own paragraph:
+
+```
+/// A third, different-shaped exception: `add_job`/`send_message`'s
+/// idempotent-replay check. Unlike `watch`/`sync_ticket` above, this one has
+/// no unrollbackable external effect to protect — it is a plain read inside
+/// the same transaction `charge` would use. It still has to run before
+/// `charge`, because the only way to guarantee a replay is never billed is
+/// to know it is a replay before billing anything; there is no way to
+/// refund a charge already recorded. See `tools::jobs::add_job` /
+/// `tools::coord::send_message` and the idempotency-key design spec §5/§8.
+```
+
+With that documented, the handler:
 
 ```rust
 pub async fn add_job(
@@ -512,10 +556,15 @@ The identical shape, applied to `send_message`/`NewMessage`/`SendMessageArgs`:
   mirroring `find_replayed_job` exactly (`sender` is a parameter of `send_message`, not a
   `NewMessage` field, so it is threaded through separately and included in the fingerprint
   payload).
-- `message_idempotency_fingerprint` fingerprints `{sender, body: new.body.trim(),
-  recipientUserId, teamId, kind, senderKind, senderLabel, repoId, jobId, inReplyTo}` —
-  `senderKind`/`senderLabel` included because they are caller-supplied and change what the
-  message actually says on screen even for byte-identical `body`.
+- `message_idempotency_fingerprint(sender: UserId, new: &NewMessage) -> Vec<u8>` fingerprints
+  `{sender, body: new.body.trim(), recipientUserId, teamId, kind, senderKind, senderLabel,
+  repoId, jobId, inReplyTo}` — `senderKind`/`senderLabel` included because they are
+  caller-supplied and change what the message actually says on screen even for
+  byte-identical `body`. Built the same way `job_idempotency_fingerprint` is (§4): a
+  named-field `let NewMessage { body, recipient_user_id, team_id, kind, sender_kind,
+  sender_label, repo_id, job_id, in_reply_to, idempotency_key: _ } = new;` with no `..`, so
+  a field added to `NewMessage` later without updating this function fails to compile
+  rather than silently fingerprinting an incomplete payload.
 - `Tx::send_message`'s insert gains the same idempotency columns +
   SAVEPOINT/unique-violation-fallback shape, matched against constraint name
   `messages_org_idempotency_key_idx`. `send_message` has no dependency step, so there is no
@@ -642,22 +691,33 @@ much rarer event than the sequential retry the issue is written to fix.
 
 ## Risks & Open Questions
 
-- The payload fingerprint is deliberately narrow (the fields that define "what this call
-  does"), not a hash of the raw wire request. If a future field is added to `NewJob`/
-  `NewMessage` and the corresponding fingerprint literal is not updated to include it, two
-  calls differing only in that field would incorrectly be treated as the same payload and
-  replay-collapsed. Mitigated by keeping the fingerprint construction next to `NewJob`/
-  `NewMessage` in the same file (§4/§6) rather than in a separate module, so the two are
-  visually adjacent to whoever next edits either struct — flagged here for the spec
-  critique to weigh in on whether a compile-time assertion (e.g. destructuring `new` by
-  name inside the fingerprint function, which already forces this file to name every field)
-  is sufficient, given `NewJob`/`NewMessage` already derive `Default` and neither is
-  `#[non_exhaustive]`.
+- **Resolved by spec critique.** The payload fingerprint is deliberately narrow (the
+  fields that define "what this call does"), not a hash of the raw wire request. Left
+  unmitigated, a future field added to `NewJob`/`NewMessage` without a matching update to
+  the fingerprint would silently collapse two genuinely different calls into "the same
+  payload". §4/§6 now require the fingerprint functions to destructure `NewJob`/
+  `NewMessage` by name with no `..` catch-all — a field added to either struct without a
+  decision about whether it belongs in the fingerprint fails to *compile*, not just to be
+  missed on review. This is a committed requirement of the implementation, not an optional
+  strengthening.
 - `db.constraint()` is used to disambiguate `jobs_org_idempotency_key_idx` from
   `jobs_org_repo_tracker_ticket_open_idx` (0015) on a unique-violation from `add_job`'s
   insert. In practice `add_job`'s own insert sets `tracker = NULL` always (only
   `create_from_ticket`/`link_ticket` set a `Tracker`), so 0015's index — which requires a
   non-NULL `tracker` to even participate meaningfully across rows — should never be the one
   that fires from this code path; the constraint-name check is defensive rather than
-  load-bearing today, and is called out here so a reviewer checking "is this actually
-  reachable" does not need to re-derive it.
+  load-bearing today. Confirmed by spec critique as correct and worth keeping exactly as
+  written: cheap, and it fails loudly rather than misattributing a different index's
+  collision as an idempotency conflict.
+- **The concurrent-race over-billing accepted in §8 is a conscious departure from
+  `of-billing`'s stated default bias, not merely a performance tradeoff, and should be read
+  that way by anyone revisiting `classify`'s reasoning later.** `CLAUDE.md`'s metering
+  section states the general rule as "over-billing a customer for something nobody decided
+  to charge for is a worse failure than under-billing ourselves" — but that rule is about
+  an *unclassified* tool silently billing when nobody decided it should be billable at all,
+  which is not this case (`add_job`/`send_message` are deliberately `Billable`; what is in
+  question is a single narrow over-count on an exceptionally rare concurrent race, not
+  whether the tool should be charged for at all). §8 names the tradeoff and the reasoning
+  for accepting it; this bullet exists so that reasoning is discoverable from "Risks &
+  Open Questions" too, not only from inside §8, the next time someone audits every place
+  this codebase knowingly over-bills.
