@@ -529,13 +529,14 @@ fn entity_schemas() -> Value {
         "Lease": {
             "type": "object",
             "description":
-                "An advisory, time-bounded claim on one branch of one repo. The server \
-                 cannot enforce it against a git operation it cannot see; it makes \
+                "An advisory, time-bounded claim on one resource of one repo — a \
+                 branch, or anything else a team needs to serialize on. The server \
+                 cannot enforce it against an operation it cannot see; it makes \
                  collisions visible rather than impossible.",
             "properties": {
                 "id": uuid,
                 "repoId": uuid,
-                "branch": { "type": "string" },
+                "resource": { "type": "string" },
                 "holderUserId": uuid,
                 "holderLabel": { "type": ["string", "null"] },
                 "jobId": { "type": ["string", "null"] },
@@ -543,7 +544,7 @@ fn entity_schemas() -> Value {
                 "renewedAt": timestamp,
                 "expiresAt": timestamp,
             },
-            "required": ["id", "repoId", "branch", "holderUserId", "expiresAt"],
+            "required": ["id", "repoId", "resource", "holderUserId", "expiresAt"],
         },
         "LeaseList": { "type": "array", "items": reference("Lease") },
         "Session": {
@@ -1317,6 +1318,32 @@ mod tests {
                 .get("security")
                 .is_none(),
             "a public endpoint must not require a session"
+        );
+    }
+
+    /// This schema is hand-written, not derived from `of_core::leases::Lease`,
+    /// so a field rename on the Rust side has no compiler to catch it here —
+    /// this test is the only thing that would have caught `Lease.branch`
+    /// surviving in the published document after the struct's field was
+    /// renamed to `resource`.
+    #[test]
+    fn the_lease_schema_matches_the_wire_field_it_actually_returns() {
+        let doc = doc();
+        let lease = &doc["components"]["schemas"]["Lease"];
+        assert!(
+            lease["properties"]["resource"].is_object(),
+            "Lease schema is missing a resource property: {lease}"
+        );
+        assert!(
+            lease["properties"].get("branch").is_none(),
+            "Lease schema still advertises the retired branch field: {lease}"
+        );
+        assert!(
+            lease["required"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("resource")),
+            "resource is required on every Lease this route returns: {lease}"
         );
     }
 
