@@ -23,10 +23,16 @@
 > `$target` in §1's script are read from a blob any PR author controls and were echoed unsanitized
 > into `::error::` lines — a crafted blob containing an embedded newline could inject a second
 > workflow command (low severity here: `contents: read`, no secrets, `pull_request` not
-> `pull_request_target`, and a fork PR already gets code execution later in the same job) and a
-> trailing newline was silently stripped by command substitution, letting a target differing only by
-> a trailing `\n` compare equal. Both closed by piping through `tr -d '\n\r'` before comparing or
-> printing either value.
+> `pull_request_target`, and a fork PR already gets code execution later in the same job).
+>
+> **Second post-review correction:** the automated PR reviewer (`copilot-pull-request-reviewer`)
+> caught a real regression in the first fix above — piping `$target` through `tr -d '\n\r'` *before*
+> the equality check makes the assertion more permissive, not stricter: a symlink blob with an
+> embedded newline (e.g. `../.gith\nub/skills`, a different, dangling target) would wrongly compare
+> equal to `../.github/skills` once the newline is stripped first. Confirmed empirically — the old
+> form falsely matched; the fix below compares `$line`/`$target` byte-for-byte (unmodified) and only
+> computes a newline-stripped copy for the `::error::` message, and only inside the branch that is
+> already failing. §1's script and this section updated to match.
 
 ## Goal & Success Criteria
 
@@ -106,7 +112,7 @@ toolchain, so ordering it first fails fast and cheaply if it's ever going to fai
 - name: Assert .claude/skills resolves to .github/skills
   run: |
     set -euo pipefail
-    line=$(git ls-tree HEAD .claude/skills | tr -d '\n\r')
+    line=$(git ls-tree HEAD .claude/skills)
     if [ -z "$line" ]; then
       echo "::error::.claude/skills does not exist in HEAD (expected a symlink)"
       exit 1
@@ -115,12 +121,14 @@ toolchain, so ordering it first fails fast and cheaply if it's ever going to fai
     mode=$(printf '%s' "$fields" | awk '{print $1}')
     type=$(printf '%s' "$fields" | awk '{print $2}')
     if [ "$mode" != "120000" ] || [ "$type" != "blob" ]; then
-      echo "::error::.claude/skills is not a symlink blob in HEAD (git ls-tree: $line)"
+      safe_line=$(printf '%s' "$line" | tr -d '\n\r')
+      echo "::error::.claude/skills is not a symlink blob in HEAD (git ls-tree: $safe_line)"
       exit 1
     fi
-    target=$(git cat-file blob HEAD:.claude/skills | tr -d '\n\r')
+    target=$(git cat-file blob HEAD:.claude/skills)
     if [ "$target" != "../.github/skills" ]; then
-      echo "::error::.claude/skills points at '$target', expected '../.github/skills'"
+      safe_target=$(printf '%s' "$target" | tr -d '\n\r')
+      echo "::error::.claude/skills points at '$safe_target', expected '../.github/skills'"
       exit 1
     fi
     if [ ! -f .claude/skills/otto-factory-development/SKILL.md ]; then
@@ -129,12 +137,14 @@ toolchain, so ordering it first fails fast and cheaply if it's ever going to fai
     fi
 ```
 
-`$line`/`$target` are read from a blob any PR author controls, so both are piped through
-`tr -d '\n\r'` before being compared or echoed into a `::error::` line — GitHub Actions parses any
-`::`-prefixed stdout line as a workflow command, so an embedded newline in the blob content could
-otherwise inject a second command, and command substitution only strips a *trailing* newline, which
-would otherwise let a target differing solely by a trailing `\n` compare equal (see the Status
-blockquote's Post-review correction).
+`$line`/`$target` are read from a blob any PR author controls, so the **comparisons** above use them
+byte-for-byte, unmodified — stripping newlines before an equality check would make the check more
+permissive, not stricter (a target differing only by an embedded newline would wrongly compare
+equal once stripped; confirmed empirically, see the Status blockquote's second Post-review
+correction). Only the copy computed inside an already-failing branch, for the `::error::` message
+itself, is passed through `tr -d '\n\r'` first — GitHub Actions parses any `::`-prefixed stdout line
+as a workflow command, so an unsanitized embedded newline in the printed value could otherwise
+inject a second command.
 
 - `git ls-tree` / `git cat-file` read the committed tree object directly — this checks what's
   *committed*, the same thing `verify_tenant_isolation`-style guards in this repo check state rather

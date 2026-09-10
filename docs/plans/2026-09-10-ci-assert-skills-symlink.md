@@ -15,14 +15,19 @@ implements it exactly.
 found one real bug before implementation (the deleted-path negative check originally pointed at a
 pre-#124 commit that still had `.claude/skills` as a real tracked directory, not an absent path —
 fixed to point at the repo's actual root commit `7cbddbb`). The PR review round (mandatory
-rust-pro/architect/blind-security trio plus pr-review-toolkit passes) found two further real
-issues beyond this plan's own critique: the spec's own deleted-path verification claim still named
-the wrong (pre-#124) commit after the plan had already been corrected, and `$line`/`$target` in
-the script were echoed unsanitized into `::error::` lines — a blob any PR author controls, so an
-embedded newline could inject a workflow command and a trailing newline was silently stripped by
-command substitution, letting a wrong target compare equal. Both fixed before merge (spec
-corrected; script pipes both values through `tr -d '\n\r'`); see the spec's Status block for
-detail.
+rust-pro/architect/blind-security trio plus pr-review-toolkit passes, then the automated
+`copilot-pull-request-reviewer`) found three further real issues beyond this plan's own critique:
+the spec's own deleted-path verification claim still named the wrong (pre-#124) commit after the
+plan had already been corrected; `$line`/`$target` in the script were echoed unsanitized into
+`::error::` lines, a log-injection risk since they're read from a blob any PR author controls; and
+the first fix for that — stripping newlines from `$line`/`$target` *before* the equality
+comparisons, not just before printing — introduced a real regression Copilot caught: it made the
+target check more permissive, since an embedded-newline target would then wrongly compare equal
+once stripped. All three fixed before merge (spec corrected; the script now compares `$line`/
+`$target` byte-for-byte and only sanitizes a separate copy computed inside the failing branch, for
+the printed message); see the spec's Status block for detail. This plan's own embedded script
+snippet below is kept in sync with the final `.github/workflows/ci.yml` step, per Copilot's fourth
+comment (the plan had drifted from the implementation after the first round of fixes).
 
 ---
 
@@ -84,8 +89,9 @@ interface surface.
       test -f .claude/skills/otto-factory-development/SKILL.md
       echo ALL PASS
       ```
-- [x] Add the step from spec §1 verbatim to `.github/workflows/ci.yml`'s `rust` job, between
-      `actions/checkout@v4` and `Install Rust toolchain`:
+- [x] Add the step from spec §1 to `.github/workflows/ci.yml`'s `rust` job, between
+      `actions/checkout@v4` and `Install Rust toolchain` (this block is kept in sync with the
+      final, post-review script — see this plan's Status section for what changed and why):
       ```yaml
       - name: Assert .claude/skills resolves to .github/skills
         run: |
@@ -99,12 +105,14 @@ interface surface.
           mode=$(printf '%s' "$fields" | awk '{print $1}')
           type=$(printf '%s' "$fields" | awk '{print $2}')
           if [ "$mode" != "120000" ] || [ "$type" != "blob" ]; then
-            echo "::error::.claude/skills is not a symlink blob in HEAD (git ls-tree: $line)"
+            safe_line=$(printf '%s' "$line" | tr -d '\n\r')
+            echo "::error::.claude/skills is not a symlink blob in HEAD (git ls-tree: $safe_line)"
             exit 1
           fi
           target=$(git cat-file blob HEAD:.claude/skills)
           if [ "$target" != "../.github/skills" ]; then
-            echo "::error::.claude/skills points at '$target', expected '../.github/skills'"
+            safe_target=$(printf '%s' "$target" | tr -d '\n\r')
+            echo "::error::.claude/skills points at '$safe_target', expected '../.github/skills'"
             exit 1
           fi
           if [ ! -f .claude/skills/otto-factory-development/SKILL.md ]; then
