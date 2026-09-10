@@ -434,9 +434,10 @@ impl Tx<'_> {
                     .fetch_optional(self.conn())
                     .await?
                     .ok_or_else(|| {
-                        Error::Invalid(format!(
-                            "add_job lost a unique-violation race for idempotency key \
-                             {key:?} but no concurrently-created job was found"
+                        Error::RaceLost(format!(
+                            "add_job lost a unique-violation race for idempotency key {key:?} but no \
+                             concurrently-created job was found — this is a transient server-side race; \
+                             retry the call"
                         ))
                     })?;
                     if winner.1 != hash {
@@ -669,9 +670,9 @@ impl Tx<'_> {
                     .get_live_job_by_ticket_for_repo(repo_id, tracker, ticket_ref)
                     .await?
                     .ok_or_else(|| {
-                        Error::Invalid(format!(
-                            "link_ticket lost a unique-violation for {ticket_ref:?} but no \
-                             conflicting job was found"
+                        Error::RaceLost(format!(
+                            "link_ticket lost a unique-violation for {ticket_ref:?} but no conflicting job \
+                             was found — this is a transient server-side race; retry the call"
                         ))
                     })?;
                 return Err(Error::TicketAlreadyLinked {
@@ -781,9 +782,10 @@ impl Tx<'_> {
                 self.get_job_by_ticket_for_repo(repo_id, tracker, ticket_ref)
                     .await?
                     .ok_or_else(|| {
-                        Error::Invalid(format!(
-                            "create_from_ticket lost a unique-violation race for {ticket_ref:?} \
-                             but no concurrently-created job was found"
+                        Error::RaceLost(format!(
+                            "create_from_ticket lost a unique-violation race for {ticket_ref:?} but no \
+                             concurrently-created job was found — this is a transient server-side race; \
+                             retry the call"
                         ))
                     })?
             }

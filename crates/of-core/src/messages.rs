@@ -305,9 +305,10 @@ impl Tx<'_> {
                     .fetch_optional(self.conn())
                     .await?
                     .ok_or_else(|| {
-                        Error::Invalid(format!(
-                            "send_message lost a unique-violation race for idempotency key \
-                             {key:?} but no concurrently-created message was found"
+                        Error::RaceLost(format!(
+                            "send_message lost a unique-violation race for idempotency key {key:?} but no \
+                             concurrently-created message was found — this is a transient server-side \
+                             race; retry the call"
                         ))
                     })?;
                     if winner.1 != hash {

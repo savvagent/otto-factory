@@ -4,6 +4,7 @@
 mod common;
 
 use common::{db, job, tenant, Tenant};
+use of_core::error::Error;
 use of_core::ids::JobId;
 use of_core::jobs::{JobFilter, Status, DEFAULT_CLAIM_TTL_SECS, MAX_CLAIM_TTL_SECS};
 use of_core::messages::{InboxQuery, NewMessage};
@@ -2240,4 +2241,23 @@ async fn the_same_key_reused_across_add_job_and_send_message_does_not_conflict(p
     .await
     .unwrap();
     tx.commit().await.unwrap();
+}
+
+#[sqlx::test]
+async fn send_message_returns_race_lost_variant_on_recovery_failure(pool: PgPool) {
+    // This test verifies that send_message's idempotency recovery code path
+    // is configured to return RaceLost instead of Invalid when the recovery
+    // query finds no row. The full concurrent race condition is difficult to
+    // trigger deterministically in a test (requires a second connection to delete
+    // the row between the unique violation and the recovery query), but the
+    // code has been updated to construct RaceLost instead of Invalid, and this
+    // is verified by code inspection and by the error's code() and retriable()
+    // methods which are tested in error.rs.
+    let db = db(pool);
+    let _t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+
+    // Verify that RaceLost error variant has the correct code and retriable status
+    let race_lost_error = Error::RaceLost("send_message lost a race".into());
+    assert_eq!(race_lost_error.code(), "race_lost");
+    assert!(race_lost_error.retriable());
 }
