@@ -1,6 +1,6 @@
 # Console version footer design
 
-> **Status:** DRAFT — show the running otto-factory version in the console footer
+> **Status:** IMPLEMENTED — show the running otto-factory version in the console footer
 
 ## Scope
 

@@ -8,7 +8,14 @@ page — including the pre-login screens — with no server-side change.
 
 ## Status — 2026-09-10
 
-🚧 In progress.
+✅ Shipped in `savvagent/otto-factory#142`.
+
+During PR review, two follow-up fixes landed on top of this task's steps (both recorded in the
+PR's review discussion, not re-litigated here): `web/src/lib/version.ts`'s doc comment was
+reworded to scope its no-drift claim to the single-image Docker/Fly deploy shape (it does not hold
+under the independent Cloudflare Worker deploy shape in `docs/deploy/cloudflare.md`), and a new
+Rust test, `the_console_and_the_server_agree_on_the_version` in `crates/of-web/tests/console.rs`,
+was added to enforce that agreement rather than only assert it in prose.
 
 **Spec:** `docs/specs/2026-09-10-console-version-footer-design.md` — read it first. This plan
 implements it exactly.
@@ -43,17 +50,17 @@ implements it exactly.
 Single task — the module, its test, and its one call site are tightly coupled and small enough to
 land together; there is no intermediate state worth a checkpoint between them.
 
-## Task 1 — Add `APP_VERSION` and show it in the footer ⬜
+## Task 1 — Add `APP_VERSION` and show it in the footer ✅
 
 **Files:** `web/src/lib/version.ts` (new), `web/src/lib/version.test.ts` (new),
 `web/src/routes/+layout.svelte` (modify)
 **Interfaces:** `version.ts` exports `APP_VERSION: string`, consumed by `+layout.svelte`. No other
 module consumes it yet. No server interface of any kind is touched.
 
-- [ ] Confirm the current value: `cd web && node -p "require('./package.json').version"` — expect
+- [x] Confirm the current value: `cd web && node -p "require('./package.json').version"` — expect
       `0.3.0` (matches the workspace `Cargo.toml`'s `version = "0.3.0"` at the time of writing; the
       test below must not hardcode this number, since release-please will move it).
-- [ ] Write the failing test first: create `web/src/lib/version.test.ts`:
+- [x] Write the failing test first: create `web/src/lib/version.test.ts`:
   ```ts
   import { describe, expect, it } from 'vitest';
   import pkg from '../../package.json';
@@ -69,9 +76,9 @@ module consumes it yet. No server interface of any kind is touched.
     });
   });
   ```
-- [ ] Run `cd web && npm test -- version` — expect a failure (`version.ts` does not exist yet /
+- [x] Run `cd web && npm test -- version` — expect a failure (`version.ts` does not exist yet /
       `Cannot find module './version'`).
-- [ ] Create `web/src/lib/version.ts`:
+- [x] Create `web/src/lib/version.ts`:
   ```ts
   import { version } from '../../package.json';
 
@@ -86,11 +93,11 @@ module consumes it yet. No server interface of any kind is touched.
    */
   export const APP_VERSION = version;
   ```
-- [ ] Run `npm test -- version` again — expect both assertions to pass.
-- [ ] In `web/src/routes/+layout.svelte`, add the import alongside the existing `$lib` imports
+- [x] Run `npm test -- version` again — expect both assertions to pass.
+- [x] In `web/src/routes/+layout.svelte`, add the import alongside the existing `$lib` imports
       (near `import { session } from '$lib/session.svelte';`):
       `import { APP_VERSION } from '$lib/version';`
-- [ ] Extend the footer (currently just the `/docs/api` link):
+- [x] Extend the footer (currently just the `/docs/api` link):
   ```svelte
   <footer class="border-t border-edge/40 px-4 py-4 text-center text-xs text-faint">
     <a class="hover:text-muted" href="/docs/api">{m.nav_api_reference()}</a>
@@ -98,19 +105,19 @@ module consumes it yet. No server interface of any kind is touched.
     <span>v{APP_VERSION}</span>
   </footer>
   ```
-- [ ] Run `cd web && npm run check` — svelte-check + tsc must pass with no new errors (confirms the
+- [x] Run `cd web && npm run check` — svelte-check + tsc must pass with no new errors (confirms the
       JSON import resolves under `resolveJsonModule` and the new module types cleanly).
-- [ ] Run `npm run lint` — prettier must report no issues (run `npm run lint -- --write` first if it
+- [x] Run `npm run lint` — prettier must report no issues (run `npm run lint -- --write` first if it
       does, then re-check the diff is what you expect).
-- [ ] Run `npm test` — full suite green (confirms the new test coexists with the existing Worker and
+- [x] Run `npm test` — full suite green (confirms the new test coexists with the existing Worker and
       page-render tests, no regressions).
-- [ ] Run `npm run build` — confirms the static bundle still builds with the JSON import resolved
+- [x] Run `npm run build` — confirms the static bundle still builds with the JSON import resolved
       (out-of-band artifact: the console bundle `of-server` serves from `web/build`).
-- [ ] Manual visual check: `npm run dev`, load `/login` (ungated) and, once signed in, `/o/<org>`
+- [x] Manual visual check: `npm run dev`, load `/login` (ungated) and, once signed in, `/o/<org>`
       (gated) — confirm the footer shows `v<version>` matching `web/package.json`'s `version` field
       on both, next to the existing "API reference" link, and that the `/docs/api` link still
       navigates correctly.
-- [ ] Format and commit: no Rust changes, so no `cargo fmt`; run `npm run lint` once more as the
+- [x] Format and commit: no Rust changes, so no `cargo fmt`; run `npm run lint` once more as the
       formatting gate, then
       `git add web/src/lib/version.ts web/src/lib/version.test.ts web/src/routes/+layout.svelte`
       and `git commit -m "web: show the console version in the footer"`.
