@@ -3,6 +3,9 @@
 **Spec:** `docs/specs/2026-09-10-race-lost-retriable-design.md` — read it first. This plan
 implements it exactly.
 
+> Plan critique approved on first pass; two non-blocking advisories applied (dropped a
+> nonexistent `--test messages` target from Task 2's commands).
+
 ## Goal
 
 Closes `savvagent/otto-factory#100`: reclassify the "lost a unique-violation race with no
@@ -118,10 +121,12 @@ value to convert, so it lands last.
       `crates/of-core/tests/jobs.rs` / `crates/of-core/tests/queue.rs`, so add alongside that
       existing coverage rather than a new file. At minimum, one such test must exist proving a
       real call site now returns `RaceLost` where it used to return `Invalid`.
-- [ ] Run the new test(s) with `cargo test -p of-core --test jobs` (and `--test queue` if that
-      is where `send_message`/`add_job` coverage lives) — confirm they fail against the
-      current `Error::Invalid` sites (or fail to compile if written against `Error::RaceLost`
-      before Task 1's variant exists — Task 1 must already be committed at this point).
+- [ ] Run the new test(s) with `cargo test -p of-core --test jobs --test queue` (`add_job`/
+      `create_from_ticket`/`link_ticket` coverage lives in `tests/jobs.rs`; `send_message`
+      coverage lives in `tests/queue.rs`/`tests/isolation.rs` — there is no separate
+      `tests/messages.rs`) — confirm they fail against the current `Error::Invalid` sites (or
+      fail to compile if written against `Error::RaceLost` before Task 1's variant exists —
+      Task 1 must already be committed at this point).
 - [ ] In `crates/of-core/src/jobs.rs`, change `Tx::add_job`'s idempotency-key recovery
       `ok_or_else` (currently `crates/of-core/src/jobs.rs:437-441`) from `Error::Invalid` to:
       ```rust
@@ -168,11 +173,10 @@ value to convert, so it lands last.
           ))
       })?;
       ```
-- [ ] Run `cargo test -p of-core --test jobs --test queue --test messages` (adjust to the
-      actual suite names covering `jobs.rs`/`messages.rs`) — confirm the new test(s) from step
-      1 now pass and every pre-existing test in those suites still passes (in particular any
-      test touching `TicketAlreadyLinked`, `IdempotencyKeyConflict`, or the happy-path
-      recovery arms, which must be unaffected).
+- [ ] Run `cargo test -p of-core --test jobs --test queue --test isolation` — confirm the new
+      test(s) from step 1 now pass and every pre-existing test in those suites still passes
+      (in particular any test touching `TicketAlreadyLinked`, `IdempotencyKeyConflict`, or the
+      happy-path recovery arms, which must be unaffected).
 - [ ] Run `cargo test -p of-core` (full crate) and `cargo clippy -p of-core --all-targets --
       -D warnings` — confirm clean.
 - [ ] Format and commit: `cargo fmt --all` then
