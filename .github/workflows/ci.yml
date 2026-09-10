@@ -59,6 +59,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Assert .claude/skills resolves to .github/skills
+        run: |
+          set -euo pipefail
+          line=$(git ls-tree HEAD .claude/skills)
+          if [ -z "$line" ]; then
+            echo "::error::.claude/skills does not exist in HEAD (expected a symlink)"
+            exit 1
+          fi
+          fields=$(printf '%s' "$line" | cut -f1)
+          mode=$(printf '%s' "$fields" | awk '{print $1}')
+          type=$(printf '%s' "$fields" | awk '{print $2}')
+          if [ "$mode" != "120000" ] || [ "$type" != "blob" ]; then
+            echo "::error::.claude/skills is not a symlink blob in HEAD (git ls-tree: $line)"
+            exit 1
+          fi
+          target=$(git cat-file blob HEAD:.claude/skills)
+          if [ "$target" != "../.github/skills" ]; then
+            echo "::error::.claude/skills points at '$target', expected '../.github/skills'"
+            exit 1
+          fi
+          if [ ! -f .claude/skills/otto-factory-development/SKILL.md ]; then
+            echo "::error::.claude/skills/otto-factory-development/SKILL.md not reachable through the symlink"
+            exit 1
+          fi
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
