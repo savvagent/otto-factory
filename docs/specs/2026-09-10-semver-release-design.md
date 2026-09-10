@@ -52,7 +52,11 @@ bump).
   shape) is strategy-internal behavior this spec cannot fully pin down without running it. `"simple"`
   with an explicit `extra-files` entry (a `toml` updater at `$.workspace.package.version`, a `json`
   updater for `web/package.json` at `$.version`) is fully specified by this document: it replaces
-  exactly those two values and nothing else. See §1 and Risks for `Cargo.lock`.
+  exactly those two values and nothing else. See §1 and Risks for `Cargo.lock`. The `"simple"`
+  release-type also unconditionally probes for an optional `version.txt` at the repo root
+  (`createIfMissing: false`); this repo has none, so every `release-please` run logs a harmless
+  "file version.txt did not exist" warning and continues — noted here so it isn't mistaken for a
+  broken run when someone first reads the job log.
 - **Adopting Conventional Commits for PR titles is required, not optional, for this to work.**
   release-please's bump computation reads commit *type* (`feat`, `fix`, …) from Conventional Commits
   syntax. This repo's existing convention is `<scope>: <subject>` (scope = crate/area, no type) —
@@ -137,7 +141,11 @@ bump).
 - A one-line note in `docs/clients/matrix.md` recording the MCP `server_info` identity fix (§3) —
   it changes a field every client observes at `initialize`, and Rule 6 asks for exactly that kind
   of client-visible change to be recorded there, even though correcting a wrong value to a right
-  one is a bug fix rather than a compatibility break.
+  one is a bug fix rather than a compatibility break. `matrix.md` otherwise records a dated,
+  point-in-time conformance run against a real client; phrase the new line as a recorded
+  code-level fix (e.g. "server_info now reports otto-factory's own name/version, not rmcp's —
+  fixed in <PR>, not re-verified against a live client as part of this run") rather than as an
+  observed conformance-run finding, so it isn't mistaken for one.
 
 **Out:**
 - Publishing any crate to crates.io, or any per-crate (rather than per-product) versioning. Nothing
