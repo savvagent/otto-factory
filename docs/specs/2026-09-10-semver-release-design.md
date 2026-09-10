@@ -1,7 +1,13 @@
 # SemVer release automation design
 
-> **Status:** DRAFT — release-please-driven versioning, tagged releases, an MCP identity fix, and a
-> release-gated deploy.
+> **Status:** IMPLEMENTED — shipped in savvagent/otto-factory#114 (merged as `670860e`), closing
+> savvagent/otto-factory#84. release-please-driven versioning, tagged releases, an MCP identity
+> fix, and a release-gated deploy. Hardened during review: job-level `permissions:` and an exact
+> commit-SHA pin for `pr-title`, a workflow-level read-only `permissions:` default, `deploy` and
+> `release-please` each given their own explicit push/master guard, `concurrency` reworked so a
+> master push is never queued behind (and so never cancellable by) another, and a `bootstrap-sha`
+> added to `release-please-config.json` so the first changelog doesn't backfill this repo's
+> pre-convention history. See PR #114 for the full review discussion.
 
 ## Goal & Success Criteria
 

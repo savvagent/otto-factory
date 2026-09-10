@@ -13,7 +13,9 @@ savvagent/otto-factory#84.
 
 ## Status — 2026-09-10
 
-⬜ Not started. Five tasks, sequential, single PR.
+✅ Shipped. All five tasks landed in savvagent/otto-factory#114 (merged as `670860e`), closing
+savvagent/otto-factory#84, with additional hardening from the mandatory review trio folded in
+before merge (see the spec's Status block for what changed post-review).
 
 ## Global Constraints
 
@@ -65,7 +67,7 @@ These hold for every task below:
    behavior established by Tasks 1–4; writing them first would risk documenting something that
    changed during implementation.
 
-## Task 1 — release-please config, manifest, and changelog seed
+## Task 1 — release-please config, manifest, and changelog seed ✅
 
 **Files:** `release-please-config.json`, `.release-please-manifest.json`, `CHANGELOG.md`
 
@@ -89,7 +91,7 @@ These hold for every task below:
       dependency tree, not its root version field), so no action is needed beyond naming it.
 - [ ] Format and commit: `git add release-please-config.json .release-please-manifest.json CHANGELOG.md && git commit -m "ci: add release-please config"`.
 
-## Task 2 — CI: release automation jobs
+## Task 2 — CI: release automation jobs ✅
 
 **Files:** `.github/workflows/ci.yml`
 
@@ -123,7 +125,7 @@ These hold for every task below:
       command.
 - [ ] Format and commit: `git add .github/workflows/ci.yml && git commit -m "ci: gate deploy on a release-please release, add PR title lint"`.
 
-## Task 3 — MCP server identity fix
+## Task 3 — MCP server identity fix ✅
 
 **Files:** `crates/of-mcp/src/server.rs`, `crates/of-mcp/tests/tools.rs`
 
@@ -147,7 +149,7 @@ value's `server_info` field changes from the `rmcp` crate's own identity to otto
       `cargo test -p of-mcp`.
 - [ ] Format and commit: `cargo fmt --all && git add crates/of-mcp/src/server.rs crates/of-mcp/tests/tools.rs && git commit -m "of-mcp: report otto-factory's own name and version at initialize, not rmcp's"`.
 
-## Task 4 — OpenAPI version regression test
+## Task 4 — OpenAPI version regression test ✅
 
 **Files:** `crates/of-web/tests/console.rs` (confirm this is where the OpenAPI-document tests
 actually live before writing — `grep -rn "openapi::document\|fn.*openapi" crates/of-web/tests/`; if
@@ -164,7 +166,7 @@ has (spec Premise corrections: `openapi.rs`'s `info.version` is already `env!("C
 - [ ] Run the full crate suite: `cargo test -p of-web`.
 - [ ] Format and commit: `cargo fmt --all && git add crates/of-web/tests/console.rs && git commit -m "of-web: pin the OpenAPI document's version to the workspace version"`.
 
-## Task 5 — Documentation
+## Task 5 — Documentation ✅
 
 **Files:** `CLAUDE.md`, `docs/deploy/fly.md`, `docs/specs/2026-09-08-master-autodeploy-design.md`,
 `docs/clients/matrix.md`
