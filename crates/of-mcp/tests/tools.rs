@@ -414,6 +414,7 @@ async fn the_full_loop_from_remote_url_to_completed_job(pool: PgPool) {
             Parameters(tools::jobs::ClaimJobsArgs {
                 jobs: vec![id.clone()],
                 agent: Some("api-agent@ci-7".into()),
+                ttl: None,
             }),
         )
         .await);
@@ -472,6 +473,7 @@ async fn activating_a_claimed_job_marks_it_active_and_completion_still_works(poo
             Parameters(tools::jobs::ClaimJobsArgs {
                 jobs: vec![id.clone()],
                 agent: Some("agent-one".into()),
+                ttl: None,
             }),
         )
         .await);
@@ -518,6 +520,105 @@ async fn activate_job_on_an_unclaimed_job_is_refused(pool: PgPool) {
         .await);
     assert_eq!(code_of(&e), "wrong_status");
     assert!(e.message.contains("in-progress"));
+}
+
+/// `renew_claim` is what lets a long-running agent keep a claim it is still
+/// actively working, the same way `renew_lease` keeps a branch lease alive —
+/// and the claim it extends must still finish normally afterwards.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn renew_claim_extends_the_claim_and_completion_still_works(pool: PgPool) {
+    let (env, caller) = env(pool).await;
+    env.register(&caller).await;
+
+    let job = env.add_job(&caller, "long running work").await;
+    let id = job["id"].as_str().unwrap().to_string();
+
+    let claimed = ok(env
+        .factory
+        .claim_jobs(
+            Extension(parts(&caller)),
+            Parameters(tools::jobs::ClaimJobsArgs {
+                jobs: vec![id.clone()],
+                agent: Some("agent-one".into()),
+                ttl: Some(120),
+            }),
+        )
+        .await);
+    let expires_after_claim = claimed["jobs"][0]["claimExpiresAt"]
+        .as_str()
+        .expect("claimExpiresAt")
+        .to_string();
+
+    let renewed = ok(env
+        .factory
+        .renew_claim(
+            Extension(parts(&caller)),
+            Parameters(tools::jobs::RenewClaimArgs {
+                job: id.clone(),
+                ttl: Some(3600),
+            }),
+        )
+        .await);
+    let expires_after_renew = renewed["job"]["claimExpiresAt"]
+        .as_str()
+        .expect("claimExpiresAt")
+        .to_string();
+
+    assert!(
+        expires_after_renew > expires_after_claim,
+        "renew_claim did not push the expiry forward: {expires_after_claim} -> {expires_after_renew}"
+    );
+
+    let done = ok(env
+        .factory
+        .complete_job(
+            Extension(parts(&caller)),
+            Parameters(tools::jobs::CompleteJobArgs {
+                job: id,
+                result: Some("done".into()),
+            }),
+        )
+        .await);
+    assert_eq!(done["job"]["status"], "completed");
+}
+
+/// Only the agent that actually holds a claim may finalize it — a stray
+/// `complete_job` from anyone else must never let one agent close out work it
+/// did not do.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn complete_job_from_a_non_holder_is_refused(pool: PgPool) {
+    let (env, caller) = env(pool).await;
+    env.register(&caller).await;
+    let intruder = env.teammate(caller.org_id, "mallory@acme.test").await;
+
+    let job = env
+        .add_job(&caller, "claimed by one, finished by another")
+        .await;
+    let id = job["id"].as_str().unwrap().to_string();
+
+    ok(env
+        .factory
+        .claim_jobs(
+            Extension(parts(&caller)),
+            Parameters(tools::jobs::ClaimJobsArgs {
+                jobs: vec![id.clone()],
+                agent: Some("agent-one".into()),
+                ttl: None,
+            }),
+        )
+        .await);
+
+    let e = err(env
+        .factory
+        .complete_job(
+            Extension(parts(&intruder)),
+            Parameters(tools::jobs::CompleteJobArgs {
+                job: id,
+                result: Some("not yours to finish".into()),
+            }),
+        )
+        .await);
+    assert_eq!(code_of(&e), "already_claimed");
 }
 
 /// A pending job has no holder to wait on, so `request_cancel` finalizes it
@@ -605,6 +706,7 @@ async fn request_cancel_then_cancel_job_on_a_claimed_job(pool: PgPool) {
             Parameters(tools::jobs::ClaimJobsArgs {
                 jobs: vec![id.clone()],
                 agent: Some("agent-one".into()),
+                ttl: None,
             }),
         )
         .await);
@@ -657,6 +759,7 @@ async fn request_cancel_then_cancel_job_audits_distinct_actors(pool: PgPool) {
             Parameters(tools::jobs::ClaimJobsArgs {
                 jobs: vec![id.clone()],
                 agent: Some("agent-one".into()),
+                ttl: None,
             }),
         )
         .await);
@@ -719,6 +822,7 @@ async fn cancel_job_without_a_prior_request_is_refused(pool: PgPool) {
             Parameters(tools::jobs::ClaimJobsArgs {
                 jobs: vec![id.clone()],
                 agent: Some("agent-one".into()),
+                ttl: None,
             }),
         )
         .await);
@@ -758,6 +862,7 @@ async fn ticketless_job_transitions_still_succeed(pool: PgPool) {
             Parameters(tools::jobs::ClaimJobsArgs {
                 jobs: vec![id.clone()],
                 agent: Some("agent-one".into()),
+                ttl: None,
             }),
         )
         .await);
@@ -833,6 +938,7 @@ async fn a_blocked_job_is_not_offered_and_cannot_be_claimed(pool: PgPool) {
                 Parameters(tools::jobs::ClaimJobsArgs {
                     jobs: vec![second_id.clone()],
                     agent: None,
+                    ttl: None,
                 }),
             )
             .await
@@ -848,6 +954,7 @@ async fn a_blocked_job_is_not_offered_and_cannot_be_claimed(pool: PgPool) {
             Parameters(tools::jobs::ClaimJobsArgs {
                 jobs: vec![first_id.clone()],
                 agent: None,
+                ttl: None,
             }),
         )
         .await);
@@ -966,6 +1073,7 @@ async fn one_orgs_token_cannot_see_or_touch_anothers_work(pool: PgPool) {
             Parameters(tools::jobs::ClaimJobsArgs {
                 jobs: vec![id.clone()],
                 agent: None,
+                ttl: None,
             }),
         )
         .await
@@ -1387,6 +1495,7 @@ fn the_advertised_surface_is_exactly_what_the_design_specifies() {
         "update_job",
         "delete_job",
         "claim_jobs",
+        "renew_claim",
         "activate_job",
         "complete_job",
         "fail_job",
@@ -2025,6 +2134,7 @@ async fn sync_ticket_without_a_binding_reports_not_configured(pool: PgPool) {
             Parameters(tools::jobs::ClaimJobsArgs {
                 jobs: vec![id.clone()],
                 agent: Some("agent-one".into()),
+                ttl: None,
             }),
         )
         .await);
@@ -2093,6 +2203,7 @@ async fn sync_ticket_reports_an_outbound_failure_as_retriable(pool: PgPool) {
             Parameters(tools::jobs::ClaimJobsArgs {
                 jobs: vec![id.clone()],
                 agent: Some("agent-one".into()),
+                ttl: None,
             }),
         )
         .await);
@@ -2166,6 +2277,7 @@ async fn sync_ticket_refuses_before_the_outbound_call_when_over_budget(pool: PgP
             Parameters(tools::jobs::ClaimJobsArgs {
                 jobs: vec![id.clone()],
                 agent: Some("agent-one".into()),
+                ttl: None,
             }),
         )
         .await);
@@ -2257,6 +2369,7 @@ async fn sync_ticket_reports_a_malformed_github_ticket_ref_as_non_retriable(pool
             Parameters(tools::jobs::ClaimJobsArgs {
                 jobs: vec![id.clone()],
                 agent: Some("agent-one".into()),
+                ttl: None,
             }),
         )
         .await);
@@ -2326,6 +2439,7 @@ async fn sync_ticket_reports_a_malformed_jira_ticket_ref_as_non_retriable(pool: 
             Parameters(tools::jobs::ClaimJobsArgs {
                 jobs: vec![id.clone()],
                 agent: Some("agent-one".into()),
+                ttl: None,
             }),
         )
         .await);
