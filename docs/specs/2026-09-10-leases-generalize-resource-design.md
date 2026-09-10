@@ -275,6 +275,9 @@ directly, so the field rename flows through automatically once `of-core` changes
 exactly the reuse `out.rs`'s own doc comment argues for (no parallel view struct to
 independently update).
 
+`of-billing::classify` keys lease entries by tool name (`acquire_lease`, `renew_lease`,
+`release_lease`, `list_leases`), none of which change, so no metering update is needed.
+
 ## §5 Console (`web/`)
 
 - `web/src/lib/types.ts`: `Lease.branch: string` → `Lease.resource: string`; doc comment
@@ -288,9 +291,11 @@ independently update).
 
 ## Error Handling & Edge Cases
 
-- **Empty resource.** `resource: Some("")` (or whitespace-only) and `branch: Some("")` both
-  hit the same `resource.is_empty()` guard in `of-core` after trimming — no new validation
-  needed in `of-mcp`.
+- **Empty resource.** `resource: Some("")` (or whitespace-only) reaches `of-core`'s
+  `resource.is_empty()` guard after trimming, same as today. `branch: Some("")` (or
+  whitespace-only) is rejected earlier, by the dedicated check in §4's `of-mcp` handler —
+  it never reaches `of-core` at all, because prefixing it first would produce the non-empty
+  string `"branch:"`, which would sail past `of-core`'s guard undetected.
 - **Both `resource` and `branch` omitted.** New `invalid_params` error in `of-mcp` (§4) —
   today's `AcquireLeaseArgs::branch` is a required field so serde already rejects a missing
   branch; making both optional means the "neither given" case must be checked explicitly
