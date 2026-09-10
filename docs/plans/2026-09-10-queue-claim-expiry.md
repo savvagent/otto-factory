@@ -11,7 +11,12 @@ implements it exactly.
 
 ## Status — 2026-09-10
 
-Not started.
+Not started. Plan critique round 1 found four real issues (unscoped `clippy`/`cargo test`
+gates that would fail mid-plan on code the current task hasn't touched yet; two test
+files — `crates/of-core/tests/jobs.rs` and `crates/of-web/tests/console.rs` — that call
+the changing signatures directly and were missing from the file lists; and
+`ClaimJobsArgs` needing `Default` so its 14 existing test-literal call sites don't all
+need hand-editing). All four are fixed below.
 
 ---
 
@@ -24,8 +29,14 @@ These hold for every task in this plan:
 - Every SQL statement lives in `of-core`. A query in `of-mcp`/`of-web` is a bug.
 - Tests need a real Postgres: `podman compose up -d` (Postgres 16 on host port 15433) and
   a `.env` with `DATABASE_URL` (`cp .env.example .env`).
-- `cargo test` (or `cargo test --workspace`) + `cargo clippy --all-targets -- -D
-  warnings` + `cargo fmt --all --check` must all be clean before a task is done.
+- Per-task gates are **crate-scoped** (`-p of-core`, `-p of-mcp -p of-billing`, `-p
+  of-web`), not workspace-wide, until the final Rust task: `Tx::claim_jobs`/
+  `complete_job`/`fail_job`'s signatures change in Task 1, and `crates/of-mcp`,
+  `crates/of-web/tests/console.rs`, and `crates/of-core/tests/jobs.rs` all call them
+  directly, so an unscoped `cargo clippy --all-targets`/`cargo test --workspace` run
+  before every caller is updated fails to compile on code the current task hasn't
+  touched yet. Run `cargo test --workspace` + `cargo clippy --all-targets -- -D warnings`
+  unscoped only after Task 3 (the last Rust task) completes, as that task's final gate.
 - A migration is a new file, never an edit to one already applied. `0025` is the next free
   number (`0024` is the current head).
 - A new MCP tool is not done until it is classified in `of-billing::classify` —
@@ -48,11 +59,13 @@ These hold for every task in this plan:
 | **Modify.** `crates/of-core/src/jobs.rs` | `DEFAULT_CLAIM_TTL_SECS`/`MAX_CLAIM_TTL_SECS`, `Job.claim_expires_at`, `claim_jobs`'s reap step + `ttl_secs` param, `ready()`'s widened claimable predicate, `ensure_claim_held`, `finalize`/`complete_job`/`fail_job` taking `caller: UserId`, `renew_claim`, `repend_job` clearing the new column. |
 | **Modify.** `crates/of-core/src/error.rs` | `AlreadyClaimed` gains `holder: String`. |
 | **Modify.** `crates/of-core/tests/queue.rs` | New-behavior tests (see Task 1). |
+| **Modify.** `crates/of-core/tests/jobs.rs` | 9 existing direct `.claim_jobs(`/`.complete_job(`/`.fail_job(` call sites need updating to the new signatures — a separate test binary from `queue.rs`, so it is not exercised by `cargo test -p of-core --test queue` and needs its own pass. |
 | **Modify.** `crates/of-core/tests/isolation.rs` | Cross-org negative tests for `renew_claim` and for the claimer check on `complete_job`/`fail_job`. |
 | **Modify.** `crates/of-mcp/src/tools/jobs.rs` | `ClaimJobsArgs.ttl`, `complete_job`/`fail_job` passing `caller.user_id`, new `RenewClaimArgs`/`renew_claim` tool, description updates. |
 | **Modify.** `crates/of-billing/src/classify.rs` | `renew_claim` added to `FREE`. |
-| **Modify.** `crates/of-mcp/tests/tools.rs` | End-to-end tests, tool-list/billing assertions. |
+| **Modify.** `crates/of-mcp/tests/tools.rs` | End-to-end tests, tool-list/billing assertions, `ttl: None` added to the 14 existing `ClaimJobsArgs { ... }` literals. |
 | **Modify.** `crates/of-web/src/openapi.rs` | `Job` schema gains `claimExpiresAt`, schema-assertion test. |
+| **Modify.** `crates/of-web/tests/console.rs` | 2 existing direct `.claim_jobs(...)` call sites (3-arg) need the new `ttl` argument. |
 | **Modify.** `web/src/lib/types.ts` | `Job.claimExpiresAt: string \| null`. |
 | **Create.** `web/src/lib/jobs.ts` | `isClaimStranded` predicate. |
 | **Modify.** `web/messages/{en,es,de,fr,it,hi}.json` | `job_claim_stranded` key, all six. |
@@ -130,20 +143,31 @@ message-catalog gate.
         argument (grep this file for `.complete_job(` and `.fail_job(` — there are
         multiple existing calls; every one needs its signature updated, not just the new
         tests, or the whole file fails to compile).
-      - `complete_job`/`fail_job` called by a caller who never claimed the job (a fresh
-        user with no claim at all, not just a different one) returns `Error::AlreadyClaimed`
-        naming `"nobody"` — the `unwrap_or_else(|| "nobody".into())` branch in
-        `ensure_claim_held`. Cover this distinctly from the fencing case above, since it
-        exercises a different code path (`claimed_by_label` and `claimed_by` both absent
-        vs. both present but pointing at someone else — impossible in practice since a
-        `pending`/terminal job's status check fails first, so use a job claimed by someone
-        else, not an entirely unclaimed one, to reach the `AlreadyClaimed` branch; a
-        genuinely never-claimed job hits `WrongStatus` first, which is also worth its own
-        one-line assertion for completeness).
+      - **`crates/of-core/tests/jobs.rs` is a separate test binary from `queue.rs` and is
+        not exercised by `cargo test -p of-core --test queue`.** It has 9 existing direct
+        calls to `.claim_jobs(...)` (3-arg) and `.complete_job(...)`/`.fail_job(...)`
+        (2-arg) that must be updated to the new signatures (`claim_jobs` gains a trailing
+        `ttl_secs` argument — pass `None` at every existing call site to keep today's
+        default-TTL behavior; `complete_job`/`fail_job` gain a `caller: UserId` argument —
+        pass the same user that claimed the job in each case, exactly as in `queue.rs`
+        above) or `crates/of-core` fails to compile as a whole.
+      - `complete_job`/`fail_job` called by a caller with no claim at all on a genuinely
+        never-claimed (`pending`) job hits the status check first and returns
+        `Error::WrongStatus`, not `AlreadyClaimed` — assert this explicitly, in one line,
+        so the distinction from the next bullet is visible in the test file itself.
+      - `ensure_claim_held`'s `unwrap_or_else(|| "nobody".into())` branch (both
+        `claimed_by` and `claimed_by_label` absent on an `in-progress`/`active` row) is
+        unreachable through any normal sequence of calls in this plan — a job only reaches
+        `in-progress`/`active` via `claim_jobs`, which always sets both. Leave it
+        uncovered rather than manufacturing an artificial raw-SQL row state solely to
+        exercise a defensive fallback string; note this explicitly in the test file as a
+        one-line comment so a future reader does not read the gap as an oversight.
       - `repend_job` on a claimed job clears `claim_expires_at` — extend the existing
         `repend_job` test's assertions rather than adding a new test.
 - [ ] Run `cargo test -p of-core --test queue` — expect compile failure (new column, new
-      function signatures, and `renew_claim` do not exist yet).
+      function signatures, and `renew_claim` do not exist yet). This will not yet surface
+      `tests/jobs.rs`'s breakage (different binary) — that is covered by the
+      `cargo test -p of-core` (whole-crate) run later in this task.
 - [ ] Implement `crates/of-core/src/jobs.rs` per spec §3 exactly: the two constants;
       `Job.claim_expires_at` (placed after `claimed_by_label`) with its doc comment;
       `JOB_COLS` gains `, claim_expires_at`; `claim_jobs`'s new `ttl_secs` parameter, the
@@ -158,6 +182,14 @@ message-catalog gate.
       String` field and updated `#[error(...)]` message. Confirm (do not just assume) that
       `code()`'s and `retriable()`'s existing `{ .. }` match arms still compile unchanged.
 - [ ] Run `cargo test -p of-core --test queue` — expect all pass.
+- [ ] Update `crates/of-core/tests/jobs.rs`'s 9 existing call sites (lines ~200, 206, 223,
+      229, 384, 412, 415, 443, 486 as of this plan's writing — confirm current line
+      numbers rather than trusting these, since earlier steps in this task may have
+      shifted them) per the failing-test-first bullet above: `None` for `claim_jobs`'s new
+      trailing argument, the claiming user's id for `complete_job`/`fail_job`'s new
+      argument.
+- [ ] Run `cargo test -p of-core` (whole crate, all test binaries) — expect all pass,
+      including `tests/jobs.rs` and `tests/queue.rs` together.
 - [ ] In `crates/of-core/tests/isolation.rs`, extend `cross_org_mutation_is_refused` (or
       add a sibling following its exact existing pattern) with: `renew_claim` called from
       org b against a job claimed in org a (`.is_err()`); `complete_job`/`fail_job` called
@@ -165,7 +197,9 @@ message-catalog gate.
       the changed statements, distinct from the claimer check in `queue.rs`, which runs
       inside one org).
 - [ ] Run `cargo test -p of-core --test isolation` — expect all pass.
-- [ ] `cargo clippy --all-targets -- -D warnings` clean. `cargo fmt --all`.
+- [ ] `cargo clippy -p of-core --all-targets -- -D warnings` clean (scoped: `of-mcp` and
+      `of-web` do not compile yet at this point in the plan — see Global Constraints).
+      `cargo fmt --all`.
 - [ ] Commit: `git commit -m "of-core: expire job claims and check the claimer on finalize"`.
 
 ## Task 2 — `of-mcp` + `of-billing`: `renew_claim`, `ttl`, and the claimer check
@@ -184,17 +218,24 @@ message-catalog gate.
       - End-to-end: `claim_jobs` as one caller → `complete_job` attempted with a
         **different** caller's token/principal fails with an error whose `code` is
         `"already_claimed"`.
-      - `renew_claim` appears in the tool list with a non-empty description — extend
-        whichever test enumerates the tool list by name (follow the `request_cancel`/
-        `cancel_job` precedent from the cancellation feature's Task 2 exactly — find that
-        hardcoded `expected` vec and add `"renew_claim"` to it).
-      - `every_tool_has_a_price`/`exhaustive_over` (in `of-billing`, or wherever the
-        existing "tool list vs. price list" test lives) still passes once `renew_claim`
-        is classified — this needs Task 2's classify.rs step below to actually pass; note
-        it here as the acceptance check for that step. If `of-billing`'s
-        `work_is_billable_and_looking_is_not`-style test hardcodes a free-tools list
-        (check the existing test body, following the cancellation plan's Task 2
-        precedent), extend it with `"renew_claim"`.
+      - `renew_claim` appears in the tool list with a non-empty description — extend the
+        hardcoded `expected` vec in `the_advertised_surface_is_exactly_what_the_design_specifies`
+        (`crates/of-mcp/tests/tools.rs`) with `"renew_claim"`, following the
+        `request_cancel`/`cancel_job` precedent exactly.
+      - `every_tool_has_a_price`/`exhaustive_over` (`crates/of-mcp/tests/tools.rs:1375`,
+        confirmed present and generic — it is not a hardcoded per-tool list, so it needs
+        no manual edit) passes once `renew_claim` is classified in Task 2's
+        `classify.rs` step below. `of-billing`'s own `work_is_billable_and_looking_is_not`
+        test does not enumerate `renew_lease`/`release_lease` either today, so it needs no
+        change for `renew_claim` — do not add one.
+      - Add `ttl: None,` to every one of the 14 existing `ClaimJobsArgs { ... }` struct
+        literals in this file (grep for `ClaimJobsArgs {`). `#[serde(default)]` on the new
+        field only covers wire deserialization, not a Rust struct literal — `ClaimJobsArgs`
+        derives `Debug, Deserialize, schemars::JsonSchema`, not `Default`, so every
+        existing literal needs the new field named explicitly or the crate fails to
+        compile with "missing field `ttl`". Do not add `Default` to the struct solely to
+        avoid this — 14 one-line edits is simpler than a new derive plus 14
+        `..Default::default()` insertions for the same result.
 - [ ] Run `cargo test -p of-mcp --test tools` — expect compile failure (`renew_claim` does
       not exist, `claim_jobs`/`complete_job`/`fail_job` handler signatures haven't
       changed to match `of-core` yet — this crate will already fail to compile against
@@ -212,26 +253,38 @@ message-catalog gate.
       `"renew_lease"`/`"release_lease"`, extending their existing comment per spec §6.
 - [ ] Run `cargo test -p of-mcp --test tools` and `cargo test -p of-billing` — expect all
       pass, including `every_tool_has_a_price`/`exhaustive_over`.
-- [ ] `cargo clippy --all-targets -- -D warnings` clean. `cargo fmt --all`.
+- [ ] `cargo clippy -p of-mcp -p of-billing --all-targets -- -D warnings` clean (scoped:
+      `of-web` does not compile yet — see Global Constraints). `cargo fmt --all`.
 - [ ] Commit: `git commit -m "of-mcp: add renew_claim and a claim TTL for claim_jobs"`.
 
 ## Task 3 — `of-web`: schema update
 
-**Files:** `crates/of-web/src/openapi.rs`.
+**Files:** `crates/of-web/src/openapi.rs`, `crates/of-web/tests/console.rs`.
 
 **Interfaces consumed:** `Job.claim_expires_at` (Task 1), passed through unchanged —
-`routes/jobs.rs` returns `of_core::jobs::Job` directly, so no route code changes.
+`routes/jobs.rs` returns `of_core::jobs::Job` directly, so no route code changes. This
+task also fixes the last remaining caller of `claim_jobs`'s pre-change signature.
 
 - [ ] In `crates/of-web/src/openapi.rs`'s test module (the same block asserting
       `"cancelRequestedAt"` etc. per the cancellation feature's precedent), write the
       failing assertion first: the `Job` schema's `properties` contains `claimExpiresAt`.
-- [ ] Run the relevant `cargo test -p of-web` schema test — expect failure.
+- [ ] Update `crates/of-web/tests/console.rs`'s two existing direct
+      `tx.claim_jobs(std::slice::from_ref(&first.id), rob.user, Some("claude-code"))`-shaped
+      call sites (grep for `.claim_jobs(` in this file) to pass `None` as the new trailing
+      `ttl_secs` argument — this is the last file in the workspace still calling the
+      pre-Task-1 3-argument signature, so `crates/of-web` cannot compile until this lands.
+- [ ] Run the relevant `cargo test -p of-web` schema test — expect failure (the schema
+      assertion, not a compile error, since the `claim_jobs` call sites are already fixed
+      by the previous step).
 - [ ] Add `"claimExpiresAt": { "type": ["string", "null"], "format": "date-time" }` to the
       `Job` schema in `openapi.rs`, placed after `"claimedByLabel"` per spec §7.
 - [ ] Run the schema test — expect pass. Then run `cargo test -p of-web` in full,
       including `the_queue_is_read_only_over_the_console` explicitly (confirm it still
       passes unchanged — this task adds no route).
-- [ ] `cargo clippy --all-targets -- -D warnings` clean. `cargo fmt --all`.
+- [ ] `cargo clippy -p of-web --all-targets -- -D warnings` clean. `cargo fmt --all`.
+- [ ] **This is the last Rust task** — every crate's callers of the changed signatures are
+      now updated. Run `cargo test --workspace` and `cargo clippy --all-targets -- -D
+      warnings` unscoped, for the first time in this plan — expect both clean.
 - [ ] Commit: `git commit -m "of-web: surface claim expiry in the console schema"`.
 
 ## Task 4 — `web/`: the stranded-claim indicator
@@ -282,8 +335,9 @@ API from Task 3 — this task is purely presentational, no new API calls.
 
 ## Rule for every task
 
-A task is done when its own tests pass, `cargo clippy --all-targets -- -D warnings` is
-clean, and `cargo fmt --all --check` is clean (Tasks 1–3), or `npm run check && npm run
-lint && npm test` is clean (Task 4). Tenant-scoped functions are not done without a
-cross-org negative test (Task 1: `renew_claim`, `complete_job`, `fail_job`). A new MCP
-tool is not done without a `of-billing::classify` entry (Task 2: `renew_claim`).
+A task is done when its own tests pass, its own crate-scoped `cargo clippy ... -D
+warnings` is clean (unscoped only at the end of Task 3, per Global Constraints), and
+`cargo fmt --all --check` is clean (Tasks 1–3), or `npm run check && npm run lint && npm
+test` is clean (Task 4). Tenant-scoped functions are not done without a cross-org
+negative test (Task 1: `renew_claim`, `complete_job`, `fail_job`). A new MCP tool is not
+done without a `of-billing::classify` entry (Task 2: `renew_claim`).
