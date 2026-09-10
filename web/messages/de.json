@@ -5,6 +5,7 @@
   "status_active": "Aktiv",
   "status_completed": "Abgeschlossen",
   "status_failed": "Fehlgeschlagen",
+  "status_cancelled": "Abgebrochen",
   "meter_billable_ratio": "{used} / {included} abrechenbar",
   "meter_aria_label": "In diesem Zeitraum genutzte abrechenbare Vorgänge",
   "meter_aria_valuetext": "{used} von {included} abrechenbaren Vorgängen ({percent} %)",

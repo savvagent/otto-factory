@@ -27,6 +27,8 @@ export function statusLabel(status: JobStatus): string {
       return m.status_completed();
     case 'failed':
       return m.status_failed();
+    case 'cancelled':
+      return m.status_cancelled();
   }
 }
 

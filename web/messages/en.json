@@ -5,6 +5,7 @@
   "status_active": "Active",
   "status_completed": "Completed",
   "status_failed": "Failed",
+  "status_cancelled": "Cancelled",
   "meter_billable_ratio": "{used} / {included} billable",
   "meter_aria_label": "Billable operations used this period",
   "meter_aria_valuetext": "{used} of {included} billable operations ({percent}%)",

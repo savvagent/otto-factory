@@ -5,6 +5,7 @@
   "status_active": "Activo",
   "status_completed": "Completado",
   "status_failed": "Fallido",
+  "status_cancelled": "Cancelado",
   "meter_billable_ratio": "{used} / {included} facturables",
   "meter_aria_label": "Operaciones facturables usadas en este periodo",
   "meter_aria_valuetext": "{used} de {included} operaciones facturables ({percent} %)",

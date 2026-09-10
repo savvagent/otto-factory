@@ -5,6 +5,7 @@
   "status_active": "सक्रिय",
   "status_completed": "पूर्ण",
   "status_failed": "विफल",
+  "status_cancelled": "रद्द",
   "meter_billable_ratio": "{used} / {included} बिल-योग्य",
   "meter_aria_label": "इस अवधि में उपयोग किए गए बिल-योग्य ऑपरेशन",
   "meter_aria_valuetext": "{included} में से {used} बिल-योग्य ऑपरेशन ({percent}%)",

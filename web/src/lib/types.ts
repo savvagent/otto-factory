@@ -15,7 +15,7 @@
  */
 
 export type Role = 'owner' | 'admin' | 'member';
-export type JobStatus = 'pending' | 'in-progress' | 'active' | 'completed' | 'failed';
+export type JobStatus = 'pending' | 'in-progress' | 'active' | 'completed' | 'failed' | 'cancelled';
 export type Provider = 'github' | 'gitlab' | 'bitbucket' | 'other';
 export type TokenKind = 'oauth' | 'pat';
 
@@ -303,6 +303,7 @@ export interface QueueStats {
   active: number;
   completed: number;
   failed: number;
+  cancelled: number;
   blocked: number;
   total: number;
 }
