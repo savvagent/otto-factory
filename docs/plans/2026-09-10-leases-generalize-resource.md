@@ -92,11 +92,15 @@ compiles unchanged, per the Global Constraints note).
       `"deploy:staging"` by a third user fails with `err.code() == "lease_held"` and
       `err.to_string().contains("deploy:staging")` (proving `Error::LeaseHeld` names the
       resource, not a hardcoded "branch").
-- [ ] Run `cargo test -p of-core --test queue leases_are_per_resource_not_just_branch` —
-      confirm it fails to compile or fails the assertion (the column is still named
-      `branch`, but positional calls still compile against the current signature, so this
-      will most likely fail on the message-content assertion, not a compile error — either
-      failure mode confirms the test exercises the not-yet-built behavior).
+- [ ] Run `cargo test -p of-core --test queue leases_are_per_resource_not_just_branch`.
+      This is **not** a failing-first step in the usual sense: `Tx::acquire_lease` already
+      accepts any non-empty string with no branch-shaped format check, and
+      `Error::LeaseHeld`'s message already interpolates whatever string was passed, so this
+      test is expected to **pass immediately at HEAD**, before any of the rest of this
+      task's changes — it is a rename/schema task, not an `of-core`-level behavior change.
+      Do not treat a green result here as a sign something is wrong; its value is as a
+      permanent regression/AC test proving the literal claim in GH#69 ("agents can lease
+      things that are not branches"), not as a red-then-green TDD gate.
 - [ ] Create `crates/of-core/migrations/0027_lease_resource.sql`:
       ```sql
       ALTER TABLE repo_leases RENAME COLUMN branch TO resource;
@@ -153,17 +157,31 @@ public `acquire_lease` MCP tool's new input shape and all four lease tools' outp
 - [ ] Run `cargo test -p of-mcp --test tools` — confirm these four fail to compile (the
       struct literals reference fields that don't exist yet in the shape the tests need).
 - [ ] In `crates/of-mcp/src/tools/coord.rs`: change `AcquireLeaseArgs.branch` to
-      `Option<String>` with an updated doc comment marking it deprecated; add
-      `resource: Option<String>` above it with the doc comment from spec §4. In the
-      `acquire_lease` handler, resolve `resource` from `(args.resource, args.branch)`
-      exactly per spec §4 — **the `branch` arm must reject an empty/whitespace value
-      before prefixing**, returning `invalid_params` rather than producing the string
-      `"branch:"`. Update the `acquire_lease` tool description verbatim from spec §4.
-      Update `renew_lease` and `release_lease` descriptions to say "the resource" in place
-      of "the branch" (both currently read "...another agent may take the branch..." and
-      "...freeing the branch immediately..."). Update `list_leases`' description from "the
-      holder, the branch, and when each expires" to "the holder, the resource, and when
-      each expires."
+      `Option<String>`, with a doc comment marking it deprecated and pointing at `resource`
+      (spec §4 gives no literal text to copy for this or the new field — author a doc
+      comment that says what it means, matching the style of the surrounding fields); add
+      `resource: Option<String>` above it with a doc comment describing it as a free-form
+      name for whatever is being leased, mentioning the `branch:main` convention for the
+      branch case. In the `acquire_lease` handler, resolve `resource` from `(args.resource,
+      args.branch)` exactly per spec §4's `match` — **the `branch` arm must reject an
+      empty/whitespace value before prefixing**, returning `invalid_params` rather than
+      producing the string `"branch:"`.
+
+      **`acquire_lease`'s tool description needs new explanatory prose, not a word
+      substitution** — this is the one tool the spec's Success Criteria calls out
+      specifically ("`acquire_lease`'s tool description explains the `branch:main`
+      convention"). Write a new description that states what a resource is, gives the
+      `branch:main` convention for the branch case, and says `branch` is accepted as a
+      deprecated shorthand for `resource: "branch:<branch>"` — the existing description
+      ("Announce that you are working on a branch of a repository...") does not carry this
+      information at all, so this is authored prose, not a rename.
+
+      `renew_lease`, `release_lease`, and `list_leases` genuinely are simple substitutions
+      (confirmed against current source): `renew_lease`'s description's "...another agent
+      may take the branch while you are still in it" becomes "...the resource...";
+      `release_lease`'s "...freeing the branch immediately instead of waiting for it to
+      expire" becomes "...the resource..."; `list_leases`' "the holder, the branch, and
+      when each expires" becomes "the holder, the resource, and when each expires."
 - [ ] Fix the three existing `AcquireLeaseArgs` struct literals in
       `crates/of-mcp/tests/tools.rs` for the new field shape (`branch: "main".into()` no
       longer compiles against `Option<String>`): line ~1164's direct literal and the
