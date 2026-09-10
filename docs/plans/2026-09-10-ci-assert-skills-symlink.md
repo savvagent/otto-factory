@@ -110,10 +110,13 @@ interface surface.
       paths actually fire as designed (this is what the spec's §2 Testing section commits to
       reporting in the PR body — do this now so the PR body can state real results, not
       predictions):
-      - Deleted path: run the script (or its first three lines) against a commit before
-        savvagent/otto-factory#124 merged, e.g.
-        `git ls-tree <pre-124-sha> .claude/skills` — expect empty output, confirm the `[ -z
-        "$line" ]` branch would fire.
+      - Deleted path: `.claude/skills` has existed as a path since the repo's very first
+        content-bearing commits — #124 converted an existing *directory* into a symlink, it did
+        not create the path from nothing, so a commit "before #124" (e.g. `74d6062`, its
+        immediate parent) still has `.claude/skills` present as a `040000 tree`, which exercises
+        the *directory* branch below, not this one. To exercise a genuinely absent path, run
+        against the repo's first commit instead: `git ls-tree 7cbddbb .claude/skills` — expect
+        empty output, confirming the `[ -z "$line" ]` branch would fire.
       - Wrong target: in a scratch git repo (`/tmp` or the scratch directory, never this repo),
         create a symlink pointing somewhere else, commit it, and run the target-comparison
         portion of the script against it — expect the target mismatch branch to fire with the
