@@ -833,7 +833,10 @@ impl Factory {
                        watch, and is expected to call cancel_job once it actually stops (or \
                        fail_job, if it disagrees and finishes anyway). Fails if the job is \
                        already completed, failed, or cancelled. Anything that depends on this \
-                       job stays blocked — use repend_job or set_dependencies to unblock it."
+                       job stays blocked until the dependency actually completes — repend_job \
+                       only returns this job to pending for another attempt, it does not \
+                       complete it, so anything waiting on it is still waiting; use \
+                       set_dependencies instead if you need to remove the dependency entirely."
     )]
     pub async fn request_cancel(
         &self,
@@ -1121,9 +1124,11 @@ impl Factory {
                        Use this after link_ticket, when nothing has been posted yet because no \
                        transition has fired since the link was made, or to retry after a \
                        tracker outage — unlike the automatic write-back after claim_jobs, \
-                       complete_job, fail_job, request_cancel and cancel_job, this call \
-                       surfaces a tracker failure as its own error rather than swallowing it, \
-                       because talking to the tracker is \
+                       complete_job, fail_job, and cancel_job (and after request_cancel, but \
+                       only when it immediately finalizes a pending job with nobody to wait \
+                       on; a request that only flags a claimed job does not sync until \
+                       cancel_job later finalizes it), this call surfaces a tracker failure as \
+                       its own error rather than swallowing it, because talking to the tracker is \
                        the entire point of calling it. Requires the job to already be linked \
                        via link_ticket and to be in-progress, active, completed, failed, or \
                        cancelled."
