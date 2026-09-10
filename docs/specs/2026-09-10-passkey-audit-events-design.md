@@ -1,9 +1,18 @@
 # Passkey audit events design
 
-> **Status:** DRAFT — give passkey registration and clearing their own `auth.passkey.*` audit
-> action names instead of the TOTP names they currently borrow, stop discarding the two audit
-> writes on those paths, and log (without changing behavior) the two places a stored credential
-> that fails to deserialize is silently dropped. Filed as `savvagent/otto-factory#76`.
+> **Status:** IMPLEMENTED — give passkey registration and clearing their own `auth.passkey.*`
+> audit action names instead of the TOTP names they currently borrow, stop discarding the two
+> audit writes on those paths, and log (without changing behavior) the two places a stored
+> credential that fails to deserialize is silently dropped. Shipped in `savvagent/otto-factory#86`,
+> closing `#76`, deployed and verified via the merge commit's own CI run
+> (`cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all --check`
+> all green) and a subsequent successful `flyctl deploy` to `otto-factory-mcp`. Three findings from
+> the mandatory review trio were addressed in the same PR (a false atomicity claim in a doc
+> comment, a missing IP on the admin-reset's audit row, an incomplete historical-constant doc
+> comment); three more were filed as follow-ups rather than folded in — `#87` (actor
+> misattribution and non-atomicity in the admin-assisted reset), `#88` (registration's audit row
+> can't distinguish signup/claim/add-key and carries no IP), `#89` (`passkeys::remove`/`rename`
+> write no audit row; `login::logout` still discards its write silently).
 
 ## Goal & Success Criteria
 

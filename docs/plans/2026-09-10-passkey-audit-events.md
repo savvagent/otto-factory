@@ -9,9 +9,11 @@ can hit it, with no change to what either path returns.
 
 ## Status — 2026-09-10
 
-✅ Both tasks landed and reviewed. Task 1: `5670bdd`. Task 2: `6e0d2ff`. Full workspace
-`cargo test`, `cargo clippy --all-targets -- -D warnings`, and `cargo fmt --all --check` all green
-on the branch as a whole.
+✅ Shipped in `savvagent/otto-factory#86`, merged as `5db1e4a`, closing `#76`. Task 1: `5670bdd`.
+Task 2: `6e0d2ff`. Review-response fixes (an admin-reset audit row missing its IP, two doc
+comments that overclaimed, a missing negative test assertion): `5edb012`. Deployed and verified
+via the merge's own CI run plus a subsequent successful `flyctl deploy`. Follow-ups filed rather
+than folded in: `#87`, `#88`, `#89`.
 
 **Spec:** `docs/specs/2026-09-10-passkey-audit-events-design.md` — read it first. This plan
 implements it exactly. Closes `savvagent/otto-factory#76`.
