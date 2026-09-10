@@ -125,6 +125,11 @@ pub struct ListJobsArgs {
     /// Only jobs you queued yourself. Defaults to false.
     #[serde(default)]
     pub mine: bool,
+    /// A routing hint, not access control: restrict to jobs with this exact
+    /// `agent_type` plus jobs with none at all (unrouted work anyone may
+    /// take). Omit to see every job regardless of `agent_type`.
+    #[serde(default)]
+    pub agent_type: Option<String>,
     /// Maximum rows. Defaults to the server's own limit.
     #[serde(default)]
     pub limit: Option<i64>,
@@ -139,6 +144,22 @@ pub struct RepoScopeArgs {
     /// Or narrow by git remote URL.
     #[serde(default)]
     pub remote: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadyArgs {
+    /// Narrow to one repo by slug. Omit to cover the whole organization.
+    #[serde(default)]
+    pub repo: Option<String>,
+    /// Or narrow by git remote URL.
+    #[serde(default)]
+    pub remote: Option<String>,
+    /// A routing hint for a mixed fleet, not access control: restrict to jobs
+    /// with this exact `agentType` plus jobs with none set at all (unrouted
+    /// work anyone may take). Omit to see every ready job.
+    #[serde(default)]
+    pub agent_type: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -616,9 +637,12 @@ impl Factory {
 
     #[tool(
         name = "list_jobs",
-        description = "List jobs, optionally filtered by status, repository, or whether you \
-                       queued them. To find work you can actually take, prefer `ready` — this \
-                       returns jobs regardless of whether their dependencies are satisfied."
+        description = "List jobs, optionally filtered by status, repository, whether you queued \
+                       them, or agentType. agentType is a routing hint for a mixed fleet, not \
+                       access control: passing it also returns jobs with no agentType set, since \
+                       unrouted work is anyone's to take. To find work you can actually take, \
+                       prefer `ready` — this returns jobs regardless of whether their \
+                       dependencies are satisfied."
     )]
     pub async fn list_jobs(
         &self,
@@ -645,6 +669,7 @@ impl Factory {
                 status,
                 repo_id,
                 created_by: args.mine.then_some(caller.user_id),
+                agent_type: args.agent_type,
                 limit: args.limit,
                 ..Default::default()
             })
@@ -880,12 +905,15 @@ impl Factory {
     #[tool(
         name = "ready",
         description = "List the jobs that can be claimed right now: pending, with every \
-                       dependency completed. This is the tool to call when looking for work."
+                       dependency completed. This is the tool to call when looking for work. \
+                       agentType narrows to jobs meant for your kind of agent, plus unrouted \
+                       jobs with no agentType set — it is a routing hint for a mixed fleet, not \
+                       access control."
     )]
     pub async fn ready(
         &self,
         Extension(parts): Extension<http::request::Parts>,
-        Parameters(args): Parameters<RepoScopeArgs>,
+        Parameters(args): Parameters<ReadyArgs>,
     ) -> Result<Json<out::JobsOut>, ErrorData> {
         let caller = self.caller(&parts)?;
         caller.require_scope(scope::JOBS_READ).mcp()?;
@@ -893,7 +921,7 @@ impl Factory {
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "ready").await?;
         let repo_id = maybe_repo_of(&mut tx, args.repo, args.remote).await?;
-        let jobs = tx.ready(repo_id).await.mcp()?;
+        let jobs = tx.ready(repo_id, args.agent_type.as_deref()).await.mcp()?;
         tx.commit().await.mcp()?;
 
         Ok(Json(out::JobsOut { jobs }))

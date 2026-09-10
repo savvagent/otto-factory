@@ -304,9 +304,10 @@ async fn the_full_loop_from_remote_url_to_completed_job(pool: PgPool) {
         .factory
         .ready(
             Extension(parts(&caller)),
-            Parameters(tools::jobs::RepoScopeArgs {
+            Parameters(tools::jobs::ReadyArgs {
                 repo: Some("api".into()),
                 remote: None,
+                agent_type: None,
             }),
         )
         .await);
@@ -330,7 +331,7 @@ async fn the_full_loop_from_remote_url_to_completed_job(pool: PgPool) {
         .factory
         .ready(
             Extension(parts(&caller)),
-            Parameters(tools::jobs::RepoScopeArgs::default()),
+            Parameters(tools::jobs::ReadyArgs::default()),
         )
         .await);
     assert!(ready["jobs"].as_array().unwrap().is_empty());
@@ -491,7 +492,7 @@ async fn a_blocked_job_is_not_offered_and_cannot_be_claimed(pool: PgPool) {
         .factory
         .ready(
             Extension(parts(&caller)),
-            Parameters(tools::jobs::RepoScopeArgs::default()),
+            Parameters(tools::jobs::ReadyArgs::default()),
         )
         .await);
     assert_eq!(
@@ -550,7 +551,7 @@ async fn a_blocked_job_is_not_offered_and_cannot_be_claimed(pool: PgPool) {
         .factory
         .ready(
             Extension(parts(&caller)),
-            Parameters(tools::jobs::RepoScopeArgs::default()),
+            Parameters(tools::jobs::ReadyArgs::default()),
         )
         .await);
     assert_eq!(ready["jobs"][0]["id"], second_id);
@@ -614,6 +615,7 @@ async fn one_orgs_token_cannot_see_or_touch_anothers_work(pool: PgPool) {
                 repo: None,
                 remote: None,
                 mine: false,
+                agent_type: None,
                 limit: None,
             }),
         )
@@ -1181,7 +1183,7 @@ async fn work_is_billed_and_looking_is_not(pool: PgPool) {
             .factory
             .ready(
                 Extension(parts(&caller)),
-                Parameters(tools::jobs::RepoScopeArgs::default()),
+                Parameters(tools::jobs::ReadyArgs::default()),
             )
             .await);
     }
@@ -1312,7 +1314,7 @@ async fn enforcement_stops_work_but_never_reads(pool: PgPool) {
         .factory
         .ready(
             Extension(parts(&caller)),
-            Parameters(tools::jobs::RepoScopeArgs::default()),
+            Parameters(tools::jobs::ReadyArgs::default()),
         )
         .await);
 

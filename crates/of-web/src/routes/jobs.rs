@@ -96,6 +96,7 @@ pub async fn list_jobs(
             repo_id,
             team_id,
             created_by: q.mine.then_some(ctx.user.id),
+            agent_type: None,
             limit: q.limit,
         })
         .await?;

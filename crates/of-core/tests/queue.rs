@@ -175,7 +175,7 @@ async fn dependencies_gate_ready_and_claim(pool: PgPool) {
         .unwrap();
 
     let ready: Vec<String> = tx
-        .ready(None)
+        .ready(None, None)
         .await
         .unwrap()
         .into_iter()
@@ -210,7 +210,7 @@ async fn dependencies_gate_ready_and_claim(pool: PgPool) {
         .unwrap();
     tx.complete_job(&first.id, Some("done")).await.unwrap();
     let ready: Vec<String> = tx
-        .ready(None)
+        .ready(None, None)
         .await
         .unwrap()
         .into_iter()
@@ -779,6 +779,69 @@ async fn list_jobs_filters_by_repo(pool: PgPool) {
 
     assert_eq!(only_web.len(), 1);
     assert_eq!(only_web[0].title, "web work");
+}
+
+/// `agent_type` is a routing hint, not access control: filtering by it must
+/// still surface unrouted work, because that is anyone's to take.
+#[sqlx::test]
+async fn agent_type_filter_includes_matches_and_unrouted_jobs(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let claude = tx
+        .add_job(of_core::jobs::NewJob {
+            repo_id: t.repo,
+            title: "claude work".into(),
+            agent_type: Some("claude-code".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let copilot = tx
+        .add_job(of_core::jobs::NewJob {
+            repo_id: t.repo,
+            title: "copilot work".into(),
+            agent_type: Some("copilot-cli".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let unrouted = tx
+        .add_job(of_core::jobs::NewJob {
+            repo_id: t.repo,
+            title: "unrouted work".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    // Omitting the filter sees everything, unchanged.
+    let everything = tx.list_jobs(&JobFilter::default()).await.unwrap();
+    assert_eq!(everything.len(), 3);
+
+    // Filtering matches the exact agent_type plus every unrouted job.
+    let for_claude = tx
+        .list_jobs(&JobFilter {
+            agent_type: Some("claude-code".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let for_claude_ids: Vec<_> = for_claude.iter().map(|j| j.id.as_str()).collect();
+    assert_eq!(for_claude_ids.len(), 2);
+    assert!(for_claude_ids.contains(&claude.id.as_str()));
+    assert!(for_claude_ids.contains(&unrouted.id.as_str()));
+    assert!(!for_claude_ids.contains(&copilot.id.as_str()));
+
+    // `ready` applies the same rule.
+    let ready_for_claude = tx.ready(None, Some("claude-code")).await.unwrap();
+    let ready_ids: Vec<_> = ready_for_claude.iter().map(|j| j.id.as_str()).collect();
+    assert_eq!(ready_ids.len(), 2);
+    assert!(ready_ids.contains(&claude.id.as_str()));
+    assert!(ready_ids.contains(&unrouted.id.as_str()));
+
+    tx.commit().await.unwrap();
 }
 
 /// A patch touches only what it names. A caller written against three fields
