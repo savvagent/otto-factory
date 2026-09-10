@@ -89,9 +89,17 @@ async fn register_new(db: &Db, auth: &mut WebauthnAuthenticator<SoftToken>) -> U
             for_soft_token(ceremony.challenge),
         )
         .expect("the authenticator refused the registration challenge");
-    passkeys::finish_registration(db, &webauthn, ceremony.id, &credential, Some("laptop"))
-        .await
-        .unwrap()
+    passkeys::finish_registration(
+        db,
+        &webauthn,
+        ceremony.id,
+        &credential,
+        Some("laptop"),
+        "signup",
+        None,
+    )
+    .await
+    .unwrap()
 }
 
 /// The credential IDs an account holds, for `offer`.
@@ -169,10 +177,17 @@ async fn a_second_passkey_also_opens_the_account(pool: PgPool) {
             for_soft_token(ceremony.challenge),
         )
         .unwrap();
-    let same =
-        passkeys::finish_registration(&db, &webauthn, ceremony.id, &credential, Some("phone"))
-            .await
-            .unwrap();
+    let same = passkeys::finish_registration(
+        &db,
+        &webauthn,
+        ceremony.id,
+        &credential,
+        Some("phone"),
+        "add",
+        None,
+    )
+    .await
+    .unwrap();
     assert_eq!(same, user);
     assert_eq!(passkeys::count(&db, user).await.unwrap(), 2);
 
@@ -395,6 +410,61 @@ async fn registration_writes_the_passkey_registered_action(pool: PgPool) {
         0,
         "registration must not write the historical TOTP action"
     );
+}
+
+/// The claim path's row is the one that matters most: it is what proves who
+/// actually walked through the door after an admin-assisted reset (#88).
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn registration_records_which_flow_wrote_it(pool: PgPool) {
+    let db = Db::from_pool(pool);
+    let webauthn = rp();
+    let mut auth = authenticator();
+    let user = register_new(&db, &mut auth).await;
+
+    let ceremony = passkeys::start_registration(&db, &webauthn, Some(user))
+        .await
+        .unwrap();
+    let credential = auth
+        .do_registration(
+            Url::parse(ORIGIN).unwrap(),
+            for_soft_token(ceremony.challenge),
+        )
+        .expect("the authenticator refused the registration challenge");
+    passkeys::finish_registration(
+        &db,
+        &webauthn,
+        ceremony.id,
+        &credential,
+        None,
+        "claim",
+        Some("203.0.113.7"),
+    )
+    .await
+    .unwrap();
+
+    let via: serde_json::Value = sqlx::query_scalar(
+        "SELECT detail->'via' FROM audit_events \
+         WHERE action = $1 AND actor_user_id = $2 \
+         ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(of_core::audit::action::PASSKEY_REGISTERED)
+    .bind(user)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(via, serde_json::json!("claim"));
+
+    let ip: Option<String> = sqlx::query_scalar(
+        "SELECT ip FROM audit_events \
+         WHERE action = $1 AND actor_user_id = $2 \
+         ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(of_core::audit::action::PASSKEY_REGISTERED)
+    .bind(user)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(ip.as_deref(), Some("203.0.113.7"));
 }
 
 /// Clearing writes the new `auth.passkey.cleared` action, never the old
@@ -625,9 +695,10 @@ async fn a_second_key_on_one_account_is_named_like_the_first(pool: PgPool) {
     let credential = auth
         .do_registration(Url::parse(ORIGIN).unwrap(), for_soft_token(first.challenge))
         .unwrap();
-    let user = passkeys::finish_registration(&db, &webauthn, first.id, &credential, None)
-        .await
-        .unwrap();
+    let user =
+        passkeys::finish_registration(&db, &webauthn, first.id, &credential, None, "signup", None)
+            .await
+            .unwrap();
 
     let second = passkeys::start_registration(&db, &webauthn, Some(user))
         .await

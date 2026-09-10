@@ -213,12 +213,20 @@ pub async fn start_registration(
 }
 
 /// Finish registering, and return the account the key now belongs to.
+///
+/// `via` names which flow drove the ceremony — `"signup"`, `"add"`, or
+/// `"claim"` — and is written into the audit row's detail rather than left to
+/// be inferred later. The claim case is the one that matters most: it is the
+/// takeover-completion event that follows an admin-assisted reset, and without
+/// `via` it is indistinguishable from an ordinary signup.
 pub async fn finish_registration(
     db: &Db,
     webauthn: &Webauthn,
     ceremony: Uuid,
     credential: &RegisterPublicKeyCredential,
     nickname: Option<&str>,
+    via: &str,
+    ip: Option<&str>,
 ) -> Result<UserId> {
     let (user_id, state): (Option<UserId>, PasskeyRegistration) =
         take_ceremony(db, ceremony, "register").await?;
@@ -253,7 +261,12 @@ pub async fn finish_registration(
     })?;
 
     if let Err(e) = db
-        .audit_global(Entry::new(action::PASSKEY_REGISTERED).actor(user_id))
+        .audit_global(
+            Entry::new(action::PASSKEY_REGISTERED)
+                .actor(user_id)
+                .detail(serde_json::json!({ "via": via }))
+                .from_request(ip, None),
+        )
         .await
     {
         tracing::error!(
