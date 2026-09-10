@@ -7,7 +7,7 @@
 > `release-please` each given their own explicit push/master guard, `concurrency` reworked so a
 > master push is never queued behind (and so never cancellable by) another, and a `bootstrap-sha`
 > added to `release-please-config.json` so the first changelog doesn't backfill this repo's
-> pre-convention history. See PR #114 for the full review discussion.
+> pre-convention history. See savvagent/otto-factory#114 for the full review discussion.
 >
 > **Not yet exercised live, as of this record.** `rust`/`web`/`docker-build`/`pr-title` all ran
 > green on `670860e`'s own merge, and the MCP identity fix and OpenAPI regression test are
