@@ -219,12 +219,22 @@ pub struct AcquireLeaseArgs {
 }
 ```
 
-Handler resolves the resource before calling `tx.acquire_lease`:
+Handler resolves the resource before calling `tx.acquire_lease`. The `branch` alias's
+emptiness is checked **before** prefixing — `format!("branch:{}", ...)` on an empty or
+whitespace-only branch would otherwise produce the non-empty string `"branch:"`, silently
+sailing past `of-core`'s `resource.is_empty()` guard and creating a lease on a meaningless
+resource, which would be a real regression from today's `if branch.is_empty()` check:
 
 ```rust
 let resource = match (args.resource.as_deref(), args.branch.as_deref()) {
     (Some(r), _) => r.trim().to_string(),
-    (None, Some(b)) => format!("branch:{}", b.trim()),
+    (None, Some(b)) => {
+        let b = b.trim();
+        if b.is_empty() {
+            return Err(ErrorData::invalid_params("branch must not be empty", None));
+        }
+        format!("branch:{b}")
+    }
     (None, None) => {
         return Err(ErrorData::invalid_params(
             "acquire_lease needs resource (or the deprecated branch)",
@@ -251,9 +261,14 @@ Tool description updated to state the convention explicitly:
 > message them, or pick different work. Leases are advisory: the server cannot see your git
 > operations, so this makes collisions visible rather than impossible."
 
-`renew_lease`, `release_lease` descriptions are unchanged (they never mentioned branch).
-`list_leases` description changes "the holder, the branch, and when each expires" to "the
-holder, the resource, and when each expires."
+`renew_lease` and `release_lease` currently name "the branch" explicitly ("another agent may
+take the branch while you are still in it"; "freeing the branch immediately instead of
+waiting for it to expire") — exactly the branch-specific wording the rest of this section
+generalizes away from `Error::LeaseHeld`'s message, and for the same reason: read against a
+staging-slot or migration-lock resource, "freeing the branch" is confusing or wrong. Both
+descriptions are updated to say "the resource" in place of "the branch." `list_leases`
+description changes "the holder, the branch, and when each expires" to "the holder, the
+resource, and when each expires."
 
 `LeaseOut` / `LeasesOut` in `of-mcp::tools::out` need no code change — they wrap `of_core::leases::Lease`
 directly, so the field rename flows through automatically once `of-core` changes; this is
