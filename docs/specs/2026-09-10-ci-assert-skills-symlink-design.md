@@ -1,7 +1,7 @@
 # CI assertion for the `.claude/skills` symlink design
 
-> **Status:** DRAFT — assert in CI that `.claude/skills` still resolves to `../.github/skills`,
-> closing savvagent/otto-factory#127.
+> **Status:** APPROVED — assert in CI that `.claude/skills` still resolves to `../.github/skills`,
+> closing savvagent/otto-factory#127. Flipped to IMPLEMENTED once the PR merges.
 >
 > **Revised after spec critique:** §1's script originally reconstructed `git ls-tree`'s mode/type/sha
 > into a string and compared it against `"120000 blob $blob_sha"` — but `git ls-tree` appends a
