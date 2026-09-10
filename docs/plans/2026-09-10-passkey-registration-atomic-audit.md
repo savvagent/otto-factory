@@ -11,7 +11,10 @@ plan implements it exactly.
 
 ## Status — 2026-09-10
 
-Not started. One task.
+Shipped in `savvagent/otto-factory#131`. One task, complete — plus two hardening commits added
+during PR review (a doc warning + regression test on `Db::audit_global_on`, and a deterministic
+rollback test forcing the audit write to fail). Three follow-up issues filed from review findings
+outside this plan's scope: `#132`, `#133`, `#134` — see the spec's Risks & Open Questions.
 
 ## Global Constraints
 
@@ -47,7 +50,7 @@ because the second cannot compile without the first (`Db::audit_global_on` does 
 splitting them into two commits would leave an intermediate commit with a private-only refactor that
 compiles but serves no caller — not a meaningful checkpoint to pause at.
 
-## Task 1 — Atomic credential + audit write ✅/🚧/⬜: ⬜
+## Task 1 — Atomic credential + audit write ✅/🚧/⬜: ✅
 
 **Files:** `crates/of-core/src/audit.rs`, `crates/of-auth/src/passkeys.rs`
 
