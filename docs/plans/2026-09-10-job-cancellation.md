@@ -16,8 +16,9 @@ review-response rounds: the first added a `JobTransition::Cancelled` variant
 (`crates/of-trackers`) to fix an incorrect JIRA transition the original plan didn't
 anticipate, added audit-trail test coverage that was missing, corrected several
 tool-description inaccuracies, combined `0024`'s three `ALTER TABLE` statements into one,
-and surfaced the new fields on the console's job detail page (`web/src/routes/o/[org]/
-queue/[job]/+page.svelte` — not in the original Task 4 file list); the second corrected
+and surfaced the new fields on the console's job detail page
+(`web/src/routes/o/[org]/queue/[job]/+page.svelte` — not in the original Task 4 file
+list); the second corrected
 two more tool-description inaccuracies the first round introduced and strengthened
 `cancel_job`'s cross-org negative test, which previously would have passed even with the
 `org_id` predicate removed. Merged as commit `4dd0f5e`, deployed to production the same
