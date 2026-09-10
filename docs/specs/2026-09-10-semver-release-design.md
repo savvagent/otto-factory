@@ -22,13 +22,15 @@
 > `deploy`'s remaining unpinned checkout step, the repo's PR-self-approval setting) are tracked in
 > savvagent/otto-factory#117.
 >
-> **Update, savvagent/otto-factory#115:** the release-PR path above is no longer unexercised.
-> #115 (`feat: generalize repo leases…`, merged `6fe084e0`) is this repo's first `feat:`-typed
+> **Update, savvagent/otto-factory#115: partially exercised, not fully.** #115
+> (`feat: generalize repo leases…`, merged `6fe084e0`) is this repo's first `feat:`-typed
 > merge since #114, and its push triggered `release-please` opening
 > savvagent/otto-factory#121 (`chore: release 0.2.0`) — confirming the repo setting flagged
-> above as unverified does in fact allow it. `deploy` still correctly skipped on #115's own
-> push, since #121 (the release PR) has not yet merged; see #115's design spec Status
-> blockquote for the full account.
+> above as unverified does in fact allow it. That resolves the release-PR-creation half of
+> the "not yet exercised live" caveat above. **What remains unexercised**: cutting an actual
+> release (the tag + GitHub Release release-please creates when #121 itself merges) and the
+> `deploy` job that gates on it — `deploy` correctly skipped again on #115's own push, since
+> #121 has not yet merged. See #115's design spec Status blockquote for the full account.
 
 ## Goal & Success Criteria
 

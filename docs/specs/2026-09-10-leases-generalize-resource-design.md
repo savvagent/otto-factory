@@ -16,8 +16,9 @@
 >
 > **A follow-up, not a fix, was filed as `savvagent/otto-factory#119`, tracking a new
 > migration — never an edit to the applied `0027_lease_resource.sql`.** `#111` — merged
-> concurrently with this PR (12:17 UTC vs. this PR's 12:39 UTC merge, same day) — added
-> CLAUDE.md guidance on migrations that rewrite tenant-table data, generalizing the same
+> concurrently with `savvagent/otto-factory#115` (12:17 UTC vs. #115's 12:39 UTC merge, same
+> day) — added CLAUDE.md guidance on migrations that rewrite tenant-table data, generalizing
+> the same
 > class of bug the bolded note in §1 found here. CLAUDE.md states **both** branches of that
 > bug, and both matter: a bare `UPDATE` against a tenant table inside `Db::migrate` (which
 > never sets `app.org_id`) is a silent zero-row no-op where RLS applies, **and** — on a
