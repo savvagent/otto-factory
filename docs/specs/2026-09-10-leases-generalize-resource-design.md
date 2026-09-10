@@ -1,6 +1,33 @@
 # Leases: generalize (repo, branch) to (repo, resource) design
 
 > **Status:** DRAFT — closes savvagent/otto-factory#69.
+>
+> **PR review round found six further corrections, all applied before merge:** (1) the
+> migration's backfill `UPDATE` ran under `repo_leases`' `FORCE ROW LEVEL SECURITY` with no
+> `app.org_id` set, so it silently affected zero rows on any deployment where FORCE actually
+> matters (managed Postgres) — empirically verified both broken and fixed against a real
+> `FORCE ROW LEVEL SECURITY` table; the migration now suspends FORCE for the owner-run
+> backfill and restores it immediately after, with the reasoning as an inline comment. (2)
+> The backfill's `WHERE resource NOT LIKE 'branch:%'` guard could collide two distinct
+> branches (`main` and a branch literally named `branch:main`) and abort the migration;
+> it now prefixes unconditionally. (3) The `DROP INDEX`/`CREATE UNIQUE INDEX` pair was a
+> no-op — `RENAME COLUMN` already carries an index's definition forward — and is removed.
+> (4) §4's resolution logic now refuses `resource` and `branch` both being given
+> (`invalid_params`) instead of silently preferring `resource`, and treats a blank
+> `resource` the same as an absent one (falling back to `branch`) rather than masking a
+> valid alias — both fixed several real "guessed instead of stopped" bugs three independent
+> reviewers converged on. (5) `Lease.resource` gained a `MAX_RESOURCE_LEN` (200 bytes,
+> matching `idempotency_key`'s precedent) — unbounded, the column could grow arbitrarily on
+> a table whose rows are never deleted, and an oversized value would have failed at
+> Postgres's btree index limit as a retriable internal error. (6) A documentation sweep
+> found "branch" surviving in the MCP server's top-level `INSTRUCTIONS` (the first thing an
+> agent reads, unchanged by this PR's other description updates), the `renew_claim` tool
+> description, `crates/of-web/src/openapi.rs`'s hand-written `Lease` schema (which still
+> marked `branch` required — a public, unauthenticated document contradicting the actual
+> response), and several internal doc comments; all updated, and a new test
+> (`the_lease_schema_matches_the_wire_field_it_actually_returns`) guards the OpenAPI schema
+> specifically, since nothing else would catch that class of drift on a hand-written schema.
+> See the `Post-review correction:` notes inline in §1 and §4 for detail.
 
 ## Goal & Success Criteria
 
@@ -139,23 +166,55 @@ New migration `crates/of-core/migrations/0027_lease_resource.sql`, forward-only 
 ```sql
 ALTER TABLE repo_leases RENAME COLUMN branch TO resource;
 
-UPDATE repo_leases SET resource = 'branch:' || resource WHERE resource NOT LIKE 'branch:%';
-
-DROP INDEX repo_leases_live_key;
-CREATE UNIQUE INDEX repo_leases_live_key
-  ON repo_leases (repo_id, resource)
-  WHERE released_at IS NULL;
+ALTER TABLE repo_leases NO FORCE ROW LEVEL SECURITY;
+UPDATE repo_leases SET resource = 'branch:' || resource;
+ALTER TABLE repo_leases FORCE ROW LEVEL SECURITY;
 ```
 
-The `WHERE resource NOT LIKE 'branch:%'` guard makes the `UPDATE` idempotent against a
-migration re-run in a context where it partially applied (defensive; sqlx applies each
-migration inside its own transaction, so a clean re-run is the only case that matters, but
-the guard costs nothing and documents the intent). The index drop+recreate is required
-because a `UNIQUE INDEX` cannot be renamed to track a column rename automatically in a way
-that also changes its definition comment; recreating it under the same name keeps
-`\d repo_leases` readable. `repo_leases_org_expiry_idx` does not reference the column and is
-untouched. The `repo_leases_notify` trigger (`0003_jobs.sql`) fires on the table, not a
-named column list, so it needs no change.
+**Post-review correction:** the original draft of this section additionally guarded the
+`UPDATE` with `WHERE resource NOT LIKE 'branch:%'` and followed the rename with a
+`DROP INDEX`/`CREATE UNIQUE INDEX` pair, and neither survived review.
+
+The `WHERE` guard is gone because it could **collide** two distinct pre-existing branches: a
+git branch can itself be named `branch:main`, and the guard would map both it and a plain
+`main` to the identical string `branch:main`, aborting the migration on the unique index
+below. Prefixing unconditionally keeps every row distinct (the one branch that already
+collided with the convention gets a harmless double prefix, `branch:branch:main`, rather
+than losing its identity) — correct, not merely simpler; there is no re-run case to be
+idempotent *for*, since sqlx runs each migration exactly once and each inside its own
+transaction.
+
+The index drop/recreate is gone because it was a no-op: `ALTER TABLE ... RENAME COLUMN`
+already carries a dependent index's definition forward to the new column name (verified —
+`repo_leases_live_key` reads `(repo_id, resource) WHERE released_at IS NULL` immediately
+after the rename, with no further statement), so dropping and recreating it under the same
+name only took an `ACCESS EXCLUSIVE` lock to reproduce what already existed.
+`repo_leases_org_expiry_idx` does not reference the column and needs no attention either
+way. The `repo_leases_notify` trigger (`0003_jobs.sql`) fires on the table, not a named
+column list, so it needs no change.
+
+**The `NO FORCE`/`FORCE` pair is load-bearing, not decorative**, and its absence was the one
+finding in this whole change that would have shipped a silent data-correctness bug:
+`repo_leases` is a tenant table under `FORCE ROW LEVEL SECURITY` (`0007_rls.sql`) whose
+policy is `USING (org_id = current_org())`. A migration connection never sets
+`app.org_id` — there is no tenant transaction to pin one — so `current_org()` reads NULL and
+the policy's predicate is never `TRUE` for any row. A bare `UPDATE` (as originally drafted)
+would therefore **silently affect zero rows** on exactly the deployment shape where FORCE
+matters at all: managed Postgres, where the migrating role is the table's owner and is
+neither a superuser nor `BYPASSRLS`. This was invisible everywhere the work got checked
+before review — the local compose role and the `#[sqlx::test]` connecting role are both
+superusers, which bypass RLS regardless of FORCE, so the backfill "worked" in every test and
+every local run and would only have failed the one place `CLAUDE.md`'s own RLS section warns
+about. Verified empirically both ways against a real `FORCE ROW LEVEL SECURITY` table:
+`UPDATE 0` with the bare statement, `UPDATE 1` (and the row correctly rewritten) with the
+`NO FORCE`/`FORCE` pair around it, run as the table's non-superuser owner in both cases. The
+consequence of shipping the bug would have been a split lease keyspace with no error: rows
+would stay spelled `main` while every new caller — including the `branch` alias this PR adds
+specifically to keep old callers working — writes `branch:main`, so two agents could each
+successfully lease "the same" branch and neither would see `lease_held`. Suspending FORCE
+only around this one statement, run as the table's owner (which the migration already must
+be, to `RENAME COLUMN` and to have created the table in the first place), lets the owner's
+own migration see and rewrite every row; it is restored in the same migration before commit.
 
 ## §2 `of-core::leases`
 
@@ -170,6 +229,15 @@ named column list, so it needs no change.
 - Doc comments (`leases.rs`'s module doc, `acquire_lease`'s doc comment) drop "branch" in
   favor of "resource," keeping the advisory/time-bounded reasoning verbatim since that
   reasoning is unchanged.
+
+**Post-review correction:** a new `MAX_RESOURCE_LEN` constant (200 bytes, matching
+`idempotency::MAX_KEY_LEN`'s reasoning — long enough for any reasonable caller-chosen name,
+short enough that a released lease's row, kept for history and never deleted, cannot become
+unbounded free storage) caps `resource`'s length in `acquire_lease`, refused with a
+non-retriable `Error::Invalid` above the limit. Generalizing past a git branch name removed
+the informal length ceiling a branch name used to imply; unbounded, an oversized value would
+have failed only at Postgres's btree index-row-size limit, surfacing as a retriable
+`internal_error` an agent could loop on forever.
 
 ## §3 `Error::LeaseHeld`
 
@@ -219,22 +287,21 @@ pub struct AcquireLeaseArgs {
 }
 ```
 
-Handler resolves the resource before calling `tx.acquire_lease`. The `branch` alias's
-emptiness is checked **before** prefixing — `format!("branch:{}", ...)` on an empty or
-whitespace-only branch would otherwise produce the non-empty string `"branch:"`, silently
-sailing past `of-core`'s `resource.is_empty()` guard and creating a lease on a meaningless
-resource, which would be a real regression from today's `if branch.is_empty()` check:
+Handler resolves the resource before calling `tx.acquire_lease`. A blank string and an
+absent field are folded together (`.map(str::trim).filter(|s| !s.is_empty())`) before
+matching, then:
 
 ```rust
-let resource = match (args.resource.as_deref(), args.branch.as_deref()) {
-    (Some(r), _) => r.trim().to_string(),
-    (None, Some(b)) => {
-        let b = b.trim();
-        if b.is_empty() {
-            return Err(ErrorData::invalid_params("branch must not be empty", None));
-        }
-        format!("branch:{b}")
+let resource = match (resource, branch) {
+    (Some(_), Some(_)) => {
+        return Err(ErrorData::invalid_params(
+            "acquire_lease got both resource and the deprecated branch; pass only \
+             one (resource, or branch as a shorthand for \"branch:<branch>\")",
+            None,
+        ))
     }
+    (Some(r), None) => r.to_string(),
+    (None, Some(b)) => format!("branch:{b}"),
     (None, None) => {
         return Err(ErrorData::invalid_params(
             "acquire_lease needs resource (or the deprecated branch)",
@@ -244,22 +311,51 @@ let resource = match (args.resource.as_deref(), args.branch.as_deref()) {
 };
 ```
 
-Passing both `resource` and `branch` is not an error — `resource` simply wins, same
-last-one-wins-is-confusing tradeoff already accepted elsewhere in this codebase (e.g. `repo`
-winning over `remote` in `resolve_repo`) rather than adding a new error path for a case that
-costs the caller nothing to get "wrong."
+**Post-review correction:** the original draft matched `(args.resource.as_deref(),
+args.branch.as_deref())` directly (no pre-filtering) with `(Some(r), _) => ...` as the first
+arm and no `(Some(_), Some(_))` arm, on the reasoning that "passing both is not an error —
+`resource` simply wins." Three independent reviewers converged on the same two defects in
+that shape, both closed by the version above:
 
-Tool description updated to state the convention explicitly:
+1. **Silently preferring `resource` over a simultaneously-supplied `branch` is a guess, and
+   `CLAUDE.md`'s own style rule says "errors that guess are worse than errors that stop."**
+   A caller who meant the `branch` alias — populated, say, by a client that always sends
+   `resource` with a stale or empty default — would have leased whatever `resource` happened
+   to contain, told the call succeeded, with no signal that `branch` was ignored. Both given
+   is now refused outright, naming both fields.
+2. **A blank `resource` masked a perfectly good `branch`.** `(Some(r), _)` matched on `Some`
+   regardless of content, so `resource: Some("")` alongside `branch: Some("main")` took the
+   first arm, trimmed to an empty string, and only failed later inside `of-core`'s own
+   guard — after this handler had already opened a transaction and charged the meter for a
+   call that was always going to fail, and without ever trying the `branch` alias that was
+   right there. Filtering both fields to `None` when blank, before matching, means a blank
+   `resource` is now indistinguishable from an absent one: it falls through to `branch` if
+   present, exactly like a caller who omitted `resource` entirely — which is what the
+   deprecated alias exists to keep working. This also fixes an asymmetry the same reviewers
+   flagged: the `branch` arm always rejected an empty value before doing any work, while the
+   `resource` arm did not, so two structurally identical "you gave me nothing usable"
+   mistakes read as two unrelated failures depending on which field was blank.
+
+The `AcquireLeaseArgs` doc comments for both fields now say "pass exactly one of `resource`
+or `branch`, never both" to match.
+
+Tool description updated to state the convention explicitly, including the corrected
+precedence rule and — per an architect-review finding — that a lease is scoped to one repo,
+so the free-form examples it cites (a staging slot, a migration lock) do not serialize
+*across* repos the way the prose alone might suggest:
 
 > "Announce that you are taking exclusive use of something in a repository — a branch, or
 > anything else your team needs to serialize on, such as a staging slot or a migration
-> lock — so other agents can see it and go elsewhere. Pass `resource` as a free-form name;
-> for a branch, use the form `branch:<name>` (e.g. `branch:main`) so every caller converges
-> on the same spelling. `branch` is accepted as a deprecated shorthand for
-> `resource: "branch:<branch>"`. Take one before you start and renew it while you work. If
-> someone already holds it the error names them and says when it expires, so you can wait,
-> message them, or pick different work. Leases are advisory: the server cannot see your git
-> operations, so this makes collisions visible rather than impossible."
+> lock — so other agents can see it and go elsewhere. Two agents in two different
+> repositories can hold the same resource name independently; a lease only ever serializes
+> within one repository. Pass `resource` as a free-form name; for a branch, use the form
+> `branch:<name>` (e.g. `branch:main`) so every caller converges on the same spelling — a
+> bare `main` and `branch:main` are different resources. `branch` is accepted as a
+> deprecated shorthand for `resource: "branch:<branch>"`; pass one or the other, never both.
+> Take one before you start and renew it while you work. If someone already holds it the
+> error names them and says when it expires, so you can wait, message them, or pick
+> different work. Leases are advisory: the server cannot see your git operations, so this
+> makes collisions visible rather than impossible."
 
 `renew_lease` and `release_lease` currently name "the branch" explicitly ("another agent may
 take the branch while you are still in it"; "freeing the branch immediately instead of
@@ -291,25 +387,34 @@ independently update).
 
 ## Error Handling & Edge Cases
 
-- **Empty resource.** `resource: Some("")` (or whitespace-only) reaches `of-core`'s
-  `resource.is_empty()` guard after trimming, same as today. `branch: Some("")` (or
-  whitespace-only) is rejected earlier, by the dedicated check in §4's `of-mcp` handler —
-  it never reaches `of-core` at all, because prefixing it first would produce the non-empty
-  string `"branch:"`, which would sail past `of-core`'s guard undetected.
-- **Both `resource` and `branch` omitted.** New `invalid_params` error in `of-mcp` (§4) —
-  today's `AcquireLeaseArgs::branch` is a required field so serde already rejects a missing
-  branch; making both optional means the "neither given" case must be checked explicitly
-  now that serde can no longer do it for us.
+- **Empty or absent `resource`.** `resource: Some("")` (whitespace-only or empty) and
+  `resource: None` are treated identically by §4's pre-match filtering — both fall back to
+  `branch` if given, or to the "neither given" error if not. A non-empty `resource` that
+  somehow reached `of-core` empty (there is no such path today, since §4 filters first) would
+  still be caught by `of-core`'s own `resource.is_empty()` guard — belt and braces, not a gap.
+- **Empty or absent `branch`.** Symmetric to `resource`: `branch: Some("")` and `branch:
+  None` are both folded to "absent" before matching, so an empty-string `branch` never
+  reaches the `format!("branch:{b}")` step that would otherwise produce the meaningless
+  resource `"branch:"`.
+- **Both `resource` and `branch` given (both non-blank).** `invalid_params` naming both
+  fields (§4) — refused rather than guessed, per the post-review correction in §4.
+- **Both `resource` and `branch` omitted (or both blank).** `invalid_params` naming
+  `resource` (§4) — today's `AcquireLeaseArgs::branch` is a required field so serde already
+  rejects a missing branch; making both optional means the "neither given" case must be
+  checked explicitly now that serde can no longer do it for us.
+- **An oversized `resource`.** Rejected by `of-core`'s `MAX_RESOURCE_LEN` guard (§2) with a
+  non-retriable `Error::Invalid` naming the byte count and the limit.
 - **A resource string containing `:` that isn't `branch:...`.** Never rejected — free-form
   means free-form; a customer's skill might reasonably use `deploy:staging` or
   `fixture:accounts-db`.
-- **Migration idempotency.** Covered by the `WHERE resource NOT LIKE 'branch:%'` guard in §1.
+- **Migration data correctness under RLS.** See §1's `Post-review correction` — the backfill
+  now suspends `FORCE ROW LEVEL SECURITY` for its own duration rather than relying on a
+  guard clause, since the guard clause was never the risk that mattered here.
 - **Existing live leases across the migration boundary.** A lease acquired on `main` before
   the migration and still live after it is transparently `branch:main` afterward — the
-  unique index still enforces exclusivity on the same logical resource, and `list_leases`
-  during the deploy window returns the new field name with the migrated value. No
-  in-flight-lease special casing is needed because the rename is a single blocking `ALTER
-  TABLE ... RENAME COLUMN` plus an `UPDATE`, both inside one migration transaction.
+  unique index still enforces exclusivity on the same logical resource (carried forward by
+  `RENAME COLUMN` with no further action, per §1), and `list_leases` during the deploy window
+  returns the new field name with the migrated value.
 
 ## Risks & Open Questions
 
@@ -328,3 +433,24 @@ independently update).
   does not set one; removing it later is a small, separate, easy-to-scope change once real
   callers are observed to have moved on (or never depended on it in the first place — this
   server has no production traffic history to check yet).
+- **Known, documented, not-fixed-in-this-PR limitations found in review** — real, but
+  pre-existing (not introduced by this change) or a genuinely separate concern, deliberately
+  left as follow-ups per "the same bug pattern is discovered elsewhere — file a follow-up,
+  do not silently widen scope":
+  - **A lost `acquire_lease` race on a resource with no existing row reports a retriable
+    internal error instead of `lease_held`.** `acquire_lease`'s reap → `SELECT ... FOR
+    UPDATE` → `INSERT` shape means two concurrent first-time acquires both see no row to
+    lock, both attempt the `INSERT`, and the loser's `sqlx::Error::Database` (unique
+    violation) surfaces through the generic `Error::Db` path as `"the server could not
+    complete this call; retry shortly"` rather than naming the winner and the expiry the way
+    a losing `acquire_lease` normally does. This predates this change (the same reap-then-
+    insert shape existed for `branch`), but generalizing to free-form resources plausibly
+    raises how often it fires — more agents contending on fewer, coarser resources (one
+    staging slot vs. many branch names) than before. Fixing it means matching
+    `sqlx::Error::Database` on the `repo_leases_live_key` constraint name and re-reading the
+    live row to answer with `Error::LeaseHeld` — a real fix, but a distinct one from this
+    issue's scope.
+  - **`list_leases` has no result cap.** Previously bounded in practice by "one lease per
+    branch actively worked"; a free-form resource namespace has no natural ceiling. Not
+    fixed here because it is a design choice (add a `LIMIT`, and decide what the MCP tool
+    description promises about it) rather than a mechanical follow-on of the rename.

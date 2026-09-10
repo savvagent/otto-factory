@@ -9,6 +9,27 @@ savvagent/otto-factory#69.
 **Spec:** `docs/specs/2026-09-10-leases-generalize-resource-design.md` — read it first.
 This plan implements it exactly.
 
+## Status — post-PR-review
+
+All four tasks below (✅) were implemented, reviewed, and shipped, but the mandatory
+PR-review trio (rust-pro, architect-reviewer, blind security-auditor) plus the
+pr-review-toolkit passes found six further real issues beyond what this plan's own
+task-level spec-compliance and code-quality reviews caught — see the spec's
+`Post-review correction:` notes in §1 and §4 for the technical detail, and its Status
+blockquote for the summary. The two most significant, fixed before merge: the migration's
+backfill silently affected zero rows under `repo_leases`' `FORCE ROW LEVEL SECURITY` on any
+deployment where FORCE actually matters (empirically verified both broken and fixed); and
+`acquire_lease`'s resource-resolution logic silently preferred `resource` over a
+simultaneously-supplied `branch` and let a blank `resource` mask a valid `branch` instead of
+falling back to it — both closed by validating before matching rather than guessing. Also
+fixed: a length cap on `resource` (unbounded before review), the OpenAPI document's
+hand-written `Lease` schema (still declared `branch` required), and a documentation sweep of
+"branch" wording surviving in the MCP server's `INSTRUCTIONS`, the `renew_claim` description,
+and several internal comments. Two pre-existing, out-of-scope issues were found and
+deliberately left as follow-ups rather than silently widening this PR's scope: a lost
+`acquire_lease` race reports a retriable internal error instead of `lease_held`, and
+`list_leases` has no result cap.
+
 ---
 
 ## Global Constraints
@@ -67,7 +88,7 @@ These hold for every task in this plan:
 
 ---
 
-## Task 1 — `of-core`: schema, `Lease`, and `Error::LeaseHeld` ⬜
+## Task 1 — `of-core`: schema, `Lease`, and `Error::LeaseHeld` ✅
 
 **Files:** `crates/of-core/migrations/0027_lease_resource.sql` (create),
 `crates/of-core/src/leases.rs`, `crates/of-core/src/error.rs`,
@@ -133,7 +154,7 @@ compiles unchanged, per the Global Constraints note).
 - [ ] Format and commit: `cargo fmt --all` then
       `git commit -m "of-core: generalize repo_leases from (repo, branch) to (repo, resource)"`.
 
-## Task 2 — `of-mcp`: `resource` input, `branch` alias, tool descriptions ⬜
+## Task 2 — `of-mcp`: `resource` input, `branch` alias, tool descriptions ✅
 
 **Files:** `crates/of-mcp/src/tools/coord.rs`, `crates/of-mcp/tests/tools.rs`,
 `crates/of-mcp/src/error.rs`
@@ -217,7 +238,7 @@ public `acquire_lease` MCP tool's new input shape and all four lease tools' outp
 - [ ] Format and commit: `cargo fmt --all` then
       `git commit -m "of-mcp: accept resource on acquire_lease, keep branch as a deprecated alias"`.
 
-## Task 3 — `web/`: console type and Repos page ⬜
+## Task 3 — `web/`: console type and Repos page ✅
 
 **Files:** `web/src/lib/types.ts`, `web/src/routes/o/[org]/repos/+page.svelte`,
 `crates/of-web/tests/console.rs`
@@ -260,7 +281,7 @@ returns `of_core::leases::Lease` verbatim).
 - [ ] Format and commit: `cargo fmt --all` (for `console.rs`) then
       `git commit -m "web: rename lease.branch to lease.resource in the console"`.
 
-## Task 4 — Docs: restate open risk 4 ⬜
+## Task 4 — Docs: restate open risk 4 ✅
 
 **Files:** `docs/specs/2026-09-01-otto-factory-design.md`
 
