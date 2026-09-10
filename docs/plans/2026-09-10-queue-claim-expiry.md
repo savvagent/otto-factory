@@ -15,8 +15,8 @@ Not started. Plan critique round 1 found four real issues (unscoped `clippy`/`ca
 gates that would fail mid-plan on code the current task hasn't touched yet; two test
 files — `crates/of-core/tests/jobs.rs` and `crates/of-web/tests/console.rs` — that call
 the changing signatures directly and were missing from the file lists; and
-`ClaimJobsArgs` needing `Default` so its 14 existing test-literal call sites don't all
-need hand-editing). All four are fixed below.
+`ClaimJobsArgs`'s 14 existing test-literal call sites needing a new `ttl: None` field
+each). All four are fixed below.
 
 ---
 
