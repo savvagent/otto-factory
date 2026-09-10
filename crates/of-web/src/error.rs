@@ -173,7 +173,22 @@ impl From<CoreError> for ApiError {
             }
         };
 
-        ApiError::new(status, e.code(), e.to_string())
+        let mut api = ApiError::new(status, e.code(), e.to_string());
+        // Rare, and the only signal an operator gets if it fires more than
+        // expected -- or if send_message's currently-unreachable case (see
+        // that site's own comment in messages.rs) is ever reached by a
+        // future change. Unlike Db/Config/Crypto's ApiError::internal path,
+        // this does not redact the message; it only adds the log
+        // side-effect and a small retry hint, since the race this describes
+        // is expected to resolve almost immediately.
+        if let RaceLost(_) = &e {
+            tracing::warn!(
+                message = %api.message,
+                "a lost unique-violation race surfaced to the console API"
+            );
+            api.retry_after = Some(1);
+        }
+        api
     }
 }
 
@@ -298,6 +313,12 @@ mod tests {
     /// whoever hit it — it must reach the caller intact, not the redacted
     /// generic string `internal()` produces, and its status is 503 (retry),
     /// not 500, matching the distinction `retriable()` already draws.
+    ///
+    /// It also carries a `retry_after` hint, unlike every other non-429
+    /// error this module produces: an agent told "retriable" with nothing
+    /// else to go on could hot-loop, and the race this describes is
+    /// expected to resolve almost immediately, so `Some(1)` (second) is
+    /// enough.
     #[test]
     fn race_lost_maps_to_service_unavailable_with_its_own_message() {
         let e = CoreError::RaceLost("add_job lost a race".into());
@@ -306,6 +327,7 @@ mod tests {
         assert_eq!(api.status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(api.code, "race_lost");
         assert_eq!(api.message, "add_job lost a race");
+        assert_eq!(api.retry_after, Some(1));
     }
 
     /// Every credential failure that names an account must be

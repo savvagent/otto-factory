@@ -48,6 +48,16 @@ pub fn from_core(e: &CoreError) -> ErrorData {
             tracing::error!(error = %inner, "database failure surfaced to an MCP caller");
             "the server could not complete this call; retry shortly".to_string()
         }
+        // Unlike `Db`, `RaceLost`'s message is already written to be read by
+        // the caller and must reach it unredacted — but it is rare enough,
+        // and rare-enough-to-be-suspicious if it fires a lot, that it still
+        // deserves its own trace naming which of the four call sites (named
+        // in the message itself) produced it, the same way a `Db` failure
+        // is logged just above.
+        CoreError::RaceLost(msg) => {
+            tracing::warn!(message = %msg, "a lost unique-violation race surfaced to an MCP caller");
+            msg.clone()
+        }
         other => other.to_string(),
     };
 
@@ -202,13 +212,17 @@ mod tests {
 
     /// A lost race is the server's problem, not the caller's — it must map
     /// to INTERNAL_ERROR at the JSON-RPC level exactly like a raw database
-    /// failure does, not INVALID_PARAMS.
+    /// failure does, not INVALID_PARAMS. Unlike `Db`, though, its message is
+    /// already written to be read by the caller and must survive
+    /// conversion unredacted — the opposite of
+    /// `database_internals_do_not_reach_the_caller`, above.
     #[test]
     fn race_lost_maps_to_internal_error() {
         let e = CoreError::RaceLost("add_job lost a race".into());
         let converted = from_core(&e);
         assert_eq!(converted.code, ErrorCode::INTERNAL_ERROR);
         assert_eq!(converted.data.unwrap()["retriable"], true);
+        assert!(converted.message.contains("lost a race"));
     }
 
     /// A refusal an agent cannot fix by trying again has to say so, and say
