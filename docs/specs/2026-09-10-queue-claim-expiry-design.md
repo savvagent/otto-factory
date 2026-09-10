@@ -20,7 +20,17 @@
 > longer `retriable()`, since every real caller of it (via `ensure_claim_held`) is a
 > refusal that retrying cannot fix. A known, documented, not-fixed-in-this-PR limitation
 > — fencing by account (`claimed_by: UserId`) rather than by agent instance — is recorded
-> in Risks & Open Questions.
+> in Risks & Open Questions and filed as `savvagent/otto-factory#103`.
+>
+> Shipped in `savvagent/otto-factory#102`, merged as `d3198013ef91f91fb691b4561da23c15aef9bd98`
+> and deployed — CI run `34466174128`'s `rust`/`web`/`docker-build`/`deploy` jobs all
+> succeeded. Verified directly post-deploy: `/readyz` reported `ready` and the live
+> `/api/openapi.json`'s `Job` schema carries `claimExpiresAt`. A brief `readyz` `503`
+> ("the database rejected a probe query") appeared for under a minute during the rollout,
+> caused by the outgoing instance's `LISTEN` connection dropping mid-restart — the same
+> `of_core::watch` reconnect path this repo already has an (unrelated, uncommitted at time
+> of writing) backoff fix pending for — not a defect in this change; it cleared on its own
+> once the new instance was fully up.
 
 ## Goal & Success Criteria
 
