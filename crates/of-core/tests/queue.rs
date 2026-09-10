@@ -320,6 +320,95 @@ async fn stats_counts_active_separately_from_in_progress(pool: PgPool) {
     assert_eq!(s.active, 1);
 }
 
+/// The org-wide branch of `stats` reads `completed`/`failed` off
+/// `orgs.jobs_completed_total`/`jobs_failed_total` instead of scanning every
+/// job the org has ever run — this pins those counters to every way a job
+/// can enter or leave a terminal status, so they never drift from what a
+/// full rescan would say.
+#[sqlx::test]
+async fn org_wide_stats_terminal_counters_track_every_transition(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let completed = tx.add_job(job(&t, "will complete")).await.unwrap();
+    let failed = tx.add_job(job(&t, "will fail")).await.unwrap();
+    let repended = tx.add_job(job(&t, "will be repended")).await.unwrap();
+    let deleted = tx.add_job(job(&t, "will be deleted")).await.unwrap();
+    tx.claim_jobs(
+        &[
+            completed.id.clone(),
+            failed.id.clone(),
+            repended.id.clone(),
+            deleted.id.clone(),
+        ],
+        t.user,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    tx.complete_job(&completed.id, t.user, None).await.unwrap();
+    tx.fail_job(&failed.id, t.user, Some("boom")).await.unwrap();
+    tx.complete_job(&repended.id, t.user, None).await.unwrap();
+    tx.complete_job(&deleted.id, t.user, None).await.unwrap();
+
+    let s = tx.stats(None).await.unwrap();
+    assert_eq!(s.completed, 3, "completed, repended, and deleted");
+    assert_eq!(s.failed, 1);
+
+    // Repending a completed job takes it out of `completed` again.
+    tx.repend_job(&repended.id).await.unwrap();
+    // Deleting a completed job removes it from the count entirely, not just
+    // from the table — a stale row would leave the counter overstated
+    // forever.
+    tx.delete_job(&deleted.id).await.unwrap();
+
+    let s = tx.stats(None).await.unwrap();
+    assert_eq!(s.completed, 1, "only the untouched one is left");
+    assert_eq!(s.failed, 1);
+    assert_eq!(s.pending, 1, "the repended job");
+    assert_eq!(s.total, 3, "completed + failed + the repended job");
+
+    // Repending an in-progress (never-terminal) job must not touch either
+    // counter — there was nothing to take back out.
+    let never_finished = tx
+        .add_job(job(&t, "claimed, never finished"))
+        .await
+        .unwrap();
+    tx.claim_jobs(std::slice::from_ref(&never_finished.id), t.user, None, None)
+        .await
+        .unwrap();
+    tx.repend_job(&never_finished.id).await.unwrap();
+    let s = tx.stats(None).await.unwrap();
+    assert_eq!(s.completed, 1);
+    assert_eq!(s.failed, 1);
+
+    tx.commit().await.unwrap();
+}
+
+/// A repo-scoped read is the exact, full-scan query, unaffected by the
+/// org-wide counters above — and it and the org-wide read must still agree.
+#[sqlx::test]
+async fn repo_scoped_stats_match_the_org_wide_counters(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let a = tx.add_job(job(&t, "a")).await.unwrap();
+    tx.claim_jobs(std::slice::from_ref(&a.id), t.user, None, None)
+        .await
+        .unwrap();
+    tx.complete_job(&a.id, t.user, None).await.unwrap();
+
+    let org_wide = tx.stats(None).await.unwrap();
+    let repo_scoped = tx.stats(Some(t.repo)).await.unwrap();
+    tx.commit().await.unwrap();
+
+    assert_eq!(org_wide.completed, repo_scoped.completed);
+    assert_eq!(org_wide.total, repo_scoped.total);
+}
+
 #[sqlx::test]
 async fn activating_a_claimed_job_moves_it_to_active(pool: PgPool) {
     let db = db(pool);

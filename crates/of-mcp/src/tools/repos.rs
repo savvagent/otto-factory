@@ -42,6 +42,9 @@ pub struct ListReposArgs {
     /// Include repos that have been retired. Defaults to false.
     #[serde(default)]
     pub include_inactive: bool,
+    /// Maximum rows. Defaults to the server's own limit.
+    #[serde(default)]
+    pub limit: Option<i64>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -139,7 +142,10 @@ impl Factory {
 
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "list_repos").await?;
-        let repos = tx.list_repos(args.include_inactive).await.mcp()?;
+        let repos = tx
+            .list_repos(args.include_inactive, args.limit)
+            .await
+            .mcp()?;
         tx.commit().await.mcp()?;
 
         Ok(Json(out::ReposOut { repos }))

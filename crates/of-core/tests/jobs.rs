@@ -461,12 +461,18 @@ async fn close_from_ticket_allows_pending_and_in_progress(pool: PgPool) {
         )
         .await
         .unwrap();
+    // `close_from_ticket` is a second path into a terminal status, distinct
+    // from `finalize` — the org-wide stats counters have to track it too.
+    let stats = tx.stats(None).await.unwrap();
+
     tx.commit().await.unwrap();
 
     assert_eq!(completed.status, Status::Completed);
     assert_eq!(completed.result.as_deref(), Some("remote complete"));
     assert_eq!(failed.status, Status::Failed);
     assert_eq!(failed.error.as_deref(), Some("remote failed"));
+    assert_eq!(stats.completed, 1);
+    assert_eq!(stats.failed, 1);
 }
 
 #[sqlx::test]
