@@ -9,7 +9,8 @@ implements it exactly.
 
 ## Status — 2026-09-10
 
-Shipped as PR #107, with one design change made during PR review (see amendment below). No blocking
+Done. Shipped as PR #107, merged, deployed, and CI-verified. Issue #88 auto-closed on merge. One
+design change was made during PR review (see amendment below). No blocking
 issues from plan review; advisory note that was raised and then addressed in review: the
 `add_passkey_finish` (the "add" path) was the one call site gaining a genuinely new `parts: Parts`
 extractor rather than just a new trailing argument, and no test asserted its specific via/ip values —
@@ -217,4 +218,4 @@ every caller updated in this same commit; see the spec's Public-interface change
 
 ## ✅ / 🚧 / ⬜ marker
 
-⬜ Task 1 — not started.
+✅ Task 1 — shipped in `savvagent/otto-factory#107`.

@@ -1,9 +1,16 @@
 # Passkey registration audit: distinguish signup/claim/add, and carry an IP
 
-> **Status:** APPROVED, amended during PR review — closes `savvagent/otto-factory#88`, filed as a
-> lower-severity follow-up during the review of `savvagent/otto-factory#86` (see
+> **Status:** IMPLEMENTED — shipped in `savvagent/otto-factory#107`, closing `savvagent/otto-factory#88`,
+> filed as a lower-severity follow-up during the review of `savvagent/otto-factory#86` (see
 > `docs/specs/2026-09-10-passkey-audit-events-design.md`, which shipped the `auth.passkey.registered`
-> / `auth.passkey.cleared` rename this spec builds on).
+> / `auth.passkey.cleared` rename this spec builds on). Deployed and verified via the merge commit's
+> own CI run (`cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`,
+> `cargo fmt --all --check`, `npm run check`/`lint`/`test` all green) and the automatic `flyctl deploy` to
+> `otto-factory-mcp` that followed it. Three follow-up issues were filed rather than folded in, per
+> the independent security reviewer's own recommendation not to hold the merge for them: `#108`
+> (`finish_registration`'s credential INSERT and its audit write are not atomic), `#109`
+> (`claim_finish`/`add_passkey_finish` write the audit row before the ceremony-ownership check that
+> can still reject the request), `#110` (`client_ip` stores the proxy header value unvalidated).
 >
 > **Amendment (PR #107 review):** the original plan for `via` below is `via: &str` with call-site
 > string literals, matching every other `.detail(json!({...}))` call site in the codebase (see the
