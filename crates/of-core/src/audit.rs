@@ -9,6 +9,10 @@
 //! - [`Db::audit_global`] for events that precede any org context: login
 //!   attempts, passkey enrollment.
 //!
+//! A third entry point, [`Db::audit_global_on`], is for a caller that already
+//! holds a transaction open for something else and needs its audit write to
+//! commit or roll back with it, rather than best-effort on the pool.
+//!
 //! Actions are dotted and stable because they are queried by prefix and because
 //! they end up in customers' SIEM exports. Renaming one is a breaking change.
 
@@ -134,6 +138,27 @@ impl Entry {
     }
 }
 
+impl Entry {
+    async fn write<'e, E>(self, org: Option<OrgId>, conn: E) -> Result<()>
+    where
+        E: sqlx::PgExecutor<'e>,
+    {
+        sqlx::query(INSERT_SQL)
+            .bind(org)
+            .bind(self.actor_user_id)
+            .bind(self.actor_label)
+            .bind(self.action)
+            .bind(self.target_type)
+            .bind(self.target_id)
+            .bind(self.ip)
+            .bind(self.user_agent)
+            .bind(self.detail.unwrap_or_else(|| serde_json::json!({})))
+            .execute(conn)
+            .await?;
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, FromRow)]
 #[serde(rename_all = "camelCase")]
 pub struct AuditEvent {
@@ -162,19 +187,7 @@ impl Tx<'_> {
     /// describes**. If the change rolls back, so does its record.
     pub async fn audit(&mut self, e: Entry) -> Result<()> {
         let org = self.org();
-        sqlx::query(INSERT_SQL)
-            .bind(org)
-            .bind(e.actor_user_id)
-            .bind(e.actor_label.as_deref())
-            .bind(&e.action)
-            .bind(e.target_type.as_deref())
-            .bind(e.target_id.as_deref())
-            .bind(e.ip.as_deref())
-            .bind(e.user_agent.as_deref())
-            .bind(e.detail.unwrap_or_else(|| serde_json::json!({})))
-            .execute(self.conn())
-            .await?;
-        Ok(())
+        e.write(Some(org), self.conn()).await
     }
 
     /// Read the org's audit trail, newest first. Powers the console's security
@@ -208,36 +221,30 @@ impl Db {
     /// write failure into an authentication outage. Losing one audit row is bad;
     /// refusing every login because the audit table is unavailable is worse.
     pub async fn audit_global(&self, e: Entry) -> Result<()> {
-        sqlx::query(INSERT_SQL)
-            .bind(Option::<OrgId>::None)
-            .bind(e.actor_user_id)
-            .bind(e.actor_label.as_deref())
-            .bind(&e.action)
-            .bind(e.target_type.as_deref())
-            .bind(e.target_id.as_deref())
-            .bind(e.ip.as_deref())
-            .bind(e.user_agent.as_deref())
-            .bind(e.detail.unwrap_or_else(|| serde_json::json!({})))
-            .execute(self.pool())
-            .await?;
-        Ok(())
+        e.write(None, self.pool()).await
     }
 
     /// Record an org-scoped event from the control plane, where no tenant
     /// transaction is open (e.g. membership changes made during signup).
     pub async fn audit_for_org(&self, org: OrgId, e: Entry) -> Result<()> {
-        sqlx::query(INSERT_SQL)
-            .bind(org)
-            .bind(e.actor_user_id)
-            .bind(e.actor_label.as_deref())
-            .bind(&e.action)
-            .bind(e.target_type.as_deref())
-            .bind(e.target_id.as_deref())
-            .bind(e.ip.as_deref())
-            .bind(e.user_agent.as_deref())
-            .bind(e.detail.unwrap_or_else(|| serde_json::json!({})))
-            .execute(self.pool())
-            .await?;
-        Ok(())
+        e.write(Some(org), self.pool()).await
+    }
+
+    /// Record a global (no-org) event on a connection the caller already
+    /// holds open — typically a transaction that also carries the change the
+    /// event describes, so both commit or roll back together.
+    ///
+    /// Unlike [`Self::audit_global`], a failure here is **not** swallowed: it
+    /// propagates to the caller, who is expected to let it abort the
+    /// transaction. Use this only when a lost audit row would be worse than
+    /// failing the whole operation — `Db::audit_global`'s own doc comment
+    /// explains why the *pool* variant is deliberately best-effort for the
+    /// ordinary login/enrollment path; this is the exception for a caller
+    /// that decided the tradeoff the other way.
+    pub async fn audit_global_on<'e, E>(conn: E, e: Entry) -> Result<()>
+    where
+        E: sqlx::PgExecutor<'e>,
+    {
+        e.write(None, conn).await
     }
 }
