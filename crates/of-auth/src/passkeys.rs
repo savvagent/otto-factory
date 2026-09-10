@@ -502,8 +502,12 @@ pub async fn rename(db: &Db, user: UserId, key: Uuid, nickname: &str) -> Result<
 ///
 /// Leaves the account with no way in **by design** — the caller must issue a
 /// claim code, or the account becomes claimable by whoever reaches registration
-/// first. `of_web::routes::orgs::reset_member_passkeys` does both in one
-/// transaction for exactly that reason.
+/// first. `of_web::routes::orgs::reset_member_passkeys` does both, but **not**
+/// atomically — each of `clear`, `sessions::revoke_all`, and the claim-code
+/// insert commits on its own connection before the next runs. A failure partway
+/// through is a real, currently-unhandled lockout risk; see
+/// `docs/specs/2026-09-10-passkey-audit-events-design.md` §1a for how this was
+/// found and `savvagent/otto-factory#87` for the follow-up to fix it.
 pub async fn clear(db: &Db, user: UserId, ip: Option<&str>) -> Result<u64> {
     let removed = sqlx::query("DELETE FROM passkeys WHERE user_id = $1")
         .bind(user)

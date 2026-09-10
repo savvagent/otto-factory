@@ -372,7 +372,8 @@ pub async fn reset_member_passkeys(
     tx.audit(
         Entry::new(action::MEMBER_PASSKEYS_RESET)
             .actor(ctx.user.id)
-            .target("user", target.to_string()),
+            .target("user", target.to_string())
+            .from_request(ip.as_deref(), None),
     )
     .await?;
     tx.commit().await?;

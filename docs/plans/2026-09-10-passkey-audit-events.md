@@ -73,7 +73,7 @@ PR opens.
 pre-existing, unchanged signatures). Produces two new `pub const` action strings in
 `of_core::audit::action`; no new function, no new public type.
 
-- [ ] Add a helper to `crates/of-auth/tests/passkeys.rs` alongside the existing `login_failures`:
+- [x] Add a helper to `crates/of-auth/tests/passkeys.rs` alongside the existing `login_failures`:
 
   ```rust
   /// How many rows this account has under a given action — the same query shape
@@ -91,7 +91,7 @@ pre-existing, unchanged signatures). Produces two new `pub const` action strings
   (`login_failures` may now delegate to this or stay as its own one-liner — either is fine; do not
   delete `login_failures`, other tests call it by name.)
 
-- [ ] In `a_passkey_creates_an_account_and_signs_back_into_it`, after `register_new` returns `user`,
+- [x] In `a_passkey_creates_an_account_and_signs_back_into_it`, after `register_new` returns `user`,
       add:
 
   ```rust
@@ -107,7 +107,7 @@ pre-existing, unchanged signatures). Produces two new `pub const` action strings
   `cargo test -p of-auth --test passkeys a_passkey_creates_an_account_and_signs_back_into_it` — expect
   a compile failure naming `PASSKEY_REGISTERED`.
 
-- [ ] In `clearing_passkeys_leaves_no_way_in`, after `passkeys::clear(&db, user, None).await.unwrap()`,
+- [x] In `clearing_passkeys_leaves_no_way_in`, after `passkeys::clear(&db, user, None).await.unwrap()`,
       add:
 
   ```rust
@@ -120,7 +120,7 @@ pre-existing, unchanged signatures). Produces two new `pub const` action strings
 
   Same expected failure mode (compile error) for now.
 
-- [ ] Add a new test for the corrupted-credential regression, placed near
+- [x] Add a new test for the corrupted-credential regression, placed near
       `a_known_credential_with_a_bad_signature_is_still_invalid_credentials`:
 
   ```rust
@@ -156,7 +156,7 @@ pre-existing, unchanged signatures). Produces two new `pub const` action strings
   new behavior. Confirm it passes before touching `passkeys.rs`, so a later failure is unambiguously
   the rewrite's fault.
 
-- [ ] In `crates/of-core/src/audit.rs`, in `pub mod action`, replace:
+- [x] In `crates/of-core/src/audit.rs`, in `pub mod action`, replace:
 
   ```rust
   pub const TOTP_ENROLLED: &str = "auth.totp.enrolled";
@@ -177,7 +177,7 @@ pre-existing, unchanged signatures). Produces two new `pub const` action strings
   pub const PASSKEY_CLEARED: &str = "auth.passkey.cleared";
   ```
 
-- [ ] In `crates/of-auth/src/passkeys.rs`, `finish_registration`, replace:
+- [x] In `crates/of-auth/src/passkeys.rs`, `finish_registration`, replace:
 
   ```rust
   let _ = db
@@ -196,7 +196,7 @@ pre-existing, unchanged signatures). Produces two new `pub const` action strings
   }
   ```
 
-- [ ] In the same file, `clear`, replace:
+- [x] In the same file, `clear`, replace:
 
   ```rust
   let _ = db
@@ -223,7 +223,7 @@ pre-existing, unchanged signatures). Produces two new `pub const` action strings
   }
   ```
 
-- [ ] In `finish_authentication`, replace:
+- [x] In `finish_authentication`, replace:
 
   ```rust
   let keys: Vec<DiscoverableKey> = stored
@@ -256,7 +256,7 @@ pre-existing, unchanged signatures). Produces two new `pub const` action strings
   (`user_id` is already bound above this point via the `let Some(user_id) = owner else { ... }`
   earlier in the function — no new binding needed.)
 
-- [ ] In `update_stored_credential`, replace:
+- [x] In `update_stored_credential`, replace:
 
   ```rust
   let Some(raw) = raw else { return Ok(()) };
@@ -282,13 +282,13 @@ pre-existing, unchanged signatures). Produces two new `pub const` action strings
   };
   ```
 
-- [ ] Run `cargo test -p of-auth --test passkeys` — all tests in the file, including the three
+- [x] Run `cargo test -p of-auth --test passkeys` — all tests in the file, including the three
       touched/added above, must pass. In particular re-confirm
       `a_corrupted_stored_credential_is_invalid_not_a_panic` still passes after the `filter_map`
       rewrite (this is the regression the rewrite could introduce if the match arms were
       transposed).
-- [ ] Run `cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all`.
-- [ ] `git commit -m "of-auth: name passkey audit events for real, stop dropping failed writes silently"`
+- [x] Run `cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all`.
+- [x] `git commit -m "of-auth: name passkey audit events for real, stop dropping failed writes silently"`
 
 ## Task 2 — The admin-assisted reset's own org-scoped event
 
@@ -302,7 +302,7 @@ signature). Produces one new `pub const MEMBER_PASSKEYS_RESET: &str = "org.membe
 in `of_core::audit::action`, grouped with `MEMBER_ROLE_CHANGED`/`MEMBER_REMOVED` under "Org
 administration", not with `PASSKEY_REGISTERED`/`PASSKEY_CLEARED`.
 
-- [ ] Confirm whether `MEMBER_PASSKEYS_RESET` already exists in `crates/of-core/src/audit.rs` (Task
+- [x] Confirm whether `MEMBER_PASSKEYS_RESET` already exists in `crates/of-core/src/audit.rs` (Task
       1's implementation may or may not have added it — it is Task 2's constant, not Task 1's). If
       absent, add it under the "Org administration" section:
 
@@ -310,11 +310,11 @@ administration", not with `PASSKEY_REGISTERED`/`PASSKEY_CLEARED`.
   pub const MEMBER_PASSKEYS_RESET: &str = "org.member.passkeys_reset";
   ```
 
-- [ ] In `crates/of-web/tests/console.rs`, extend
+- [x] In `crates/of-web/tests/console.rs`, extend
       `an_admin_can_reset_a_members_authenticator_but_gains_nothing_by_it` — after the `reset.expect(StatusCode::CREATED);` line — with a failing assertion:
 
   ```rust
-  let audit = Call::get("/api/orgs/acme/audit?action_prefix=org.member.passkeys_reset")
+  let audit = Call::get("/api/orgs/acme/audit?actionPrefix=org.member.passkeys_reset")
       .with_session(&rob.session)
       .send(&h.router)
       .await;
@@ -326,12 +326,12 @@ administration", not with `PASSKEY_REGISTERED`/`PASSKEY_CLEARED`.
   ```
 
   This is a **failing test right now**: the endpoint currently writes `TOTP_RESET`, so
-  `action_prefix=org.member.passkeys_reset` matches nothing and `rows.len()` is `0`. Run
+  `actionPrefix=org.member.passkeys_reset` matches nothing and `rows.len()` is `0`. Run
   `cargo test -p of-web --test console an_admin_can_reset_a_members_authenticator_but_gains_nothing_by_it`
   to confirm it fails on the new assertion, not on something else (the rest of that test's body must
   still pass unchanged).
 
-- [ ] In `crates/of-web/src/routes/orgs.rs`, `reset_member_passkeys`, replace:
+- [x] In `crates/of-web/src/routes/orgs.rs`, `reset_member_passkeys`, replace:
 
   ```rust
   tx.audit(
@@ -353,10 +353,10 @@ administration", not with `PASSKEY_REGISTERED`/`PASSKEY_CLEARED`.
 
   (`.await?` and everything else on that statement is unchanged — only the action constant.)
 
-- [ ] Run `cargo test -p of-web --test console an_admin_can_reset_a_members_authenticator_but_gains_nothing_by_it`
+- [x] Run `cargo test -p of-web --test console an_admin_can_reset_a_members_authenticator_but_gains_nothing_by_it`
       — must now pass.
-- [ ] Run `cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all`.
-- [ ] `git commit -m "of-web: name the admin-assisted passkey reset's own audit event"`
+- [x] Run `cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all`.
+- [x] `git commit -m "of-web: name the admin-assisted passkey reset's own audit event"`
 
 ## Out-of-band verification
 

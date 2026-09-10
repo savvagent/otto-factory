@@ -29,8 +29,11 @@ pub mod action {
     /// action predate `PASSKEY_REGISTERED` and are not rewritten. Nothing
     /// writes this constant anymore.
     pub const TOTP_ENROLLED: &str = "auth.totp.enrolled";
-    /// Historical only, for the same reason as `TOTP_ENROLLED`. Superseded by
-    /// `PASSKEY_CLEARED`.
+    /// Historical only, for the same reason as `TOTP_ENROLLED`. Rows predate a
+    /// split into two successors: `PASSKEY_CLEARED` (self-service, global) and
+    /// `MEMBER_PASSKEYS_RESET` (admin-assisted, org-scoped). A historical row
+    /// under this action does not say which of the two occurred — check
+    /// whether it carries an `org_id` to tell them apart.
     pub const TOTP_RESET: &str = "auth.totp.reset";
     pub const RECOVERY_CODE_USED: &str = "auth.recovery_code.used";
     pub const MAGIC_LINK_SENT: &str = "auth.magic_link.sent";
