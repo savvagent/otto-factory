@@ -42,23 +42,47 @@ claim still holds against the current tree:
 - `crates/of-auth/src/passkeys.rs:593-596` — `update_stored_credential`'s
   `let Ok(mut passkey) = serde_json::from_value::<Passkey>(raw) else { return Ok(()) };`.
 
-No new premise correction beyond updated line numbers. `docs/plans/2026-09-04-doc-drift-no-email.md`
-Task 2 already flagged exactly this rename as deliberately deferred, "the file's own definition of
-a breaking change", and this spec is that deferred decision.
+`docs/plans/2026-09-04-doc-drift-no-email.md` Task 2 already flagged exactly this rename as
+deliberately deferred, "the file's own definition of a breaking change", and this spec is that
+deferred decision.
+
+**One correction found during planning, not in the issue: a third call site writes
+`TOTP_RESET`.** `crates/of-web/src/routes/orgs.rs:372-376`, inside `reset_member_passkeys` (the
+admin-assisted recovery endpoint `CLAUDE.md` describes), issues its own **org-scoped** write after
+calling `of_auth::passkeys::clear`:
+
+```rust
+tx.audit(
+    Entry::new(action::TOTP_RESET)
+        .actor(ctx.user.id)
+        .target("user", target.to_string()),
+)
+```
+
+This is not the same event as `clear`'s own write: `clear`'s is global (`Db::audit_global`, no org,
+actor = the affected account) and records "this account's passkeys were cleared"; this one is
+org-scoped (`Tx::audit`, guard-1-compliant — it runs inside the same pinned transaction as the claim
+code that follows) and records "an admin reset a member's passkeys", with the admin as actor and the
+member as `target`. Both fire on the same request. Without fixing this one too, the issue's own
+success criterion — "one filtering for TOTP finds nothing" — is false for every org's own audit
+trail (`audit_trail`, the console's security page and any customer's SIEM export scoped to their
+org), which is arguably the more visible of the two failure modes since it is customer-facing rather
+than global-only. In scope now; see §1a.
 
 ## Scope
 
 **In:**
 
-- Two new action constants in `of-core::audit::action`, and the two `of-auth` call sites that
-  switch to them.
-- Doc-comment updates on the two constants they replace, marking them historical-only.
+- Three new action constants in `of-core::audit::action` (`PASSKEY_REGISTERED`, `PASSKEY_CLEARED`,
+  `MEMBER_PASSKEYS_RESET`), and the three call sites (two in `of-auth`, one in `of-web`) that switch
+  to them.
+- Doc-comment updates on the two TOTP constants they replace, marking them historical-only.
 - Logging the two discarded audit-write results at `error` level, matching `note_failure`.
 - Logging the two silent credential-deserialization drops at `error` level, with no behavior
   change.
-- Tests: the new action constants are the ones written by registration and clearing; the two
-  deserialization-drop paths keep their current success/failure behavior when a stored credential
-  is corrupt.
+- Tests: the new action constants are the ones written by registration, self-clearing, and
+  admin-assisted reset; the two deserialization-drop paths keep their current success/failure
+  behavior when a stored credential is corrupt.
 
 **Out:**
 
@@ -96,7 +120,8 @@ prefix and because they end up in customers' SIEM exports. Renaming one is a bre
 
 | Surface | Change | Breaking? |
 |---|---|---|
-| Audit trail / SIEM export | New writes for passkey registration and clearing use `auth.passkey.registered` / `auth.passkey.cleared` instead of `auth.totp.enrolled` / `auth.totp.reset` | **Yes, for any saved query filtering on the old action strings going forward** — see §1 for the mitigation (both old constants stay defined and documented) and the discontinuity this accepts |
+| Audit trail / SIEM export | New writes for passkey registration and self-clearing use `auth.passkey.registered` / `auth.passkey.cleared` instead of `auth.totp.enrolled` / `auth.totp.reset` | **Yes, for any saved query filtering on the old action strings going forward** — see §1 for the mitigation (both old constants stay defined and documented) and the discontinuity this accepts |
+| Audit trail / SIEM export (org-scoped) | `reset_member_passkeys`'s org-scoped write uses a new `org.member.passkeys_reset` instead of `auth.totp.reset` | **Yes, same discontinuity, org-scoped this time** — see §1a |
 | MCP | none | — |
 | Console REST | none | — |
 | OAuth/discovery | none | — |
@@ -149,6 +174,39 @@ for instead of a backfill or a dual-read.
   `Entry::new(action::PASSKEY_CLEARED)`.
 
 Neither call site's `.actor(...)` / `.from_request(...)` chain changes — only the action string.
+
+## §1a The admin-assisted reset's own org-scoped event
+
+`crates/of-web/src/routes/orgs.rs`, `reset_member_passkeys`, currently writes:
+
+```rust
+tx.audit(
+    Entry::new(action::TOTP_RESET)
+        .actor(ctx.user.id)
+        .target("user", target.to_string()),
+)
+```
+
+**A new constant, not a reuse of `PASSKEY_CLEARED`.** This event and `clear`'s own `PASSKEY_CLEARED`
+write are not the same fact from two places — they are two different facts about the same request,
+with different actors: `clear`'s write says "this account's passkeys were removed", attributed to
+the account itself (global, no org); this write says "an admin reset a member's passkeys",
+attributed to the admin, org-scoped, naming the member as `target`. That is the same shape as the
+existing `MEMBER_ROLE_CHANGED` / `MEMBER_REMOVED` pair in the "Org administration" section of
+`audit::action` — an admin acting on a member, inside that org's own trail. The new constant belongs
+there, not next to `PASSKEY_REGISTERED`/`PASSKEY_CLEARED`:
+
+```rust
+pub const MEMBER_PASSKEYS_RESET: &str = "org.member.passkeys_reset";
+```
+
+`reset_member_passkeys`'s write changes to `Entry::new(action::MEMBER_PASSKEYS_RESET)`, with its
+`.actor(...)` / `.target(...)` chain unchanged. This write already uses `tx.audit(...).await?` — it
+propagates its error, not best-effort — so §2 does not apply to it: it fails the request (500) if
+the audit write fails, which is existing behavior this spec does not change. That asymmetry is
+correct as-is: this write is inside the same pinned transaction as the claim-code creation, so a
+failed audit write here means the whole admin action rolls back together, exactly what `Tx::audit`'s
+doc comment promises ("an action and its record commit or abort together").
 
 ## §2 Stop discarding the two audit writes
 
@@ -242,7 +300,13 @@ of the two errors a caller sees.
   rewrite in §3 is most likely to introduce if the match arms are transposed.
 
 No test asserts the log line's text — see Scope/Out. `cargo test -p of-auth --test passkeys` is the
-gate; `cargo clippy --all-targets -- -D warnings` and `cargo fmt --all --check` cover the rest.
+gate for the `of-auth` half; `cargo clippy --all-targets -- -D warnings` and `cargo fmt --all
+--check` cover the rest.
+
+`crates/of-web/tests/console.rs` (or wherever `reset_member_passkeys` is already covered — grep for
+its route before adding a new test file): extend the existing coverage of the admin-reset endpoint
+with an assertion that the org's audit trail gains a `MEMBER_PASSKEYS_RESET` row attributed to the
+admin, targeting the affected member, and not a `TOTP_RESET` row.
 
 ## Error Handling & Edge Cases
 

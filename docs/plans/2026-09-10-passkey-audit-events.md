@@ -9,7 +9,9 @@ can hit it, with no change to what either path returns.
 
 ## Status — 2026-09-10
 
-🚧 Not started.
+🚧 In progress. Task 1 done (landed as `5670bdd`, verified against the spec below and re-checked
+with `cargo check -p of-auth -p of-core` — compiles clean). Task 2 (the `of-web` third call site,
+found during plan review, not in the original issue) not started.
 
 **Spec:** `docs/specs/2026-09-10-passkey-audit-events-design.md` — read it first. This plan
 implements it exactly. Closes `savvagent/otto-factory#76`.
@@ -44,22 +46,25 @@ implements it exactly. Closes `savvagent/otto-factory#76`.
 
 | File | Responsibility |
 | --- | --- |
-| **Modify.** `crates/of-core/src/audit.rs` | Add `PASSKEY_REGISTERED` / `PASSKEY_CLEARED`; re-document `TOTP_ENROLLED` / `TOTP_RESET` as historical. |
+| **Modify.** `crates/of-core/src/audit.rs` | Add `PASSKEY_REGISTERED` / `PASSKEY_CLEARED` / `MEMBER_PASSKEYS_RESET`; re-document `TOTP_ENROLLED` / `TOTP_RESET` as historical. |
 | **Modify.** `crates/of-auth/src/passkeys.rs` | `finish_registration` and `clear` write the new constants and log a failed write; `finish_authentication` and `update_stored_credential` log a deserialization failure without changing behavior. |
 | **Modify.** `crates/of-auth/tests/passkeys.rs` | Assert the new action constants are what registration and clearing write; assert a corrupted stored credential still reaches the existing error, not a panic or a different one. |
+| **Modify.** `crates/of-web/src/routes/orgs.rs` | `reset_member_passkeys`'s own org-scoped write uses `MEMBER_PASSKEYS_RESET` instead of `TOTP_RESET`. |
+| **Modify.** `crates/of-web/tests/console.rs` | Extend the existing admin-reset test with an assertion on the org audit trail's action name. |
 
 ## Task Order & Rationale
 
-One task. All three changes touch the same two files, in the same review pass, and none has a
-dependency the others need staged first — splitting them would mean three commits each re-running
-the same `cargo test -p of-auth --test passkeys` gate for no isolation benefit. Steps are ordered
-failing-test-first within the task: the constant-rename assertions land first (they are the
-smallest, most mechanical change), then the corrupted-credential regression test, then the
-implementation that makes both pass together.
+Two tasks, split by crate rather than run together, because Task 1 already landed (see Status)
+before the `of-web` gap was found in plan review — Task 2 is new work, not a revision of Task 1.
+Had both been planned from scratch together they would have been one task (same reasoning as the
+original: no dependency between the `of-auth` and `of-web` changes, same review pass). Task 2 is
+independent of Task 1's implementation details — it touches a different crate and a different
+constant — so there is no ordering constraint between them beyond both needing to land before the
+PR opens.
 
 ## Task 1 — Real action names, logged writes, logged decode failures
 
-⬜
+✅ Landed as `5670bdd` — `of-auth: give passkeys their own auth.passkey.* audit actions`.
 
 **Files:** `crates/of-core/src/audit.rs`, `crates/of-auth/src/passkeys.rs`,
 `crates/of-auth/tests/passkeys.rs`
@@ -285,7 +290,77 @@ pre-existing, unchanged signatures). Produces two new `pub const` action strings
 - [ ] Run `cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all`.
 - [ ] `git commit -m "of-auth: name passkey audit events for real, stop dropping failed writes silently"`
 
+## Task 2 — The admin-assisted reset's own org-scoped event
+
+⬜
+
+**Files:** `crates/of-core/src/audit.rs` (if not already amended by Task 1's implementer; add the
+constant if missing), `crates/of-web/src/routes/orgs.rs`, `crates/of-web/tests/console.rs`
+
+**Interfaces:** Consumes `of_core::audit::{action, Entry}`, `Tx::audit` (pre-existing, unchanged
+signature). Produces one new `pub const MEMBER_PASSKEYS_RESET: &str = "org.member.passkeys_reset";`
+in `of_core::audit::action`, grouped with `MEMBER_ROLE_CHANGED`/`MEMBER_REMOVED` under "Org
+administration", not with `PASSKEY_REGISTERED`/`PASSKEY_CLEARED`.
+
+- [ ] Confirm whether `MEMBER_PASSKEYS_RESET` already exists in `crates/of-core/src/audit.rs` (Task
+      1's implementation may or may not have added it — it is Task 2's constant, not Task 1's). If
+      absent, add it under the "Org administration" section:
+
+  ```rust
+  pub const MEMBER_PASSKEYS_RESET: &str = "org.member.passkeys_reset";
+  ```
+
+- [ ] In `crates/of-web/tests/console.rs`, extend
+      `an_admin_can_reset_a_members_authenticator_but_gains_nothing_by_it` — after the `reset.expect(StatusCode::CREATED);` line — with a failing assertion:
+
+  ```rust
+  let audit = Call::get("/api/orgs/acme/audit?action_prefix=org.member.passkeys_reset")
+      .with_session(&rob.session)
+      .send(&h.router)
+      .await;
+  audit.expect(StatusCode::OK);
+  let rows = audit.body.as_array().expect("audit response must be an array");
+  assert_eq!(rows.len(), 1, "the reset must write exactly one org.member.passkeys_reset row");
+  assert_eq!(rows[0]["actorUserId"].as_str().unwrap(), rob.user.to_string());
+  assert_eq!(rows[0]["targetId"].as_str().unwrap(), bob.user.to_string());
+  ```
+
+  This is a **failing test right now**: the endpoint currently writes `TOTP_RESET`, so
+  `action_prefix=org.member.passkeys_reset` matches nothing and `rows.len()` is `0`. Run
+  `cargo test -p of-web --test console an_admin_can_reset_a_members_authenticator_but_gains_nothing_by_it`
+  to confirm it fails on the new assertion, not on something else (the rest of that test's body must
+  still pass unchanged).
+
+- [ ] In `crates/of-web/src/routes/orgs.rs`, `reset_member_passkeys`, replace:
+
+  ```rust
+  tx.audit(
+      Entry::new(action::TOTP_RESET)
+          .actor(ctx.user.id)
+          .target("user", target.to_string()),
+  )
+  ```
+
+  with:
+
+  ```rust
+  tx.audit(
+      Entry::new(action::MEMBER_PASSKEYS_RESET)
+          .actor(ctx.user.id)
+          .target("user", target.to_string()),
+  )
+  ```
+
+  (`.await?` and everything else on that statement is unchanged — only the action constant.)
+
+- [ ] Run `cargo test -p of-web --test console an_admin_can_reset_a_members_authenticator_but_gains_nothing_by_it`
+      — must now pass.
+- [ ] Run `cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all`.
+- [ ] `git commit -m "of-web: name the admin-assisted passkey reset's own audit event"`
+
 ## Out-of-band verification
 
-Vacuously satisfied — no migration, no `web/` change, no container image, Cloudflare Worker, or CI
-workflow change, no new `OF_*` config key. Stated explicitly rather than skipped.
+Vacuously satisfied — no migration, no `web/` (SvelteKit console) change, no container image,
+Cloudflare Worker, or CI workflow change, no new `OF_*` config key. Stated explicitly rather than
+skipped. (`of-web` the Rust crate is touched by Task 2; `web/` the SvelteKit frontend is not —
+disambiguated per plan review feedback.)
