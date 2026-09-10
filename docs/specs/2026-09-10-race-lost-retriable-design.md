@@ -46,6 +46,9 @@ Per Non-Negotiable Rule 6, this is **additive, not breaking**:
   used to get an immediate, confident "don't retry" signal and now gets "retry is plausible."
   This is the bug fix the issue asks for, not a schema or route change — no MCP tool's input
   or output schema changes, no console route changes.
+- The console API's `{"error": {"code": …, "message": …}}` envelope (`of-web`) gains one new
+  possible `code`/`status` pairing (`"race_lost"` / `503`), the same additive shape every prior
+  `Error` variant already gave it — no existing pairing changes.
 - No version bump is required; every crate stays at the workspace `0.1.0`.
 
 ## Scope
@@ -61,11 +64,25 @@ Per Non-Negotiable Rule 6, this is **additive, not breaking**:
   fourth site, same change.
 - `crates/of-mcp/src/error.rs`: `from_core`'s JSON-RPC code match gains `RaceLost` alongside
   `Db` in the `INTERNAL_ERROR` arm.
+- `crates/of-web/src/error.rs`: **discovered mid-implementation, not in the original draft** —
+  `impl From<CoreError> for ApiError`'s `status` match is exhaustive over every non-redacted
+  `of_core::Error` variant, so adding `RaceLost` without a matching arm fails the whole
+  workspace to compile (`E0004: non-exhaustive patterns`), not just `of-web`. `RaceLost` gets
+  its own arm mapping to `StatusCode::SERVICE_UNAVAILABLE` — unlike `Db`/`IsolationNotEnforced`/
+  `Config`/`Crypto`, its message is already written to be read by whoever hit it (per the file's
+  own module doc: "Everything else in `of-core::Error` was written to be read by whoever hit
+  it"), so it must NOT join the early-return `ApiError::internal(...)` redaction branch — it
+  flows through to the bottom `ApiError::new(status, e.code(), e.to_string())` call, preserving
+  its actual message. `503`, not `500`, because the condition is specifically retriable — the
+  same distinction `retriable()` already draws between `RaceLost` and `Db` at the MCP layer.
 - Tests: `crates/of-core/tests/*` exercising each of the four sites' lost-race branch directly
   (not just its sibling branches, which existing tests already cover — see §3), and
   `crates/of-mcp/src/error.rs`'s own `every_error_carries_a_code_and_a_retriable_flag`
   test gains a `RaceLost` case plus a dedicated JSON-RPC-code assertion mirroring
-  `database_internals_do_not_reach_the_caller`.
+  `database_internals_do_not_reach_the_caller`. `crates/of-web/src/error.rs` gains a test
+  asserting `ApiError::from(CoreError::RaceLost("x".into())).status ==
+  StatusCode::SERVICE_UNAVAILABLE` and that the message is NOT the redacted generic string (it
+  must equal the variant's own `Display` text, proving it did not take the `internal()` path).
 
 **Out:**
 
