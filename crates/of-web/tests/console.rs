@@ -1627,6 +1627,26 @@ async fn the_openapi_document_version_matches_workspace_version(pool: PgPool) {
     );
 }
 
+/// The console displays `web/package.json`'s `version` in its footer
+/// (`web/src/lib/version.ts`); this proves that value is actually the
+/// workspace version and not something that has drifted from it.
+/// `include_str!` rather than `std::fs::read_to_string` so a missing or
+/// unparseable file fails the build, not a passing test that never ran.
+#[test]
+fn the_console_and_the_server_agree_on_the_version() {
+    const PACKAGE_JSON: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../web/package.json"
+    ));
+    let package: serde_json::Value = serde_json::from_str(PACKAGE_JSON).expect("web/package.json");
+    assert_eq!(
+        package["version"].as_str(),
+        Some(env!("CARGO_PKG_VERSION")),
+        "web/package.json and the workspace version disagree — the console footer would \
+         display a version the server was not built from"
+    );
+}
+
 /// Routes are mounted from the same list the document is rendered from, so
 /// anything described has to actually answer. This catches the failure the
 /// catalog exists to prevent — a documented endpoint that is not mounted.

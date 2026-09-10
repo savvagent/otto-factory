@@ -10,6 +10,7 @@
   import { reconcile, resolveAtBoot } from '$lib/locale';
   import { isServerRoute, safeNext } from '$lib/next';
   import { session } from '$lib/session.svelte';
+  import { APP_VERSION } from '$lib/version';
   import Alert from '$lib/components/Alert.svelte';
   import Loading from '$lib/components/Loading.svelte';
   import Logo from '$lib/components/Logo.svelte';
@@ -228,5 +229,7 @@
 
   <footer class="border-t border-edge/40 px-4 py-4 text-center text-xs text-faint">
     <a class="hover:text-muted" href="/docs/api">{m.nav_api_reference()}</a>
+    <span aria-hidden="true"> · </span>
+    <span>v{APP_VERSION}</span>
   </footer>
 </div>
