@@ -1,7 +1,26 @@
 # SemVer release automation design
 
-> **Status:** DRAFT — release-please-driven versioning, tagged releases, an MCP identity fix, and a
-> release-gated deploy.
+> **Status:** IMPLEMENTED — shipped in savvagent/otto-factory#114 (merged as `670860e`), closing
+> savvagent/otto-factory#84. release-please-driven versioning, tagged releases, an MCP identity
+> fix, and a release-gated deploy. Hardened during review: job-level `permissions:` and an exact
+> commit-SHA pin for `pr-title`, a workflow-level read-only `permissions:` default, `deploy` and
+> `release-please` each given their own explicit push/master guard, `concurrency` reworked so a
+> master push is never queued behind (and so never cancellable by) another, and a `bootstrap-sha`
+> added to `release-please-config.json` so the first changelog doesn't backfill this repo's
+> pre-convention history. See savvagent/otto-factory#114 for the full review discussion.
+>
+> **Not yet exercised live, as of this record.** `pr-title` ran green on savvagent/otto-factory#114
+> itself (it only runs on `pull_request` events, not on the merge push); `rust`/`web`/`docker-build`
+> ran green on `670860e`'s merge push, covering the MCP identity fix and the OpenAPI regression
+> test. `release-please` has run on that push too (it's `needs: [rust, web, docker-build]`, all
+> three passed) — but it has not yet *created a release PR or cut a release*, since both
+> savvagent/otto-factory#114 and this record are non-bumping `ci:`/`docs:` commits; the first
+> release PR only appears on the next `feat`/`fix`/`perf`/breaking merge. Its first attempt to open
+> a PR at all still depends on the repo setting "Allow GitHub Actions to create and approve pull
+> requests" being enabled — flagged in savvagent/otto-factory#114, unverified from any diff. Three
+> lower-priority CI-hardening findings savvagent/otto-factory#114 left unfixed (job timeouts,
+> `deploy`'s remaining unpinned checkout step, the repo's PR-self-approval setting) are tracked in
+> savvagent/otto-factory#117.
 
 ## Goal & Success Criteria
 
@@ -188,7 +207,7 @@ bump).
       "release-type": "simple",
       "changelog-path": "CHANGELOG.md",
       "pull-request-title-pattern": "chore: release ${version}",
-      "bootstrap-sha": "<origin/master's tip immediately before this PR opened — see Risks>",
+      "bootstrap-sha": "797b9964c7b8da6dbca4b403aeebb19cf5626ec7",
       "extra-files": [
         { "type": "toml", "path": "Cargo.toml", "jsonpath": "$.workspace.package.version" },
         { "type": "json", "path": "web/package.json", "jsonpath": "$.version" }
