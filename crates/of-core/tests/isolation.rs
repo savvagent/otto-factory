@@ -806,6 +806,72 @@ async fn rls_scopes_tracker_bindings(pool: PgPool) {
     assert_eq!(after.external_ref, "acme/api");
 }
 
+/// **What 0020_rename_trigger_label_default.sql got wrong, reproduced.**
+///
+/// That migration relabels `tracker_bindings.trigger_label` with a bare
+/// `UPDATE ... WHERE trigger_label = 'dark-factory'`. `Db::migrate` runs every
+/// migration on the raw pool (`db.rs`) — never `Db::begin`, so never `SET
+/// LOCAL ROLE of_app` and never `set_config('app.org_id', …)`. On this test's
+/// connecting superuser that is invisible: RLS does not constrain a superuser
+/// regardless of `FORCE`. On the FORCE-RLS-fallback deployment shape (managed
+/// Postgres, no `CREATEROLE` — see CLAUDE.md), migrations run under the very
+/// role `FORCE ROW LEVEL SECURITY` applies to, with no org context ever set,
+/// so `current_org()` is NULL for the statement's entire lifetime and
+/// `org_id = current_org()` is never true: the UPDATE silently matches zero
+/// rows, for every tenant, forever.
+///
+/// `savvagent/otto-factory#70`. No corrective data migration accompanies this
+/// test — production `tracker_bindings` was confirmed empty at the time of
+/// investigation, and this deployment's migrations currently run as a
+/// superuser that bypasses RLS outright (`docs/deploy/fly.md`). This test is
+/// the guard for the deployment shape where that stops being true.
+#[sqlx::test]
+async fn rls_scopes_a_migration_style_update_with_no_org_context(pool: PgPool) {
+    let db = db(pool);
+    let a = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+
+    // Seed a row the way a pre-0020 database would have had one: written
+    // directly on the pool (bypassing `Tx`, standing in for data a migration
+    // — not application code — would be rewriting).
+    sqlx::query(
+        "INSERT INTO tracker_bindings (org_id, repo_id, provider, external_ref, trigger_label) \
+         VALUES ($1, $2, 'github', 'acme/api', 'dark-factory')",
+    )
+    .bind(a.org)
+    .bind(a.repo)
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    // The exact shape `Db::migrate` runs a statement under: `of_app`, and no
+    // `app.org_id` ever set — a schema migration has no tenant to set it to.
+    let mut tx = db.begin_unpinned().await.unwrap();
+    sqlx::query("SET LOCAL ROLE of_app")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+
+    // 0020's own statement, verbatim.
+    let updated = sqlx::query(
+        "UPDATE tracker_bindings SET trigger_label = 'otto-factory' \
+         WHERE trigger_label = 'dark-factory'",
+    )
+    .execute(&mut *tx)
+    .await
+    .unwrap()
+    .rows_affected();
+    tx.commit().await.unwrap();
+
+    assert_eq!(
+        updated, 0,
+        "a bare UPDATE against a FORCE RLS tenant table with no app.org_id set \
+         is exactly the failure this test exists to keep visible — if this \
+         starts affecting rows, something about the deployment's isolation \
+         shape changed and every migration written under the old assumption \
+         needs re-auditing"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The guard on the guard.
 //

@@ -74,6 +74,26 @@ and it survives both deployment shapes. `#[sqlx::test]` connects as a superuser 
 bypasses RLS, so a test of such a policy **must** `SET LOCAL ROLE of_app` explicitly or it
 passes against no policy at all.
 
+**A migration that rewrites tenant-table data cannot rely on a bare `UPDATE`/`DELETE`.**
+`Db::migrate` runs every migration statement on the connection pool directly — never through
+`Db::begin`, so `app.org_id` is never set and `of_app` is never assumed. On a single-role
+deployment (`SET LOCAL ROLE of_app` succeeds at request time) this is invisible: migrations run as
+a superuser or the table owner, and RLS does not constrain either regardless of `FORCE`. On the
+managed-Postgres fallback shape — the one guard 2 exists to keep honest — a migration statement
+runs under the very role `FORCE ROW LEVEL SECURITY` applies to, with `current_org()` NULL for the
+statement's entire lifetime, so `org_id = current_org()` is never true and the statement silently
+matches zero rows, for every tenant, forever. `savvagent/otto-factory#70` found this in
+`0020_rename_trigger_label_default.sql`'s relabeling `UPDATE`;
+`rls_scopes_a_migration_style_update_with_no_org_context` in `tests/isolation.rs` reproduces it. A
+migration that must rewrite existing tenant-table data has two correct shapes: wrap the statement
+in `ALTER TABLE <table> NO FORCE ROW LEVEL SECURITY` / `ALTER TABLE <table> FORCE ROW LEVEL
+SECURITY` (mirroring the table's own definition in `0007_rls.sql`/`0011_trackers.sql`, restored
+before the migration transaction commits — a migration that leaves a tenant table un-forced is a
+worse bug than the one it fixes), or loop over every org and `SELECT set_config('app.org_id', ...,
+true)` before each org's statement, the same way `Db::begin` does at request time. A schema-only
+change (`ALTER TABLE ... ADD COLUMN`, a new `DEFAULT`, an index) is unaffected — RLS only
+constrains `SELECT`/`INSERT`/`UPDATE`/`DELETE` against existing rows, never DDL.
+
 Note that ordinary cross-org tests pass on the strength of guard 1 alone. The tests that
 actually exercise RLS are the `rls_scopes_*` ones in `tests/isolation.rs`, which issue
 deliberately **unscoped** SQL inside a pinned transaction. Keep that distinction — a test
