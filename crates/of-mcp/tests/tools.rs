@@ -544,10 +544,11 @@ async fn renew_claim_extends_the_claim_and_completion_still_works(pool: PgPool) 
             }),
         )
         .await);
-    let expires_after_claim = claimed["jobs"][0]["claimExpiresAt"]
+    let expires_after_claim: chrono::DateTime<chrono::Utc> = claimed["jobs"][0]["claimExpiresAt"]
         .as_str()
         .expect("claimExpiresAt")
-        .to_string();
+        .parse()
+        .expect("claimExpiresAt must be a valid RFC3339 timestamp");
 
     let renewed = ok(env
         .factory
@@ -559,10 +560,11 @@ async fn renew_claim_extends_the_claim_and_completion_still_works(pool: PgPool) 
             }),
         )
         .await);
-    let expires_after_renew = renewed["job"]["claimExpiresAt"]
+    let expires_after_renew: chrono::DateTime<chrono::Utc> = renewed["job"]["claimExpiresAt"]
         .as_str()
         .expect("claimExpiresAt")
-        .to_string();
+        .parse()
+        .expect("claimExpiresAt must be a valid RFC3339 timestamp");
 
     assert!(
         expires_after_renew > expires_after_claim,
