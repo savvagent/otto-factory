@@ -241,6 +241,17 @@ impl Db {
     /// explains why the *pool* variant is deliberately best-effort for the
     /// ordinary login/enrollment path; this is the exception for a caller
     /// that decided the tradeoff the other way.
+    ///
+    /// **Never pass a pinned [`Tx`]'s connection here.** This writes a
+    /// `NULL`-org row, which is only legal for a connection with no
+    /// `app.org_id` set. On a connection where guard 2 sets `app.org_id`
+    /// (i.e. `Tx::conn()`), `audit_events`'s `audit_events_append` policy's
+    /// `WITH CHECK` rejects the row outright wherever RLS is enforced — and
+    /// where RLS is bypassed instead, it silently writes a row no tenant's
+    /// own audit trail will ever show. Either outcome depends on the
+    /// deployment's RLS shape, which is exactly the kind of thing nothing in
+    /// this crate may assume (see `Db::begin`'s doc comment). Use
+    /// [`Tx::audit`] for anything running on a pinned connection.
     pub async fn audit_global_on<'e, E>(conn: E, e: Entry) -> Result<()>
     where
         E: sqlx::PgExecutor<'e>,
