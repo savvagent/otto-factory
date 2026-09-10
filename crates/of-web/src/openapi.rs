@@ -675,6 +675,7 @@ fn queue_schemas() -> Value {
                 "createdBy": { "type": ["string", "null"], "format": "uuid" },
                 "claimedBy": { "type": ["string", "null"], "format": "uuid" },
                 "claimedByLabel": { "type": ["string", "null"] },
+                "claimExpiresAt": { "type": ["string", "null"], "format": "date-time" },
                 "cancelRequestedAt": { "type": ["string", "null"], "format": "date-time" },
                 "cancelRequestedBy": { "type": ["string", "null"], "format": "uuid" },
                 "cancelReason": { "type": ["string", "null"] },
@@ -1152,7 +1153,12 @@ mod tests {
         let job_props = schemas["Job"]["properties"]
             .as_object()
             .expect("Job has no properties object");
-        for field in ["cancelRequestedAt", "cancelRequestedBy", "cancelReason"] {
+        for field in [
+            "cancelRequestedAt",
+            "cancelRequestedBy",
+            "cancelReason",
+            "claimExpiresAt",
+        ] {
             assert!(
                 job_props.contains_key(field),
                 "Job.properties is missing {field:?}"

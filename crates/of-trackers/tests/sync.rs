@@ -42,6 +42,7 @@ fn job(status: Status, tracker: Tracker, ticket_ref: &str, remote_revision: Opti
         created_by: None,
         claimed_by: None,
         claimed_by_label: None,
+        claim_expires_at: None,
         cancel_requested_at: None,
         cancel_requested_by: None,
         cancel_reason: None,
