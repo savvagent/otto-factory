@@ -1,0 +1,15 @@
+-- Adds 'cancelled' to job_status: a terminal state reached either directly
+-- from 'pending' (request_cancel finalizes immediately, since there is no
+-- holder to notify) or from 'in-progress'/'active' via cancel_job, once the
+-- holder that received the request actually stops. Additive only —
+-- 0003_jobs.sql is never edited; enum values can only be appended, and
+-- ordering here does not matter because nothing compares job_status by its
+-- enum ordinal.
+--
+-- This is its own migration file, separate from 0024's column changes,
+-- because Postgres refuses to let a new enum value be *used* (even as a
+-- string literal) in the same transaction that added it ("unsafe use of new
+-- value ... New enum values must be committed before they can be used") —
+-- and sqlx runs each migration file in its own transaction, so the two steps
+-- cannot share one file.
+ALTER TYPE job_status ADD VALUE 'cancelled';

@@ -1036,7 +1036,12 @@ impl Factory {
             Status::InProgress => (JobTransition::Claimed, job.claimed_by_label.clone()),
             Status::Active => (JobTransition::Claimed, job.claimed_by_label.clone()),
             Status::Completed => (JobTransition::Completed, job.result.clone()),
-            Status::Failed => (JobTransition::Failed, job.error.clone()),
+            // No dedicated outbound "cancelled" signal exists for either tracker (no
+            // `not_planned` GitHub close reason, no distinct JIRA status category), so
+            // this reuses the existing `Failed` outbound plumbing — symmetric with how
+            // `of_trackers::sync::close_status` already collapses an inbound "won't
+            // do"/"cancelled"/"rejected" ticket state into `Status::Failed`.
+            Status::Failed | Status::Cancelled => (JobTransition::Failed, job.error.clone()),
         };
 
         let provider = provider_of(tracker);

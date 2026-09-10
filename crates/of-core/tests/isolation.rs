@@ -111,6 +111,8 @@ async fn cross_org_mutation_is_refused(pool: PgPool) {
         .await
         .is_err());
     assert!(tx.repend_job(&target.id).await.is_err());
+    assert!(tx.request_cancel(&target.id, b.user, None).await.is_err());
+    assert!(tx.cancel_job(&target.id, None).await.is_err());
     let _ = tx.rollback().await;
 
     // A's job is untouched.

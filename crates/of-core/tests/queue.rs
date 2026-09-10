@@ -374,6 +374,286 @@ async fn completing_or_failing_an_active_job_still_works(pool: PgPool) {
     tx.commit().await.unwrap();
 }
 
+// ------------------------------------------------------------------- cancel
+
+/// Cancelling a job that has not started yet has nobody to notify, so
+/// `request_cancel` finalizes it immediately instead of leaving it in limbo
+/// waiting for a holder that will never call `cancel_job`.
+#[sqlx::test]
+async fn request_cancel_on_pending_finalizes_immediately(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let j = tx.add_job(job(&t, "never started")).await.unwrap();
+    let cancelled = tx
+        .request_cancel(&j.id, t.user, Some("no longer needed"))
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    assert_eq!(cancelled.status, Status::Cancelled);
+    assert!(cancelled.status.is_terminal());
+    assert!(cancelled.completed_at.is_some());
+    assert!(cancelled.cancel_requested_at.is_some());
+    assert_eq!(cancelled.cancel_requested_by, Some(t.user));
+    assert_eq!(cancelled.cancel_reason.as_deref(), Some("no longer needed"));
+}
+
+/// Cancelling a claimed job only raises the flag — the holder is the only one
+/// who can say when it has actually stopped, via `cancel_job`. A second call
+/// re-stamps the request rather than being refused, so an agent that lost
+/// track of an earlier request can simply ask again.
+#[sqlx::test]
+async fn request_cancel_on_in_progress_only_sets_the_flag(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let j = tx.add_job(job(&t, "long running")).await.unwrap();
+    tx.claim_jobs(std::slice::from_ref(&j.id), t.user, None)
+        .await
+        .unwrap();
+
+    let flagged = tx
+        .request_cancel(&j.id, t.user, Some("first reason"))
+        .await
+        .unwrap();
+    assert_eq!(flagged.status, Status::InProgress);
+    assert!(flagged.cancel_requested_at.is_some());
+    assert_eq!(flagged.cancel_requested_by, Some(t.user));
+    assert_eq!(flagged.cancel_reason.as_deref(), Some("first reason"));
+
+    let restamped = tx
+        .request_cancel(&j.id, t.user, Some("second reason"))
+        .await
+        .unwrap();
+    assert_eq!(restamped.status, Status::InProgress);
+    assert_eq!(restamped.cancel_reason.as_deref(), Some("second reason"));
+    assert!(restamped.cancel_requested_at >= flagged.cancel_requested_at);
+
+    tx.commit().await.unwrap();
+}
+
+/// `active` is a refinement of `in-progress`, and a cancellation request must
+/// reach it the same way.
+#[sqlx::test]
+async fn request_cancel_on_active_only_sets_the_flag(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let j = tx.add_job(job(&t, "actively working")).await.unwrap();
+    tx.claim_jobs(std::slice::from_ref(&j.id), t.user, None)
+        .await
+        .unwrap();
+    tx.activate_job(&j.id).await.unwrap();
+
+    let flagged = tx.request_cancel(&j.id, t.user, None).await.unwrap();
+    assert_eq!(flagged.status, Status::Active);
+    assert!(flagged.cancel_requested_at.is_some());
+    tx.commit().await.unwrap();
+}
+
+/// A job already at a terminal status has nothing left to cancel.
+#[sqlx::test]
+async fn request_cancel_on_a_terminal_job_is_refused(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+
+    let mut tx = db.begin(t.org).await.unwrap();
+
+    let completed = tx.add_job(job(&t, "will complete")).await.unwrap();
+    tx.claim_jobs(std::slice::from_ref(&completed.id), t.user, None)
+        .await
+        .unwrap();
+    tx.complete_job(&completed.id, Some("done")).await.unwrap();
+    let err = tx
+        .request_cancel(&completed.id, t.user, None)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "wrong_status");
+    assert!(
+        err.to_string().contains("pending, in-progress, or active"),
+        "must name the valid starting states: {err}"
+    );
+
+    let failed = tx.add_job(job(&t, "will fail")).await.unwrap();
+    tx.claim_jobs(std::slice::from_ref(&failed.id), t.user, None)
+        .await
+        .unwrap();
+    tx.fail_job(&failed.id, Some("nope")).await.unwrap();
+    let err = tx
+        .request_cancel(&failed.id, t.user, None)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "wrong_status");
+
+    let cancelled = tx.add_job(job(&t, "will be cancelled")).await.unwrap();
+    tx.request_cancel(&cancelled.id, t.user, None)
+        .await
+        .unwrap();
+    let err = tx
+        .request_cancel(&cancelled.id, t.user, None)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "wrong_status");
+
+    tx.rollback().await.unwrap();
+}
+
+/// `cancel_job` is how a holder that received a `request_cancel` reports that
+/// it actually stopped.
+#[sqlx::test]
+async fn cancel_job_after_request_cancel_succeeds(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let j = tx.add_job(job(&t, "long running")).await.unwrap();
+    tx.claim_jobs(std::slice::from_ref(&j.id), t.user, None)
+        .await
+        .unwrap();
+    tx.request_cancel(&j.id, t.user, Some("stop please"))
+        .await
+        .unwrap();
+
+    let cancelled = tx
+        .cancel_job(&j.id, Some("stopped as requested"))
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    assert_eq!(cancelled.status, Status::Cancelled);
+    assert!(cancelled.completed_at.is_some());
+    assert_eq!(cancelled.error.as_deref(), Some("stopped as requested"));
+}
+
+/// Stopping unilaterally, with no `request_cancel` on file, is `fail_job`'s
+/// job, not `cancel_job`'s — the distinction is what tells an observer whether
+/// the stop was in response to a request or the holder's own decision.
+#[sqlx::test]
+async fn cancel_job_with_no_request_on_file_is_invalid(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let j = tx.add_job(job(&t, "long running")).await.unwrap();
+    tx.claim_jobs(std::slice::from_ref(&j.id), t.user, None)
+        .await
+        .unwrap();
+
+    let err = tx.cancel_job(&j.id, Some("giving up")).await.unwrap_err();
+    tx.rollback().await.unwrap();
+
+    assert_eq!(err.code(), "invalid_argument");
+}
+
+/// `cancel_job` only makes sense once a job has been claimed — a pending job
+/// with a cancellation request already finalized inside `request_cancel`
+/// itself.
+#[sqlx::test]
+async fn cancel_job_on_a_pending_job_is_refused(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let j = tx.add_job(job(&t, "still pending")).await.unwrap();
+    let err = tx.cancel_job(&j.id, None).await.unwrap_err();
+    tx.rollback().await.unwrap();
+
+    assert_eq!(err.code(), "wrong_status");
+    assert!(
+        err.to_string().contains("in-progress or active"),
+        "must name the valid starting states: {err}"
+    );
+}
+
+/// A repended cancelled job gets a clean slate: no stale cancellation request
+/// should follow it into its next attempt.
+#[sqlx::test]
+async fn repend_clears_cancellation_fields(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let j = tx
+        .add_job(job(&t, "will be cancelled and retried"))
+        .await
+        .unwrap();
+    tx.claim_jobs(std::slice::from_ref(&j.id), t.user, None)
+        .await
+        .unwrap();
+    tx.request_cancel(&j.id, t.user, Some("stop"))
+        .await
+        .unwrap();
+    tx.cancel_job(&j.id, Some("stopped")).await.unwrap();
+
+    let repended = tx.repend_job(&j.id).await.unwrap();
+    assert_eq!(repended.status, Status::Pending);
+    assert!(repended.cancel_requested_at.is_none());
+    assert!(repended.cancel_requested_by.is_none());
+    assert!(repended.cancel_reason.is_none());
+
+    // The fresh attempt has no request on file, so a stop now must go
+    // through fail_job, not cancel_job.
+    tx.claim_jobs(std::slice::from_ref(&j.id), t.user, None)
+        .await
+        .unwrap();
+    let err = tx.cancel_job(&j.id, None).await.unwrap_err();
+    assert_eq!(err.code(), "invalid_argument");
+    tx.commit().await.unwrap();
+}
+
+#[sqlx::test]
+async fn stats_reports_cancelled_and_the_total_reconciles(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+
+    let mut tx = db.begin(t.org).await.unwrap();
+
+    let pending = tx.add_job(job(&t, "pending")).await.unwrap();
+    let _ = pending;
+
+    let in_progress = tx.add_job(job(&t, "in progress")).await.unwrap();
+    tx.claim_jobs(std::slice::from_ref(&in_progress.id), t.user, None)
+        .await
+        .unwrap();
+
+    let active = tx.add_job(job(&t, "active")).await.unwrap();
+    tx.claim_jobs(std::slice::from_ref(&active.id), t.user, None)
+        .await
+        .unwrap();
+    tx.activate_job(&active.id).await.unwrap();
+
+    let completed = tx.add_job(job(&t, "completed")).await.unwrap();
+    tx.claim_jobs(std::slice::from_ref(&completed.id), t.user, None)
+        .await
+        .unwrap();
+    tx.complete_job(&completed.id, Some("done")).await.unwrap();
+
+    let failed = tx.add_job(job(&t, "failed")).await.unwrap();
+    tx.claim_jobs(std::slice::from_ref(&failed.id), t.user, None)
+        .await
+        .unwrap();
+    tx.fail_job(&failed.id, Some("nope")).await.unwrap();
+
+    let cancelled = tx.add_job(job(&t, "cancelled")).await.unwrap();
+    tx.request_cancel(&cancelled.id, t.user, None)
+        .await
+        .unwrap();
+
+    let s = tx.stats(None).await.unwrap();
+    tx.commit().await.unwrap();
+
+    assert_eq!(s.cancelled, 1);
+    assert_eq!(s.total, 6);
+    assert_eq!(
+        s.pending + s.in_progress + s.active + s.completed + s.failed + s.cancelled,
+        s.total
+    );
+}
+
 // --------------------------------------------------------------------- repos
 
 #[sqlx::test]
