@@ -201,6 +201,8 @@ pub async fn signup_finish(
         req.ceremony_id,
         &req.credential,
         req.nickname.as_deref(),
+        passkeys::RegistrationVia::Signup,
+        ip.as_deref(),
     )
     .await?;
 
@@ -284,6 +286,8 @@ pub async fn claim_finish(
         req.ceremony_id,
         &req.credential,
         req.nickname.as_deref(),
+        passkeys::RegistrationVia::Claim,
+        ip.as_deref(),
     )
     .await?;
 
@@ -455,14 +459,18 @@ pub async fn add_passkey_start(
 pub async fn add_passkey_finish(
     State(state): State<AppState>,
     caller: CurrentUser,
+    parts: Parts,
     Json(req): Json<FinishRegistration>,
 ) -> ApiResult<Response> {
+    let ip = client_ip(&parts, &state.config);
     let registered = passkeys::finish_registration(
         &state.db,
         &state.webauthn,
         req.ceremony_id,
         &req.credential,
         req.nickname.as_deref(),
+        passkeys::RegistrationVia::Add,
+        ip.as_deref(),
     )
     .await?;
 

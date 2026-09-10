@@ -89,9 +89,17 @@ async fn register_new(db: &Db, auth: &mut WebauthnAuthenticator<SoftToken>) -> U
             for_soft_token(ceremony.challenge),
         )
         .expect("the authenticator refused the registration challenge");
-    passkeys::finish_registration(db, &webauthn, ceremony.id, &credential, Some("laptop"))
-        .await
-        .unwrap()
+    passkeys::finish_registration(
+        db,
+        &webauthn,
+        ceremony.id,
+        &credential,
+        Some("laptop"),
+        passkeys::RegistrationVia::Signup,
+        None,
+    )
+    .await
+    .unwrap()
 }
 
 /// The credential IDs an account holds, for `offer`.
@@ -169,10 +177,17 @@ async fn a_second_passkey_also_opens_the_account(pool: PgPool) {
             for_soft_token(ceremony.challenge),
         )
         .unwrap();
-    let same =
-        passkeys::finish_registration(&db, &webauthn, ceremony.id, &credential, Some("phone"))
-            .await
-            .unwrap();
+    let same = passkeys::finish_registration(
+        &db,
+        &webauthn,
+        ceremony.id,
+        &credential,
+        Some("phone"),
+        passkeys::RegistrationVia::Add,
+        None,
+    )
+    .await
+    .unwrap();
     assert_eq!(same, user);
     assert_eq!(passkeys::count(&db, user).await.unwrap(), 2);
 
@@ -395,6 +410,55 @@ async fn registration_writes_the_passkey_registered_action(pool: PgPool) {
         0,
         "registration must not write the historical TOTP action"
     );
+}
+
+/// The claim path's row is the one that matters most: it is what proves who
+/// actually walked through the door after an admin-assisted reset (#88).
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn registration_records_which_flow_wrote_it(pool: PgPool) {
+    let db = Db::from_pool(pool);
+    let webauthn = rp();
+    let mut auth = authenticator();
+    let user = register_new(&db, &mut auth).await;
+
+    let ceremony = passkeys::start_registration(&db, &webauthn, Some(user))
+        .await
+        .unwrap();
+    let credential = auth
+        .do_registration(
+            Url::parse(ORIGIN).unwrap(),
+            for_soft_token(ceremony.challenge),
+        )
+        .expect("the authenticator refused the registration challenge");
+    passkeys::finish_registration(
+        &db,
+        &webauthn,
+        ceremony.id,
+        &credential,
+        None,
+        passkeys::RegistrationVia::Claim,
+        Some("203.0.113.7"),
+    )
+    .await
+    .unwrap();
+
+    // One query for both columns, ordered by `id` rather than `created_at` —
+    // `created_at` defaults to the transaction's start time and can tie, and
+    // `of_core::audit`'s own reader already orders by `created_at DESC, id
+    // DESC` for exactly that reason. Two separate queries could in principle
+    // disagree about which row is "latest"; one query cannot.
+    let row: (serde_json::Value, Option<String>) = sqlx::query_as(
+        "SELECT detail->'via', ip FROM audit_events \
+         WHERE action = $1 AND actor_user_id = $2 \
+         ORDER BY id DESC LIMIT 1",
+    )
+    .bind(of_core::audit::action::PASSKEY_REGISTERED)
+    .bind(user)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(row.0, serde_json::json!("claim"));
+    assert_eq!(row.1.as_deref(), Some("203.0.113.7"));
 }
 
 /// Clearing writes the new `auth.passkey.cleared` action, never the old
@@ -625,9 +689,17 @@ async fn a_second_key_on_one_account_is_named_like_the_first(pool: PgPool) {
     let credential = auth
         .do_registration(Url::parse(ORIGIN).unwrap(), for_soft_token(first.challenge))
         .unwrap();
-    let user = passkeys::finish_registration(&db, &webauthn, first.id, &credential, None)
-        .await
-        .unwrap();
+    let user = passkeys::finish_registration(
+        &db,
+        &webauthn,
+        first.id,
+        &credential,
+        None,
+        passkeys::RegistrationVia::Signup,
+        None,
+    )
+    .await
+    .unwrap();
 
     let second = passkeys::start_registration(&db, &webauthn, Some(user))
         .await

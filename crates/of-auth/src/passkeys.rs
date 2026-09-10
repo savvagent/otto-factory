@@ -212,13 +212,42 @@ pub async fn start_registration(
     Ok(Ceremony { id, challenge })
 }
 
+/// Which flow reached [`finish_registration`]. `Claim` is the takeover-completion
+/// event that follows an admin-assisted passkey reset (see `org.member.passkeys_reset`)
+/// — the one case #88 exists to distinguish from an ordinary signup or an
+/// already-signed-in session adding a second key.
+#[derive(Debug, Clone, Copy)]
+pub enum RegistrationVia {
+    Signup,
+    Add,
+    Claim,
+}
+
+impl RegistrationVia {
+    fn as_str(self) -> &'static str {
+        match self {
+            RegistrationVia::Signup => "signup",
+            RegistrationVia::Add => "add",
+            RegistrationVia::Claim => "claim",
+        }
+    }
+}
+
 /// Finish registering, and return the account the key now belongs to.
+///
+/// `via` names which flow drove the ceremony and is written into the audit
+/// row's detail rather than left to be inferred later. The claim case is the
+/// one that matters most: it is the takeover-completion event that follows an
+/// admin-assisted reset, and without `via` it is indistinguishable from an
+/// ordinary signup.
 pub async fn finish_registration(
     db: &Db,
     webauthn: &Webauthn,
     ceremony: Uuid,
     credential: &RegisterPublicKeyCredential,
     nickname: Option<&str>,
+    via: RegistrationVia,
+    ip: Option<&str>,
 ) -> Result<UserId> {
     let (user_id, state): (Option<UserId>, PasskeyRegistration) =
         take_ceremony(db, ceremony, "register").await?;
@@ -253,7 +282,12 @@ pub async fn finish_registration(
     })?;
 
     if let Err(e) = db
-        .audit_global(Entry::new(action::PASSKEY_REGISTERED).actor(user_id))
+        .audit_global(
+            Entry::new(action::PASSKEY_REGISTERED)
+                .actor(user_id)
+                .detail(serde_json::json!({ "via": via.as_str() }))
+                .from_request(ip, None),
+        )
         .await
     {
         tracing::error!(
