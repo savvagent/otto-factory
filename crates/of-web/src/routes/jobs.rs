@@ -32,7 +32,7 @@ use crate::state::AppState;
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListJobsQuery {
-    /// `pending` | `in-progress` | `active` | `completed` | `failed`.
+    /// `pending` | `in-progress` | `active` | `completed` | `failed` | `cancelled`.
     #[serde(default)]
     pub status: Option<String>,
     /// A registered repo slug.
@@ -62,8 +62,8 @@ pub async fn list_jobs(
     Query(q): Query<ListJobsQuery>,
 ) -> ApiResult<Json<Vec<Job>>> {
     // Parsed before the transaction opens: a typo in a query string should not
-    // cost a pooled connection, and `Status::from_str` already names the four
-    // valid values, which is what an error here has to do.
+    // cost a pooled connection, and `Status::from_str` already names the valid
+    // values, which is what an error here has to do.
     let status = q
         .status
         .as_deref()
@@ -96,6 +96,7 @@ pub async fn list_jobs(
             repo_id,
             team_id,
             created_by: q.mine.then_some(ctx.user.id),
+            agent_type: None,
             limit: q.limit,
         })
         .await?;

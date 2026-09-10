@@ -33,6 +33,13 @@ pub enum Status {
     Active,
     Completed,
     Failed,
+    /// Terminal. Reached either directly from `Pending` (via `request_cancel`,
+    /// which finalizes immediately since there is no holder to wait on) or
+    /// from `InProgress`/`Active` once the holder confirms it stopped (via
+    /// `cancel_job`). Invariant: every `Cancelled` job has a non-null
+    /// `cancel_requested_at`, enforced by `Tx::request_cancel`/`Tx::cancel_job`
+    /// — never construct one otherwise.
+    Cancelled,
 }
 
 impl Status {
@@ -43,11 +50,12 @@ impl Status {
             Status::Active => "active",
             Status::Completed => "completed",
             Status::Failed => "failed",
+            Status::Cancelled => "cancelled",
         }
     }
 
     pub fn is_terminal(self) -> bool {
-        matches!(self, Status::Completed | Status::Failed)
+        matches!(self, Status::Completed | Status::Failed | Status::Cancelled)
     }
 }
 
@@ -60,12 +68,42 @@ impl std::str::FromStr for Status {
             "active" => Ok(Status::Active),
             "completed" => Ok(Status::Completed),
             "failed" => Ok(Status::Failed),
+            "cancelled" => Ok(Status::Cancelled),
             other => Err(Error::Invalid(format!(
                 "unknown status {other:?} (expected pending | in-progress | active | \
-                 completed | failed)"
+                 completed | failed | cancelled)"
             ))),
         }
     }
+}
+
+/// Default claim lifetime. Same value as `leases::DEFAULT_TTL_SECS`, and
+/// for the same reason: long enough that a working agent renewing on a
+/// normal cadence never loses its claim mid-task, short enough that a
+/// crashed agent's job becomes claimable again while a human is still in the
+/// room. Defined separately from the lease constant rather than imported —
+/// jobs and leases are different resources with independently tunable
+/// lifetimes that only happen to start at the same number today.
+pub const DEFAULT_CLAIM_TTL_SECS: i64 = 900;
+
+/// Lower bound on a client-requested claim TTL, mirroring
+/// `MAX_CLAIM_TTL_SECS`'s reasoning at the other end: without a floor, a
+/// value close to zero would make an ordinary round trip to the database
+/// race the claim's own expiry.
+pub const MIN_CLAIM_TTL_SECS: i64 = 60;
+
+/// Upper bound on a client-requested claim TTL, for the same reason
+/// `leases::MAX_TTL_SECS` caps leases: without one, a single
+/// `claim_jobs` call could take an effectively permanent claim that only
+/// `repend_job` could clear.
+pub const MAX_CLAIM_TTL_SECS: i64 = 4 * 3600;
+
+/// Shared by `claim_jobs` and `renew_claim` so the two never drift apart on
+/// what "an out-of-range TTL" means.
+fn clamp_claim_ttl(ttl_secs: Option<i64>) -> i64 {
+    ttl_secs
+        .unwrap_or(DEFAULT_CLAIM_TTL_SECS)
+        .clamp(MIN_CLAIM_TTL_SECS, MAX_CLAIM_TTL_SECS)
 }
 
 #[derive(
@@ -103,6 +141,35 @@ pub struct Job {
     pub created_by: Option<UserId>,
     pub claimed_by: Option<UserId>,
     pub claimed_by_label: Option<String>,
+    /// When the current claim lapses and the job becomes claimable again via
+    /// `ready()`/`claim_jobs`, the way an expired `repo_leases` row frees its
+    /// resource. `None` for a job that has never been claimed, or whose claim
+    /// was finalized (`complete_job`/`fail_job`/`cancel_job`/
+    /// `close_from_ticket`), reaped, or reset (`repend_job`) — every one of
+    /// those write paths clears this column, so only a live
+    /// `in-progress`/`active` claim ever has it set. A job in
+    /// `in-progress`/`active` with this timestamp in the past is *stranded*:
+    /// nobody is actually working it, but nothing has reclaimed it yet.
+    pub claim_expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Set by `request_cancel`. `None` means nobody has ever asked this job to
+    /// stop. **Check `status` before acting on this**: it is only a live "stop,
+    /// please" while `status` is `in-progress` or `active` — that is when you,
+    /// as the holder, should call `cancel_job` once you actually stop (or
+    /// `fail_job`, if you are stopping for your own reasons unrelated to this
+    /// request). `complete_job`, `fail_job`, and the immediate pending-finalize
+    /// path inside `request_cancel` itself do **not** clear this field, so a
+    /// `Completed`, `Failed`, or `Cancelled` job can still show it set — at
+    /// that point it is history, not a pending request. Only `repend_job`
+    /// clears it.
+    pub cancel_requested_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Who asked, at the time `cancel_requested_at` was last set. Can be
+    /// `None` even while a request is still live: the column is
+    /// `ON DELETE SET NULL`, so a requester whose account is later deleted
+    /// leaves `cancel_requested_at`/`cancel_reason` in place with this field
+    /// cleared. So `cancel_requested_by == None` does **not** mean "no
+    /// request" — only `cancel_requested_at == None` means that.
+    pub cancel_requested_by: Option<UserId>,
+    pub cancel_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -118,6 +185,11 @@ pub struct NewJob {
     /// Job ids that must reach `completed` before this one is claimable.
     pub depends_on: Vec<JobId>,
     pub created_by: Option<UserId>,
+    /// Caller-supplied replay key. `None` (the default) reproduces today's
+    /// behavior exactly — no lookup, no extra column write beyond NULL. See
+    /// the `idempotency` module doc and the idempotency-key design spec's §1
+    /// for the correctness argument.
+    pub idempotency_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -127,6 +199,11 @@ pub struct JobFilter {
     pub team_id: Option<TeamId>,
     /// Restrict to jobs this user created. Used by "what did I queue?" views.
     pub created_by: Option<UserId>,
+    /// A routing hint, not access control: matches jobs with this exact
+    /// `agent_type` **and** jobs with no `agent_type` at all, because an
+    /// unrouted job is work anyone may take. Never validated against a list —
+    /// same reasoning as `agent_type` itself.
+    pub agent_type: Option<String>,
     pub limit: Option<i64>,
 }
 
@@ -138,6 +215,7 @@ pub struct Stats {
     pub active: i64,
     pub completed: i64,
     pub failed: i64,
+    pub cancelled: i64,
     pub blocked: i64,
     pub total: i64,
 }
@@ -145,9 +223,100 @@ pub struct Stats {
 const JOB_COLS: &str = "id, org_id, repo_id, team_id, title, description, status, ticket_ref, \
                         tracker, remote_revision, agent_type, metadata, created_at, started_at, \
                         completed_at, attempts, result, error, created_by, claimed_by, \
-                        claimed_by_label";
+                        claimed_by_label, cancel_requested_at, cancel_requested_by, \
+                        cancel_reason, claim_expires_at";
+
+/// Fingerprint the fields that define "the same `add_job` call" — see the
+/// `idempotency` module doc. Named-field destructure with no `..`: adding a
+/// field to `NewJob` without deciding whether it belongs here fails to
+/// *compile*, not just to be missed on review.
+///
+/// `team_id` here is `new.team_id` as the caller supplied it, deliberately
+/// *not* `add_job`'s locally-inherited `new.team_id.or(repo.team_id)` — the
+/// fingerprint describes the request, not a value `add_job` derives from it,
+/// so a repo whose default team changes between the original call and a
+/// replay does not turn an otherwise-identical retry into a false conflict.
+fn job_idempotency_fingerprint(new: &NewJob) -> Vec<u8> {
+    let NewJob {
+        repo_id,
+        team_id,
+        title,
+        description,
+        ticket_ref,
+        tracker,
+        agent_type,
+        metadata,
+        depends_on,
+        created_by,
+        // The key names the replay lookup; it is never part of what makes
+        // two calls "the same call".
+        idempotency_key: _,
+    } = new;
+
+    // Dependency order carries no meaning (set_dependencies takes a set, not
+    // a sequence), so it is sorted before hashing — otherwise the same
+    // dependency set supplied in a different order would look like a
+    // different payload and turn a genuine replay into a false conflict.
+    let mut dep_ids: Vec<&str> = depends_on.iter().map(|j| j.0.as_str()).collect();
+    dep_ids.sort_unstable();
+
+    // Normalized the same way the insert normalizes it (`None` becomes
+    // `{}`), so a caller who spells the omitted field as `{}` on a retry
+    // still replays cleanly instead of hitting a false conflict.
+    let metadata = metadata.clone().unwrap_or_else(|| serde_json::json!({}));
+
+    crate::idempotency::fingerprint(&serde_json::json!({
+        "repoId": repo_id,
+        "teamId": team_id,
+        "title": title.trim(),
+        "description": description,
+        "ticketRef": ticket_ref,
+        "tracker": tracker,
+        "agentType": agent_type,
+        "metadata": metadata,
+        "dependsOn": dep_ids,
+        "createdBy": created_by,
+    }))
+}
 
 impl Tx<'_> {
+    /// Resolve `new.idempotency_key` against an already-completed `add_job`
+    /// call, doing no writes and touching no meter. `Ok(None)` covers both
+    /// "no key was supplied" (the common case, at zero extra query cost) and
+    /// "the key has not been used before" — either way the caller should
+    /// proceed to `add_job`. `add_job` repeats this check race-safely via a
+    /// unique index + SAVEPOINT retry for the rare case of two concurrent
+    /// callers racing a brand-new key; this method exists separately so the
+    /// MCP layer can skip metering a replay *before* calling `add_job`,
+    /// which has no way to un-charge after the fact.
+    pub async fn find_replayed_job(&mut self, new: &NewJob) -> Result<Option<Job>> {
+        let Some(key) = new.idempotency_key.as_deref() else {
+            return Ok(None);
+        };
+        crate::idempotency::validate(key)?;
+
+        let org = self.org();
+        let existing: Option<(JobId, Vec<u8>)> = sqlx::query_as(
+            "SELECT id, idempotency_payload_hash FROM jobs \
+             WHERE org_id = $1 AND idempotency_key = $2",
+        )
+        .bind(org)
+        .bind(key)
+        .fetch_optional(self.conn())
+        .await?;
+        let Some((id, stored_hash)) = existing else {
+            return Ok(None);
+        };
+
+        if stored_hash != job_idempotency_fingerprint(new) {
+            return Err(Error::IdempotencyKeyConflict {
+                key: key.to_string(),
+                tool: "add_job",
+            });
+        }
+        Ok(Some(self.get_job(&id).await?))
+    }
+
     /// Enqueue a job.
     ///
     /// The id comes from the org's own counter, bumped under that org's row lock
@@ -157,6 +326,9 @@ impl Tx<'_> {
     pub async fn add_job(&mut self, new: NewJob) -> Result<Job> {
         if new.title.trim().is_empty() {
             return Err(Error::Invalid("job title must not be empty".into()));
+        }
+        if let Some(key) = new.idempotency_key.as_deref() {
+            crate::idempotency::validate(key)?;
         }
 
         let org = self.org();
@@ -183,28 +355,154 @@ impl Tx<'_> {
         // reads work without the caller having to know about teams at all.
         let team_id = new.team_id.or(repo.team_id);
 
-        let job: Job = sqlx::query_as(&format!(
-            "INSERT INTO jobs (id, org_id, repo_id, team_id, title, description, ticket_ref, \
-                               tracker, remote_revision, agent_type, metadata, created_by) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING {JOB_COLS}"
-        ))
-        .bind(&id)
-        .bind(org)
-        .bind(new.repo_id)
-        .bind(team_id)
-        .bind(new.title.trim())
-        .bind(new.description.as_deref())
-        .bind(new.ticket_ref.as_deref())
-        .bind(new.tracker)
-        .bind(Option::<&str>::None)
-        .bind(new.agent_type.as_deref())
-        .bind(new.metadata.unwrap_or_else(|| serde_json::json!({})))
-        .bind(new.created_by)
-        .fetch_one(self.conn())
-        .await?;
+        let (job, created): (Job, bool) = if let Some(key) = new.idempotency_key.as_deref() {
+            let hash = job_idempotency_fingerprint(&new);
+            // A savepoint, not a bare INSERT: Postgres aborts the *whole*
+            // enclosing transaction on any statement error, so recovering
+            // from a unique-violation by running another query in the same
+            // Tx would otherwise fail with "current transaction is aborted"
+            // instead of ever reaching the recovery query below — same
+            // reasoning as create_from_ticket's own SAVEPOINT below.
+            sqlx::query("SAVEPOINT add_job_idempotency")
+                .execute(self.conn())
+                .await?;
+            let inserted = sqlx::query_as(&format!(
+                "INSERT INTO jobs (id, org_id, repo_id, team_id, title, description, \
+                                   ticket_ref, tracker, remote_revision, agent_type, \
+                                   metadata, created_by, idempotency_key, \
+                                   idempotency_payload_hash) \
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) \
+                 RETURNING {JOB_COLS}"
+            ))
+            .bind(&id)
+            .bind(org)
+            .bind(new.repo_id)
+            .bind(team_id)
+            .bind(new.title.trim())
+            .bind(new.description.as_deref())
+            .bind(new.ticket_ref.as_deref())
+            .bind(new.tracker)
+            .bind(Option::<&str>::None)
+            .bind(new.agent_type.as_deref())
+            // Moved, not cloned: `new.metadata` is not read again (only the
+            // disjoint `new.depends_on` is, below), and `hash` (computed
+            // just above) already captured its content.
+            .bind(new.metadata.unwrap_or_else(|| serde_json::json!({})))
+            .bind(new.created_by)
+            .bind(key)
+            .bind(&hash)
+            .fetch_one(self.conn())
+            .await;
 
-        if !new.depends_on.is_empty() {
-            self.set_dependencies(&id, &new.depends_on, &[]).await?;
+            match inserted {
+                Ok(job) => {
+                    sqlx::query("RELEASE SAVEPOINT add_job_idempotency")
+                        .execute(self.conn())
+                        .await?;
+                    (job, true)
+                }
+                // A concurrent caller won the race on this brand-new key
+                // between find_replayed_job's read and this insert. Converge
+                // on its row exactly like create_from_ticket converges on
+                // ticket_ref's winner, rather than failing a request that,
+                // semantically, already succeeded — the seq number burned
+                // above is simply unused, same as that precedent.
+                //
+                // The literal index name here must match 0025's
+                // `CREATE UNIQUE INDEX jobs_org_idempotency_key_idx` exactly:
+                // if that index is ever renamed without updating this match,
+                // the guard below silently stops matching and this whole
+                // recovery path falls through to the generic `Err(Error::Db)`
+                // arm instead — a correctness regression with no compiler
+                // error to catch it.
+                Err(sqlx::Error::Database(db))
+                    if db.is_unique_violation()
+                        && db.constraint() == Some("jobs_org_idempotency_key_idx") =>
+                {
+                    sqlx::query("ROLLBACK TO SAVEPOINT add_job_idempotency")
+                        .execute(self.conn())
+                        .await?;
+                    sqlx::query("RELEASE SAVEPOINT add_job_idempotency")
+                        .execute(self.conn())
+                        .await?;
+                    let winner: (JobId, Vec<u8>) = sqlx::query_as(
+                        "SELECT id, idempotency_payload_hash FROM jobs \
+                         WHERE org_id = $1 AND idempotency_key = $2",
+                    )
+                    .bind(org)
+                    .bind(key)
+                    .fetch_optional(self.conn())
+                    .await?
+                    .ok_or_else(|| {
+                        Error::Invalid(format!(
+                            "add_job lost a unique-violation race for idempotency key \
+                             {key:?} but no concurrently-created job was found"
+                        ))
+                    })?;
+                    if winner.1 != hash {
+                        return Err(Error::IdempotencyKeyConflict {
+                            key: key.to_string(),
+                            tool: "add_job",
+                        });
+                    }
+                    // Reachable two ways, and `Tx::add_job` cannot tell
+                    // which: a genuine concurrent race (two callers both saw
+                    // `find_replayed_job` return `None`, one lost the
+                    // insert), or a direct of-core caller that skips the
+                    // find_replayed_job pre-check entirely and relies on
+                    // this fallback alone. Via `tools::jobs::add_job` (the
+                    // production path) only the first is possible, and it
+                    // means the loser was already billed via Factory::charge
+                    // for a call that created nothing — accepted and
+                    // documented in the idempotency-key design spec §8, not
+                    // a bug, logged so it is observable rather than silent.
+                    tracing::warn!(
+                        org = %org,
+                        key,
+                        "add_job's idempotency-key insert hit a unique violation and \
+                         converged onto an existing job instead of failing; expected under \
+                         concurrent replay of the same new key (see design spec §8) — \
+                         unexpected otherwise"
+                    );
+                    (self.get_job(&winner.0).await?, false)
+                }
+                Err(error) => return Err(Error::Db(error)),
+            }
+        } else {
+            // Unchanged from before this feature: no key, no idempotency
+            // columns written, no savepoint.
+            let job = sqlx::query_as(&format!(
+                "INSERT INTO jobs (id, org_id, repo_id, team_id, title, description, \
+                                   ticket_ref, tracker, remote_revision, agent_type, \
+                                   metadata, created_by) \
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING {JOB_COLS}"
+            ))
+            .bind(&id)
+            .bind(org)
+            .bind(new.repo_id)
+            .bind(team_id)
+            .bind(new.title.trim())
+            .bind(new.description.as_deref())
+            .bind(new.ticket_ref.as_deref())
+            .bind(new.tracker)
+            .bind(Option::<&str>::None)
+            .bind(new.agent_type.as_deref())
+            .bind(new.metadata.unwrap_or_else(|| serde_json::json!({})))
+            .bind(new.created_by)
+            .fetch_one(self.conn())
+            .await?;
+            (job, true)
+        };
+
+        // Only for a row this call actually inserted: the race-fallback arm
+        // converged onto a concurrent winner whose own add_job call already
+        // set its dependencies from the identical payload (the hash
+        // comparison above includes dependsOn, so a mismatch there is
+        // already a conflict before this point). Using `job.id` here (not
+        // the locally-burned `id`) matters for the same reason — in the
+        // race-fallback arm they are different jobs.
+        if created && !new.depends_on.is_empty() {
+            self.set_dependencies(&job.id, &new.depends_on, &[]).await?;
         }
 
         Ok(job)
@@ -532,14 +830,16 @@ impl Tx<'_> {
                AND ($3::uuid IS NULL OR repo_id = $3) \
                AND ($4::uuid IS NULL OR team_id = $4) \
                AND ($5::uuid IS NULL OR created_by = $5) \
+               AND ($6::text IS NULL OR agent_type = $6 OR agent_type IS NULL) \
              ORDER BY created_at DESC \
-             LIMIT $6"
+             LIMIT $7"
         ))
         .bind(org)
         .bind(f.status)
         .bind(f.repo_id)
         .bind(f.team_id)
         .bind(f.created_by)
+        .bind(&f.agent_type)
         .bind(f.limit.unwrap_or(200).clamp(1, 1000))
         .fetch_all(self.conn())
         .await?;
@@ -560,18 +860,27 @@ impl Tx<'_> {
         ids: &[JobId],
         claimer: UserId,
         label: Option<&str>,
+        ttl_secs: Option<i64>,
     ) -> Result<Vec<Job>> {
         if ids.is_empty() {
             return Err(Error::Invalid(
                 "claim_jobs needs at least one job id".into(),
             ));
         }
+        let ttl = clamp_claim_ttl(ttl_secs);
 
         let org = self.org();
         let mut sorted: Vec<String> = ids.iter().map(|i| i.0.clone()).collect();
         sorted.sort();
         sorted.dedup();
 
+        // Lock every requested row in sorted order *first* — this is the
+        // invariant this function already promised ("rows are locked in a
+        // deterministic order so two agents claiming overlapping batches
+        // cannot deadlock each other"), and the reap below must not acquire
+        // any lock this statement didn't already take, or two concurrent
+        // calls reaping overlapping stale batches could lock in opposite
+        // orders and deadlock.
         let locked: Vec<(String, Status)> = sqlx::query_as(
             "SELECT id, status FROM jobs WHERE org_id = $1 AND id = ANY($2) \
              ORDER BY id FOR UPDATE",
@@ -592,8 +901,34 @@ impl Tx<'_> {
             return Err(Error::JobNotFound(JobId(missing)));
         }
 
+        // Reap any of the *requested* jobs whose claim has lapsed, exactly the
+        // way acquire_lease reaps an expired lease on the specific resource
+        // being acquired before checking availability — scoped to these ids,
+        // not organization-wide, because there is no background sweeper: a
+        // stale claim on a job nobody is trying to (re)claim simply sits
+        // until someone does, and ready() already tells callers it is
+        // claimable in the meantime. Runs against rows the SELECT above
+        // already holds the lock on, so this acquires no *new* locks and
+        // cannot reorder anything. Clears the same fields repend_job clears
+        // for the same reason: a reap is an involuntary repend, and a stale
+        // cancellation request or note left behind would misattribute to
+        // whoever claims the job next.
+        let reaped: Vec<String> = sqlx::query_scalar(
+            "UPDATE jobs SET status = 'pending', claimed_by = NULL, \
+                    claimed_by_label = NULL, started_at = NULL, claim_expires_at = NULL, \
+                    cancel_requested_at = NULL, cancel_requested_by = NULL, cancel_reason = NULL \
+             WHERE org_id = $1 AND id = ANY($2) AND status IN ('in-progress', 'active') \
+               AND claim_expires_at <= now() \
+             RETURNING id",
+        )
+        .bind(org)
+        .bind(&sorted)
+        .fetch_all(self.conn())
+        .await?;
+        let reaped: std::collections::HashSet<&str> = reaped.iter().map(String::as_str).collect();
+
         for (id, status) in &locked {
-            if *status != Status::Pending {
+            if *status != Status::Pending && !reaped.contains(id.as_str()) {
                 return Err(Error::WrongStatus {
                     job: JobId(id.clone()),
                     actual: status.as_str().to_string(),
@@ -623,13 +958,15 @@ impl Tx<'_> {
 
         let jobs: Vec<Job> = sqlx::query_as(&format!(
             "UPDATE jobs SET status = 'in-progress', started_at = now(), \
-                    attempts = attempts + 1, claimed_by = $3, claimed_by_label = $4 \
+                    attempts = attempts + 1, claimed_by = $3, claimed_by_label = $4, \
+                    claim_expires_at = now() + make_interval(secs => $5) \
              WHERE org_id = $1 AND id = ANY($2) RETURNING {JOB_COLS}"
         ))
         .bind(org)
         .bind(&sorted)
         .bind(claimer)
         .bind(label)
+        .bind(ttl as f64)
         .fetch_all(self.conn())
         .await?;
 
@@ -637,13 +974,24 @@ impl Tx<'_> {
     }
 
     /// Mark an in-progress (or active) job completed.
-    pub async fn complete_job(&mut self, id: &JobId, result: Option<&str>) -> Result<Job> {
-        self.finalize(id, Status::Completed, result, None).await
+    pub async fn complete_job(
+        &mut self,
+        id: &JobId,
+        caller: UserId,
+        result: Option<&str>,
+    ) -> Result<Job> {
+        self.finalize(id, caller, Status::Completed, result, None)
+            .await
     }
 
     /// Mark an in-progress (or active) job failed.
-    pub async fn fail_job(&mut self, id: &JobId, error: Option<&str>) -> Result<Job> {
-        self.finalize(id, Status::Failed, None, error).await
+    pub async fn fail_job(
+        &mut self,
+        id: &JobId,
+        caller: UserId,
+        error: Option<&str>,
+    ) -> Result<Job> {
+        self.finalize(id, caller, Status::Failed, None, error).await
     }
 
     /// Confirm a claimed job is being actively worked on, not merely claimed.
@@ -692,7 +1040,9 @@ impl Tx<'_> {
         let column = match status {
             Status::Completed => "jobs_completed_total",
             Status::Failed => "jobs_failed_total",
-            Status::Pending | Status::InProgress | Status::Active => return Ok(()),
+            Status::Pending | Status::InProgress | Status::Active | Status::Cancelled => {
+                return Ok(())
+            }
         };
         sqlx::query(&format!(
             "UPDATE orgs SET {column} = {column} + $2 WHERE id = $1"
@@ -704,32 +1054,60 @@ impl Tx<'_> {
         Ok(())
     }
 
+    /// Lock the job row, confirm it is claimed (`in-progress` or `active`), and
+    /// confirm `caller` is the one who holds it. Shared by `finalize` and
+    /// `renew_claim` — both need the identical fencing check.
+    async fn ensure_claim_held(&mut self, id: &JobId, caller: UserId) -> Result<()> {
+        let org = self.org();
+        let row: Option<(Status, Option<UserId>, Option<String>)> = sqlx::query_as(
+            "SELECT status, claimed_by, claimed_by_label FROM jobs \
+             WHERE org_id = $1 AND id = $2 FOR UPDATE",
+        )
+        .bind(org)
+        .bind(id)
+        .fetch_optional(self.conn())
+        .await?;
+        let (status, claimed_by, claimed_by_label) =
+            row.ok_or_else(|| Error::JobNotFound(id.clone()))?;
+
+        if !matches!(status, Status::InProgress | Status::Active) {
+            return Err(Error::WrongStatus {
+                job: id.clone(),
+                actual: status.as_str().to_string(),
+                expected: "in-progress or active".into(),
+            });
+        }
+        if claimed_by != Some(caller) {
+            return Err(Error::AlreadyClaimed {
+                job: id.clone(),
+                // The `unwrap_or_else` arm is unreachable in practice: the
+                // only path to `InProgress`/`Active` is `claim_jobs`, which
+                // always sets `claimed_by`. It is worded as a data-
+                // inconsistency report rather than a plausible-sounding
+                // "claimed by nobody" so that if this invariant is ever
+                // broken by a future change, the resulting error is legible
+                // as a bug report rather than a normal business state.
+                holder: claimed_by_label
+                    .or_else(|| claimed_by.map(|u| u.to_string()))
+                    .unwrap_or_else(|| "no recorded holder (data inconsistency)".into()),
+            });
+        }
+        Ok(())
+    }
+
     async fn finalize(
         &mut self,
         id: &JobId,
+        caller: UserId,
         to: Status,
         result: Option<&str>,
         error: Option<&str>,
     ) -> Result<Job> {
+        self.ensure_claim_held(id, caller).await?;
         let org = self.org();
-        let current: Option<Status> =
-            sqlx::query_scalar("SELECT status FROM jobs WHERE org_id = $1 AND id = $2 FOR UPDATE")
-                .bind(org)
-                .bind(id)
-                .fetch_optional(self.conn())
-                .await?;
-
-        let current = current.ok_or_else(|| Error::JobNotFound(id.clone()))?;
-        if !matches!(current, Status::InProgress | Status::Active) {
-            return Err(Error::WrongStatus {
-                job: id.clone(),
-                actual: current.as_str().to_string(),
-                expected: "in-progress or active".into(),
-            });
-        }
-
         let job = sqlx::query_as(&format!(
-            "UPDATE jobs SET status = $3, completed_at = now(), result = $4, error = $5 \
+            "UPDATE jobs SET status = $3, completed_at = now(), result = $4, error = $5, \
+                    claim_expires_at = NULL \
              WHERE org_id = $1 AND id = $2 RETURNING {JOB_COLS}"
         ))
         .bind(org)
@@ -740,6 +1118,142 @@ impl Tx<'_> {
         .fetch_one(self.conn())
         .await?;
         self.bump_terminal_counter(to, 1).await?;
+
+        Ok(job)
+    }
+
+    /// Push a held claim's expiry forward without completing or failing the
+    /// job — the direct analog of `renew_lease`. Only the current holder may
+    /// renew, via the same `ensure_claim_held` check `finalize` uses.
+    pub async fn renew_claim(
+        &mut self,
+        id: &JobId,
+        caller: UserId,
+        ttl_secs: Option<i64>,
+    ) -> Result<Job> {
+        self.ensure_claim_held(id, caller).await?;
+        let ttl = clamp_claim_ttl(ttl_secs);
+        let org = self.org();
+        let job = sqlx::query_as(&format!(
+            "UPDATE jobs SET claim_expires_at = now() + make_interval(secs => $3) \
+             WHERE org_id = $1 AND id = $2 RETURNING {JOB_COLS}"
+        ))
+        .bind(org)
+        .bind(id)
+        .bind(ttl as f64)
+        .fetch_one(self.conn())
+        .await?;
+
+        Ok(job)
+    }
+
+    /// Ask a job to stop.
+    ///
+    /// A `Pending` job has no holder to wait on — there is nobody to notice the
+    /// flag and act on it — so this finalizes it to `Cancelled` immediately, in
+    /// the same statement that stamps the request. An `InProgress`/`Active` job
+    /// only gets the three cancellation fields set: its holder is the only
+    /// party that can say when it has actually stopped, and does so by calling
+    /// `cancel_job`. Calling this again on an already-flagged job re-stamps the
+    /// request rather than failing, so an agent that lost track of an earlier
+    /// call can simply ask again.
+    pub async fn request_cancel(
+        &mut self,
+        id: &JobId,
+        requested_by: UserId,
+        reason: Option<&str>,
+    ) -> Result<Job> {
+        let org = self.org();
+        let current: Option<Status> =
+            sqlx::query_scalar("SELECT status FROM jobs WHERE org_id = $1 AND id = $2 FOR UPDATE")
+                .bind(org)
+                .bind(id)
+                .fetch_optional(self.conn())
+                .await?;
+
+        let current = current.ok_or_else(|| Error::JobNotFound(id.clone()))?;
+        if current.is_terminal() {
+            return Err(Error::WrongStatus {
+                job: id.clone(),
+                actual: current.as_str().to_string(),
+                expected: "pending, in-progress, or active".into(),
+            });
+        }
+
+        let job = if current == Status::Pending {
+            sqlx::query_as(&format!(
+                "UPDATE jobs SET status = 'cancelled', completed_at = now(), \
+                        cancel_requested_at = now(), cancel_requested_by = $3, \
+                        cancel_reason = $4 \
+                 WHERE org_id = $1 AND id = $2 RETURNING {JOB_COLS}"
+            ))
+            .bind(org)
+            .bind(id)
+            .bind(requested_by)
+            .bind(reason)
+            .fetch_one(self.conn())
+            .await?
+        } else {
+            sqlx::query_as(&format!(
+                "UPDATE jobs SET cancel_requested_at = now(), cancel_requested_by = $3, \
+                        cancel_reason = $4 \
+                 WHERE org_id = $1 AND id = $2 RETURNING {JOB_COLS}"
+            ))
+            .bind(org)
+            .bind(id)
+            .bind(requested_by)
+            .bind(reason)
+            .fetch_one(self.conn())
+            .await?
+        };
+
+        Ok(job)
+    }
+
+    /// Confirm a claimed job has stopped in response to an earlier
+    /// `request_cancel` call.
+    ///
+    /// Refuses a job with no cancellation request on file: a holder stopping
+    /// for its own reasons, unrelated to a request, should call `fail_job`
+    /// instead — the distinction is what lets an observer tell "asked to stop
+    /// and did" apart from "gave up on its own". Also refuses a caller that
+    /// does not currently hold the claim, via the same `ensure_claim_held`
+    /// check `complete_job`/`fail_job` use: this finalizes a job exactly like
+    /// they do, and a stale holder confirming a stop on a job someone else
+    /// has since reclaimed would corrupt that reclaimer's work the same way
+    /// an unchecked `complete_job` would.
+    pub async fn cancel_job(
+        &mut self,
+        id: &JobId,
+        caller: UserId,
+        note: Option<&str>,
+    ) -> Result<Job> {
+        self.ensure_claim_held(id, caller).await?;
+        let org = self.org();
+        let cancel_requested_at: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+            "SELECT cancel_requested_at FROM jobs WHERE org_id = $1 AND id = $2",
+        )
+        .bind(org)
+        .bind(id)
+        .fetch_one(self.conn())
+        .await?;
+        if cancel_requested_at.is_none() {
+            return Err(Error::Invalid(format!(
+                "job {id} has no cancellation request on file — call fail_job if you are \
+                 stopping for your own reasons, not in response to a request_cancel call"
+            )));
+        }
+
+        let job = sqlx::query_as(&format!(
+            "UPDATE jobs SET status = 'cancelled', completed_at = now(), error = $3, \
+                    claim_expires_at = NULL \
+             WHERE org_id = $1 AND id = $2 RETURNING {JOB_COLS}"
+        ))
+        .bind(org)
+        .bind(id)
+        .bind(note)
+        .fetch_one(self.conn())
+        .await?;
 
         Ok(job)
     }
@@ -784,9 +1298,15 @@ impl Tx<'_> {
         // follow-up `set_remote_revision` call, so a ticket close and its
         // revision stamp can never drift apart into two partially-applied
         // writes.
+        // No claimer check here, unlike finalize: this is driven by an
+        // inbound tracker webhook, not an MCP caller, so there is no
+        // `UserId` to check against — a human closing the linked ticket is
+        // not "someone claiming to be the holder", it's a separate,
+        // trusted-by-construction signal. `claim_expires_at` is still
+        // cleared for the same hygiene reason `finalize`/`cancel_job` do.
         let job = sqlx::query_as(&format!(
             "UPDATE jobs SET status = $3, completed_at = now(), result = $4, error = $5, \
-                    remote_revision = COALESCE($6, remote_revision) \
+                    remote_revision = COALESCE($6, remote_revision), claim_expires_at = NULL \
              WHERE org_id = $1 AND id = $2 RETURNING {JOB_COLS}"
         ))
         .bind(org)
@@ -818,13 +1338,15 @@ impl Tx<'_> {
             return Err(Error::WrongStatus {
                 job: id.clone(),
                 actual: "pending".into(),
-                expected: "completed, failed, in-progress, or active".into(),
+                expected: "completed, failed, in-progress, active, or cancelled".into(),
             });
         }
 
         let job = sqlx::query_as(&format!(
             "UPDATE jobs SET status = 'pending', started_at = NULL, completed_at = NULL, \
-                    result = NULL, error = NULL, claimed_by = NULL, claimed_by_label = NULL \
+                    result = NULL, error = NULL, claimed_by = NULL, claimed_by_label = NULL, \
+                    claim_expires_at = NULL, \
+                    cancel_requested_at = NULL, cancel_requested_by = NULL, cancel_reason = NULL \
              WHERE org_id = $1 AND id = $2 RETURNING {JOB_COLS}"
         ))
         .bind(org)
@@ -1005,12 +1527,26 @@ impl Tx<'_> {
     }
 
     /// Pending jobs whose dependencies are all completed — i.e. claimable now.
-    pub async fn ready(&mut self, repo_id: Option<RepoId>) -> Result<Vec<Job>> {
+    /// Also includes a job stuck `in-progress`/`active` whose claim has
+    /// lapsed: nobody is actually working it, and there is no background
+    /// sweeper to reap it proactively, so `ready()` itself has to say so.
+    ///
+    /// `agent_type` is a routing hint, not access control: passing it returns
+    /// jobs with that exact `agent_type` **and** jobs with no `agent_type` at
+    /// all, since an unrouted job is work anyone may take.
+    pub async fn ready(
+        &mut self,
+        repo_id: Option<RepoId>,
+        agent_type: Option<&str>,
+    ) -> Result<Vec<Job>> {
         let org = self.org();
         let jobs = sqlx::query_as(&format!(
             "SELECT {JOB_COLS} FROM jobs j \
-             WHERE j.org_id = $1 AND j.status = 'pending' \
+             WHERE j.org_id = $1 \
+               AND (j.status = 'pending' \
+                    OR (j.status IN ('in-progress', 'active') AND j.claim_expires_at <= now())) \
                AND ($2::uuid IS NULL OR j.repo_id = $2) \
+               AND ($3::text IS NULL OR j.agent_type = $3 OR j.agent_type IS NULL) \
                AND NOT EXISTS ( \
                  SELECT 1 FROM job_dependencies d \
                  JOIN jobs dep ON dep.org_id = d.org_id AND dep.id = d.depends_on \
@@ -1019,6 +1555,7 @@ impl Tx<'_> {
         ))
         .bind(org)
         .bind(repo_id)
+        .bind(agent_type)
         .fetch_all(self.conn())
         .await?;
         Ok(jobs)
@@ -1062,6 +1599,7 @@ impl Tx<'_> {
                COUNT(*) FILTER (WHERE status = 'active')      AS active, \
                COUNT(*) FILTER (WHERE status = 'completed')   AS completed, \
                COUNT(*) FILTER (WHERE status = 'failed')      AS failed, \
+               COUNT(*) FILTER (WHERE status = 'cancelled')   AS cancelled, \
                COUNT(*) FILTER (WHERE status = 'pending' AND EXISTS ( \
                  SELECT 1 FROM job_dependencies d \
                  JOIN jobs dep ON dep.org_id = d.org_id AND dep.id = d.depends_on \
@@ -1080,8 +1618,10 @@ impl Tx<'_> {
     /// `completed`/`failed` come from `orgs.jobs_completed_total`/
     /// `jobs_failed_total` — counters kept exactly in step by
     /// `bump_terminal_counter` — rather than a `COUNT(*)` over every job the
-    /// org has ever run. Only `pending`/`in-progress`/`active`/`blocked` need
-    /// a live scan, and that scan is restricted to non-terminal rows, so its
+    /// org has ever run. `cancelled` has no such cache (it is rare enough
+    /// that a full-history rescan was never the cost problem this exists to
+    /// fix) and is counted live, same as `pending`/`in-progress`/`active`/
+    /// `blocked`; that scan is restricted to non-terminal rows, so its
     /// cost tracks current queue depth rather than the org's lifetime volume.
     async fn org_wide_stats(&mut self, org: OrgId) -> Result<Stats> {
         let (completed, failed): (i64, i64) = sqlx::query_as(
@@ -1097,6 +1637,7 @@ impl Tx<'_> {
             pending: i64,
             in_progress: i64,
             active: i64,
+            cancelled: i64,
             blocked: i64,
         }
 
@@ -1105,6 +1646,7 @@ impl Tx<'_> {
                COUNT(*) FILTER (WHERE status = 'pending')     AS pending, \
                COUNT(*) FILTER (WHERE status = 'in-progress') AS in_progress, \
                COUNT(*) FILTER (WHERE status = 'active')      AS active, \
+               COUNT(*) FILTER (WHERE status = 'cancelled')   AS cancelled, \
                COUNT(*) FILTER (WHERE status = 'pending' AND EXISTS ( \
                  SELECT 1 FROM job_dependencies d \
                  JOIN jobs dep ON dep.org_id = d.org_id AND dep.id = d.depends_on \
@@ -1123,8 +1665,14 @@ impl Tx<'_> {
             active: live.active,
             completed,
             failed,
+            cancelled: live.cancelled,
             blocked: live.blocked,
-            total: live.pending + live.in_progress + live.active + completed + failed,
+            total: live.pending
+                + live.in_progress
+                + live.active
+                + completed
+                + failed
+                + live.cancelled,
         })
     }
 }

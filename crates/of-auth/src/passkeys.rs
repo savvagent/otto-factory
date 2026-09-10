@@ -212,13 +212,42 @@ pub async fn start_registration(
     Ok(Ceremony { id, challenge })
 }
 
+/// Which flow reached [`finish_registration`]. `Claim` is the takeover-completion
+/// event that follows an admin-assisted passkey reset (see `org.member.passkeys_reset`)
+/// — the one case #88 exists to distinguish from an ordinary signup or an
+/// already-signed-in session adding a second key.
+#[derive(Debug, Clone, Copy)]
+pub enum RegistrationVia {
+    Signup,
+    Add,
+    Claim,
+}
+
+impl RegistrationVia {
+    fn as_str(self) -> &'static str {
+        match self {
+            RegistrationVia::Signup => "signup",
+            RegistrationVia::Add => "add",
+            RegistrationVia::Claim => "claim",
+        }
+    }
+}
+
 /// Finish registering, and return the account the key now belongs to.
+///
+/// `via` names which flow drove the ceremony and is written into the audit
+/// row's detail rather than left to be inferred later. The claim case is the
+/// one that matters most: it is the takeover-completion event that follows an
+/// admin-assisted reset, and without `via` it is indistinguishable from an
+/// ordinary signup.
 pub async fn finish_registration(
     db: &Db,
     webauthn: &Webauthn,
     ceremony: Uuid,
     credential: &RegisterPublicKeyCredential,
     nickname: Option<&str>,
+    via: RegistrationVia,
+    ip: Option<&str>,
 ) -> Result<UserId> {
     let (user_id, state): (Option<UserId>, PasskeyRegistration) =
         take_ceremony(db, ceremony, "register").await?;
@@ -252,9 +281,21 @@ pub async fn finish_registration(
         _ => AuthError::from(e),
     })?;
 
-    let _ = db
-        .audit_global(Entry::new(action::TOTP_ENROLLED).actor(user_id))
-        .await;
+    if let Err(e) = db
+        .audit_global(
+            Entry::new(action::PASSKEY_REGISTERED)
+                .actor(user_id)
+                .detail(serde_json::json!({ "via": via.as_str() }))
+                .from_request(ip, None),
+        )
+        .await
+    {
+        tracing::error!(
+            error = %e,
+            user_id = %user_id,
+            "failed to write audit event for passkey registration"
+        );
+    }
 
     Ok(user_id)
 }
@@ -351,7 +392,17 @@ pub async fn finish_authentication(
 
     let keys: Vec<DiscoverableKey> = stored
         .into_iter()
-        .filter_map(|raw| serde_json::from_value::<Passkey>(raw).ok())
+        .filter_map(|raw| match serde_json::from_value::<Passkey>(raw) {
+            Ok(passkey) => Some(passkey),
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    user_id = %user_id,
+                    "stored passkey credential failed to deserialize; skipping it"
+                );
+                None
+            }
+        })
         .map(|p| DiscoverableKey::from(&p))
         .collect();
 
@@ -447,7 +498,7 @@ pub async fn has_credential(db: &Db, user: UserId) -> Result<bool> {
 /// your own account with no email to recover through, and the click that does
 /// it looks exactly like tidying up a stale device. Someone who genuinely wants
 /// out deletes the account.
-pub async fn remove(db: &Db, user: UserId, key: Uuid) -> Result<()> {
+pub async fn remove(db: &Db, user: UserId, key: Uuid, ip: Option<&str>) -> Result<()> {
     let remaining = count(db, user).await?;
     if remaining <= 1 {
         return Err(AuthError::LastPasskey);
@@ -463,10 +514,33 @@ pub async fn remove(db: &Db, user: UserId, key: Uuid) -> Result<()> {
     if affected == 0 {
         return Err(AuthError::UnknownCredential);
     }
+
+    if let Err(e) = db
+        .audit_global(
+            Entry::new(action::PASSKEY_REMOVED)
+                .actor(user)
+                .target("passkey", key.to_string())
+                .from_request(ip, None),
+        )
+        .await
+    {
+        tracing::error!(
+            error = %e,
+            user_id = %user,
+            "failed to write audit event for passkey removal"
+        );
+    }
+
     Ok(())
 }
 
-pub async fn rename(db: &Db, user: UserId, key: Uuid, nickname: &str) -> Result<()> {
+pub async fn rename(
+    db: &Db,
+    user: UserId,
+    key: Uuid,
+    nickname: &str,
+    ip: Option<&str>,
+) -> Result<()> {
     let affected = sqlx::query("UPDATE passkeys SET nickname = $3 WHERE user_id = $1 AND id = $2")
         .bind(user)
         .bind(key)
@@ -478,6 +552,23 @@ pub async fn rename(db: &Db, user: UserId, key: Uuid, nickname: &str) -> Result<
     if affected == 0 {
         return Err(AuthError::UnknownCredential);
     }
+
+    if let Err(e) = db
+        .audit_global(
+            Entry::new(action::PASSKEY_RENAMED)
+                .actor(user)
+                .target("passkey", key.to_string())
+                .from_request(ip, None),
+        )
+        .await
+    {
+        tracing::error!(
+            error = %e,
+            user_id = %user,
+            "failed to write audit event for passkey rename"
+        );
+    }
+
     Ok(())
 }
 
@@ -485,23 +576,54 @@ pub async fn rename(db: &Db, user: UserId, key: Uuid, nickname: &str) -> Result<
 ///
 /// Leaves the account with no way in **by design** — the caller must issue a
 /// claim code, or the account becomes claimable by whoever reaches registration
-/// first. `of_web::routes::orgs::reset_member_passkeys` does both in one
-/// transaction for exactly that reason.
-pub async fn clear(db: &Db, user: UserId, ip: Option<&str>) -> Result<u64> {
-    let removed = sqlx::query("DELETE FROM passkeys WHERE user_id = $1")
-        .bind(user)
-        .execute(db.pool())
-        .await?
-        .rows_affected();
+/// first. `of_web::routes::orgs::reset_member_passkeys` runs this, the session
+/// revocation, and the claim-code insert in one transaction via [`clear_tx`],
+/// so a failure partway through cannot leave the account cleared with no way
+/// back in — see `savvagent/otto-factory#87`.
+///
+/// The audit row is attributed to `actor`, not `user`: this is always called on
+/// somebody else's behalf (there is no self-service passkey clear yet), and a
+/// row that named the affected member as its own actor would misattribute an
+/// admin's action to the person it happened to.
+pub async fn clear(db: &Db, user: UserId, actor: UserId, ip: Option<&str>) -> Result<u64> {
+    let mut tx = db.begin_unpinned().await?;
+    let removed = clear_tx(&mut tx, user).await?;
+    tx.commit().await?;
 
-    let _ = db
+    if let Err(e) = db
         .audit_global(
-            Entry::new(action::TOTP_RESET)
-                .actor(user)
+            Entry::new(action::PASSKEY_CLEARED)
+                .actor(actor)
+                .target("user", user.to_string())
                 .from_request(ip, None),
         )
-        .await;
+        .await
+    {
+        tracing::error!(
+            error = %e,
+            user_id = %user,
+            "failed to write audit event for passkey clear"
+        );
+    }
 
+    Ok(removed)
+}
+
+/// The delete half of [`clear`], against a connection the caller already holds
+/// a transaction on.
+///
+/// No audit row here: the row [`clear`] writes is global (no org), and the
+/// transaction this runs inside during an admin-assisted reset is pinned to
+/// one org — an insert with a null `org_id` would violate `audit_events`'s
+/// row-level-security policy on that connection. The caller writes it
+/// separately, after commit, as the best-effort record `audit_global` already
+/// documents itself to be.
+pub async fn clear_tx(conn: &mut sqlx::PgConnection, user: UserId) -> Result<u64> {
+    let removed = sqlx::query("DELETE FROM passkeys WHERE user_id = $1")
+        .bind(user)
+        .execute(conn)
+        .await?
+        .rows_affected();
     Ok(removed)
 }
 
@@ -591,8 +713,16 @@ async fn update_stored_credential(
     .await?;
 
     let Some(raw) = raw else { return Ok(()) };
-    let Ok(mut passkey) = serde_json::from_value::<Passkey>(raw) else {
-        return Ok(());
+    let mut passkey = match serde_json::from_value::<Passkey>(raw) {
+        Ok(passkey) => passkey,
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                user_id = %user,
+                "stored passkey credential failed to deserialize during a sign-counter update; skipping it"
+            );
+            return Ok(());
+        }
     };
 
     if passkey.update_credential(result).is_some() {

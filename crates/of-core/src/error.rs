@@ -41,8 +41,12 @@ pub enum Error {
         expected: String,
     },
 
-    #[error("job {job} was claimed by someone else")]
-    AlreadyClaimed { job: JobId },
+    #[error(
+        "job {job} is currently claimed by {holder}, not you — your claim likely expired \
+         and was taken over. Call get_job to see its current state, or claim_jobs if it \
+         becomes available again; do not retry this call as-is."
+    )]
+    AlreadyClaimed { job: JobId, holder: String },
 
     #[error(
         "ticket {ticket_ref} is already linked to job {job} — unlink it there first, \
@@ -53,9 +57,9 @@ pub enum Error {
     #[error("dependency cycle: {0} would depend on itself through {1}")]
     DependencyCycle(JobId, JobId),
 
-    #[error("{branch} of this repo is leased by {holder} until {expires_at}")]
+    #[error("{resource} of this repo is leased by {holder} until {expires_at}")]
     LeaseHeld {
-        branch: String,
+        resource: String,
         holder: String,
         expires_at: chrono::DateTime<chrono::Utc>,
     },
@@ -111,6 +115,13 @@ pub enum Error {
     #[error("{0}")]
     Invalid(String),
 
+    #[error(
+        "idempotency_key {key:?} was already used for a different {tool} call in this \
+         organization. Use a new key for a different request, or omit idempotency_key to \
+         always create a new one."
+    )]
+    IdempotencyKeyConflict { key: String, tool: &'static str },
+
     /// The database cannot enforce tenant isolation as configured. Raised only
     /// by `Db::verify_tenant_isolation` at startup, never by a request: by the
     /// time a tool call is in flight it is far too late to discover that one
@@ -154,6 +165,7 @@ impl Error {
             Error::Config(_) => "internal_error",
             Error::Crypto(_) => "internal_error",
             Error::Invalid(_) => "invalid_argument",
+            Error::IdempotencyKeyConflict { .. } => "idempotency_key_conflict",
             Error::IsolationNotEnforced { .. } => "isolation_not_enforced",
             Error::Db(_) => "internal_error",
         }
@@ -162,10 +174,36 @@ impl Error {
     /// Whether retrying the identical call could plausibly succeed. `LeaseHeld`
     /// is retriable (the lease expires); `DependencyCycle` is not (the request
     /// is wrong). Agents use this to decide between backing off and rethinking.
+    ///
+    /// `AlreadyClaimed` is **not** retriable, unlike `LeaseHeld`, even though
+    /// both describe "someone else has this right now": a lease's holder can
+    /// let it lapse without acting, so waiting and retrying the identical
+    /// `acquire_lease` call can succeed on its own. `AlreadyClaimed` today is
+    /// raised only by `ensure_claim_held` — a caller that is not (or is no
+    /// longer) a job's claim holder — and retrying `complete_job`/`fail_job`/
+    /// `cancel_job`/`renew_claim` with the same arguments can never succeed;
+    /// the only way forward is a different call (`claim_jobs`, or `get_job`
+    /// to see who holds it now). Telling an agent this is retriable would
+    /// have it busy-loop a call that is structurally doomed.
     pub fn retriable(&self) -> bool {
-        matches!(
-            self,
-            Error::LeaseHeld { .. } | Error::AlreadyClaimed { .. } | Error::Db(_)
-        )
+        matches!(self, Error::LeaseHeld { .. } | Error::Db(_))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Retrying the identical call with the identical key will fail
+    /// identically every time — the caller must change the key or the
+    /// payload, not back off and try again.
+    #[test]
+    fn idempotency_key_conflict_is_not_retriable() {
+        let e = Error::IdempotencyKeyConflict {
+            key: "k".into(),
+            tool: "add_job",
+        };
+        assert!(!e.retriable());
+        assert_eq!(e.code(), "idempotency_key_conflict");
     }
 }

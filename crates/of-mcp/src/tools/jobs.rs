@@ -8,6 +8,7 @@
 //! shows what is claimable, `claim_jobs` takes it atomically, and starting
 //! work you have not claimed is how two agents end up writing the same file.
 
+use of_core::audit::{action, Entry};
 use of_core::ids::JobId;
 use of_core::jobs::{Job, JobFilter, NewJob, Status, Tracker};
 use of_core::trackers::{
@@ -102,6 +103,15 @@ pub struct AddJobArgs {
     /// Job ids that must be completed before this one can be claimed.
     #[serde(default)]
     pub depends_on: Vec<String>,
+    /// A caller-chosen key. Replaying add_job with the same key and the same
+    /// arguments returns the original job unchanged instead of creating a
+    /// second one — call this every time if your connection to the server
+    /// can drop between the call committing and its response arriving,
+    /// which is the situation a retry cannot otherwise tell apart from
+    /// "never happened". Reusing a key with different arguments is an
+    /// error. Omit it and every call creates a new job, as today.
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -115,7 +125,7 @@ pub struct JobArgs {
 #[serde(rename_all = "camelCase")]
 pub struct ListJobsArgs {
     /// Only jobs in this state: "pending", "in-progress", "active",
-    /// "completed" or "failed". Omit for all of them.
+    /// "completed", "failed" or "cancelled". Omit for all of them.
     #[serde(default)]
     pub status: Option<String>,
     #[serde(default)]
@@ -125,6 +135,11 @@ pub struct ListJobsArgs {
     /// Only jobs you queued yourself. Defaults to false.
     #[serde(default)]
     pub mine: bool,
+    /// A routing hint, not access control: restrict to jobs with this exact
+    /// `agent_type` plus jobs with none at all (unrouted work anyone may
+    /// take). Omit to see every job regardless of `agent_type`.
+    #[serde(default)]
+    pub agent_type: Option<String>,
     /// Maximum rows. Defaults to the server's own limit.
     #[serde(default)]
     pub limit: Option<i64>,
@@ -139,6 +154,22 @@ pub struct RepoScopeArgs {
     /// Or narrow by git remote URL.
     #[serde(default)]
     pub remote: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadyArgs {
+    /// Narrow to one repo by slug. Omit to cover the whole organization.
+    #[serde(default)]
+    pub repo: Option<String>,
+    /// Or narrow by git remote URL.
+    #[serde(default)]
+    pub remote: Option<String>,
+    /// A routing hint for a mixed fleet, not access control: restrict to jobs
+    /// with this exact `agentType` plus jobs with none set at all (unrouted
+    /// work anyone may take). Omit to see every ready job.
+    #[serde(default)]
+    pub agent_type: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -165,6 +196,12 @@ pub struct ClaimJobsArgs {
     /// example "api-agent@ci-7". Free-form.
     #[serde(default)]
     pub agent: Option<String>,
+    /// Seconds before this claim expires if never renewed. Defaults to a
+    /// server-chosen TTL (900s) if omitted, clamped to between 60 seconds and
+    /// 4 hours. Extend it with renew_claim while you keep working — an
+    /// unrenewed claim expires and the job becomes claimable by someone else.
+    #[serde(default)]
+    pub ttl: Option<i64>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -183,6 +220,38 @@ pub struct FailJobArgs {
     /// Why it failed, specifically enough that the next attempt can do better.
     #[serde(default)]
     pub error: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RenewClaimArgs {
+    /// The job you are still working on.
+    pub job: String,
+    /// Seconds from now until the claim expires — not added to whatever
+    /// time was left on it. Same default (900s) and clamp range (60 seconds
+    /// to 4 hours) as claim_jobs's ttl if omitted.
+    #[serde(default)]
+    pub ttl: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestCancelArgs {
+    /// The job to ask to stop.
+    pub job: String,
+    /// Why, for whoever is holding it and for the audit trail.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelJobArgs {
+    /// The job you were working on and are stopping.
+    pub job: String,
+    /// What you were doing when you stopped, for whoever reads this later.
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -561,7 +630,9 @@ impl Factory {
         description = "Queue a new job against a repository. Give it a specific title and \
                        enough description that an agent with none of your context can pick it \
                        up. Use dependsOn for work that must wait for other jobs. Returns the \
-                       created job, including its id."
+                       created job, including its id. Pass idempotencyKey if your connection \
+                       can drop before you see the response, so a retry returns the original \
+                       job instead of creating a duplicate."
     )]
     pub async fn add_job(
         &self,
@@ -572,22 +643,58 @@ impl Factory {
         caller.require_scope(scope::JOBS_WRITE).mcp()?;
 
         let mut tx = self.tx(&caller).await?;
-        self.charge(&mut tx, &caller, "add_job").await?;
+
+        // No key: reproduce today's behavior exactly, including charging as
+        // the literal first thing after the transaction opens (see
+        // Factory::charge's doc comment) — there is no replay question to
+        // answer first, so nothing should run ahead of it.
+        let Some(key) = args.idempotency_key else {
+            self.charge(&mut tx, &caller, "add_job").await?;
+            let repo = repo_of(&mut tx, args.repo, args.remote).await?;
+            let job = tx
+                .add_job(NewJob {
+                    repo_id: repo.id,
+                    title: args.title,
+                    description: args.description,
+                    ticket_ref: args.ticket_ref,
+                    agent_type: args.agent_type,
+                    metadata: args.metadata,
+                    depends_on: ids(args.depends_on),
+                    created_by: Some(caller.user_id),
+                    ..Default::default()
+                })
+                .await
+                .mcp()?;
+            tx.commit().await.mcp()?;
+            return Ok(Json(out::JobOut { job }));
+        };
+
+        // A key was supplied: replay-vs-new must be resolved before
+        // charging (a replay must never be billed, and there is no way to
+        // un-charge after the fact — see Factory::charge's third exception),
+        // which needs `repo.id` to build the payload to check.
         let repo = repo_of(&mut tx, args.repo, args.remote).await?;
-        let job = tx
-            .add_job(NewJob {
-                repo_id: repo.id,
-                title: args.title,
-                description: args.description,
-                ticket_ref: args.ticket_ref,
-                agent_type: args.agent_type,
-                metadata: args.metadata,
-                depends_on: ids(args.depends_on),
-                created_by: Some(caller.user_id),
-                ..Default::default()
-            })
-            .await
-            .mcp()?;
+        let new_job = NewJob {
+            repo_id: repo.id,
+            title: args.title,
+            description: args.description,
+            ticket_ref: args.ticket_ref,
+            agent_type: args.agent_type,
+            metadata: args.metadata,
+            depends_on: ids(args.depends_on),
+            created_by: Some(caller.user_id),
+            idempotency_key: Some(key),
+            ..Default::default()
+        };
+
+        if let Some(existing) = tx.find_replayed_job(&new_job).await.mcp()? {
+            self.record_replay(&mut tx, &caller, "add_job").await?;
+            tx.commit().await.mcp()?;
+            return Ok(Json(out::JobOut { job: existing }));
+        }
+
+        self.charge(&mut tx, &caller, "add_job").await?;
+        let job = tx.add_job(new_job).await.mcp()?;
         tx.commit().await.mcp()?;
 
         Ok(Json(out::JobOut { job }))
@@ -616,9 +723,12 @@ impl Factory {
 
     #[tool(
         name = "list_jobs",
-        description = "List jobs, optionally filtered by status, repository, or whether you \
-                       queued them. To find work you can actually take, prefer `ready` — this \
-                       returns jobs regardless of whether their dependencies are satisfied."
+        description = "List jobs, optionally filtered by status, repository, whether you queued \
+                       them, or agentType. agentType is a routing hint for a mixed fleet, not \
+                       access control: passing it also returns jobs with no agentType set, since \
+                       unrouted work is anyone's to take. To find work you can actually take, \
+                       prefer `ready` — this returns jobs regardless of whether their \
+                       dependencies are satisfied."
     )]
     pub async fn list_jobs(
         &self,
@@ -645,6 +755,7 @@ impl Factory {
                 status,
                 repo_id,
                 created_by: args.mine.then_some(caller.user_id),
+                agent_type: args.agent_type,
                 limit: args.limit,
                 ..Default::default()
             })
@@ -715,7 +826,9 @@ impl Factory {
                        under your name. All of them succeed or none do, so a partial claim can \
                        never leave you believing you own work you do not. Fails if any job is \
                        already claimed or still blocked by an unfinished dependency. Claim \
-                       before you start working."
+                       before you start working. Claims expire (900s by default, or your ttl); \
+                       renew_claim pushes a claim you hold forward, and an expired claim \
+                       becomes claimable again — see ready."
     )]
     pub async fn claim_jobs(
         &self,
@@ -728,7 +841,12 @@ impl Factory {
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "claim_jobs").await?;
         let jobs = tx
-            .claim_jobs(&ids(args.jobs), caller.user_id, args.agent.as_deref())
+            .claim_jobs(
+                &ids(args.jobs),
+                caller.user_id,
+                args.agent.as_deref(),
+                args.ttl,
+            )
             .await
             .mcp()?;
         tx.commit().await.mcp()?;
@@ -740,9 +858,38 @@ impl Factory {
     }
 
     #[tool(
+        name = "renew_claim",
+        description = "Push a claim you hold forward, the way renew_lease extends a \
+                       resource lease. Call this on a cadence comfortably shorter than the claim's TTL \
+                       while a long-running job is still in progress: an unrenewed claim \
+                       expires and the job becomes claimable by someone else, which is what \
+                       lets a crashed agent's abandoned job be picked back up. Fails if you are \
+                       not the job's current claim holder."
+    )]
+    pub async fn renew_claim(
+        &self,
+        Extension(parts): Extension<http::request::Parts>,
+        Parameters(args): Parameters<RenewClaimArgs>,
+    ) -> Result<Json<out::JobOut>, ErrorData> {
+        let caller = self.caller(&parts)?;
+        caller.require_scope(scope::JOBS_WRITE).mcp()?;
+
+        let mut tx = self.tx(&caller).await?;
+        self.charge(&mut tx, &caller, "renew_claim").await?;
+        let job = tx
+            .renew_claim(&JobId::from(args.job), caller.user_id, args.ttl)
+            .await
+            .mcp()?;
+        tx.commit().await.mcp()?;
+
+        Ok(Json(out::JobOut { job }))
+    }
+
+    #[tool(
         name = "complete_job",
         description = "Mark a job you claimed as completed, with a summary of what was done. \
-                       Anything that depends on it becomes claimable."
+                       Anything that depends on it becomes claimable. Fails if you are not the \
+                       job's current claim holder."
     )]
     pub async fn complete_job(
         &self,
@@ -755,7 +902,11 @@ impl Factory {
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "complete_job").await?;
         let job = tx
-            .complete_job(&JobId::from(args.job), args.result.as_deref())
+            .complete_job(
+                &JobId::from(args.job),
+                caller.user_id,
+                args.result.as_deref(),
+            )
             .await
             .mcp()?;
         tx.commit().await.mcp()?;
@@ -774,7 +925,8 @@ impl Factory {
         name = "fail_job",
         description = "Mark a job you claimed as failed, recording why. Use this rather than \
                        leaving a job in-progress when you cannot finish it — an abandoned claim \
-                       blocks everything downstream and tells nobody anything."
+                       blocks everything downstream and tells nobody anything. Fails if you are \
+                       not the job's current claim holder."
     )]
     pub async fn fail_job(
         &self,
@@ -787,7 +939,11 @@ impl Factory {
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "fail_job").await?;
         let job = tx
-            .fail_job(&JobId::from(args.job), args.error.as_deref())
+            .fail_job(
+                &JobId::from(args.job),
+                caller.user_id,
+                args.error.as_deref(),
+            )
             .await
             .mcp()?;
         tx.commit().await.mcp()?;
@@ -799,6 +955,128 @@ impl Factory {
         )
         .await;
 
+        Ok(out)
+    }
+
+    #[tool(
+        name = "request_cancel",
+        description = "Ask a job to stop. If nobody has claimed it yet, this cancels it \
+                       immediately — there is no agent to wait on. If it is claimed \
+                       (in-progress or active), this only sets a flag: the server cannot \
+                       stop the agent holding it, any more than it can stop a git push. The \
+                       holder sees the request the next time it calls get_job or wakes from \
+                       watch, and is expected to call cancel_job once it actually stops (or \
+                       fail_job, if it disagrees and finishes anyway). Fails if the job is \
+                       already completed, failed, or cancelled. Anything that depends on this \
+                       job stays blocked until the dependency actually completes — repend_job \
+                       only returns this job to pending for another attempt, it does not \
+                       complete it, so anything waiting on it is still waiting; use \
+                       set_dependencies instead if you need to remove the dependency entirely."
+    )]
+    pub async fn request_cancel(
+        &self,
+        Extension(parts): Extension<http::request::Parts>,
+        Parameters(args): Parameters<RequestCancelArgs>,
+    ) -> Result<Json<out::JobOut>, ErrorData> {
+        let caller = self.caller(&parts)?;
+        caller.require_scope(scope::JOBS_WRITE).mcp()?;
+
+        let mut tx = self.tx(&caller).await?;
+        self.charge(&mut tx, &caller, "request_cancel").await?;
+        let id = JobId::from(args.job);
+        let job = tx
+            .request_cancel(&id, caller.user_id, args.reason.as_deref())
+            .await
+            .mcp()?;
+
+        tx.audit(
+            Entry::new(action::JOB_CANCEL_REQUESTED)
+                .actor(caller.user_id)
+                .target("job", job.id.to_string())
+                .detail(serde_json::json!({ "reason": args.reason })),
+        )
+        .await
+        .mcp()?;
+
+        // A pending job with nobody to wait on is finalized in the same call —
+        // record that outcome too, distinctly, so the audit trail always shows
+        // both events regardless of which path a job took.
+        let finalized_now = job.status == Status::Cancelled;
+        if finalized_now {
+            tx.audit(
+                Entry::new(action::JOB_CANCELLED)
+                    .actor(caller.user_id)
+                    .target("job", job.id.to_string())
+                    .detail(serde_json::json!({ "reason": args.reason })),
+            )
+            .await
+            .mcp()?;
+        }
+        tx.commit().await.mcp()?;
+
+        let out = Json(out::JobOut { job: job.clone() });
+        if finalized_now {
+            let detail = args
+                .reason
+                .clone()
+                .unwrap_or_else(|| "Cancelled before being claimed.".to_string());
+            self.sync_jobs_after_transition(
+                std::slice::from_ref(&job),
+                JobTransition::Cancelled,
+                Some(&detail),
+            )
+            .await;
+        }
+        Ok(out)
+    }
+
+    #[tool(
+        name = "cancel_job",
+        description = "Finalize a job you were working on as cancelled, because you were \
+                       asked to stop via request_cancel and are complying. Fails if this job \
+                       never had a cancellation requested — if you are stopping for your own \
+                       reasons, call fail_job instead, so the audit trail keeps distinguishing \
+                       'asked to stop, and did' from an ordinary failure. Also fails if the \
+                       job is not currently in-progress or active — still pending, or already \
+                       completed, failed, or cancelled — or if you are not its current claim \
+                       holder."
+    )]
+    pub async fn cancel_job(
+        &self,
+        Extension(parts): Extension<http::request::Parts>,
+        Parameters(args): Parameters<CancelJobArgs>,
+    ) -> Result<Json<out::JobOut>, ErrorData> {
+        let caller = self.caller(&parts)?;
+        caller.require_scope(scope::JOBS_WRITE).mcp()?;
+
+        let mut tx = self.tx(&caller).await?;
+        self.charge(&mut tx, &caller, "cancel_job").await?;
+        let job = tx
+            .cancel_job(&JobId::from(args.job), caller.user_id, args.note.as_deref())
+            .await
+            .mcp()?;
+        tx.audit(
+            Entry::new(action::JOB_CANCELLED)
+                .actor(caller.user_id)
+                .target("job", job.id.to_string())
+                .detail(serde_json::json!({ "note": args.note })),
+        )
+        .await
+        .mcp()?;
+        tx.commit().await.mcp()?;
+
+        let out = Json(out::JobOut { job: job.clone() });
+        let detail = args
+            .note
+            .clone()
+            .or_else(|| job.cancel_reason.clone())
+            .unwrap_or_else(|| "Cancelled.".to_string());
+        self.sync_jobs_after_transition(
+            std::slice::from_ref(&job),
+            JobTransition::Cancelled,
+            Some(&detail),
+        )
+        .await;
         Ok(out)
     }
 
@@ -828,8 +1106,9 @@ impl Factory {
 
     #[tool(
         name = "repend_job",
-        description = "Return a completed or failed job to pending so it can be claimed again. \
-                       The attempt count is preserved, so repeated failures stay visible."
+        description = "Return a completed, failed, cancelled, in-progress, or active job to \
+                       pending so it can be claimed again. The attempt count is preserved, so \
+                       repeated failures stay visible."
     )]
     pub async fn repend_job(
         &self,
@@ -880,12 +1159,17 @@ impl Factory {
     #[tool(
         name = "ready",
         description = "List the jobs that can be claimed right now: pending, with every \
-                       dependency completed. This is the tool to call when looking for work."
+                       dependency completed. This is the tool to call when looking for work. \
+                       A job whose claim has expired also appears here, even though its status \
+                       still says in-progress or active — see claim_jobs. \
+                       agentType narrows to jobs meant for your kind of agent, plus unrouted \
+                       jobs with no agentType set — it is a routing hint for a mixed fleet, not \
+                       access control."
     )]
     pub async fn ready(
         &self,
         Extension(parts): Extension<http::request::Parts>,
-        Parameters(args): Parameters<RepoScopeArgs>,
+        Parameters(args): Parameters<ReadyArgs>,
     ) -> Result<Json<out::JobsOut>, ErrorData> {
         let caller = self.caller(&parts)?;
         caller.require_scope(scope::JOBS_READ).mcp()?;
@@ -893,7 +1177,7 @@ impl Factory {
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "ready").await?;
         let repo_id = maybe_repo_of(&mut tx, args.repo, args.remote).await?;
-        let jobs = tx.ready(repo_id).await.mcp()?;
+        let jobs = tx.ready(repo_id, args.agent_type.as_deref()).await.mcp()?;
         tx.commit().await.mcp()?;
 
         Ok(Json(out::JobsOut { jobs }))
@@ -924,8 +1208,8 @@ impl Factory {
     #[tool(
         name = "stats",
         description = "Counts of jobs by state — pending, in-progress, active, completed, \
-                       failed, and how many of the pending ones are blocked — for the whole \
-                       organization or one repository."
+                       failed, cancelled, and how many of the pending ones are blocked — for \
+                       the whole organization or one repository."
     )]
     pub async fn stats(
         &self,
@@ -975,16 +1259,20 @@ impl Factory {
     #[tool(
         name = "sync_ticket",
         description = "Force an immediate outbound write-back to the ticket a job is linked to, \
-                       reflecting the job's current status (in-progress, active, completed, or \
-                       failed) as a comment and, where the tracker supports it, a status \
-                       transition. \
+                       reflecting the job's current status (in-progress, active, completed, \
+                       failed, or cancelled) as a comment and, where the tracker supports it, a \
+                       status transition. \
                        Use this after link_ticket, when nothing has been posted yet because no \
                        transition has fired since the link was made, or to retry after a \
                        tracker outage — unlike the automatic write-back after claim_jobs, \
-                       complete_job and fail_job, this call surfaces a tracker failure as its \
-                       own error rather than swallowing it, because talking to the tracker is \
+                       complete_job, fail_job, and cancel_job (and after request_cancel, but \
+                       only when it immediately finalizes a pending job with nobody to wait \
+                       on; a request that only flags a claimed job does not sync until \
+                       cancel_job later finalizes it), this call surfaces a tracker failure as \
+                       its own error rather than swallowing it, because talking to the tracker is \
                        the entire point of calling it. Requires the job to already be linked \
-                       via link_ticket and to be in-progress, active, completed, or failed."
+                       via link_ticket and to be in-progress, active, completed, failed, or \
+                       cancelled."
     )]
     pub async fn sync_ticket(
         &self,
@@ -1037,6 +1325,27 @@ impl Factory {
             Status::Active => (JobTransition::Claimed, job.claimed_by_label.clone()),
             Status::Completed => (JobTransition::Completed, job.result.clone()),
             Status::Failed => (JobTransition::Failed, job.error.clone()),
+            // No dedicated outbound "cancelled" signal exists for either tracker (no
+            // `not_planned` GitHub close reason, no distinct JIRA status category), so
+            // `JobTransition::Cancelled` gets the same comment-only, no-close,
+            // no-transition shape as `Failed` — but its own variant, not a reuse of
+            // `Failed` itself, because that arm's JIRA handling transitions a ticket to
+            // the "new" status category, which would announce "still needs doing" about
+            // work someone just asked to stop. The detail prefers `error`, which is
+            // populated whenever `cancel_job` (as opposed to `request_cancel`'s
+            // immediate-finalize path) produced the cancellation, then falls back to
+            // `cancel_reason` and finally a fixed string, so the tracker comment is
+            // never `outbound_decision`'s literal "Cancelled." default when a more
+            // specific one is available.
+            Status::Cancelled => (
+                JobTransition::Cancelled,
+                Some(
+                    job.error
+                        .clone()
+                        .or_else(|| job.cancel_reason.clone())
+                        .unwrap_or_else(|| "Cancelled.".into()),
+                ),
+            ),
         };
 
         let provider = provider_of(tracker);

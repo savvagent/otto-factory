@@ -25,12 +25,24 @@ pub mod action {
     pub const LOGIN_SUCCEEDED: &str = "auth.login.succeeded";
     pub const LOGIN_FAILED: &str = "auth.login.failed";
     pub const LOGOUT: &str = "auth.logout";
+    /// Historical only. TOTP was removed from this product; rows with this
+    /// action predate `PASSKEY_REGISTERED` and are not rewritten. Nothing
+    /// writes this constant anymore.
     pub const TOTP_ENROLLED: &str = "auth.totp.enrolled";
+    /// Historical only, for the same reason as `TOTP_ENROLLED`. Rows predate a
+    /// split into two successors: `PASSKEY_CLEARED` (self-service, global) and
+    /// `MEMBER_PASSKEYS_RESET` (admin-assisted, org-scoped). A historical row
+    /// under this action does not say which of the two occurred — check
+    /// whether it carries an `org_id` to tell them apart.
     pub const TOTP_RESET: &str = "auth.totp.reset";
     pub const RECOVERY_CODE_USED: &str = "auth.recovery_code.used";
     pub const MAGIC_LINK_SENT: &str = "auth.magic_link.sent";
     pub const MAGIC_LINK_CONSUMED: &str = "auth.magic_link.consumed";
     pub const EMAIL_VERIFIED: &str = "auth.email.verified";
+    pub const PASSKEY_REGISTERED: &str = "auth.passkey.registered";
+    pub const PASSKEY_CLEARED: &str = "auth.passkey.cleared";
+    pub const PASSKEY_REMOVED: &str = "auth.passkey.removed";
+    pub const PASSKEY_RENAMED: &str = "auth.passkey.renamed";
 
     // OAuth / tokens (org-scoped: the org is bound at authorization time).
     pub const CLIENT_REGISTERED: &str = "oauth.client.registered";
@@ -49,6 +61,7 @@ pub mod action {
     pub const MEMBER_JOINED: &str = "org.member.joined";
     pub const MEMBER_ROLE_CHANGED: &str = "org.member.role_changed";
     pub const MEMBER_REMOVED: &str = "org.member.removed";
+    pub const MEMBER_PASSKEYS_RESET: &str = "org.member.passkeys_reset";
     pub const IDP_CONNECTED: &str = "org.idp.connected";
     pub const IDP_DISCONNECTED: &str = "org.idp.disconnected";
     pub const DOMAIN_CLAIMED: &str = "org.domain.claimed";
@@ -62,6 +75,10 @@ pub mod action {
     pub const TRACKER_DISCONNECTED: &str = "tracker.disconnected";
     pub const TRACKER_BOUND: &str = "tracker.repo.bound";
     pub const TRACKER_UNBOUND: &str = "tracker.repo.unbound";
+
+    // Jobs.
+    pub const JOB_CANCEL_REQUESTED: &str = "job.cancel.requested";
+    pub const JOB_CANCELLED: &str = "job.cancelled";
 }
 
 /// One recorded event. Built with the fluent constructors rather than a struct

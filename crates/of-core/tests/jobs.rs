@@ -197,13 +197,15 @@ async fn link_ticket_conflict_names_the_live_holder_not_a_newer_terminal_job(poo
         .await
         .unwrap();
     let claimed = tx
-        .claim_jobs(std::slice::from_ref(&older.id), t.user, None)
+        .claim_jobs(std::slice::from_ref(&older.id), t.user, None, None)
         .await
         .unwrap()
         .into_iter()
         .find(|j| j.id == older.id)
         .expect("older job claimable");
-    tx.complete_job(&claimed.id, Some("done")).await.unwrap();
+    tx.complete_job(&claimed.id, t.user, Some("done"))
+        .await
+        .unwrap();
 
     // Created after `older` finished, so it has a later created_at and is
     // free to reuse the same ticket_ref — the unique index only blocks live
@@ -220,13 +222,15 @@ async fn link_ticket_conflict_names_the_live_holder_not_a_newer_terminal_job(poo
         .await
         .unwrap();
     let claimed_newer = tx
-        .claim_jobs(std::slice::from_ref(&newer_terminal.id), t.user, None)
+        .claim_jobs(std::slice::from_ref(&newer_terminal.id), t.user, None, None)
         .await
         .unwrap()
         .into_iter()
         .find(|j| j.id == newer_terminal.id)
         .expect("newer job claimable");
-    tx.fail_job(&claimed_newer.id, Some("nope")).await.unwrap();
+    tx.fail_job(&claimed_newer.id, t.user, Some("nope"))
+        .await
+        .unwrap();
 
     // Revives `older` in place — created_at is unchanged, so it stays the
     // earlier of the two rows sharing this ticket_ref, but it is once again
@@ -352,6 +356,69 @@ async fn concurrent_create_from_ticket_converges_on_one_job(pool: PgPool) {
     );
 }
 
+/// The identical race shape for a brand-new idempotency key, driven across
+/// two real connections rather than sequential calls on one `Tx` — the
+/// SAVEPOINT/unique-violation-recovery path this mirrors
+/// (`Tx::add_job`) is reasoned about, in its own comments, as behaving
+/// exactly like `create_from_ticket`'s; this is the same proof the
+/// precedent test above gives that reasoning; see
+/// `concurrent_create_from_ticket_converges_on_one_job`.
+#[sqlx::test]
+async fn concurrent_add_job_idempotency_converges_on_one_job(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+
+    let db_a = db.clone();
+    let db_b = db.clone();
+    let repo = t.repo;
+    let org = t.org;
+    let user = t.user;
+
+    let new = |repo, user| of_core::jobs::NewJob {
+        repo_id: repo,
+        title: "wire up the health endpoint".into(),
+        created_by: Some(user),
+        idempotency_key: Some("concurrent-retry".into()),
+        ..Default::default()
+    };
+
+    let (first, second) = tokio::join!(
+        async move {
+            let mut tx = db_a.begin(org).await.unwrap();
+            let job = tx.add_job(new(repo, user)).await.unwrap();
+            // Hold the row uncommitted briefly so the second call below
+            // genuinely races against an in-flight insert, not an
+            // already-committed one.
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            tx.commit().await.unwrap();
+            job
+        },
+        async move {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            let mut tx = db_b.begin(org).await.unwrap();
+            let job = tx.add_job(new(repo, user)).await.unwrap();
+            tx.commit().await.unwrap();
+            job
+        }
+    );
+
+    assert_eq!(
+        first.id, second.id,
+        "two concurrent calls racing the same brand-new idempotency key produced two jobs"
+    );
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let all = tx
+        .list_jobs(&of_core::jobs::JobFilter {
+            repo_id: Some(t.repo),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(all.len(), 1, "the race must not leave a duplicate row");
+}
+
 #[sqlx::test]
 async fn close_from_ticket_allows_pending_and_in_progress(pool: PgPool) {
     let db = db(pool);
@@ -381,7 +448,7 @@ async fn close_from_ticket_allows_pending_and_in_progress(pool: PgPool) {
         .unwrap();
 
     let in_progress = tx.add_job(job(&t, "claimed first")).await.unwrap();
-    tx.claim_jobs(std::slice::from_ref(&in_progress.id), t.user, None)
+    tx.claim_jobs(std::slice::from_ref(&in_progress.id), t.user, None, None)
         .await
         .unwrap();
     let failed = tx
@@ -415,10 +482,12 @@ async fn close_from_ticket_rejects_terminal_jobs(pool: PgPool) {
 
     let mut tx = db.begin(t.org).await.unwrap();
     let job = tx.add_job(job(&t, "done already")).await.unwrap();
-    tx.claim_jobs(std::slice::from_ref(&job.id), t.user, None)
+    tx.claim_jobs(std::slice::from_ref(&job.id), t.user, None, None)
         .await
         .unwrap();
-    tx.complete_job(&job.id, Some("done")).await.unwrap();
+    tx.complete_job(&job.id, t.user, Some("done"))
+        .await
+        .unwrap();
 
     let err = tx
         .close_from_ticket(&job.id, Status::Failed, None, Some("too late"), None)
@@ -446,7 +515,7 @@ async fn close_from_ticket_allows_active(pool: PgPool) {
         )
         .await
         .unwrap();
-    tx.claim_jobs(std::slice::from_ref(&active.id), t.user, None)
+    tx.claim_jobs(std::slice::from_ref(&active.id), t.user, None, None)
         .await
         .unwrap();
     tx.activate_job(&active.id).await.unwrap();
@@ -489,7 +558,7 @@ async fn link_ticket_on_a_ticket_an_active_job_holds_returns_ticket_already_link
         )
         .await
         .unwrap();
-    tx.claim_jobs(std::slice::from_ref(&holder.id), t.user, None)
+    tx.claim_jobs(std::slice::from_ref(&holder.id), t.user, None, None)
         .await
         .unwrap();
     tx.activate_job(&holder.id).await.unwrap();

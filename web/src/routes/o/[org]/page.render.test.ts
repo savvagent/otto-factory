@@ -135,15 +135,30 @@ describe('the overview', () => {
 
     // The whole point of the stale rule: one 502 must not cost the reader a
     // working dashboard.
-    expect(container.textContent).toContain('Wire the webhook ingest');
-    const note = container.querySelector('[role="status"]');
-    expect(note).not.toBeNull();
-    expect(note?.textContent).toContain('Refresh failed');
+    //
+    // `advanceTimersByTimeAsync` above is what fires the refresh's fake timer;
+    // it is not what finishes the rejected fetch. The real `fetch` mock answers
+    // with a real `Response`, and `Response.text()` resolves through the
+    // runtime's own body-reading machinery, which needs a genuine turn of the
+    // real event loop, not just the fake clock's microtask flush. Advancing the
+    // clock further would only narrow that race, not close it — `vi.waitFor`
+    // actually polls on a real timer, so it keeps giving the pending fetch
+    // chain real turns until the assertion is true or the wait times out.
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain('Wire the webhook ingest');
+      const note = container.querySelector('[role="status"]');
+      expect(note).not.toBeNull();
+      expect(note?.textContent).toContain('Refresh failed');
+    });
 
     healthy = true;
     await vi.advanceTimersByTimeAsync(REFRESH_INTERVAL * 4);
-    expect(container.querySelector('[role="status"]')).toBeNull();
-    expect(container.textContent).toContain('Wire the webhook ingest');
+    // Same race on the way back: recovery also reads a real `Response` body
+    // before `stale` clears.
+    await vi.waitFor(() => {
+      expect(container.querySelector('[role="status"]')).toBeNull();
+      expect(container.textContent).toContain('Wire the webhook ingest');
+    });
 
     unmount(instance);
   });

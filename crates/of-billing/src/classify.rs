@@ -48,13 +48,15 @@ pub const FREE: &[&str] = &[
     "usage",
     // The long poll. The whole reason this table exists.
     "watch",
-    // Renewing and releasing a lease you already paid to acquire. Charging per
+    // Renewing and releasing a lease you already paid to acquire, and renewing
+    // a job claim you already paid to take with claim_jobs. Charging per
     // renewal would bill an agent for holding still, and charging for release
     // would create an incentive not to release — which costs everyone else the
-    // branch until the lease expires. Coordination hygiene must never have a
+    // resource until the lease expires. Coordination hygiene must never have a
     // price on it.
     "renew_lease",
     "release_lease",
+    "renew_claim",
     // Advancing your own read cursor. Bookkeeping on a read, and billing it
     // would penalise the agents that keep their inbox tidy.
     "ack_messages",
@@ -70,6 +72,8 @@ pub const BILLABLE: &[&str] = &[
     "complete_job",
     "fail_job",
     "repend_job",
+    "request_cancel",
+    "cancel_job",
     "set_dependencies",
     "send_message",
     "acquire_lease",
@@ -169,6 +173,8 @@ mod tests {
             "activate_job",
             "complete_job",
             "acquire_lease",
+            "request_cancel",
+            "cancel_job",
         ] {
             assert_eq!(classify(tool), Class::Billable, "{tool}");
         }

@@ -202,6 +202,25 @@ pub async fn revoke_all(db: &Db, user: UserId) -> Result<u64> {
     Ok(n)
 }
 
+/// The same revocation as [`revoke_all`], but run against a connection the
+/// caller already holds a transaction on.
+///
+/// `of_web::routes::orgs::reset_member_passkeys` calls this: an admin-assisted
+/// passkey reset must commit its session revocation together with the passkey
+/// clear and the new claim code, or a failure partway through can leave the
+/// account cleared with no way back in. See `savvagent/otto-factory#87`.
+pub async fn revoke_all_tx(conn: &mut sqlx::PgConnection, user: UserId) -> Result<u64> {
+    let n = sqlx::query(
+        "UPDATE browser_sessions SET revoked_at = now() \
+         WHERE user_id = $1 AND revoked_at IS NULL",
+    )
+    .bind(user)
+    .execute(conn)
+    .await?
+    .rows_affected();
+    Ok(n)
+}
+
 /// Live sessions for a user, newest first — what the console lists so someone
 /// can see where they are signed in.
 pub async fn list(db: &Db, user: UserId) -> Result<Vec<Session>> {

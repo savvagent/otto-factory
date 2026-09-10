@@ -20,6 +20,7 @@ use of_mcp::tools;
 use rmcp::handler::server::tool::Extension;
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::model::ErrorData;
+use rmcp::ServerHandler;
 use sqlx::PgPool;
 
 const RESOURCE: &str = "https://mcp.otto-factory.test/mcp";
@@ -179,6 +180,7 @@ impl Env {
                     agent_type: None,
                     metadata: None,
                     depends_on: vec![],
+                    idempotency_key: None,
                 }),
             )
             .await)["job"]
@@ -226,6 +228,21 @@ async fn a_handler_without_a_principal_blames_the_server(pool: PgPool) {
     assert!(e.message.contains("misconfiguration"));
 }
 
+/// `get_info` is answered from `ServerInfo::default()` if nobody sets
+/// `server_info` explicitly, and that default is `rmcp`'s own crate name and
+/// version — expanded in `rmcp`'s build context, not otto-factory's. Every
+/// client that completes `initialize` should see otto-factory identify
+/// itself, not the library it is built on.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn get_info_reports_otto_factorys_own_name_and_version(pool: PgPool) {
+    let (env, _caller) = env(pool).await;
+
+    let info = env.factory.get_info();
+
+    assert_eq!(info.server_info.name, "otto-factory");
+    assert_eq!(info.server_info.version, env!("CARGO_PKG_VERSION"));
+}
+
 // ------------------------------------------------------------------- scopes
 
 #[sqlx::test(migrations = "../of-core/migrations")]
@@ -266,12 +283,106 @@ async fn a_read_only_token_can_look_but_not_touch(pool: PgPool) {
                 agent_type: None,
                 metadata: None,
                 depends_on: vec![],
+                idempotency_key: None,
             }),
         )
         .await);
 
     assert_eq!(code_of(&e), "insufficient_scope");
     assert!(e.message.contains("jobs:write"), "{}", e.message);
+}
+
+// ------------------------------------------------------------ idempotency
+
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn add_job_with_an_idempotency_key_replays_instead_of_duplicating(pool: PgPool) {
+    let (env, caller) = env(pool).await;
+    env.register(&caller).await;
+
+    let before = env.usage(&caller).await;
+    let billable_before = before["billableUsed"].as_i64().unwrap();
+    let total_before = before["totalCalls"].as_i64().unwrap();
+
+    let args = || tools::jobs::AddJobArgs {
+        title: "wire up the health endpoint".into(),
+        description: None,
+        repo: Some("api".into()),
+        remote: None,
+        ticket_ref: None,
+        agent_type: None,
+        metadata: None,
+        depends_on: vec![],
+        idempotency_key: Some("retry-1".into()),
+    };
+
+    let first = ok(env
+        .factory
+        .add_job(Extension(parts(&caller)), Parameters(args()))
+        .await);
+    let second = ok(env
+        .factory
+        .add_job(Extension(parts(&caller)), Parameters(args()))
+        .await);
+
+    assert_eq!(first["job"]["id"], second["job"]["id"]);
+
+    let after = env.usage(&caller).await;
+    assert_eq!(
+        after["billableUsed"].as_i64().unwrap() - billable_before,
+        1,
+        "a replay must not be billed a second time"
+    );
+    // 2 add_job calls (one billable, one recorded-but-free) + this `usage`
+    // read itself, which is also Free-but-recorded (of_billing::classify).
+    assert_eq!(
+        after["totalCalls"].as_i64().unwrap() - total_before,
+        3,
+        "a replay is still recorded in history, just not billed"
+    );
+}
+
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn add_job_with_a_reused_idempotency_key_and_a_different_title_errors(pool: PgPool) {
+    let (env, caller) = env(pool).await;
+    env.register(&caller).await;
+
+    ok(env
+        .factory
+        .add_job(
+            Extension(parts(&caller)),
+            Parameters(tools::jobs::AddJobArgs {
+                title: "first title".into(),
+                description: None,
+                repo: Some("api".into()),
+                remote: None,
+                ticket_ref: None,
+                agent_type: None,
+                metadata: None,
+                depends_on: vec![],
+                idempotency_key: Some("retry-1".into()),
+            }),
+        )
+        .await);
+
+    let e = err(env
+        .factory
+        .add_job(
+            Extension(parts(&caller)),
+            Parameters(tools::jobs::AddJobArgs {
+                title: "a different title".into(),
+                description: None,
+                repo: Some("api".into()),
+                remote: None,
+                ticket_ref: None,
+                agent_type: None,
+                metadata: None,
+                depends_on: vec![],
+                idempotency_key: Some("retry-1".into()),
+            }),
+        )
+        .await);
+
+    assert_eq!(code_of(&e), "idempotency_key_conflict");
 }
 
 // --------------------------------------------------------------- repo anchor
@@ -305,9 +416,10 @@ async fn the_full_loop_from_remote_url_to_completed_job(pool: PgPool) {
         .factory
         .ready(
             Extension(parts(&caller)),
-            Parameters(tools::jobs::RepoScopeArgs {
+            Parameters(tools::jobs::ReadyArgs {
                 repo: Some("api".into()),
                 remote: None,
+                agent_type: None,
             }),
         )
         .await);
@@ -320,6 +432,7 @@ async fn the_full_loop_from_remote_url_to_completed_job(pool: PgPool) {
             Parameters(tools::jobs::ClaimJobsArgs {
                 jobs: vec![id.clone()],
                 agent: Some("api-agent@ci-7".into()),
+                ttl: None,
             }),
         )
         .await);
@@ -331,7 +444,7 @@ async fn the_full_loop_from_remote_url_to_completed_job(pool: PgPool) {
         .factory
         .ready(
             Extension(parts(&caller)),
-            Parameters(tools::jobs::RepoScopeArgs::default()),
+            Parameters(tools::jobs::ReadyArgs::default()),
         )
         .await);
     assert!(ready["jobs"].as_array().unwrap().is_empty());
@@ -378,6 +491,7 @@ async fn activating_a_claimed_job_marks_it_active_and_completion_still_works(poo
             Parameters(tools::jobs::ClaimJobsArgs {
                 jobs: vec![id.clone()],
                 agent: Some("agent-one".into()),
+                ttl: None,
             }),
         )
         .await);
@@ -426,6 +540,331 @@ async fn activate_job_on_an_unclaimed_job_is_refused(pool: PgPool) {
     assert!(e.message.contains("in-progress"));
 }
 
+/// `renew_claim` is what lets a long-running agent keep a claim it is still
+/// actively working, the same way `renew_lease` keeps a resource lease alive —
+/// and the claim it extends must still finish normally afterwards.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn renew_claim_extends_the_claim_and_completion_still_works(pool: PgPool) {
+    let (env, caller) = env(pool).await;
+    env.register(&caller).await;
+
+    let job = env.add_job(&caller, "long running work").await;
+    let id = job["id"].as_str().unwrap().to_string();
+
+    let claimed = ok(env
+        .factory
+        .claim_jobs(
+            Extension(parts(&caller)),
+            Parameters(tools::jobs::ClaimJobsArgs {
+                jobs: vec![id.clone()],
+                agent: Some("agent-one".into()),
+                ttl: Some(120),
+            }),
+        )
+        .await);
+    let expires_after_claim: chrono::DateTime<chrono::Utc> = claimed["jobs"][0]["claimExpiresAt"]
+        .as_str()
+        .expect("claimExpiresAt")
+        .parse()
+        .expect("claimExpiresAt must be a valid RFC3339 timestamp");
+
+    let renewed = ok(env
+        .factory
+        .renew_claim(
+            Extension(parts(&caller)),
+            Parameters(tools::jobs::RenewClaimArgs {
+                job: id.clone(),
+                ttl: Some(3600),
+            }),
+        )
+        .await);
+    let expires_after_renew: chrono::DateTime<chrono::Utc> = renewed["job"]["claimExpiresAt"]
+        .as_str()
+        .expect("claimExpiresAt")
+        .parse()
+        .expect("claimExpiresAt must be a valid RFC3339 timestamp");
+
+    assert!(
+        expires_after_renew > expires_after_claim,
+        "renew_claim did not push the expiry forward: {expires_after_claim} -> {expires_after_renew}"
+    );
+
+    let done = ok(env
+        .factory
+        .complete_job(
+            Extension(parts(&caller)),
+            Parameters(tools::jobs::CompleteJobArgs {
+                job: id,
+                result: Some("done".into()),
+            }),
+        )
+        .await);
+    assert_eq!(done["job"]["status"], "completed");
+}
+
+/// Only the agent that actually holds a claim may finalize it — a stray
+/// `complete_job` from anyone else must never let one agent close out work it
+/// did not do.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn complete_job_from_a_non_holder_is_refused(pool: PgPool) {
+    let (env, caller) = env(pool).await;
+    env.register(&caller).await;
+    let intruder = env.teammate(caller.org_id, "mallory@acme.test").await;
+
+    let job = env
+        .add_job(&caller, "claimed by one, finished by another")
+        .await;
+    let id = job["id"].as_str().unwrap().to_string();
+
+    ok(env
+        .factory
+        .claim_jobs(
+            Extension(parts(&caller)),
+            Parameters(tools::jobs::ClaimJobsArgs {
+                jobs: vec![id.clone()],
+                agent: Some("agent-one".into()),
+                ttl: None,
+            }),
+        )
+        .await);
+
+    let e = err(env
+        .factory
+        .complete_job(
+            Extension(parts(&intruder)),
+            Parameters(tools::jobs::CompleteJobArgs {
+                job: id,
+                result: Some("not yours to finish".into()),
+            }),
+        )
+        .await);
+    assert_eq!(code_of(&e), "already_claimed");
+}
+
+/// A pending job has no holder to wait on, so `request_cancel` finalizes it
+/// immediately rather than merely flagging it.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn request_cancel_on_a_pending_job_finalizes_it_immediately(pool: PgPool) {
+    let (env, caller) = env(pool).await;
+    env.register(&caller).await;
+
+    let job = env.add_job(&caller, "never gets started").await;
+    let id = job["id"].as_str().unwrap().to_string();
+
+    let cancelled = ok(env
+        .factory
+        .request_cancel(
+            Extension(parts(&caller)),
+            Parameters(tools::jobs::RequestCancelArgs {
+                job: id,
+                reason: Some("no longer needed".into()),
+            }),
+        )
+        .await);
+    assert_eq!(cancelled["job"]["status"], "cancelled");
+    assert_eq!(cancelled["job"]["cancelReason"], "no longer needed");
+    assert!(cancelled["job"]["cancelRequestedAt"].is_string());
+}
+
+/// The two-event audit trail (`job.cancel.requested`, `job.cancelled`) is the
+/// headline of this whole feature, and had no coverage at the audit-trail
+/// level before this test: a pending job's immediate finalize must still
+/// leave both events behind, both attributed to the one caller involved.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn request_cancel_on_a_pending_job_audits_both_events(pool: PgPool) {
+    let (env, caller) = env(pool).await;
+    env.register(&caller).await;
+
+    let job = env.add_job(&caller, "never gets started").await;
+    let id = job["id"].as_str().unwrap().to_string();
+
+    ok(env
+        .factory
+        .request_cancel(
+            Extension(parts(&caller)),
+            Parameters(tools::jobs::RequestCancelArgs {
+                job: id.clone(),
+                reason: Some("no longer needed".into()),
+            }),
+        )
+        .await);
+
+    let mut tx = env.db.begin(caller.org_id).await.unwrap();
+    let trail = tx.audit_trail(Some("job."), 100).await.unwrap();
+    tx.rollback().await.unwrap();
+
+    let requested: Vec<_> = trail
+        .iter()
+        .filter(|e| e.action == "job.cancel.requested")
+        .collect();
+    let cancelled: Vec<_> = trail
+        .iter()
+        .filter(|e| e.action == "job.cancelled")
+        .collect();
+    assert_eq!(requested.len(), 1, "expected exactly one request event");
+    assert_eq!(cancelled.len(), 1, "expected exactly one finalize event");
+    assert_eq!(requested[0].target_id.as_deref(), Some(id.as_str()));
+    assert_eq!(cancelled[0].target_id.as_deref(), Some(id.as_str()));
+    assert_eq!(requested[0].actor_user_id, Some(caller.user_id));
+    assert_eq!(cancelled[0].actor_user_id, Some(caller.user_id));
+}
+
+/// A claimed job only gets flagged by `request_cancel` — the holder is the
+/// only one who can say it actually stopped, via `cancel_job`.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn request_cancel_then_cancel_job_on_a_claimed_job(pool: PgPool) {
+    let (env, caller) = env(pool).await;
+    env.register(&caller).await;
+
+    let job = env.add_job(&caller, "claimed then cancelled").await;
+    let id = job["id"].as_str().unwrap().to_string();
+
+    ok(env
+        .factory
+        .claim_jobs(
+            Extension(parts(&caller)),
+            Parameters(tools::jobs::ClaimJobsArgs {
+                jobs: vec![id.clone()],
+                agent: Some("agent-one".into()),
+                ttl: None,
+            }),
+        )
+        .await);
+
+    let flagged = ok(env
+        .factory
+        .request_cancel(
+            Extension(parts(&caller)),
+            Parameters(tools::jobs::RequestCancelArgs {
+                job: id.clone(),
+                reason: Some("stop, wrong branch".into()),
+            }),
+        )
+        .await);
+    assert_eq!(flagged["job"]["status"], "in-progress");
+    assert!(flagged["job"]["cancelRequestedAt"].is_string());
+    assert!(flagged["job"]["cancelRequestedBy"].is_string());
+    assert_eq!(flagged["job"]["cancelReason"], "stop, wrong branch");
+
+    let cancelled = ok(env
+        .factory
+        .cancel_job(
+            Extension(parts(&caller)),
+            Parameters(tools::jobs::CancelJobArgs {
+                job: id,
+                note: Some("stopped as asked".into()),
+            }),
+        )
+        .await);
+    assert_eq!(cancelled["job"]["status"], "cancelled");
+    assert_eq!(cancelled["job"]["error"], "stopped as asked");
+}
+
+/// The claimed path's two audit events can carry different actors — whoever
+/// asked is not necessarily whoever complied — and the trail must keep them
+/// straight rather than attributing both to one caller.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn request_cancel_then_cancel_job_audits_distinct_actors(pool: PgPool) {
+    let (env, owner) = env(pool).await;
+    env.register(&owner).await;
+    let holder = env.teammate(owner.org_id, "holder@acme.test").await;
+
+    let job = env.add_job(&owner, "claimed then cancelled").await;
+    let id = job["id"].as_str().unwrap().to_string();
+
+    ok(env
+        .factory
+        .claim_jobs(
+            Extension(parts(&holder)),
+            Parameters(tools::jobs::ClaimJobsArgs {
+                jobs: vec![id.clone()],
+                agent: Some("agent-one".into()),
+                ttl: None,
+            }),
+        )
+        .await);
+
+    ok(env
+        .factory
+        .request_cancel(
+            Extension(parts(&owner)),
+            Parameters(tools::jobs::RequestCancelArgs {
+                job: id.clone(),
+                reason: Some("stop, wrong branch".into()),
+            }),
+        )
+        .await);
+
+    ok(env
+        .factory
+        .cancel_job(
+            Extension(parts(&holder)),
+            Parameters(tools::jobs::CancelJobArgs {
+                job: id.clone(),
+                note: Some("stopped as asked".into()),
+            }),
+        )
+        .await);
+
+    let mut tx = env.db.begin(owner.org_id).await.unwrap();
+    let trail = tx.audit_trail(Some("job."), 100).await.unwrap();
+    tx.rollback().await.unwrap();
+
+    let requested = trail
+        .iter()
+        .find(|e| e.action == "job.cancel.requested")
+        .expect("job.cancel.requested must be recorded");
+    let cancelled = trail
+        .iter()
+        .find(|e| e.action == "job.cancelled")
+        .expect("job.cancelled must be recorded");
+    assert_eq!(requested.target_id.as_deref(), Some(id.as_str()));
+    assert_eq!(cancelled.target_id.as_deref(), Some(id.as_str()));
+    assert_eq!(requested.actor_user_id, Some(owner.user_id));
+    assert_eq!(cancelled.actor_user_id, Some(holder.user_id));
+    assert_ne!(requested.actor_user_id, cancelled.actor_user_id);
+}
+
+/// A holder stopping on its own, unprompted, must call `fail_job` — `cancel_job`
+/// refuses when no cancellation was ever requested.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn cancel_job_without_a_prior_request_is_refused(pool: PgPool) {
+    let (env, caller) = env(pool).await;
+    env.register(&caller).await;
+
+    let job = env.add_job(&caller, "claimed, never asked to stop").await;
+    let id = job["id"].as_str().unwrap().to_string();
+
+    ok(env
+        .factory
+        .claim_jobs(
+            Extension(parts(&caller)),
+            Parameters(tools::jobs::ClaimJobsArgs {
+                jobs: vec![id.clone()],
+                agent: Some("agent-one".into()),
+                ttl: None,
+            }),
+        )
+        .await);
+
+    let e = err(env
+        .factory
+        .cancel_job(
+            Extension(parts(&caller)),
+            Parameters(tools::jobs::CancelJobArgs {
+                job: id,
+                note: None,
+            }),
+        )
+        .await);
+    assert_eq!(code_of(&e), "invalid_argument");
+    assert!(
+        e.message.contains("no cancellation request"),
+        "{}",
+        e.message
+    );
+}
+
 /// Most jobs have no linked ticket. Their hot path must stay the same cheap
 /// queue transition it was before tracker write-back existed.
 #[sqlx::test(migrations = "../of-core/migrations")]
@@ -443,6 +882,7 @@ async fn ticketless_job_transitions_still_succeed(pool: PgPool) {
             Parameters(tools::jobs::ClaimJobsArgs {
                 jobs: vec![id.clone()],
                 agent: Some("agent-one".into()),
+                ttl: None,
             }),
         )
         .await);
@@ -492,7 +932,7 @@ async fn a_blocked_job_is_not_offered_and_cannot_be_claimed(pool: PgPool) {
         .factory
         .ready(
             Extension(parts(&caller)),
-            Parameters(tools::jobs::RepoScopeArgs::default()),
+            Parameters(tools::jobs::ReadyArgs::default()),
         )
         .await);
     assert_eq!(
@@ -518,6 +958,7 @@ async fn a_blocked_job_is_not_offered_and_cannot_be_claimed(pool: PgPool) {
                 Parameters(tools::jobs::ClaimJobsArgs {
                     jobs: vec![second_id.clone()],
                     agent: None,
+                    ttl: None,
                 }),
             )
             .await
@@ -533,6 +974,7 @@ async fn a_blocked_job_is_not_offered_and_cannot_be_claimed(pool: PgPool) {
             Parameters(tools::jobs::ClaimJobsArgs {
                 jobs: vec![first_id.clone()],
                 agent: None,
+                ttl: None,
             }),
         )
         .await);
@@ -551,7 +993,7 @@ async fn a_blocked_job_is_not_offered_and_cannot_be_claimed(pool: PgPool) {
         .factory
         .ready(
             Extension(parts(&caller)),
-            Parameters(tools::jobs::RepoScopeArgs::default()),
+            Parameters(tools::jobs::ReadyArgs::default()),
         )
         .await);
     assert_eq!(ready["jobs"][0]["id"], second_id);
@@ -577,6 +1019,7 @@ async fn an_unresolvable_repo_says_what_is_registered_and_what_to_call(pool: PgP
                 agent_type: None,
                 metadata: None,
                 depends_on: vec![],
+                idempotency_key: None,
             }),
         )
         .await);
@@ -615,6 +1058,7 @@ async fn one_orgs_token_cannot_see_or_touch_anothers_work(pool: PgPool) {
                 repo: None,
                 remote: None,
                 mine: false,
+                agent_type: None,
                 limit: None,
             }),
         )
@@ -651,6 +1095,7 @@ async fn one_orgs_token_cannot_see_or_touch_anothers_work(pool: PgPool) {
             Parameters(tools::jobs::ClaimJobsArgs {
                 jobs: vec![id.clone()],
                 agent: None,
+                ttl: None,
             }),
         )
         .await
@@ -701,6 +1146,7 @@ async fn a_message_cannot_be_addressed_to_someone_in_another_org(pool: PgPool) {
         job: None,
         in_reply_to: None,
         agent: None,
+        idempotency_key: None,
     };
 
     let existing = err(env
@@ -736,7 +1182,8 @@ async fn a_held_lease_names_its_holder_to_the_next_agent(pool: PgPool) {
         .acquire_lease(
             Extension(parts(&first)),
             Parameters(tools::coord::AcquireLeaseArgs {
-                branch: "main".into(),
+                resource: None,
+                branch: Some("main".into()),
                 repo: Some("api".into()),
                 remote: None,
                 agent: Some("agent-one".into()),
@@ -748,7 +1195,8 @@ async fn a_held_lease_names_its_holder_to_the_next_agent(pool: PgPool) {
 
     let mate = env.teammate(first.org_id, "sam@acme.test").await;
     let take = || tools::coord::AcquireLeaseArgs {
-        branch: "main".into(),
+        resource: None,
+        branch: Some("main".into()),
         repo: Some("api".into()),
         remote: None,
         agent: Some("agent-two".into()),
@@ -780,7 +1228,7 @@ async fn a_held_lease_names_its_holder_to_the_next_agent(pool: PgPool) {
         .acquire_lease(
             Extension(parts(&mate)),
             Parameters(tools::coord::AcquireLeaseArgs {
-                branch: "feature/x".into(),
+                branch: Some("feature/x".into()),
                 ..take()
             }),
         )
@@ -816,6 +1264,171 @@ async fn a_held_lease_names_its_holder_to_the_next_agent(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "../of-core/migrations")]
+async fn acquire_lease_accepts_a_free_form_resource(pool: PgPool) {
+    let (env, first) = env(pool).await;
+    env.register(&first).await;
+
+    let lease = ok(env
+        .factory
+        .acquire_lease(
+            Extension(parts(&first)),
+            Parameters(tools::coord::AcquireLeaseArgs {
+                resource: Some("deploy:staging".into()),
+                branch: None,
+                repo: Some("api".into()),
+                remote: None,
+                agent: Some("agent-one".into()),
+                job: None,
+                ttl_seconds: None,
+            }),
+        )
+        .await);
+
+    assert_eq!(lease["lease"]["resource"], "deploy:staging");
+}
+
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn acquire_lease_branch_alias_prefixes_and_still_works(pool: PgPool) {
+    let (env, first) = env(pool).await;
+    env.register(&first).await;
+
+    let lease = ok(env
+        .factory
+        .acquire_lease(
+            Extension(parts(&first)),
+            Parameters(tools::coord::AcquireLeaseArgs {
+                resource: None,
+                branch: Some("main".into()),
+                repo: Some("api".into()),
+                remote: None,
+                agent: Some("agent-one".into()),
+                job: None,
+                ttl_seconds: None,
+            }),
+        )
+        .await);
+
+    assert_eq!(lease["lease"]["resource"], "branch:main");
+}
+
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn acquire_lease_rejects_an_empty_branch_alias(pool: PgPool) {
+    let (env, first) = env(pool).await;
+    env.register(&first).await;
+
+    let e = err(env
+        .factory
+        .acquire_lease(
+            Extension(parts(&first)),
+            Parameters(tools::coord::AcquireLeaseArgs {
+                resource: None,
+                branch: Some("   ".into()),
+                repo: Some("api".into()),
+                remote: None,
+                agent: Some("agent-one".into()),
+                job: None,
+                ttl_seconds: None,
+            }),
+        )
+        .await);
+
+    assert_eq!(
+        e.code,
+        rmcp::model::ErrorCode::INVALID_PARAMS,
+        "an empty branch must not become the lease \"branch:\""
+    );
+}
+
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn acquire_lease_needs_resource_or_branch(pool: PgPool) {
+    let (env, first) = env(pool).await;
+    env.register(&first).await;
+
+    let e = err(env
+        .factory
+        .acquire_lease(
+            Extension(parts(&first)),
+            Parameters(tools::coord::AcquireLeaseArgs {
+                resource: None,
+                branch: None,
+                repo: Some("api".into()),
+                remote: None,
+                agent: Some("agent-one".into()),
+                job: None,
+                ttl_seconds: None,
+            }),
+        )
+        .await);
+
+    assert_eq!(e.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    assert!(
+        e.message.contains("resource"),
+        "the error should name the missing field: {}",
+        e.message
+    );
+}
+
+/// Passing both is refused rather than guessed: silently preferring `resource`
+/// would let a caller who meant the `branch` alias lease the wrong thing with
+/// no error, the exact "errors that guess are worse than errors that stop"
+/// failure this project's style rules out.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn acquire_lease_refuses_both_resource_and_branch(pool: PgPool) {
+    let (env, first) = env(pool).await;
+    env.register(&first).await;
+
+    let e = err(env
+        .factory
+        .acquire_lease(
+            Extension(parts(&first)),
+            Parameters(tools::coord::AcquireLeaseArgs {
+                resource: Some("deploy:staging".into()),
+                branch: Some("main".into()),
+                repo: Some("api".into()),
+                remote: None,
+                agent: Some("agent-one".into()),
+                job: None,
+                ttl_seconds: None,
+            }),
+        )
+        .await);
+
+    assert_eq!(e.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    assert!(
+        e.message.contains("resource") && e.message.contains("branch"),
+        "the error should name both fields so the caller knows which to drop: {}",
+        e.message
+    );
+}
+
+/// A blank `resource` must not mask a perfectly good `branch` — a client that
+/// always populates `resource` with an empty default alongside a real `branch`
+/// is exactly the caller the deprecated alias exists to keep working.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn acquire_lease_falls_back_to_branch_when_resource_is_blank(pool: PgPool) {
+    let (env, first) = env(pool).await;
+    env.register(&first).await;
+
+    let lease = ok(env
+        .factory
+        .acquire_lease(
+            Extension(parts(&first)),
+            Parameters(tools::coord::AcquireLeaseArgs {
+                resource: Some("   ".into()),
+                branch: Some("main".into()),
+                repo: Some("api".into()),
+                remote: None,
+                agent: Some("agent-one".into()),
+                job: None,
+                ttl_seconds: None,
+            }),
+        )
+        .await);
+
+    assert_eq!(lease["lease"]["resource"], "branch:main");
+}
+
+#[sqlx::test(migrations = "../of-core/migrations")]
 async fn messages_reach_the_inbox_and_the_cursor_clears_them(pool: PgPool) {
     let (env, sender) = env(pool).await;
     let mate = env.teammate(sender.org_id, "sam@acme.test").await;
@@ -833,6 +1446,7 @@ async fn messages_reach_the_inbox_and_the_cursor_clears_them(pool: PgPool) {
                 job: None,
                 in_reply_to: None,
                 agent: Some("agent-one".into()),
+                idempotency_key: None,
             }),
         )
         .await);
@@ -885,6 +1499,97 @@ async fn messages_reach_the_inbox_and_the_cursor_clears_them(pool: PgPool) {
         .unread_count(Extension(parts(&mate)), Parameters(tools::coord::NoArgs {}))
         .await);
     assert_eq!(unread["unread"], 0);
+}
+
+// ------------------------------------------------------------ idempotency
+
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn send_message_with_an_idempotency_key_replays_instead_of_duplicating(pool: PgPool) {
+    let (env, caller) = env(pool).await;
+
+    let before = env.usage(&caller).await;
+    let billable_before = before["billableUsed"].as_i64().unwrap();
+    let total_before = before["totalCalls"].as_i64().unwrap();
+
+    let args = || tools::coord::SendMessageArgs {
+        body: "hand-off note".into(),
+        to: None,
+        kind: None,
+        repo: None,
+        remote: None,
+        job: None,
+        in_reply_to: None,
+        agent: None,
+        idempotency_key: Some("retry-1".into()),
+    };
+
+    let first = ok(env
+        .factory
+        .send_message(Extension(parts(&caller)), Parameters(args()))
+        .await);
+    let second = ok(env
+        .factory
+        .send_message(Extension(parts(&caller)), Parameters(args()))
+        .await);
+
+    assert_eq!(first["message"]["id"], second["message"]["id"]);
+
+    let after = env.usage(&caller).await;
+    assert_eq!(
+        after["billableUsed"].as_i64().unwrap() - billable_before,
+        1,
+        "a replay must not be billed a second time"
+    );
+    // 2 send_message calls (one billable, one recorded-but-free) + this
+    // `usage` read itself, which is also Free-but-recorded.
+    assert_eq!(
+        after["totalCalls"].as_i64().unwrap() - total_before,
+        3,
+        "a replay is still recorded in history, just not billed"
+    );
+}
+
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn send_message_with_a_reused_idempotency_key_and_a_different_body_errors(pool: PgPool) {
+    let (env, caller) = env(pool).await;
+
+    ok(env
+        .factory
+        .send_message(
+            Extension(parts(&caller)),
+            Parameters(tools::coord::SendMessageArgs {
+                body: "first note".into(),
+                to: None,
+                kind: None,
+                repo: None,
+                remote: None,
+                job: None,
+                in_reply_to: None,
+                agent: None,
+                idempotency_key: Some("retry-1".into()),
+            }),
+        )
+        .await);
+
+    let e = err(env
+        .factory
+        .send_message(
+            Extension(parts(&caller)),
+            Parameters(tools::coord::SendMessageArgs {
+                body: "a totally different note".into(),
+                to: None,
+                kind: None,
+                repo: None,
+                remote: None,
+                job: None,
+                in_reply_to: None,
+                agent: None,
+                idempotency_key: Some("retry-1".into()),
+            }),
+        )
+        .await);
+
+    assert_eq!(code_of(&e), "idempotency_key_conflict");
 }
 
 /// `watch` has to return rather than hang when nothing happens, or an agent's
@@ -979,9 +1684,12 @@ fn the_advertised_surface_is_exactly_what_the_design_specifies() {
         "update_job",
         "delete_job",
         "claim_jobs",
+        "renew_claim",
         "activate_job",
         "complete_job",
         "fail_job",
+        "request_cancel",
+        "cancel_job",
         "repend_job",
         "set_dependencies",
         "ready",
@@ -1183,7 +1891,7 @@ async fn work_is_billed_and_looking_is_not(pool: PgPool) {
             .factory
             .ready(
                 Extension(parts(&caller)),
-                Parameters(tools::jobs::RepoScopeArgs::default()),
+                Parameters(tools::jobs::ReadyArgs::default()),
             )
             .await);
     }
@@ -1226,6 +1934,7 @@ async fn a_failed_call_is_not_billed(pool: PgPool) {
                 agent_type: None,
                 metadata: None,
                 depends_on: vec![],
+                idempotency_key: None,
             }),
         )
         .await);
@@ -1296,6 +2005,7 @@ async fn enforcement_stops_work_but_never_reads(pool: PgPool) {
                 agent_type: None,
                 metadata: None,
                 depends_on: vec![],
+                idempotency_key: None,
             }),
         )
         .await);
@@ -1314,7 +2024,7 @@ async fn enforcement_stops_work_but_never_reads(pool: PgPool) {
         .factory
         .ready(
             Extension(parts(&caller)),
-            Parameters(tools::jobs::RepoScopeArgs::default()),
+            Parameters(tools::jobs::ReadyArgs::default()),
         )
         .await);
 
@@ -1613,6 +2323,7 @@ async fn sync_ticket_without_a_binding_reports_not_configured(pool: PgPool) {
             Parameters(tools::jobs::ClaimJobsArgs {
                 jobs: vec![id.clone()],
                 agent: Some("agent-one".into()),
+                ttl: None,
             }),
         )
         .await);
@@ -1681,6 +2392,7 @@ async fn sync_ticket_reports_an_outbound_failure_as_retriable(pool: PgPool) {
             Parameters(tools::jobs::ClaimJobsArgs {
                 jobs: vec![id.clone()],
                 agent: Some("agent-one".into()),
+                ttl: None,
             }),
         )
         .await);
@@ -1754,6 +2466,7 @@ async fn sync_ticket_refuses_before_the_outbound_call_when_over_budget(pool: PgP
             Parameters(tools::jobs::ClaimJobsArgs {
                 jobs: vec![id.clone()],
                 agent: Some("agent-one".into()),
+                ttl: None,
             }),
         )
         .await);
@@ -1845,6 +2558,7 @@ async fn sync_ticket_reports_a_malformed_github_ticket_ref_as_non_retriable(pool
             Parameters(tools::jobs::ClaimJobsArgs {
                 jobs: vec![id.clone()],
                 agent: Some("agent-one".into()),
+                ttl: None,
             }),
         )
         .await);
@@ -1914,6 +2628,7 @@ async fn sync_ticket_reports_a_malformed_jira_ticket_ref_as_non_retriable(pool: 
             Parameters(tools::jobs::ClaimJobsArgs {
                 jobs: vec![id.clone()],
                 agent: Some("agent-one".into()),
+                ttl: None,
             }),
         )
         .await);

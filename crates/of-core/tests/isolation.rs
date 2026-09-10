@@ -99,6 +99,27 @@ async fn cross_org_mutation_is_refused(pool: PgPool) {
     let target = tx.add_job(job(&a, "acme work")).await.unwrap();
     tx.commit().await.unwrap();
 
+    // A second job, claimed and carrying a live cancellation request, so the
+    // cross-org `cancel_job` assertion below actually proves guard 1.
+    // `cancel_job` requires in-progress/active status *and* a cancellation
+    // request on file; `target` (pending, nothing requested) satisfies
+    // neither, so calling `cancel_job` on it fails on status grounds alone —
+    // it would fail identically for org A. `claimed` is put in the one state
+    // where an in-org call would actually succeed, so its failure here can
+    // only be attributed to the org-scoping predicate finding no row.
+    let mut tx = db.begin(a.org).await.unwrap();
+    let claimed = tx.add_job(job(&a, "acme in-flight work")).await.unwrap();
+    tx.claim_jobs(std::slice::from_ref(&claimed.id), a.user, None, None)
+        .await
+        .unwrap();
+    let claimed = tx
+        .request_cancel(&claimed.id, a.user, Some("stop"))
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(claimed.status, of_core::jobs::Status::InProgress);
+    assert!(claimed.cancel_requested_at.is_some());
+
     // Every mutating verb, from the wrong org.
     let mut tx = db.begin(b.org).await.unwrap();
     assert!(tx
@@ -107,18 +128,158 @@ async fn cross_org_mutation_is_refused(pool: PgPool) {
         .is_err());
     assert!(tx.delete_job(&target.id).await.is_err());
     assert!(tx
-        .claim_jobs(std::slice::from_ref(&target.id), b.user, None)
+        .claim_jobs(std::slice::from_ref(&target.id), b.user, None, None)
         .await
         .is_err());
     assert!(tx.repend_job(&target.id).await.is_err());
+    assert!(tx.request_cancel(&target.id, b.user, None).await.is_err());
+    assert!(tx.cancel_job(&claimed.id, b.user, None).await.is_err());
+    // The GH#65 claim-expiry additions: `claimed` is a real, live claim held
+    // by A in A's org, so a call that reached the row would succeed. From B's
+    // pinned transaction the row must not even be found — guard 1's org_id
+    // predicate, not the claimer check inside `ensure_claim_held`, is what
+    // has to refuse these.
+    assert!(tx.renew_claim(&claimed.id, b.user, None).await.is_err());
+    assert!(tx
+        .complete_job(&claimed.id, b.user, Some("pwned"))
+        .await
+        .is_err());
+    assert!(tx
+        .fail_job(&claimed.id, b.user, Some("pwned"))
+        .await
+        .is_err());
     let _ = tx.rollback().await;
 
-    // A's job is untouched.
+    // A's jobs are untouched — including `claimed`'s in-progress status and
+    // its cancellation request, which the failed cross-org `cancel_job` call
+    // must not have been able to finalize.
     let mut tx = db.begin(a.org).await.unwrap();
     let after = tx.get_job(&target.id).await.unwrap();
+    let after_claimed = tx.get_job(&claimed.id).await.unwrap();
     tx.commit().await.unwrap();
     assert_eq!(after.title, "acme work");
     assert_eq!(after.status, of_core::jobs::Status::Pending);
+    assert_eq!(after_claimed.status, of_core::jobs::Status::InProgress);
+    assert!(after_claimed.cancel_requested_at.is_some());
+    assert_eq!(after_claimed.cancel_reason.as_deref(), Some("stop"));
+    assert_eq!(
+        after_claimed.claimed_by,
+        Some(a.user),
+        "B's cross-org renew/complete/fail attempts must not have touched the claim"
+    );
+}
+
+/// The idempotency-key unique index is `(org_id, idempotency_key)`, not a
+/// bare `idempotency_key` — the same literal key string reused by two
+/// different orgs, for two genuinely different jobs, must not collide.
+///
+/// This deliberately does **not** compare the two returned job ids for
+/// inequality: `JobId` is a per-org sequential counter (`job_ids_are_dense_
+/// and_per_org` in `tests/queue.rs`), so both of these calls legitimately
+/// produce `job-1` in their own org — an id match here is expected and
+/// proves nothing about isolation either way. The actual proof is that
+/// **both `add_job` calls succeed** despite differing payloads under the
+/// same key. If the index (or `find_replayed_job`'s `SELECT`) were missing
+/// its `org_id` predicate, one of two things would happen instead, and this
+/// test would catch either: org B's insert could hit a global-uniqueness
+/// constraint and be rejected outright, or it could wrongly converge onto
+/// org A's row via the SAVEPOINT unique-violation recovery path — and since
+/// the payloads differ, that convergence would fail with
+/// `idempotency_key_conflict` rather than succeeding. The `find_replayed_job`
+/// follow-up calls additionally prove each org resolves its *own* content
+/// back, not the other org's, for the identical key.
+#[sqlx::test]
+async fn idempotency_keys_do_not_cross_org_boundaries(pool: PgPool) {
+    let db = db(pool);
+    let a = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+    let b = tenant(&db, "globex", "git@github.com:globex/api.git").await;
+
+    let mut a_new = job(&a, "acme work");
+    a_new.idempotency_key = Some("shared-key".into());
+    let mut tx = db.begin(a.org).await.unwrap();
+    let a_job = tx.add_job(a_new.clone()).await.unwrap();
+    tx.commit().await.unwrap();
+
+    let mut b_new = job(&b, "globex work");
+    b_new.idempotency_key = Some("shared-key".into());
+    let mut tx = db.begin(b.org).await.unwrap();
+    let b_job = tx.add_job(b_new.clone()).await.unwrap();
+    tx.commit().await.unwrap();
+
+    assert_eq!(a_job.title, "acme work");
+    assert_eq!(b_job.title, "globex work");
+
+    // Each org resolves the shared key back to its own content, not the
+    // other org's — the find_replayed_job fast path, not the insert path
+    // exercised above.
+    let mut tx = db.begin(a.org).await.unwrap();
+    let replayed = tx.find_replayed_job(&a_new).await.unwrap().unwrap();
+    tx.rollback().await.unwrap();
+    assert_eq!(replayed.id, a_job.id);
+    assert_eq!(replayed.title, "acme work");
+
+    let mut tx = db.begin(b.org).await.unwrap();
+    let replayed = tx.find_replayed_job(&b_new).await.unwrap().unwrap();
+    tx.rollback().await.unwrap();
+    assert_eq!(replayed.id, b_job.id);
+    assert_eq!(replayed.title, "globex work");
+}
+
+/// The identical proof for `send_message`'s idempotency key. `Message::id`
+/// is a plain `i64` (not per-org sequential the way `JobId` is), so unlike
+/// the job version above an id comparison is meaningful here too — but the
+/// `find_replayed_message` round trip is kept for the same reason: it is the
+/// part that would actually catch a missing `org_id` predicate in the
+/// SELECT, not the insert succeeding twice with different payloads.
+#[sqlx::test]
+async fn message_idempotency_keys_do_not_cross_org_boundaries(pool: PgPool) {
+    use of_core::messages::NewMessage;
+
+    let db = db(pool);
+    let a = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+    let b = tenant(&db, "globex", "git@github.com:globex/api.git").await;
+
+    let a_new = NewMessage {
+        body: "acme note".into(),
+        idempotency_key: Some("shared-key".into()),
+        ..Default::default()
+    };
+    let mut tx = db.begin(a.org).await.unwrap();
+    let a_msg = tx.send_message(a.user, a_new.clone()).await.unwrap();
+    tx.commit().await.unwrap();
+
+    let b_new = NewMessage {
+        body: "globex note".into(),
+        idempotency_key: Some("shared-key".into()),
+        ..Default::default()
+    };
+    let mut tx = db.begin(b.org).await.unwrap();
+    let b_msg = tx.send_message(b.user, b_new.clone()).await.unwrap();
+    tx.commit().await.unwrap();
+
+    assert_ne!(a_msg.id, b_msg.id);
+    assert_eq!(a_msg.body, "acme note");
+    assert_eq!(b_msg.body, "globex note");
+
+    let mut tx = db.begin(a.org).await.unwrap();
+    let replayed = tx
+        .find_replayed_message(a.user, &a_new)
+        .await
+        .unwrap()
+        .unwrap();
+    tx.rollback().await.unwrap();
+    assert_eq!(replayed.id, a_msg.id);
+    assert_eq!(replayed.body, "acme note");
+
+    let mut tx = db.begin(b.org).await.unwrap();
+    let replayed = tx
+        .find_replayed_message(b.user, &b_new)
+        .await
+        .unwrap()
+        .unwrap();
+    tx.rollback().await.unwrap();
+    assert_eq!(replayed.id, b_msg.id);
+    assert_eq!(replayed.body, "globex note");
 }
 
 /// The tracker-sync accessors added for the two-way sync engine (Task 4) are
@@ -643,6 +804,116 @@ async fn rls_scopes_tracker_bindings(pool: PgPool) {
     tx.commit().await.unwrap();
     assert_eq!(after.id, binding.id);
     assert_eq!(after.external_ref, "acme/api");
+}
+
+/// **What 0020_rename_trigger_label_default.sql got wrong, reproduced.**
+///
+/// That migration relabels `tracker_bindings.trigger_label` with a bare
+/// `UPDATE ... WHERE trigger_label = 'dark-factory'`. `Db::migrate` runs every
+/// migration on the raw pool (`db.rs`) — never `Db::begin`, so never `SET
+/// LOCAL ROLE of_app` and never `set_config('app.org_id', …)`. On this
+/// deployment's actual connecting role (a superuser, confirmed against
+/// `docs/deploy/fly.md`), that is invisible in the opposite direction from
+/// what this test demonstrates: a superuser bypasses RLS outright, so the
+/// statement would touch *every* org's matching rows, not none. `SET LOCAL
+/// ROLE of_app` below drops to a role RLS actually binds — `of_app` owns
+/// nothing, so it needs no `FORCE` to lose the exemption a table owner would
+/// otherwise get; the FORCE-RLS-fallback deployment shape hits the same zero
+/// for a related but distinct reason (that role *is* the owner, which is what
+/// `FORCE` binds — see `CLAUDE.md`), and this test, run from a superuser
+/// connection, can only exercise the non-owner path. Either way
+/// `current_org()` stays NULL for the statement's entire lifetime, so
+/// `org_id = current_org()` is never true and the UPDATE silently matches
+/// zero rows, for every tenant, forever.
+///
+/// `savvagent/otto-factory#70`. No corrective data migration accompanies this
+/// test — `docs/specs/2026-09-10-migration-org-scoped-writes-design.md`
+/// (Premise corrections, dated 2026-09-10) records that this deployment's own
+/// `tracker_bindings` was empty at investigation time, and that migrations
+/// there currently run as the superuser described above. Neither fact is
+/// re-verified by this test; it guards the deployment shape where the second
+/// one stops being true.
+#[sqlx::test]
+async fn rls_scopes_a_migration_style_update_with_no_org_context(pool: PgPool) {
+    let db = db(pool);
+    let a = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+
+    // Seed a row the way a pre-0020 database would have had one: written
+    // directly on the pool (bypassing `Tx`, standing in for data a migration
+    // — not application code — would be rewriting).
+    sqlx::query(
+        "INSERT INTO tracker_bindings (org_id, repo_id, provider, external_ref, trigger_label) \
+         VALUES ($1, $2, 'github', 'acme/api', 'dark-factory')",
+    )
+    .bind(a.org)
+    .bind(a.repo)
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    // `of_app` owns nothing here, so it needs no `FORCE` to be bound by RLS —
+    // a non-owner grantee role is never exempt. Neither superuser nor
+    // BYPASSRLS, and no `app.org_id` ever set — `Db::migrate` pins no org
+    // automatically; a migration that needs one sets it itself (CLAUDE.md's
+    // per-org loop), which this bare `UPDATE` never did.
+    let mut tx = db.begin_unpinned().await.unwrap();
+    sqlx::query("SET LOCAL ROLE of_app")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+
+    // 0020's own statement, verbatim.
+    let updated = sqlx::query(
+        "UPDATE tracker_bindings SET trigger_label = 'otto-factory' \
+         WHERE trigger_label = 'dark-factory'",
+    )
+    .execute(&mut *tx)
+    .await
+    .unwrap()
+    .rows_affected();
+    tx.commit().await.unwrap();
+
+    assert_eq!(
+        updated, 0,
+        "a bare UPDATE against an RLS-active tenant table with no app.org_id \
+         set is exactly the failure this test exists to keep visible — if \
+         this starts affecting rows, something about the deployment's \
+         isolation shape changed and every migration written under the old \
+         assumption needs re-auditing"
+    );
+
+    // Positive control: the row is still there, still stale. The zero above
+    // is the missing org context, not a missing or already-touched row —
+    // the distinction CLAUDE.md's own guard-1/guard-2 split insists a test
+    // in this family has to make.
+    let mut tx = db.begin(a.org).await.unwrap();
+    let label: String = sqlx::query_scalar("SELECT trigger_label FROM tracker_bindings")
+        .fetch_one(tx.conn())
+        .await
+        .unwrap();
+    assert_eq!(
+        label, "dark-factory",
+        "the row 0020 should have relabelled must still be there, untouched, \
+         for the zero above to mean what this test claims it means"
+    );
+
+    // And the same statement, with org context supplied, does relabel it —
+    // proving the statement is capable of matching at all, so the zero above
+    // is attributable to the missing `app.org_id`, not to a typo in the seed
+    // or the UPDATE's own WHERE clause.
+    let updated = sqlx::query(
+        "UPDATE tracker_bindings SET trigger_label = 'otto-factory' \
+         WHERE trigger_label = 'dark-factory'",
+    )
+    .execute(tx.conn())
+    .await
+    .unwrap()
+    .rows_affected();
+    tx.commit().await.unwrap();
+    assert_eq!(
+        updated, 1,
+        "the same statement, org-scoped, should have matched the seeded row"
+    );
 }
 
 // ---------------------------------------------------------------------------

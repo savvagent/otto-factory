@@ -156,15 +156,17 @@ split.
 ## Deploying
 
 Deploys are automatic: the `deploy` job in `.github/workflows/ci.yml` runs
-`flyctl deploy --remote-only -a otto-factory-mcp` on every push to `master` that passes
-the `rust`, `web`, and `docker-build` jobs, authenticated via the `FLY_API_TOKEN`
-repository secret (an app-scoped Fly deploy token, minted with
-`fly tokens create deploy -a otto-factory-mcp` and never valid for any other app on the
-`savvagent` org). A push
-that fails CI never reaches the deploy step — `needs:` skips it outright — and a failed
-`flyctl deploy` leaves the previously-running machine serving traffic, since Fly's own
-rolling-deploy health check (`/readyz`) never cuts traffic to a machine that hasn't
-passed it.
+`flyctl deploy --remote-only -a otto-factory-mcp` when the release-please-maintained
+"chore: release X.Y.Z" PR is merged to `master` — i.e., when release-please has just cut a
+release — authenticated via the `FLY_API_TOKEN` repository secret (an app-scoped Fly deploy
+token, minted with `fly tokens create deploy -a otto-factory-mcp` and never valid for any
+other app on the `savvagent` org). A failed `flyctl deploy` leaves the previously-running
+machine serving traffic, since Fly's own rolling-deploy health check (`/readyz`) never cuts
+traffic to a machine that hasn't passed it.
+
+A push that fails `rust`, `web`, or `docker-build` never reaches `deploy` — `release-please`
+(which cuts the tag/Release `deploy` gates on) itself needs all three to pass first, so a red
+check anywhere upstream skips the whole chain rather than attempting a deploy against broken CI.
 
 For an out-of-band deploy — re-deploying without a new commit, or deploying a specific
 historical SHA — the manual command still works exactly as before:
