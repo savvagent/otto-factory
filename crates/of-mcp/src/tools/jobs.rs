@@ -176,9 +176,9 @@ pub struct ClaimJobsArgs {
     #[serde(default)]
     pub agent: Option<String>,
     /// Seconds before this claim expires if never renewed. Defaults to a
-    /// server-chosen TTL (900s) if omitted, clamped to at most 4 hours. Extend
-    /// it with renew_claim while you keep working — an unrenewed claim expires
-    /// and the job becomes claimable by someone else.
+    /// server-chosen TTL (900s) if omitted, clamped to between 60 seconds and
+    /// 4 hours. Extend it with renew_claim while you keep working — an
+    /// unrenewed claim expires and the job becomes claimable by someone else.
     #[serde(default)]
     pub ttl: Option<i64>,
 }
@@ -206,8 +206,8 @@ pub struct FailJobArgs {
 pub struct RenewClaimArgs {
     /// The job you are still working on.
     pub job: String,
-    /// Seconds to extend the claim by, from now. Same default and cap as
-    /// claim_jobs's ttl if omitted.
+    /// Seconds to extend the claim by, from now. Same default (900s) and
+    /// clamp range (60 seconds to 4 hours) as claim_jobs's ttl if omitted.
     #[serde(default)]
     pub ttl: Option<i64>,
 }
@@ -849,9 +849,6 @@ impl Factory {
         caller.require_scope(scope::JOBS_WRITE).mcp()?;
 
         let mut tx = self.tx(&caller).await?;
-        // Recorded like every other call (of-billing's own doc comment: "record
-        // every call regardless of class") even though it is classified Free —
-        // renew_lease follows the identical pattern.
         self.charge(&mut tx, &caller, "renew_claim").await?;
         let job = tx
             .renew_claim(&JobId::from(args.job), caller.user_id, args.ttl)
