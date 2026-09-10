@@ -9,7 +9,8 @@ re-fetches, because `setFilter` and the "Clear filters" button use SvelteKit's `
 
 ## Status — 2026-09-10
 
-✅ Shipped in `savvagent/otto-factory#85`.
+✅ Shipped in `savvagent/otto-factory#85`, closing `savvagent/otto-factory#82`. Merged as
+`7dc4243`.
 
 **Spec:** `docs/specs/2026-09-09-queue-filter-refetch-design.md` — read it first. This plan
 implements it exactly.
@@ -38,7 +39,7 @@ implements it exactly.
 
 | File                                                    | Responsibility                                                                                     |
 | -------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| `web/src/routes/o/[org]/queue/+page.svelte`              | **Modify.** Swap `replaceState` for `goto(..., { replaceState: true, keepFocus: true, noScroll: true })` at both call sites; swap the `$app/navigation` import accordingly. |
+| `web/src/routes/o/[org]/queue/+page.svelte`              | **Modify.** Swap `replaceState` for `goto(..., { replaceState: true, keepFocus: true, noScroll: true })` at both call sites; swap the `$app/navigation` import accordingly. (Post-review) Consolidate both call sites behind a shared `applyFilters` helper that routes a rejected navigation into the existing `error`/`Alert` path. |
 | `web/src/routes/o/[org]/queue/QueueHarness.svelte`        | **Add** (post-review). Test harness for rendering the queue page in isolation. |
 | `web/src/routes/o/[org]/queue/page.render.test.ts`        | **Add** (post-review). Asserts `goto`, not `replaceState`, is called by the filter controls. |
 
@@ -82,31 +83,41 @@ same module). Produces no new interface — internal event-handler behavior only
       in the URL so a view can be linked to, and `goto(..., { replaceState: true })` (not bare
       `replaceState` from `$app/navigation`, which never updates the reactive `page.url` this page's
       filters read) is what applies a filter without adding a history entry per change.
-- [x] Replace the body of `setFilter` (around line 105-110):
-      ```js
+- [x] **(Post-review)** Extract a shared `applyFilters` helper that both call sites route through,
+      and route a rejected navigation into the page's existing `error`/`Alert` path. A security
+      review of the original PR found that a rejected `goto` (the origin check `goto` runs
+      internally, or a chunk-load failure) would otherwise vanish silently, reproducing this exact
+      bug's symptom — a filter that looks like it did something but changed nothing, with no error
+      shown:
+      ```ts
+      function applyFilters(url: URL | string) {
+        void goto(url, { replaceState: true, keepFocus: true, noScroll: true }).catch(
+          (e: unknown) => {
+            error = messageFor(e, m.queue_load_failed());
+          }
+        );
+      }
+      ```
+- [x] Replace the body of `setFilter` (around line 105-110) to route through the helper:
+      ```ts
       function setFilter(key: string, value: string | undefined) {
         const url = new URL(page.url);
         if (value === undefined || value === '') url.searchParams.delete(key);
         else url.searchParams.set(key, value);
         // `page.state` is intentionally not passed through: this page never calls
         // `pushState` or otherwise sets custom page state, so there is nothing to carry.
-        void goto(url, { replaceState: true, keepFocus: true, noScroll: true });
+        applyFilters(url);
       }
       ```
-      (`void` on the call: `goto` returns a `Promise<void>`; the handler doesn't need to await it,
-      and an un-awaited promise expression must not read as an accidental omission.)
-- [x] Replace the "Clear filters" button's `onclick` (around line 190-195):
+- [x] Replace the "Clear filters" button's `onclick` (around line 190-195) to call the helper with
+      a bare path:
       ```svelte
-      onclick={() =>
-        void goto(new URL(page.url.pathname, location.origin), {
-          replaceState: true,
-          keepFocus: true,
-          noScroll: true
-        })}
+      onclick={() => applyFilters(page.url.pathname)}
       ```
-      (Same `void` prefix as `setFilter`, for consistency between the two call sites this task
-      touches — the codebase uses both `await goto(...)` and `void goto(...)` elsewhere, so either
-      is acceptable, but the two sites in this file should match each other.)
+      (`page.url.pathname` alone is already relative to the current origin and `goto` accepts a
+      string directly, so the earlier `new URL(page.url.pathname, location.origin)` construction
+      was dropped as unnecessary. Both call sites now funnel through `applyFilters`, so neither
+      duplicates the `goto`/`catch` logic.)
 - [x] Repeat the manual browser check from the first step (Status, then Repo, then "only what I
       queued", then "Clear filters") against the same seeded data. Confirm each change narrows or
       restores the table immediately with no reload, and that repeated filter changes do not grow
@@ -118,8 +129,9 @@ same module). Produces no new interface — internal event-handler behavior only
 - [x] Run `cd web && npm run check` — must pass.
 - [x] Run `cd web && npm run lint` — must pass (run `npm run lint -- --write` first if formatting
       drifted, then re-run `npm run lint` to confirm clean).
-- [x] Run `cd web && npm test` — must pass unchanged (vitest over `web/worker/` and existing render
-      tests; this task adds no new automated test, per the spec's Assumptions and Risks).
+- [x] Run `cd web && npm test` — must pass, including the new **(post-review)**
+      `o/[org]/queue/page.render.test.ts` regression test, which mocks `$app/navigation` to assert
+      `goto`, not `replaceState`, is called by the filter controls (see the spec's Assumptions).
 - [x] Run `cd web && npm run build` — must succeed.
 - [x] Format and commit: from the repo root,
       `git add web/src/routes/o/\[org\]/queue/+page.svelte` and
