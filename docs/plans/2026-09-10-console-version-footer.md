@@ -8,14 +8,18 @@ page — including the pre-login screens — with no server-side change.
 
 ## Status — 2026-09-10
 
-✅ Shipped in `savvagent/otto-factory#142`.
+✅ Shipped in `savvagent/otto-factory#142`, merged as `4d5cedf`.
 
-During PR review, two follow-up fixes landed on top of this task's steps (both recorded in the
-PR's review discussion, not re-litigated here): `web/src/lib/version.ts`'s doc comment was
-reworded to scope its no-drift claim to the single-image Docker/Fly deploy shape (it does not hold
-under the independent Cloudflare Worker deploy shape in `docs/deploy/cloudflare.md`), and a new
-Rust test, `the_console_and_the_server_agree_on_the_version` in `crates/of-web/tests/console.rs`,
-was added to enforce that agreement rather than only assert it in prose.
+During PR review, two follow-up fixes landed on top of this task's steps, changing the shipped
+result from what the steps below literally show (kept as-written below for the historical record;
+see the corrected code and the added file in the notes at each affected step): the doc comment in
+`web/src/lib/version.ts` was reworded to scope its no-drift claim to the single-image Docker/Fly
+deploy shape (it does not hold under the independent Cloudflare Worker deploy shape in
+`docs/deploy/cloudflare.md`), and a new Rust test, `the_console_and_the_server_agree_on_the_version`
+in `crates/of-web/tests/console.rs`, was added to enforce that agreement rather than only assert it
+in prose. The spec (`docs/specs/2026-09-10-console-version-footer-design.md`) has been updated to
+match what actually shipped; this plan's Task 1 steps below are left as the record of what was
+originally executed.
 
 **Spec:** `docs/specs/2026-09-10-console-version-footer-design.md` — read it first. This plan
 implements it exactly.
@@ -25,11 +29,14 @@ implements it exactly.
 - `web/` conventions: Svelte 5 runes only (`$state`/`$derived`/`$props`/`$effect`), no `export let`,
   no Svelte 4 stores, Tailwind v4, `adapter-static` (no SvelteKit server).
 - No AI self-attribution anywhere (commits, comments, docs).
-- Run `npm run lint` (prettier) before committing; there is no `cargo fmt` equivalent needed since
-  this task touches no Rust code.
+- Run `npm run lint` (prettier) before committing this task's steps as originally scoped, which
+  touch no Rust code. (A PR-review follow-up, noted in Status above, later added one Rust test —
+  `cargo fmt --all` applies to that follow-up commit, not to this task's own steps.)
 - This change touches only `web/` presentational files — no SQL, no MCP tool, no console API route,
   no migration, no config surface. Tenant isolation, metering, and public-interface rules do not
-  apply; no cross-org test and no `of-billing::classify` step are needed.
+  apply; no cross-org test and no `of-billing::classify` step are needed. (The review-added Rust
+  test is a pure assertion over two already-public version strings — it introduces no SQL, no
+  tenant table, and no MCP tool, so none of these rules are newly triggered by it either.)
 - No out-of-band artifact beyond the console bundle itself: no `Dockerfile`/`fly.toml` change, no
   `web/worker/` change, no migration. The console bundle (`npm run build`) is the one out-of-band
   surface this touches, and Phase 5's out-of-band verification covers it explicitly.
@@ -44,6 +51,7 @@ implements it exactly.
 | `web/src/lib/version.ts`          | **Create.** Exports `APP_VERSION`, read from `web/package.json`'s `version` field. |
 | `web/src/lib/version.test.ts`     | **Create.** Unit test: `APP_VERSION` matches `package.json` and looks like SemVer. |
 | `web/src/routes/+layout.svelte`   | **Modify.** Footer: add `v{APP_VERSION}` next to the existing `/docs/api` link.    |
+| `crates/of-web/tests/console.rs`  | **Modify** (PR-review follow-up, not part of this task's original steps). Adds `the_console_and_the_server_agree_on_the_version`, enforcing that `web/package.json`'s version agrees with `CARGO_PKG_VERSION`. |
 
 ## Task Order & Rationale
 
@@ -78,7 +86,9 @@ module consumes it yet. No server interface of any kind is touched.
   ```
 - [x] Run `cd web && npm test -- version` — expect a failure (`version.ts` does not exist yet /
       `Cannot find module './version'`).
-- [x] Create `web/src/lib/version.ts`:
+- [x] Create `web/src/lib/version.ts` (as originally executed — **superseded in review**, see
+      Status above and `docs/specs/2026-09-10-console-version-footer-design.md`'s Implementation
+      section for the doc comment actually shipped):
   ```ts
   import { version } from '../../package.json';
 
@@ -117,7 +127,9 @@ module consumes it yet. No server interface of any kind is touched.
       (gated) — confirm the footer shows `v<version>` matching `web/package.json`'s `version` field
       on both, next to the existing "API reference" link, and that the `/docs/api` link still
       navigates correctly.
-- [x] Format and commit: no Rust changes, so no `cargo fmt`; run `npm run lint` once more as the
-      formatting gate, then
+- [x] Format and commit: this task's own steps touch no Rust, so no `cargo fmt` was needed for
+      them; run `npm run lint` once more as the formatting gate, then
       `git add web/src/lib/version.ts web/src/lib/version.test.ts web/src/routes/+layout.svelte`
       and `git commit -m "web: show the console version in the footer"`.
+      (The PR-review follow-up commit that added `crates/of-web/tests/console.rs`'s new test did
+      run `cargo fmt --all`, per Status above and `Global Constraints`.)

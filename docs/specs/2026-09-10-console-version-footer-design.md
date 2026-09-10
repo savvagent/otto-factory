@@ -1,6 +1,7 @@
 # Console version footer design
 
-> **Status:** IMPLEMENTED — show the running otto-factory version in the console footer
+> **Status:** IMPLEMENTED — shipped in `savvagent/otto-factory#142`, merged as `4d5cedf`, closing
+> `savvagent/otto-factory#83` — show the running otto-factory version in the console footer
 
 ## Scope
 
@@ -57,16 +58,23 @@ one. Three already exist, none of them fit for a console footer:
   fresh deploy.
 
 **Chosen mechanism: none of the above.** `web/package.json`'s `version` is already the documented
-source of truth for "the web half" of the one product version (CLAUDE.md, "Releases & versioning"),
-and the console bundle and the `of-server` binary are built in the same multi-stage `Dockerfile`
-(`console` stage builds `web/`, `build` stage builds the Rust binary, `runtime` stage combines
-both) into one image — so whatever `web/package.json` says when the bundle is built is exactly the
-version the accompanying server binary was built from. Reading it at build time, via TypeScript's
-`resolveJsonModule` (already enabled in `web/tsconfig.json`), needs no server change, no network
-call, and cannot drift from what actually shipped, because they are artifacts of the same build.
-This mirrors the precedent in `docs/specs/2026-09-05-header-logo-design.md`: prefer a presentational,
-build-time answer over a new or repurposed server surface when one is available and provably
-correct for how this product is packaged.
+source of truth for "the web half" of the one product version (CLAUDE.md, "Releases & versioning").
+Reading it at build time, via TypeScript's `resolveJsonModule` (already enabled in
+`web/tsconfig.json`), needs no server change and no network call. This mirrors the precedent in
+`docs/specs/2026-09-05-header-logo-design.md`: prefer a presentational, build-time answer over a
+new or repurposed server surface when one is available.
+
+**Revised during PR review (`savvagent/otto-factory#142`):** the original draft of this section
+claimed the console bundle and the `of-server` binary "cannot drift, because they are artifacts of
+the same build" — true only under the single-image Docker/Fly deploy shape (`Dockerfile` builds
+`web/` and the Rust binary together into one image, per `docs/deploy/fly.md`). It is not true
+under the Cloudflare Worker deploy shape documented in `docs/deploy/cloudflare.md`, where the
+console (`npm run deploy` → `wrangler deploy`) and `of-server` (`flyctl deploy`) ship independently
+on their own cadences — `docs/deploy/cloudflare.md`'s own "What is still open" section names this
+as a real limitation of that shape. The shipped code in `web/src/lib/version.ts` states the
+guarantee accordingly: the displayed version is always the version *the console bundle itself* was
+built from, and is additionally the version the accompanying server was built from only under the
+Docker/Fly shape. See Risks & Open Questions.
 
 ## Assumptions
 
@@ -92,7 +100,8 @@ correct for how this product is packaged.
 
 ## Implementation
 
-**New file** `web/src/lib/version.ts`:
+**New file** `web/src/lib/version.ts` (shown as shipped, after the PR review revision described
+above):
 
 ```ts
 import { version } from '../../package.json';
@@ -101,10 +110,20 @@ import { version } from '../../package.json';
  * The console bundle's own release version.
  *
  * `web/package.json`'s `version` and the workspace crate version move together
- * via release-please (see CLAUDE.md, "Releases & versioning"), and the console
- * bundle and the `of-server` binary are built in the same `Dockerfile` into one
- * image — so this is exactly the version the accompanying server was built
- * from, with no network call and no possibility of drift between the two.
+ * via release-please (see CLAUDE.md, "Releases & versioning"), so this value
+ * with no network call is always the version the console was built from.
+ *
+ * Whether it is also the version the *accompanying server* was built from
+ * depends on the deploy shape. Under the single-image Docker/Fly shape
+ * (`Dockerfile`, `docs/deploy/fly.md`) the console bundle and the `of-server`
+ * binary are built in the same `Dockerfile` from the same source tree, so the
+ * two cannot drift. Under the Cloudflare Worker shape (`docs/deploy/cloudflare.md`)
+ * the console is deployed independently (`npm run deploy`) from `of-server`
+ * (`flyctl deploy`), on its own cadence — `docs/deploy/cloudflare.md`'s own
+ * "What is still open" section notes the Worker's bundle and the image's
+ * bundle can drift because nothing deploys both from one commit. So this is
+ * the version the console was built from, not a guarantee about the origin
+ * it happens to be talking to.
  */
 export const APP_VERSION = version;
 ```
@@ -156,6 +175,14 @@ new, self-contained choice rather than a precedent being followed.)
   `docs/api/page.render.test.ts`, `o/[org]/page.render.test.ts` — mount individual routed pages, not
   the root layout). The unit test on `APP_VERSION` plus the manual check above are the right-sized
   coverage for a static string sourced from a JSON import.
+- **Added during PR review:** `the_console_and_the_server_agree_on_the_version` in
+  `crates/of-web/tests/console.rs`, a plain `#[test]` (no database pool) that `include_str!`s
+  `web/package.json` and asserts its `version` equals `env!("CARGO_PKG_VERSION")` — mirroring
+  `the_console_and_the_server_agree_on_the_locales` in `crates/of-core/src/i18n.rs`. This enforces,
+  under the Docker/Fly build, the one invariant `version.test.ts` alone cannot: not just that
+  `APP_VERSION` matches `web/package.json` (which it always will, since it's read from the same
+  file), but that `web/package.json`'s version actually agrees with the workspace crate version
+  the server was compiled from.
 
 ## Error Handling & Edge Cases
 
@@ -166,4 +193,15 @@ new, self-contained choice rather than a precedent being followed.)
 
 ## Risks & Open Questions
 
-- None outstanding.
+- **Version skew under the Cloudflare Worker deploy shape.** `docs/deploy/cloudflare.md` documents
+  a shape where the console (deployed via `wrangler deploy`) and `of-server` (deployed via
+  `flyctl deploy`) ship independently, on independent cadences, from one commit each but not the
+  same commit as each other. Under that shape the footer's `v<version>` is guaranteed to be the
+  console bundle's own version, but not guaranteed to match the `of-server` instance it happens to
+  be talking to at that moment — a stale Worker deploy would show a version number the origin has
+  since moved past. This is an accepted limitation, not a defect: the alternative (fetching the
+  version from the server at runtime) reintroduces a network round trip on every page load for a
+  value that is fully correct under this deployment's actual primary shape (Fly/Docker, per
+  `docs/deploy/fly.md`) and only ever wrong-in-a-specific-way (stale, not incorrect-about-itself)
+  under the secondary one. `the_console_and_the_server_agree_on_the_version` (see Testing) at least
+  guarantees the two are never wrong *at build time* for whichever shape is being built.
