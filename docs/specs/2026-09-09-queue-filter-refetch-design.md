@@ -1,7 +1,10 @@
 # Queue filter refetch design
 
-> **Status:** DRAFT — fix the queue page's Status/Repo/"only what I queued" filters, which update the
-> URL but never re-fetch or re-render the table
+> **Status:** IMPLEMENTED — shipped in `savvagent/otto-factory#85` (merged as `7dc4243`), closing
+> `savvagent/otto-factory#82`. Selecting a queue-page filter (Status, Repo, Team, "only what I
+> queued") re-fetches the job list immediately instead of only updating the URL. Verified via the
+> merge's own `master` CI run (`34430848210`): all four jobs green, including `deploy` —
+> confirmed live via the auto-deploy pipeline.
 
 ## Premise corrections
 
@@ -34,7 +37,9 @@ comment).
 **In:**
 
 - `web/src/routes/o/[org]/queue/+page.svelte` — the two call sites (`setFilter`, the "Clear filters"
-  button's `onclick`) that currently call `replaceState` from `$app/navigation`.
+  button's `onclick`) that currently call `replaceState` from `$app/navigation`, consolidated
+  behind a shared `applyFilters` helper that also routes a rejected navigation into the page's
+  existing `error`/`Alert` path (added during review, see Root cause).
 
 **Out:**
 
@@ -78,12 +83,22 @@ recompute, so the effect never re-runs and no second request is ever sent. The a
 behavior), which is what makes the bug easy to miss by eye — everything *looks* like it responded
 except the one thing that matters.
 
-The fix is `goto` from the same module, with `replaceState: true`:
+The fix is `goto` from the same module, with `replaceState: true`, routed through a single
+`applyFilters` helper both call sites share:
 
-```js
-import { goto } from '$app/navigation';
-...
-void goto(url, { replaceState: true, keepFocus: true, noScroll: true });
+```ts
+function applyFilters(url: URL | string) {
+  void goto(url, { replaceState: true, keepFocus: true, noScroll: true }).catch((e: unknown) => {
+    error = messageFor(e, m.queue_load_failed());
+  });
+}
+
+function setFilter(key: string, value: string | undefined) {
+  const url = new URL(page.url);
+  if (value === undefined || value === '') url.searchParams.delete(key);
+  else url.searchParams.set(key, value);
+  applyFilters(url);
+}
 ```
 
 `goto` performs an actual (client-side) navigation — which is what updates `page.url` — while
@@ -93,10 +108,18 @@ one. `keepFocus: true` avoids moving focus away from the control the reader just
 or the checkbox), and `noScroll: true` avoids SvelteKit's default post-navigation scroll-to-top,
 since this is a same-page, same-scroll-position update.
 
-Both call sites get this identical transformation: `setFilter` (line 109) and the "Clear filters"
-button's `onclick` (line 192), which currently builds its own bare `replaceState(new URL(...),
-page.state)` call. Neither is the fix on its own — leaving either as `replaceState` leaves that path
-silently broken while the other appears to work.
+The `.catch()` is not incidental. A security review of the original PR caught that a rejected
+`goto` — the origin check `goto` runs internally, or a chunk-load failure — would otherwise vanish
+silently, reproducing this exact bug's symptom: a filter that looks like it did something (the
+control's own DOM state changes) but changed nothing, with no error shown. Routing the rejection
+into the same `error`/`Alert` path the job-fetching `$effect` already uses closes that gap instead
+of leaving a second, narrower way back into the original defect.
+
+Both call sites go through `applyFilters`: `setFilter`, and the "Clear filters" button's `onclick`,
+which now calls `applyFilters(page.url.pathname)` — a bare path, not a `new URL(page.url.pathname,
+location.origin)` construction, since `goto` accepts a string directly. Neither call site
+duplicates the `goto`/`catch` logic; both funnel through the one helper, so a future
+error-handling fix only has one place to land.
 
 ## Assumptions
 
@@ -149,9 +172,10 @@ silently broken while the other appears to work.
   the "Clear filters" button (a `$derived` off the same state) never appeared. A hard navigation to
   `.../queue?status=pending` filtered correctly, isolating the defect to the client-side update path.
   Same result for Repo and "only what I queued."
-- Post-fix: repeat the same manual sequence (Status, Repo, "only what I queued", then "Clear
-  filters") against the same seeded data and confirm the table narrows/restores each time with no
-  reload, and that `window.history.length` does not grow per filter change.
+- Post-fix: repeated the same manual sequence (Status, Repo, "only what I queued", then "Clear
+  filters") against the same seeded data. The table narrowed or restored immediately each time,
+  with no reload, and `window.history.length` stayed constant across the sequence rather than
+  growing per filter change — see the plan's Manual verification record for the exact run.
 - `npm run check`, `npm run lint`, `npm test`, `npm run build` all pass.
 
 ## Risks & Open Questions
@@ -165,4 +189,5 @@ silently broken while the other appears to work.
   at the call site remains as a second line of defense for the part no test covers.
 - A future adoption of `Poller` (`web/src/lib/poll.svelte.ts`) on this page would need to key its
   restart on the four filter values (`status`, `repo`, `team`, `mine`), not just the org — a known
-  follow-up concern raised in review, noted here rather than left to be rediscovered.
+  follow-up concern raised in review, noted here rather than left to be rediscovered. Tracked as
+  `savvagent/otto-factory#92`.
