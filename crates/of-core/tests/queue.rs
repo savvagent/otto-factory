@@ -1315,3 +1315,100 @@ async fn add_job_rejects_an_empty_or_over_length_idempotency_key(pool: PgPool) {
     assert_eq!(err.code(), "invalid_argument");
     tx.rollback().await.unwrap();
 }
+
+#[sqlx::test]
+async fn send_message_replays_with_the_same_idempotency_key(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let new = NewMessage {
+        body: "hand-off note".into(),
+        idempotency_key: Some("k1".into()),
+        ..Default::default()
+    };
+    let first = tx.send_message(t.user, new.clone()).await.unwrap();
+    let second = tx.send_message(t.user, new).await.unwrap();
+    tx.commit().await.unwrap();
+
+    assert_eq!(first.id, second.id);
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let msgs = tx
+        .inbox(
+            t.user,
+            &InboxQuery {
+                unread_only: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(msgs.len(), 1, "a replay must not create a second row");
+}
+
+#[sqlx::test]
+async fn send_message_with_a_reused_key_and_a_different_payload_conflicts(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    tx.send_message(
+        t.user,
+        NewMessage {
+            body: "first note".into(),
+            idempotency_key: Some("k1".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let err = tx
+        .send_message(
+            t.user,
+            NewMessage {
+                body: "a totally different note".into(),
+                idempotency_key: Some("k1".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    tx.rollback().await.unwrap();
+    assert_eq!(err.code(), "idempotency_key_conflict");
+}
+
+#[sqlx::test]
+async fn send_message_without_a_key_always_creates_a_new_message(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let a = tx
+        .send_message(
+            t.user,
+            NewMessage {
+                body: "same body".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let b = tx
+        .send_message(
+            t.user,
+            NewMessage {
+                body: "same body".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    assert_ne!(
+        a.id, b.id,
+        "omitting the key must reproduce today's behavior"
+    );
+}
