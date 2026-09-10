@@ -277,14 +277,22 @@ pub fn client_ip(parts: &http::request::Parts, config: &Config) -> Option<String
             // The left-most entry is the original client; everything after it
             // was appended by intermediaries. A single-address header like
             // `Fly-Client-IP` has no comma and falls through this unchanged.
-            if let Some(first) = value
+            //
+            // The header is caller-influenced whenever a misconfigured proxy
+            // appends rather than overwrites it, so the value is parsed as an
+            // `IpAddr` rather than stored verbatim — an unparseable value is
+            // treated the same as a missing one, falling through to
+            // `ConnectInfo` rather than letting an attacker put an arbitrary,
+            // unbounded string into the audit trail.
+            if let Some(ip) = value
                 .to_str()
                 .ok()
                 .and_then(|v| v.split(',').next())
                 .map(str::trim)
                 .filter(|v| !v.is_empty())
+                .and_then(|v| v.parse::<std::net::IpAddr>().ok())
             {
-                return Some(first.to_string());
+                return Some(ip.to_string());
             }
         }
     }
@@ -375,6 +383,40 @@ mod tests {
             None
         );
         assert_eq!(client_ip(&parts(&[]), &config), None);
+    }
+
+    #[test]
+    fn an_unparseable_header_value_is_not_stored() {
+        let mut config = config();
+        config.client_ip_header = Some("x-forwarded-for".into());
+
+        // A misconfigured proxy that appends rather than overwrites the
+        // header leaves the left-most entry caller-chosen. Garbage there
+        // must never reach the audit trail as an unbounded string.
+        assert_eq!(
+            client_ip(
+                &parts(&[("x-forwarded-for", "'; DROP TABLE audit_events; --")]),
+                &config
+            ),
+            None
+        );
+
+        // It falls through to the real connection's address, the same as a
+        // missing or empty header does, rather than trusting nothing at all.
+        let mut request = http::Request::builder()
+            .header("x-forwarded-for", "not-an-ip")
+            .body(())
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                [198, 51, 100, 7],
+                443,
+            ))));
+        assert_eq!(
+            client_ip(&request.into_parts().0, &config),
+            Some("198.51.100.7".into())
+        );
     }
 
     #[test]

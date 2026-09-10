@@ -1,0 +1,19 @@
+-- Adds 'cancelled' to job_status: a terminal state reached either directly
+-- from 'pending' (request_cancel finalizes immediately, since there is no
+-- holder to notify) or from 'in-progress'/'active' via cancel_job, once the
+-- holder that received the request actually stops. Additive only —
+-- 0003_jobs.sql is never edited; enum values can only be appended, and
+-- ordering here does not matter because nothing compares job_status by its
+-- enum ordinal.
+--
+-- This is its own migration file, kept separate from 0024's column changes as
+-- its own concern (a new enum value vs. plain columns), following the pattern
+-- 0016/0017 established for 'active'. Note that pattern's actual necessity —
+-- Postgres refuses to let a new enum value be *used*, even as a string
+-- literal, in the same transaction that added it ("unsafe use of new value
+-- ... New enum values must be committed before they can be used") — does not
+-- itself force the split here: unlike 0017, which does reference 'active' in
+-- an index WHERE clause, 0024 never references the 'cancelled' literal. The
+-- Postgres fact is real and worth knowing; it just is not why *this* pair had
+-- to be two files.
+ALTER TYPE job_status ADD VALUE 'cancelled';

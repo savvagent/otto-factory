@@ -6,6 +6,7 @@
   import { m } from '$lib/paraglide/messages';
   import { useOrg } from '$lib/org.svelte';
   import { absolute, relative } from '$lib/format';
+  import { isClaimStranded } from '$lib/jobs';
   import type { JobDetail, Repo } from '$lib/types';
   import Alert from '$lib/components/Alert.svelte';
   import Card from '$lib/components/Card.svelte';
@@ -91,6 +92,12 @@
         <StatusPill status={job.status} />
       </div>
       <p class="of-mono mt-1 text-xs text-faint">{job.id}</p>
+      {#if (job.status === 'in-progress' || job.status === 'active') && job.cancelRequestedAt}
+        <p class="mt-1 text-xs font-medium text-bad">{m.job_cancellation_requested()}</p>
+      {/if}
+      {#if isClaimStranded(job)}
+        <p class="mt-1 text-xs font-medium text-bad">{m.job_claim_stranded()}</p>
+      {/if}
     </div>
 
     {#if job.description}
@@ -99,7 +106,7 @@
       </Card>
     {/if}
 
-    {#if job.status === 'failed' && job.error}
+    {#if (job.status === 'failed' || job.status === 'cancelled') && job.error}
       <Alert>{job.error}</Alert>
     {/if}
 
@@ -154,6 +161,12 @@
           <dt class="of-label">{m.job_field_attempts()}</dt>
           <dd class="text-muted">{job.attempts}</dd>
         </div>
+        {#if job.cancelReason}
+          <div>
+            <dt class="of-label">{m.job_cancellation_requested()}</dt>
+            <dd class="text-muted">{job.cancelReason}</dd>
+          </div>
+        {/if}
       </dl>
     </Card>
 

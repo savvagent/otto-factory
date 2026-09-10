@@ -89,9 +89,17 @@ async fn register_new(db: &Db, auth: &mut WebauthnAuthenticator<SoftToken>) -> U
             for_soft_token(ceremony.challenge),
         )
         .expect("the authenticator refused the registration challenge");
-    passkeys::finish_registration(db, &webauthn, ceremony.id, &credential, Some("laptop"))
-        .await
-        .unwrap()
+    passkeys::finish_registration(
+        db,
+        &webauthn,
+        ceremony.id,
+        &credential,
+        Some("laptop"),
+        passkeys::RegistrationVia::Signup,
+        None,
+    )
+    .await
+    .unwrap()
 }
 
 /// The credential IDs an account holds, for `offer`.
@@ -169,10 +177,17 @@ async fn a_second_passkey_also_opens_the_account(pool: PgPool) {
             for_soft_token(ceremony.challenge),
         )
         .unwrap();
-    let same =
-        passkeys::finish_registration(&db, &webauthn, ceremony.id, &credential, Some("phone"))
-            .await
-            .unwrap();
+    let same = passkeys::finish_registration(
+        &db,
+        &webauthn,
+        ceremony.id,
+        &credential,
+        Some("phone"),
+        passkeys::RegistrationVia::Add,
+        None,
+    )
+    .await
+    .unwrap();
     assert_eq!(same, user);
     assert_eq!(passkeys::count(&db, user).await.unwrap(), 2);
 
@@ -299,7 +314,7 @@ async fn the_last_passkey_cannot_be_removed(pool: PgPool) {
     assert_eq!(keys.len(), 1);
     assert_eq!(keys[0].nickname.as_deref(), Some("laptop"));
 
-    let refused = passkeys::remove(&db, user, keys[0].id).await;
+    let refused = passkeys::remove(&db, user, keys[0].id, None).await;
     assert!(refused.is_err(), "the only passkey was removed");
     assert_eq!(passkeys::count(&db, user).await.unwrap(), 1);
 }
@@ -339,7 +354,7 @@ async fn clearing_passkeys_leaves_no_way_in(pool: PgPool) {
     let user = register_new(&db, &mut auth).await;
     let ids = credential_ids(&db, user).await;
 
-    let removed = passkeys::clear(&db, user, None).await.unwrap();
+    let removed = passkeys::clear(&db, user, user, None).await.unwrap();
     assert_eq!(removed, 1);
     assert!(!passkeys::has_credential(&db, user).await.unwrap());
 
@@ -362,6 +377,191 @@ async fn login_failures(db: &Db, user: UserId) -> i64 {
         .fetch_one(db.pool())
         .await
         .unwrap()
+}
+
+/// How many rows this account has under a given action. Parameterized so both
+/// the registration and clear paths can share one helper (#76).
+async fn action_count(db: &Db, action: &str, user: UserId) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM audit_events WHERE action = $1 AND actor_user_id = $2")
+        .bind(action)
+        .bind(user)
+        .fetch_one(db.pool())
+        .await
+        .unwrap()
+}
+
+// --------------------------------------- passkey.* audit actions, not totp.* (#76)
+
+/// Registration writes the new `auth.passkey.registered` action, never the old
+/// `auth.totp.enrolled` one TOTP left behind.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn registration_writes_the_passkey_registered_action(pool: PgPool) {
+    let db = Db::from_pool(pool);
+    let mut auth = authenticator();
+    let user = register_new(&db, &mut auth).await;
+
+    assert_eq!(
+        action_count(&db, of_core::audit::action::PASSKEY_REGISTERED, user).await,
+        1,
+        "registration must write auth.passkey.registered"
+    );
+    assert_eq!(
+        action_count(&db, of_core::audit::action::TOTP_ENROLLED, user).await,
+        0,
+        "registration must not write the historical TOTP action"
+    );
+}
+
+/// The claim path's row is the one that matters most: it is what proves who
+/// actually walked through the door after an admin-assisted reset (#88).
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn registration_records_which_flow_wrote_it(pool: PgPool) {
+    let db = Db::from_pool(pool);
+    let webauthn = rp();
+    let mut auth = authenticator();
+    let user = register_new(&db, &mut auth).await;
+
+    let ceremony = passkeys::start_registration(&db, &webauthn, Some(user))
+        .await
+        .unwrap();
+    let credential = auth
+        .do_registration(
+            Url::parse(ORIGIN).unwrap(),
+            for_soft_token(ceremony.challenge),
+        )
+        .expect("the authenticator refused the registration challenge");
+    passkeys::finish_registration(
+        &db,
+        &webauthn,
+        ceremony.id,
+        &credential,
+        None,
+        passkeys::RegistrationVia::Claim,
+        Some("203.0.113.7"),
+    )
+    .await
+    .unwrap();
+
+    // One query for both columns, ordered by `id` rather than `created_at` —
+    // `created_at` defaults to the transaction's start time and can tie, and
+    // `of_core::audit`'s own reader already orders by `created_at DESC, id
+    // DESC` for exactly that reason. Two separate queries could in principle
+    // disagree about which row is "latest"; one query cannot.
+    let row: (serde_json::Value, Option<String>) = sqlx::query_as(
+        "SELECT detail->'via', ip FROM audit_events \
+         WHERE action = $1 AND actor_user_id = $2 \
+         ORDER BY id DESC LIMIT 1",
+    )
+    .bind(of_core::audit::action::PASSKEY_REGISTERED)
+    .bind(user)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(row.0, serde_json::json!("claim"));
+    assert_eq!(row.1.as_deref(), Some("203.0.113.7"));
+}
+
+/// Clearing writes the new `auth.passkey.cleared` action, never the old
+/// `auth.totp.reset` one TOTP left behind.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn clearing_writes_the_passkey_cleared_action(pool: PgPool) {
+    let db = Db::from_pool(pool);
+    let mut auth = authenticator();
+    let user = register_new(&db, &mut auth).await;
+
+    passkeys::clear(&db, user, user, None).await.unwrap();
+
+    assert_eq!(
+        action_count(&db, of_core::audit::action::PASSKEY_CLEARED, user).await,
+        1,
+        "clearing must write auth.passkey.cleared"
+    );
+    assert_eq!(
+        action_count(&db, of_core::audit::action::TOTP_RESET, user).await,
+        0,
+        "clearing must not write the historical TOTP action"
+    );
+}
+
+/// Removing a key (never the last) writes `auth.passkey.removed`. Evicting the
+/// legitimate owner's key is the standard persistence step after a session
+/// takeover, so this must be visible in the trail (#89).
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn removing_a_passkey_writes_the_passkey_removed_action(pool: PgPool) {
+    let db = Db::from_pool(pool);
+    let mut first = authenticator();
+    let user = register_new(&db, &mut first).await;
+
+    let webauthn = rp();
+    let mut second = authenticator();
+    let ceremony = passkeys::start_registration(&db, &webauthn, Some(user))
+        .await
+        .unwrap();
+    let credential = second
+        .do_registration(
+            Url::parse(ORIGIN).unwrap(),
+            for_soft_token(ceremony.challenge),
+        )
+        .unwrap();
+    passkeys::finish_registration(&db, &webauthn, ceremony.id, &credential, Some("phone"))
+        .await
+        .unwrap();
+
+    let keys = passkeys::list(&db, user).await.unwrap();
+    assert_eq!(keys.len(), 2);
+    passkeys::remove(&db, user, keys[0].id, Some("203.0.113.9"))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        action_count(&db, of_core::audit::action::PASSKEY_REMOVED, user).await,
+        1,
+        "removing a key must write auth.passkey.removed"
+    );
+}
+
+/// Renaming a key writes `auth.passkey.renamed`.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn renaming_a_passkey_writes_the_passkey_renamed_action(pool: PgPool) {
+    let db = Db::from_pool(pool);
+    let mut auth = authenticator();
+    let user = register_new(&db, &mut auth).await;
+    let keys = passkeys::list(&db, user).await.unwrap();
+
+    passkeys::rename(&db, user, keys[0].id, "renamed laptop", None)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        action_count(&db, of_core::audit::action::PASSKEY_RENAMED, user).await,
+        1,
+        "renaming a key must write auth.passkey.renamed"
+    );
+}
+
+/// A corrupted stored credential must not change `finish_authentication`'s
+/// outcome — it is dropped and logged, and the account still falls through to
+/// `InvalidCredentials` via the existing `keys.is_empty()` branch rather than a
+/// panic or a different error. This is the regression the deserialize-logging
+/// rewrite is most likely to introduce if the match arms are transposed.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_corrupted_stored_credential_is_dropped_not_fatal(pool: PgPool) {
+    let db = Db::from_pool(pool);
+    let mut auth = authenticator();
+    let user = register_new(&db, &mut auth).await;
+    let ids = credential_ids(&db, user).await;
+
+    sqlx::query("UPDATE passkeys SET credential = $1 WHERE user_id = $2")
+        .bind(serde_json::json!({"garbage": true}))
+        .bind(user)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+    match sign_in(&db, &mut auth, &ids[0]).await {
+        Err(AuthError::InvalidCredentials) => {}
+        other => panic!("a corrupted stored credential answered {other:?}"),
+    }
 }
 
 /// A credential this server has never stored answers `unknown_credential`, and
@@ -448,7 +648,7 @@ async fn a_cleared_accounts_old_credential_is_unknown_and_unattributed(pool: PgP
     let user = register_new(&db, &mut auth).await;
     let ids = credential_ids(&db, user).await;
 
-    passkeys::clear(&db, user, None).await.unwrap();
+    passkeys::clear(&db, user, user, None).await.unwrap();
 
     match sign_in(&db, &mut auth, &ids[0]).await {
         Err(AuthError::UnknownCredential) => {}
@@ -545,9 +745,17 @@ async fn a_second_key_on_one_account_is_named_like_the_first(pool: PgPool) {
     let credential = auth
         .do_registration(Url::parse(ORIGIN).unwrap(), for_soft_token(first.challenge))
         .unwrap();
-    let user = passkeys::finish_registration(&db, &webauthn, first.id, &credential, None)
-        .await
-        .unwrap();
+    let user = passkeys::finish_registration(
+        &db,
+        &webauthn,
+        first.id,
+        &credential,
+        None,
+        passkeys::RegistrationVia::Signup,
+        None,
+    )
+    .await
+    .unwrap();
 
     let second = passkeys::start_registration(&db, &webauthn, Some(user))
         .await

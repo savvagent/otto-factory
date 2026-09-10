@@ -514,12 +514,12 @@ fn entity_schemas() -> Value {
             "type": "object",
             "properties": {
                 "userId": uuid,
-                "email": { "type": "string" },
+                "email": { "type": ["string", "null"] },
                 "name": { "type": ["string", "null"] },
                 "label": { "type": "string", "examples": ["brisk-harbor-42"] },
                 "joinedAt": timestamp,
             },
-            "required": ["userId", "email", "label", "joinedAt"],
+            "required": ["userId", "label", "joinedAt"],
         },
         "TeamMemberList": { "type": "array", "items": reference("TeamMember") },
         "Repo": repo,
@@ -529,13 +529,14 @@ fn entity_schemas() -> Value {
         "Lease": {
             "type": "object",
             "description":
-                "An advisory, time-bounded claim on one branch of one repo. The server \
-                 cannot enforce it against a git operation it cannot see; it makes \
+                "An advisory, time-bounded claim on one resource of one repo — a \
+                 branch, or anything else a team needs to serialize on. The server \
+                 cannot enforce it against an operation it cannot see; it makes \
                  collisions visible rather than impossible.",
             "properties": {
                 "id": uuid,
                 "repoId": uuid,
-                "branch": { "type": "string" },
+                "resource": { "type": "string" },
                 "holderUserId": uuid,
                 "holderLabel": { "type": ["string", "null"] },
                 "jobId": { "type": ["string", "null"] },
@@ -543,7 +544,7 @@ fn entity_schemas() -> Value {
                 "renewedAt": timestamp,
                 "expiresAt": timestamp,
             },
-            "required": ["id", "repoId", "branch", "holderUserId", "expiresAt"],
+            "required": ["id", "repoId", "resource", "holderUserId", "expiresAt"],
         },
         "LeaseList": { "type": "array", "items": reference("Lease") },
         "Session": {
@@ -653,7 +654,9 @@ fn queue_schemas() -> Value {
                 "description": { "type": ["string", "null"] },
                 "status": {
                     "type": "string",
-                    "enum": ["pending", "in-progress", "active", "completed", "failed"],
+                    "enum": [
+                        "pending", "in-progress", "active", "completed", "failed", "cancelled",
+                    ],
                 },
                 "ticketRef": { "type": ["string", "null"], "examples": ["ACME-17"] },
                 "tracker": { "type": ["string", "null"], "enum": ["jira", "github", null] },
@@ -673,6 +676,10 @@ fn queue_schemas() -> Value {
                 "createdBy": { "type": ["string", "null"], "format": "uuid" },
                 "claimedBy": { "type": ["string", "null"], "format": "uuid" },
                 "claimedByLabel": { "type": ["string", "null"] },
+                "claimExpiresAt": { "type": ["string", "null"], "format": "date-time" },
+                "cancelRequestedAt": { "type": ["string", "null"], "format": "date-time" },
+                "cancelRequestedBy": { "type": ["string", "null"], "format": "uuid" },
+                "cancelReason": { "type": ["string", "null"] },
             },
             "required": ["id", "orgId", "repoId", "title", "status", "createdAt", "attempts"],
         },
@@ -706,11 +713,13 @@ fn queue_schemas() -> Value {
                 "active": { "type": "integer" },
                 "completed": { "type": "integer" },
                 "failed": { "type": "integer" },
+                "cancelled": { "type": "integer" },
                 "blocked": { "type": "integer" },
                 "total": { "type": "integer" },
             },
             "required": [
-                "pending", "inProgress", "active", "completed", "failed", "blocked", "total",
+                "pending", "inProgress", "active", "completed", "failed", "cancelled", "blocked",
+                "total",
             ],
         },
     })
@@ -755,19 +764,6 @@ fn response_schemas() -> Value {
                 "shouldAddPasskey": { "type": "boolean" },
             },
             "required": ["user", "shouldAddPasskey"],
-        },
-        "Enrollment": {
-            "type": "object",
-            "description": "Shown exactly once. Only hashes are stored.",
-            "properties": {
-                "provisioningUri": {
-                    "type": "string",
-                    "description": "otpauth:// URI — render as a QR code.",
-                },
-                "manualKey": { "type": "string" },
-                "recoveryCodes": { "type": "array", "items": { "type": "string" } },
-            },
-            "required": ["provisioningUri", "manualKey", "recoveryCodes"],
         },
         "WebauthnConfig": {
             "type": "object",
@@ -881,14 +877,6 @@ fn request_schemas() -> Value {
     };
 
     json!({
-        "SignupRequest": {
-            "type": "object",
-            "properties": {
-                "email": { "type": "string", "format": "email" },
-                "name": { "type": ["string", "null"] },
-            },
-            "required": ["email"],
-        },
         "FinishRegistration": {
             "type": "object",
             "properties": {
@@ -940,19 +928,6 @@ fn request_schemas() -> Value {
             "type": "object",
             "properties": { "nickname": { "type": "string" } },
             "required": ["nickname"],
-        },
-        "LoginRequest": {
-            "type": "object",
-            "properties": {
-                "email": { "type": "string", "format": "email" },
-                "code": { "type": "string" },
-            },
-            "required": ["email", "code"],
-        },
-        "ConfirmTotpRequest": {
-            "type": "object",
-            "properties": { "code": { "type": "string" } },
-            "required": ["code"],
         },
         "CreateOrgRequest": {
             "type": "object",
@@ -1074,6 +1049,31 @@ mod tests {
         }
     }
 
+    /// The inverse of the drift test above. `Enrollment`, `SignupRequest`,
+    /// `LoginRequest` and `ConfirmTotpRequest` all outlived the TOTP-era
+    /// flows that returned or took them, as dead documentation nothing
+    /// caught — a hand-maintained document has no compiler to notice an
+    /// endpoint stopped existing. A schema no `$ref` anywhere in the
+    /// document names is exactly that: describing a shape the server no
+    /// longer sends or accepts.
+    #[test]
+    fn every_defined_schema_is_referenced() {
+        let doc = doc();
+        let schemas = doc["components"]["schemas"].as_object().unwrap();
+
+        let mut refs = Vec::new();
+        collect_refs(&doc, &mut refs);
+        let refs: std::collections::HashSet<_> = refs.into_iter().collect();
+
+        for name in schemas.keys() {
+            assert!(
+                refs.contains(name),
+                "components/schemas/{name} is defined but nothing $refs it \
+                 anywhere in the document"
+            );
+        }
+    }
+
     fn collect_refs(value: &Value, out: &mut Vec<String>) {
         match value {
             Value::Object(map) => {
@@ -1123,6 +1123,54 @@ mod tests {
         assert!(
             stats_required.iter().any(|v| v == "active"),
             "QueueStats.required is missing \"active\": {stats_required:?}"
+        );
+    }
+
+    /// This is a hand-maintained JSON literal, not generated from
+    /// `of_core::jobs::Status`/`Job`/`Stats` — nothing else catches it drifting
+    /// out of sync with a status or field the server actually returns.
+    #[test]
+    fn the_job_schema_and_queue_stats_know_about_cancelled() {
+        let doc = doc();
+        let schemas = &doc["components"]["schemas"];
+
+        let status_enum = schemas["Job"]["properties"]["status"]["enum"]
+            .as_array()
+            .expect("Job.status has no enum array");
+        assert!(
+            status_enum.iter().any(|v| v == "cancelled"),
+            "Job.status.enum is missing \"cancelled\": {status_enum:?}"
+        );
+
+        let job_props = schemas["Job"]["properties"]
+            .as_object()
+            .expect("Job has no properties object");
+        for field in [
+            "cancelRequestedAt",
+            "cancelRequestedBy",
+            "cancelReason",
+            "claimExpiresAt",
+        ] {
+            assert!(
+                job_props.contains_key(field),
+                "Job.properties is missing {field:?}"
+            );
+        }
+
+        let stats_props = schemas["QueueStats"]["properties"]
+            .as_object()
+            .expect("QueueStats has no properties object");
+        assert!(
+            stats_props.contains_key("cancelled"),
+            "QueueStats.properties is missing \"cancelled\""
+        );
+
+        let stats_required = schemas["QueueStats"]["required"]
+            .as_array()
+            .expect("QueueStats has no required array");
+        assert!(
+            stats_required.iter().any(|v| v == "cancelled"),
+            "QueueStats.required is missing \"cancelled\": {stats_required:?}"
         );
     }
 
@@ -1261,6 +1309,32 @@ mod tests {
                 .get("security")
                 .is_none(),
             "a public endpoint must not require a session"
+        );
+    }
+
+    /// This schema is hand-written, not derived from `of_core::leases::Lease`,
+    /// so a field rename on the Rust side has no compiler to catch it here —
+    /// this test is the only thing that would have caught `Lease.branch`
+    /// surviving in the published document after the struct's field was
+    /// renamed to `resource`.
+    #[test]
+    fn the_lease_schema_matches_the_wire_field_it_actually_returns() {
+        let doc = doc();
+        let lease = &doc["components"]["schemas"]["Lease"];
+        assert!(
+            lease["properties"]["resource"].is_object(),
+            "Lease schema is missing a resource property: {lease}"
+        );
+        assert!(
+            lease["properties"].get("branch").is_none(),
+            "Lease schema still advertises the retired branch field: {lease}"
+        );
+        assert!(
+            lease["required"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("resource")),
+            "resource is required on every Lease this route returns: {lease}"
         );
     }
 

@@ -10,7 +10,10 @@
 mod common;
 
 use base64::Engine;
-use common::{add_member, harness, harness_with_trackers, onboard, org_with_owner, sign_in, Call};
+use common::{
+    add_member, harness, harness_behind_proxy, harness_with_trackers, onboard, org_with_owner,
+    present_credential, sign_in, unregistered_credential, Call, CLIENT_IP_HEADER,
+};
 use http::StatusCode;
 use of_core::orgs::Role;
 use sqlx::PgPool;
@@ -126,6 +129,176 @@ async fn signing_out_everywhere_ends_every_session(pool: PgPool) {
     }
 }
 
+// ---------------------------------------------------- login/finish throttle
+
+/// The whole point of #75: a source address shared by many honest sign-ins
+/// must be throttled, never locked out. `LOGIN_IP_CAP.hard_cap` is generous
+/// (50, against the lockout's `MAX_FAILURES` of 5) specifically so a realistic
+/// shared-address failure burst never gets near it; this drives failures from
+/// several distinct unregistered credentials — staying under each one's own,
+/// much tighter, credential cap — so the address bucket alone is what is under
+/// test.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_shared_address_is_throttled_not_locked_out(pool: PgPool) {
+    let h = harness_behind_proxy(pool);
+    let office = "198.51.100.4";
+
+    let per_credential = (of_auth::ratelimit::LOGIN_CRED_CAP.hard_cap - 1) as usize;
+    let needed = of_auth::ratelimit::LOGIN_IP_CAP.hard_cap as usize;
+    let mut sent = 0usize;
+
+    'outer: loop {
+        let (mut stranger, unknown) = unregistered_credential(&h).await;
+        for attempt in 0..per_credential {
+            if sent >= needed {
+                break 'outer;
+            }
+            let reply = present_credential(&h, &mut stranger, &unknown, Some(office)).await;
+            assert_eq!(
+                reply.error_code(),
+                Some("unknown_credential"),
+                "attempt {sent} (credential attempt {attempt}) should still be answered — \
+                 far more than the old lockout's 5-failure threshold has landed"
+            );
+            sent += 1;
+        }
+    }
+
+    // Past the address cap, a brand-new credential from the same office is
+    // refused before any credential work runs — the address itself is what
+    // is throttled, independent of which credential is being tried.
+    let (mut stranger, unknown) = unregistered_credential(&h).await;
+    let refused = present_credential(&h, &mut stranger, &unknown, Some(office)).await;
+    refused.expect(StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(refused.error_code(), Some("rate_limited"));
+    let retry_after: i64 = refused
+        .headers
+        .get(http::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse().ok())
+        .expect("a rate-limited reply must carry Retry-After");
+
+    // Keep flooding and confirm the wait never grows — a lockout would double
+    // it on every further failure; a cap holds it flat at the window length.
+    for round in 1..=5 {
+        let (mut stranger, unknown) = unregistered_credential(&h).await;
+        let refused = present_credential(&h, &mut stranger, &unknown, Some(office)).await;
+        refused.expect(StatusCode::TOO_MANY_REQUESTS);
+        let again: i64 = refused
+            .headers
+            .get(http::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse().ok())
+            .unwrap();
+        assert_eq!(
+            again, retry_after,
+            "round {round}: retry-after must stay flat, never escalate like the lockout does"
+        );
+    }
+
+    // A different address is unaffected: the bucket is keyed on the source,
+    // not shared globally.
+    let elsewhere = "203.0.113.44";
+    let (mut stranger, unknown) = unregistered_credential(&h).await;
+    let reply = present_credential(&h, &mut stranger, &unknown, Some(elsewhere)).await;
+    assert_eq!(reply.error_code(), Some("unknown_credential"));
+}
+
+/// The credential-keyed bucket (#75): probing repeats against *one specific*
+/// credential id is capped far tighter than the address bucket, and
+/// independently of it — a brand new credential from the very same address
+/// that just tripped the credential cap is still answered.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn probing_one_credential_is_capped_independently_of_the_address(pool: PgPool) {
+    let h = harness_behind_proxy(pool);
+    let (mut stranger, credential_id) = unregistered_credential(&h).await;
+    let prober = "203.0.113.7";
+
+    for attempt in 1..=of_auth::ratelimit::LOGIN_CRED_CAP.hard_cap {
+        let reply = present_credential(&h, &mut stranger, &credential_id, Some(prober)).await;
+        assert_eq!(
+            reply.error_code(),
+            Some("unknown_credential"),
+            "attempt {attempt} against this id should still be answered"
+        );
+    }
+
+    let refused = present_credential(&h, &mut stranger, &credential_id, Some(prober)).await;
+    refused.expect(StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(refused.error_code(), Some("rate_limited"));
+
+    // A different credential id, same address: unaffected. The credential cap
+    // bounds repetition against one id, not every id one address tries.
+    let (mut other, other_id) = unregistered_credential(&h).await;
+    let reply = present_credential(&h, &mut other, &other_id, Some(prober)).await;
+    assert_eq!(reply.error_code(), Some("unknown_credential"));
+
+    // Signing up from the same address is also unaffected: a different
+    // surface, a different bucket.
+    Call::post("/api/auth/signup/start")
+        .header(CLIENT_IP_HEADER, prober)
+        .send(&h.router)
+        .await
+        .expect(StatusCode::OK);
+}
+
+/// `CeremonyExpired` must never count against either bucket (#75): replaying a
+/// ceremony that has already been consumed — exactly what an abandoned tab
+/// looks like from the server's side — must keep answering `ceremony_expired`
+/// no matter how many times it is retried, never `rate_limited`.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn ceremony_expired_is_never_charged_against_any_bucket(pool: PgPool) {
+    let h = harness_behind_proxy(pool);
+    let mut rob = onboard(&h, "rob@acme.test").await;
+    let prober = "203.0.113.9";
+
+    let started = Call::post("/api/auth/login/start").send(&h.router).await;
+    started.expect(StatusCode::OK);
+    let ceremony_id = started.body["ceremonyId"].as_str().unwrap().to_string();
+
+    let mut challenge_value = started.body["challenge"].clone();
+    challenge_value["publicKey"]["allowCredentials"] = serde_json::json!([
+        { "type": "public-key", "id": rob.credential_id }
+    ]);
+    let challenge: webauthn_rs::prelude::RequestChallengeResponse =
+        serde_json::from_value(challenge_value).unwrap();
+
+    let credential = rob
+        .auth
+        .do_authentication(
+            webauthn_rs::prelude::Url::parse(common::PUBLIC_URL).unwrap(),
+            challenge,
+        )
+        .expect("the authenticator refused the sign-in challenge");
+
+    let body = serde_json::json!({ "ceremonyId": ceremony_id, "credential": credential });
+
+    // The first presentation succeeds and consumes the ceremony.
+    Call::post("/api/auth/login/finish")
+        .header(CLIENT_IP_HEADER, prober)
+        .json(body.clone())
+        .send(&h.router)
+        .await
+        .expect(StatusCode::OK);
+
+    // Every further presentation of that same, now-consumed ceremony id must
+    // report it as expired — well past the credential cap's hard limit —
+    // and never once degrade into a rate-limit refusal.
+    let attempts = of_auth::ratelimit::LOGIN_CRED_CAP.hard_cap + 5;
+    for attempt in 1..=attempts {
+        let reply = Call::post("/api/auth/login/finish")
+            .header(CLIENT_IP_HEADER, prober)
+            .json(body.clone())
+            .send(&h.router)
+            .await;
+        assert_eq!(
+            reply.error_code(),
+            Some("ceremony_expired"),
+            "attempt {attempt} should still report the expired ceremony, not a rate limit"
+        );
+    }
+}
+
 // -------------------------------------------------------- passkey signals
 
 /// The console repairs credentials registered before there was anything to name
@@ -194,6 +367,82 @@ async fn console_signal_matches_the_challenge(pool: PgPool) {
         me.body["credentialDisplayName"],
         format!("otto-factory · {label}"),
     );
+}
+
+/// `add_passkey_finish` (`POST /api/me/passkeys/finish`) is the one call site
+/// #88 gave genuinely new logic: a fresh `Parts` extractor and a `client_ip`
+/// call of its own. Drive a real second-key ceremony through it and check the
+/// audit row it writes carries both fields `finish_registration`'s `via`/`ip`
+/// parameters exist to record — `via: "add"`, and an IP that is not null.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn add_passkey_finish_records_the_add_flow_and_its_ip(pool: PgPool) {
+    let db = of_core::Db::from_pool(pool);
+    let mut config = of_web::Config::new(common::PUBLIC_URL, common::RESOURCE);
+    config.client_ip_header = Some("x-forwarded-for".into());
+    let webauthn = of_web::relying_party(&config).expect("relying party");
+    let state = of_web::AppState::new(db.clone(), common::cipher(), webauthn, config);
+    let h = common::Harness {
+        db,
+        router: of_web::router(state),
+        cipher: common::cipher(),
+    };
+
+    let rob = onboard(&h, "rob@acme.test").await;
+
+    let started = Call::post("/api/me/passkeys/start")
+        .with_session(&rob.session)
+        .send(&h.router)
+        .await;
+    started.expect(StatusCode::OK);
+
+    // `SoftToken` cannot hold discoverable credentials — see `of-auth`'s
+    // `tests/passkeys.rs` for the full note — so the resident-key requirement
+    // is dropped before it is handed the challenge. Only what the fake
+    // authenticator sees is softened; the server path is the production one.
+    let mut challenge: webauthn_rs::prelude::CreationChallengeResponse =
+        serde_json::from_value(started.body["challenge"].clone()).unwrap();
+    if let Some(selection) = challenge.public_key.authenticator_selection.as_mut() {
+        selection.require_resident_key = false;
+        selection.resident_key = None;
+    }
+
+    let mut second_device = common::authenticator();
+    let credential = second_device
+        .do_registration(
+            webauthn_rs::prelude::Url::parse(common::PUBLIC_URL).unwrap(),
+            challenge,
+        )
+        .expect("the authenticator refused the registration challenge");
+
+    let finished = Call::post("/api/me/passkeys/finish")
+        .with_session(&rob.session)
+        .header("x-forwarded-for", "203.0.113.7")
+        .json(serde_json::json!({
+            "ceremonyId": started.body["ceremonyId"].as_str().unwrap(),
+            "credential": credential,
+        }))
+        .send(&h.router)
+        .await;
+    finished.expect(StatusCode::NO_CONTENT);
+
+    // One query for both columns, ordered by `id` rather than `created_at` —
+    // `created_at` defaults to the transaction's start time and can tie.
+    let row: (serde_json::Value, Option<String>) = sqlx::query_as(
+        "SELECT detail->'via', ip FROM audit_events \
+         WHERE action = $1 AND actor_user_id = $2 \
+         ORDER BY id DESC LIMIT 1",
+    )
+    .bind(of_core::audit::action::PASSKEY_REGISTERED)
+    .bind(rob.user)
+    .fetch_one(h.db.pool())
+    .await
+    .unwrap();
+    assert_eq!(row.0, serde_json::json!("add"));
+    assert!(
+        row.1.is_some(),
+        "add_passkey_finish must record the caller's IP, not just signup's"
+    );
+    assert_eq!(row.1.as_deref(), Some("203.0.113.7"));
 }
 
 /// `signalAllAcceptedCredentials` names the credentials that still exist, and a
@@ -882,6 +1131,7 @@ async fn the_queue_view_lists_filters_and_counts(pool: PgPool) {
             std::slice::from_ref(&first.id),
             rob.user,
             Some("claude-code"),
+            None,
         )
         .await
         .unwrap();
@@ -978,9 +1228,14 @@ async fn an_active_job_is_visible_in_the_queue_and_its_stats(pool: PgPool) {
     let job = enqueue(&h, acme, api, "activate then check", rob.user).await;
     {
         let mut tx = h.db.begin(acme).await.unwrap();
-        tx.claim_jobs(std::slice::from_ref(&job.id), rob.user, Some("agent-one"))
-            .await
-            .unwrap();
+        tx.claim_jobs(
+            std::slice::from_ref(&job.id),
+            rob.user,
+            Some("agent-one"),
+            None,
+        )
+        .await
+        .unwrap();
         tx.activate_job(&job.id).await.unwrap();
         tx.commit().await.unwrap();
     }
@@ -1134,6 +1389,58 @@ async fn one_orgs_queue_is_invisible_to_another(pool: PgPool) {
         .send(&h.router)
         .await;
     elsewhere.expect(StatusCode::NOT_FOUND);
+}
+
+// ----------------------------------------------------------------- leases
+
+/// Leases, like jobs, are written by an agent over MCP, never by the console
+/// — there is no route to create one here, so seeding one for this fixture
+/// means reaching past the API into `of-core`, the same way `enqueue` does
+/// for jobs above.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn the_lease_route_reports_the_resource_field(pool: PgPool) {
+    let h = harness(pool);
+    let rob = onboard(&h, "rob@acme.test").await;
+    let acme = org_with_owner(&h, "acme", &rob).await;
+
+    let api: of_core::ids::RepoId = {
+        let created = Call::post("/api/orgs/acme/repos")
+            .with_session(&rob.session)
+            .json(serde_json::json!({ "slug": "api" }))
+            .send(&h.router)
+            .await;
+        created.expect(StatusCode::CREATED);
+        created.body["id"].as_str().unwrap().parse().unwrap()
+    };
+
+    {
+        let mut tx = h.db.begin(acme).await.unwrap();
+        tx.acquire_lease(
+            api,
+            "src/main.rs",
+            rob.user,
+            Some("claude-code"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+    }
+
+    let leases = Call::get("/api/orgs/acme/repos/api/leases")
+        .with_session(&rob.session)
+        .send(&h.router)
+        .await;
+    leases.expect(StatusCode::OK);
+    let all = leases.body.as_array().unwrap();
+    assert_eq!(all.len(), 1);
+    assert_eq!(
+        all[0]["resource"], "src/main.rs",
+        "the console reads of_core::leases::Lease verbatim, so its wire shape \
+         must carry `resource`, not `branch`: {}",
+        leases.body
+    );
 }
 
 // --------------------------------------------------------- tokens & usage
@@ -1303,6 +1610,23 @@ async fn the_openapi_document_is_public_and_describes_the_surface(pool: PgPool) 
     );
 }
 
+/// The OpenAPI document's version matches the workspace version. This pins
+/// existing-correct behavior: `openapi.rs` uses `env!("CARGO_PKG_VERSION")`,
+/// which in turn resolves to the `of-web` Cargo.toml's version field — set to
+/// `version.workspace = true`, so it reads from the workspace root.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn the_openapi_document_version_matches_workspace_version(pool: PgPool) {
+    let h = harness(pool);
+    let doc = Call::get("/api/openapi.json").send(&h.router).await;
+    doc.expect(StatusCode::OK);
+
+    assert_eq!(
+        doc.body["info"]["version"],
+        env!("CARGO_PKG_VERSION"),
+        "OpenAPI document version must match the workspace version"
+    );
+}
+
 /// Routes are mounted from the same list the document is rendered from, so
 /// anything described has to actually answer. This catches the failure the
 /// catalog exists to prevent — a documented endpoint that is not mounted.
@@ -1384,6 +1708,56 @@ async fn an_admin_can_reset_a_members_authenticator_but_gains_nothing_by_it(pool
     .send(&h.router)
     .await;
     reset.expect(StatusCode::CREATED);
+
+    let audit = Call::get("/api/orgs/acme/audit?actionPrefix=org.member.passkeys_reset")
+        .with_session(&rob.session)
+        .send(&h.router)
+        .await;
+    audit.expect(StatusCode::OK);
+    let rows = audit
+        .body
+        .as_array()
+        .expect("audit response must be an array");
+    assert_eq!(
+        rows.len(),
+        1,
+        "the reset must write exactly one org.member.passkeys_reset row"
+    );
+    assert_eq!(
+        rows[0]["actorUserId"].as_str().unwrap(),
+        rob.user.to_string()
+    );
+    assert_eq!(rows[0]["targetId"].as_str().unwrap(), bob.user.to_string());
+
+    // The global auth.passkey.cleared row is attributed to Rob, who performed
+    // the reset, not to Bob, whose account it happened to — Bob did not clear
+    // his own passkeys. See savvagent/otto-factory#87.
+    let cleared: (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT actor_user_id::text, target_id FROM audit_events \
+         WHERE action = $1 AND org_id IS NULL",
+    )
+    .bind(of_core::audit::action::PASSKEY_CLEARED)
+    .fetch_one(h.db.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        cleared.0.as_deref(),
+        Some(rob.user.to_string().as_str()),
+        "the admin-assisted clear must attribute the global audit row to the \
+         admin who performed it, not the member it happened to"
+    );
+    assert_eq!(cleared.1.as_deref(), Some(bob.user.to_string().as_str()));
+
+    let stale_action = Call::get("/api/orgs/acme/audit?actionPrefix=auth.totp")
+        .with_session(&rob.session)
+        .send(&h.router)
+        .await;
+    stale_action.expect(StatusCode::OK);
+    assert_eq!(
+        stale_action.body.as_array().unwrap().len(),
+        0,
+        "the reset must not write the historical auth.totp.reset action"
+    );
 
     // Bob's old passkey is gone...
     let stale = sign_in(&h, &mut bob).await;

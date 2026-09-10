@@ -1,6 +1,6 @@
 <script lang="ts">
   import { page } from '$app/state';
-  import { replaceState } from '$app/navigation';
+  import { goto } from '$app/navigation';
 
   import { api } from '$lib/api';
   import { messageFor } from '$lib/errors';
@@ -8,6 +8,7 @@
   import { useOrg } from '$lib/org.svelte';
   import { relative } from '$lib/format';
   import { statusLabel } from '$lib/labels';
+  import { isClaimStranded } from '$lib/jobs';
   import type { Job, JobStatus, Repo, Team } from '$lib/types';
   import Alert from '$lib/components/Alert.svelte';
   import Empty from '$lib/components/Empty.svelte';
@@ -24,14 +25,24 @@
    * The console's job is to answer "what is happening, and why is my agent
    * waiting" — see the leases on the Repos page for the second half of that.
    *
-   * Filters live in the URL so a view can be linked to. `replaceState` rather
-   * than `goto`: changing a filter is not a place in history to go back to, and
-   * a dozen entries per session makes the browser's back button useless.
+   * Filters live in the URL so a view can be linked to. `goto(..., { replaceState: true })`
+   * — not bare `replaceState` from `$app/navigation`, which never updates the reactive
+   * `page.url` this page's filters read — applies a filter by actually navigating while
+   * still replacing the current history entry: changing a filter is not a place in
+   * history to go back to, and a dozen entries per session makes the browser's back
+   * button useless.
    */
 
   const org = useOrg();
 
-  const STATUSES: JobStatus[] = ['pending', 'in-progress', 'active', 'completed', 'failed'];
+  const STATUSES: JobStatus[] = [
+    'pending',
+    'in-progress',
+    'active',
+    'completed',
+    'failed',
+    'cancelled'
+  ];
 
   const status = $derived(
     (STATUSES as string[]).includes(page.url.searchParams.get('status') ?? '')
@@ -102,11 +113,26 @@
     })();
   });
 
+  /**
+   * The one place either filter control navigates. A rejected `goto` (the
+   * origin check, a chunk-load failure) would otherwise vanish silently —
+   * reproducing this exact bug's symptom, a filter that looks like it did
+   * something but changed nothing, with no error shown — so it lands in the
+   * same `error`/`Alert` path the job-fetching effect already uses.
+   */
+  function applyFilters(url: URL | string) {
+    void goto(url, { replaceState: true, keepFocus: true, noScroll: true }).catch((e: unknown) => {
+      error = messageFor(e, m.queue_load_failed());
+    });
+  }
+
   function setFilter(key: string, value: string | undefined) {
     const url = new URL(page.url);
     if (value === undefined || value === '') url.searchParams.delete(key);
     else url.searchParams.set(key, value);
-    replaceState(url, page.state);
+    // `page.state` is intentionally not passed through: this page never calls
+    // `pushState` or otherwise sets custom page state, so there is nothing to carry.
+    applyFilters(url);
   }
 
   const filtered = $derived(
@@ -189,7 +215,7 @@
     {#if filtered}
       <button
         class="ml-auto pb-2 text-xs text-muted underline hover:text-ink"
-        onclick={() => replaceState(new URL(page.url.pathname, location.origin), page.state)}
+        onclick={() => applyFilters(page.url.pathname)}
       >
         {m.queue_clear_filters()}
       </button>
@@ -230,7 +256,12 @@
                 </a>
                 <div class="of-mono text-xs text-faint">{job.id}</div>
               </td>
-              <td class="px-4 py-2"><StatusPill status={job.status} /></td>
+              <td class="px-4 py-2">
+                <StatusPill status={job.status} />
+                {#if isClaimStranded(job)}
+                  <div class="text-xs font-medium text-bad">{m.job_claim_stranded()}</div>
+                {/if}
+              </td>
               <td class="px-4 py-2 text-muted">
                 {job.claimedByLabel ?? job.agentType ?? '—'}
               </td>

@@ -29,7 +29,8 @@
 use axum::extract::{Json, State};
 use axum::response::{IntoResponse, Response};
 use http::request::Parts;
-use of_auth::{login, passkeys, sessions};
+use of_auth::ratelimit::{self, CapPolicy, LOGIN_CRED_CAP, LOGIN_IP_CAP};
+use of_auth::{login, passkeys, sessions, AuthError};
 use of_core::orgs::User;
 use serde::{Deserialize, Serialize};
 
@@ -201,6 +202,8 @@ pub async fn signup_finish(
         req.ceremony_id,
         &req.credential,
         req.nickname.as_deref(),
+        passkeys::RegistrationVia::Signup,
+        ip.as_deref(),
     )
     .await?;
 
@@ -223,23 +226,88 @@ pub async fn login_start(
 }
 
 /// `POST /api/auth/login/finish` — present the signature and open a session.
+///
+/// Throttled on two independent keys (savvagent/otto-factory#75), both billed
+/// through `of_auth::ratelimit`'s rate **cap** rather than its exponential
+/// lockout — see that module's docs for why a lockout is the wrong tool here.
+/// `passkeys::finish_authentication` decides the credential's account from the
+/// credential id alone, before any signature is verified, so this endpoint
+/// answers a question — "is this id one we store?" — that costs an attacker
+/// nothing to ask and writes no audit row to notice:
+///
+/// - `login:ip:{ip}` prices repeated probing from one source, generously,
+///   because the source is frequently an office NAT or a CGNAT pool shared by
+///   many honest sign-ins.
+/// - `login:cred:{sha256(credential_id)}` prices repeated probing of one
+///   specific credential, independent of source — the thing the address cap
+///   alone cannot bound, since a botnet or an exit-node list gets a fresh
+///   address-bucket per id.
+///
+/// `AuthError::CeremonyExpired` is excluded from both: a client that simply
+/// took too long to answer its challenge is not an attack, and charging it
+/// would let an ordinary slow connection do an attacker's accounting for them.
 pub async fn login_finish(
     State(state): State<AppState>,
     parts: Parts,
     Json(req): Json<FinishAuthentication>,
 ) -> ApiResult<Response> {
     let ip = client_ip(&parts, &state.config);
-    let user = passkeys::finish_authentication(
+    let ip_bucket = ip.as_deref().map(|ip| format!("login:ip:{ip}"));
+    let cred_bucket = ratelimit::credential_bucket(req.credential.raw_id.as_ref());
+
+    // Cheap and approximate (see `ratelimit::cap_peek`), not the enforcement
+    // itself: skip the signature verification below for a caller already well
+    // past a cap, without relying on this read to be exact.
+    if let Some(bucket) = &ip_bucket {
+        refuse_if_capped(&state, bucket, &LOGIN_IP_CAP).await?;
+    }
+    refuse_if_capped(&state, &cred_bucket, &LOGIN_CRED_CAP).await?;
+
+    let outcome = passkeys::finish_authentication(
         &state.db,
         &state.webauthn,
         req.ceremony_id,
         &req.credential,
         ip.as_deref(),
     )
-    .await?;
+    .await;
 
+    if matches!(outcome, Err(ref e) if !matches!(e, AuthError::CeremonyExpired)) {
+        // Charge both buckets regardless of which one (if either) is already
+        // over its cap: the credential bucket still needs this attempt's
+        // accounting even when the source address is the one that refuses it,
+        // since a future attempt against the same credential may arrive from
+        // a different address.
+        let mut refusal = None;
+        if let Some(bucket) = &ip_bucket {
+            if let Err(e) = ratelimit::cap_charge(&state.db, bucket, &LOGIN_IP_CAP).await {
+                refusal.get_or_insert(e);
+            }
+        }
+        if let Err(e) = ratelimit::cap_charge(&state.db, &cred_bucket, &LOGIN_CRED_CAP).await {
+            refusal.get_or_insert(e);
+        }
+        if let Some(e) = refusal {
+            return Err(e.into());
+        }
+    }
+
+    let user = outcome?;
     let opened = login::with_passkey(&state.db, user, ip.as_deref()).await?;
     signed_in_response(&state, opened).await
+}
+
+/// Refuse early, without doing any credential work, if `bucket` is already
+/// past `policy.hard_cap`. Best-effort only — see `ratelimit::cap_peek`.
+async fn refuse_if_capped(state: &AppState, bucket: &str, policy: &CapPolicy) -> ApiResult<()> {
+    let failures = ratelimit::cap_peek(&state.db, bucket, policy).await?;
+    if failures >= policy.hard_cap {
+        return Err(AuthError::RateLimited {
+            retry_after_secs: policy.window_secs,
+        }
+        .into());
+    }
+    Ok(())
 }
 
 /// `POST /api/auth/claim/start` — begin re-registering after an admin reset.
@@ -284,6 +352,8 @@ pub async fn claim_finish(
         req.ceremony_id,
         &req.credential,
         req.nickname.as_deref(),
+        passkeys::RegistrationVia::Claim,
+        ip.as_deref(),
     )
     .await?;
 
@@ -312,8 +382,7 @@ async fn throttle_by_source(state: &AppState, parts: &Parts) -> ApiResult<()> {
     };
 
     let bucket = format!("signup:{ip}");
-    of_auth::ratelimit::check(&state.db, &bucket).await?;
-    of_auth::ratelimit::charge(&state.db, &bucket).await?;
+    of_auth::ratelimit::check_and_charge(&state.db, &bucket).await?;
     Ok(())
 }
 
@@ -455,14 +524,18 @@ pub async fn add_passkey_start(
 pub async fn add_passkey_finish(
     State(state): State<AppState>,
     caller: CurrentUser,
+    parts: Parts,
     Json(req): Json<FinishRegistration>,
 ) -> ApiResult<Response> {
+    let ip = client_ip(&parts, &state.config);
     let registered = passkeys::finish_registration(
         &state.db,
         &state.webauthn,
         req.ceremony_id,
         &req.credential,
         req.nickname.as_deref(),
+        passkeys::RegistrationVia::Add,
+        ip.as_deref(),
     )
     .await?;
 
@@ -490,9 +563,11 @@ pub async fn list_passkeys(
 pub async fn remove_passkey(
     State(state): State<AppState>,
     caller: CurrentUser,
+    parts: Parts,
     axum::extract::Path(id): axum::extract::Path<uuid::Uuid>,
 ) -> ApiResult<Response> {
-    passkeys::remove(&state.db, caller.user.id, id).await?;
+    let ip = client_ip(&parts, &state.config);
+    passkeys::remove(&state.db, caller.user.id, id, ip.as_deref()).await?;
     Ok(http::StatusCode::NO_CONTENT.into_response())
 }
 
@@ -500,10 +575,12 @@ pub async fn remove_passkey(
 pub async fn rename_passkey(
     State(state): State<AppState>,
     caller: CurrentUser,
+    parts: Parts,
     axum::extract::Path(id): axum::extract::Path<uuid::Uuid>,
     Json(req): Json<RenameKeyRequest>,
 ) -> ApiResult<Response> {
-    passkeys::rename(&state.db, caller.user.id, id, &req.nickname).await?;
+    let ip = client_ip(&parts, &state.config);
+    passkeys::rename(&state.db, caller.user.id, id, &req.nickname, ip.as_deref()).await?;
     Ok(http::StatusCode::NO_CONTENT.into_response())
 }
 

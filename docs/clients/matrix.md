@@ -188,6 +188,18 @@ refuses an unrequested version would fail, and the fix belongs upstream in `rmcp
 
 ---
 
+## Fixed since this run, not re-verified live
+
+Recorded code-level fixes that landed after 2026-09-02 and were not re-exercised against a real
+client as part of a conformance run — unlike everything above, which was.
+
+**`server_info` now reports otto-factory's own name/version at `initialize`.** Previously every
+client saw `name: "rmcp"`, `version: "2.0.0"` regardless of what otto-factory was running — the
+MCP transport layer's own identity was leaked instead of the server's
+(`docs/specs/2026-09-10-semver-release-design.md` §3).
+
+---
+
 ## Re-running this
 
 ```bash

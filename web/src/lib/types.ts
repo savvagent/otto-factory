@@ -15,7 +15,7 @@
  */
 
 export type Role = 'owner' | 'admin' | 'member';
-export type JobStatus = 'pending' | 'in-progress' | 'active' | 'completed' | 'failed';
+export type JobStatus = 'pending' | 'in-progress' | 'active' | 'completed' | 'failed' | 'cancelled';
 export type Provider = 'github' | 'gitlab' | 'bitbucket' | 'other';
 export type TokenKind = 'oauth' | 'pat';
 
@@ -175,7 +175,7 @@ export interface Team {
 
 export interface TeamMember {
   userId: string;
-  email: string;
+  email: string | null;
   name: string | null;
   /** See `User.label` — what to render where an address is missing. */
   label: string;
@@ -248,14 +248,14 @@ export interface TrackerBinding {
 }
 
 /**
- * An advisory, time-bounded claim on one branch. The server cannot enforce it
- * against a git operation it cannot see; it makes collisions visible rather
- * than impossible.
+ * An advisory, time-bounded claim on one resource. The server cannot enforce
+ * it against what an agent actually does with the resource, which it cannot
+ * see; it makes collisions visible rather than impossible.
  */
 export interface Lease {
   id: string;
   repoId: string;
-  branch: string;
+  resource: string;
   holderUserId: string;
   holderLabel: string | null;
   jobId: string | null;
@@ -286,6 +286,10 @@ export interface Job {
   createdBy: string | null;
   claimedBy: string | null;
   claimedByLabel: string | null;
+  claimExpiresAt: string | null;
+  cancelRequestedAt: string | null;
+  cancelRequestedBy: string | null;
+  cancelReason: string | null;
 }
 
 export interface JobDetail extends Job {
@@ -303,6 +307,7 @@ export interface QueueStats {
   active: number;
   completed: number;
   failed: number;
+  cancelled: number;
   blocked: number;
   total: number;
 }
