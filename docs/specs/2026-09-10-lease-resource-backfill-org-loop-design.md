@@ -149,7 +149,7 @@ and no new `0007_rls.sql` entry.
 same family, added by `#111`/`savvagent/otto-factory#70`'s spec): `rls_scopes_the_lease_resource_
 backfills_per_org_loop`.
 
-Shape: seed two `repo_leases` rows directly on the pool —
+Shape: seed two `repo_leases` rows per org, for **two** orgs (`acme` and `globex`) —
 
 1. An unprefixed `resource = 'main'` with `acquired_at` set explicitly to one hour before
    `_sqlx_migrations`'s recorded `installed_on` for version 27, standing in for a genuinely
@@ -162,13 +162,20 @@ Shape: seed two `repo_leases` rows directly on the pool —
 without needing table ownership — the same technique the existing negative test uses), run
 0030's own migration **file**, read via `include_str!("../migrations/0030_lease_resource_backfill.sql")`
 so the test exercises the artifact that actually ships rather than a copy that could drift from
-it, commit, then read both rows back through a normal pinned `Tx` and assert row 1 now reads
-`branch:main` while row 2 is untouched at `deploy:staging`.
+it, commit, then read both orgs' rows back through each org's own pinned `Tx` and assert row 1
+now reads `branch:main` while row 2 is untouched at `deploy:staging`, **for both orgs**.
+
+The second org is not incidental: on this deployment's actual shape (RLS bypassed), the loop's
+explicit `org_id = o` predicate — not the `set_config` half — is the guard doing the real work,
+and a single-org test cannot tell "the loop reaches every org" apart from "the loop happened to
+touch the one org it was seeded with." Seeding both orgs and asserting both independently closes
+that gap; found in review (security-auditor) after the single-org version of this test initially
+shipped.
 
 This is deliberately the mirror image of the existing negative test in one respect (the per-org
-loop's own `set_config` calls are what make the pre-0027 row match, under a role RLS actually
+loop's own `set_config` calls are what make the pre-0027 rows match, under a role RLS actually
 binds, unlike a bare unscoped `UPDATE`) and a direct regression guard against the rejected first
-draft in another (the post-0027 free-form row must never move).
+draft in another (the post-0027 free-form rows must never move, in either org).
 
 No `of-billing::classify` entry needed — this change adds no MCP tool.
 
@@ -192,6 +199,17 @@ No `of-billing::classify` entry needed — this change adds no MCP tool.
   moment on a database where 0027 and every later migration ran in the normal forward sequence —
   so the migration is a true no-op everywhere except the one test that deliberately backdates a
   seeded row's `acquired_at` to exercise it.
+- **`_sqlx_migrations` has no row for version 27** (a squashed or renumbered migration history —
+  not a scenario this repo currently has, but the predicate is defensive against it): the plain
+  `SELECT installed_on INTO cutoff` leaves `cutoff` NULL with no error (no `STRICT` clause), and
+  `acquired_at < NULL` is NULL for every row, which Postgres treats as not-matched. The migration
+  degrades to a safe no-op rather than raising or matching everything.
+- **A prefixed value collides with an already-live lease** (only reachable if the "0027 cannot
+  partially fail" reasoning in Assumptions is ever wrong for some deployment shape): `'branch:' ||
+  resource` landing on a value that already has a live `(repo_id, resource)` row raises a Postgres
+  unique violation against `repo_leases_live_key` (`0002_repos.sql`), failing the migration — and
+  therefore `of-server`'s startup — loudly rather than corrupting data silently. Consistent with
+  this repo's stated preference for errors that stop over errors that guess.
 
 ## Risks & Open Questions
 

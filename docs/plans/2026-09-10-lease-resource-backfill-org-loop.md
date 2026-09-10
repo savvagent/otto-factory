@@ -10,18 +10,35 @@ This plan implements it exactly.
 
 ## Status — 2026-09-10
 
-Task 1 implemented, reviewed, and corrected. PR #135 opened, `Closes #119`. The mandatory review
-trio (Phase 4 step 8) found a **Critical** bug in the original design before merge:
-`security-auditor`, `architect-reviewer`, and `pr-review-toolkit:code-reviewer` independently
-flagged that the `resource NOT LIKE 'branch:%'` guard would silently rewrite every live
-non-branch lease (`deploy:staging`, a migration lock, etc.) in every org, since `resource` has
-been free-form — not branch-only — since 0027 itself shipped. Fixed by rebinding the migration's
-predicate to provenance (`acquired_at` before `0027`'s `installed_on`) instead of value shape;
-see the spec's Risks & Open Questions for the full history. Re-verified green after the fix:
-`cargo test -p of-core --test isolation` (30 passed, including a test that now also asserts a
-post-0027 `deploy:staging` row stays untouched) and `--test queue` (65 passed), `cargo clippy
---all-targets -- -D warnings`, `cargo fmt --all --check`. Awaiting the trio's re-review of the
-fix before merge.
+Task 1 implemented, reviewed, corrected, and re-reviewed. PR #135 opened, `Closes #119`. The
+mandatory review trio (Phase 4 step 8) found a **Critical** bug in the original design before
+merge: `security-auditor`, `architect-reviewer`, and `pr-review-toolkit:code-reviewer`
+independently flagged that the `resource NOT LIKE 'branch:%'` guard would silently rewrite every
+live non-branch lease (`deploy:staging`, a migration lock, etc.) in every org, since `resource`
+has been free-form — not branch-only — since 0027 itself shipped. Fixed by rebinding the
+migration's predicate to provenance (`acquired_at` before `0027`'s `installed_on`) instead of
+value shape; see the spec's Risks & Open Questions for the full history.
+
+A second review round (all three of security-auditor, architect-reviewer, rust-pro re-dispatched
+against the fix) reported **Approved to merge** from all three, with one Medium
+(security-auditor) and one Important-but-doc-only (architect-reviewer) follow-up, both applied:
+the test now seeds two orgs (not one), proving the loop's `org_id = o` predicate — the guard this
+deployment's actual RLS-bypassed shape relies on — genuinely reaches every org rather than only
+the one it happened to be seeded alongside; and the migration's comment was corrected on an
+imprecise ownership claim, given a stated rationale for depending on sqlx's own
+`_sqlx_migrations` table, and the Error Handling section now documents the NULL-cutoff and
+unique-violation-on-collision cases explicitly. `architect-reviewer` verified the fix by mutation
+testing (removed the provenance bound, watched the corrected test fail with exactly the original
+symptom, restored it).
+
+Final verification: `cargo test -p of-core --test isolation` (30 passed, including the two-org
+positive/negative test) and `--test queue` (65 passed), `cargo clippy --all-targets -- -D
+warnings`, `cargo fmt --all --check` — all clean. PR body still needs a two-line correction
+(architect-reviewer's Important finding) before merge: its "Known limitation" verification query
+predates the provenance fix and would mislead a human doing the post-deploy check. Not yet
+merged — awaiting explicit go-ahead per this session's process (git-expert-scope operations like
+merge are confirmed with the user, not run autonomously, especially after a near-miss like this
+one).
 
 ## Global Constraints
 
