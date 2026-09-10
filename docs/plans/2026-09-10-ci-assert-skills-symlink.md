@@ -11,7 +11,10 @@ implements it exactly.
 
 ## Status — 2026-09-10
 
-Not started.
+Approved after two critique rounds (one real bug found and fixed: the deleted-path negative
+check originally pointed at a pre-#124 commit that still had `.claude/skills` as a real tracked
+directory, not an absent path — fixed to point at the repo's actual root commit `7cbddbb`).
+Implementation not yet started.
 
 ---
 
