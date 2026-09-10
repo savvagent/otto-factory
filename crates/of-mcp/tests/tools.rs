@@ -425,6 +425,120 @@ async fn activate_job_on_an_unclaimed_job_is_refused(pool: PgPool) {
     assert!(e.message.contains("in-progress"));
 }
 
+/// A pending job has no holder to wait on, so `request_cancel` finalizes it
+/// immediately rather than merely flagging it.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn request_cancel_on_a_pending_job_finalizes_it_immediately(pool: PgPool) {
+    let (env, caller) = env(pool).await;
+    env.register(&caller).await;
+
+    let job = env.add_job(&caller, "never gets started").await;
+    let id = job["id"].as_str().unwrap().to_string();
+
+    let cancelled = ok(env
+        .factory
+        .request_cancel(
+            Extension(parts(&caller)),
+            Parameters(tools::jobs::RequestCancelArgs {
+                job: id,
+                reason: Some("no longer needed".into()),
+            }),
+        )
+        .await);
+    assert_eq!(cancelled["job"]["status"], "cancelled");
+    assert_eq!(cancelled["job"]["cancelReason"], "no longer needed");
+    assert!(cancelled["job"]["cancelRequestedAt"].is_string());
+}
+
+/// A claimed job only gets flagged by `request_cancel` — the holder is the
+/// only one who can say it actually stopped, via `cancel_job`.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn request_cancel_then_cancel_job_on_a_claimed_job(pool: PgPool) {
+    let (env, caller) = env(pool).await;
+    env.register(&caller).await;
+
+    let job = env.add_job(&caller, "claimed then cancelled").await;
+    let id = job["id"].as_str().unwrap().to_string();
+
+    ok(env
+        .factory
+        .claim_jobs(
+            Extension(parts(&caller)),
+            Parameters(tools::jobs::ClaimJobsArgs {
+                jobs: vec![id.clone()],
+                agent: Some("agent-one".into()),
+            }),
+        )
+        .await);
+
+    let flagged = ok(env
+        .factory
+        .request_cancel(
+            Extension(parts(&caller)),
+            Parameters(tools::jobs::RequestCancelArgs {
+                job: id.clone(),
+                reason: Some("stop, wrong branch".into()),
+            }),
+        )
+        .await);
+    assert_eq!(flagged["job"]["status"], "in-progress");
+    assert!(flagged["job"]["cancelRequestedAt"].is_string());
+    assert!(flagged["job"]["cancelRequestedBy"].is_string());
+    assert_eq!(flagged["job"]["cancelReason"], "stop, wrong branch");
+
+    let cancelled = ok(env
+        .factory
+        .cancel_job(
+            Extension(parts(&caller)),
+            Parameters(tools::jobs::CancelJobArgs {
+                job: id,
+                note: Some("stopped as asked".into()),
+            }),
+        )
+        .await);
+    assert_eq!(cancelled["job"]["status"], "cancelled");
+    assert_eq!(cancelled["job"]["error"], "stopped as asked");
+}
+
+/// A holder stopping on its own, unprompted, must call `fail_job` — `cancel_job`
+/// refuses when no cancellation was ever requested.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn cancel_job_without_a_prior_request_is_refused(pool: PgPool) {
+    let (env, caller) = env(pool).await;
+    env.register(&caller).await;
+
+    let job = env.add_job(&caller, "claimed, never asked to stop").await;
+    let id = job["id"].as_str().unwrap().to_string();
+
+    ok(env
+        .factory
+        .claim_jobs(
+            Extension(parts(&caller)),
+            Parameters(tools::jobs::ClaimJobsArgs {
+                jobs: vec![id.clone()],
+                agent: Some("agent-one".into()),
+            }),
+        )
+        .await);
+
+    let e = err(env
+        .factory
+        .cancel_job(
+            Extension(parts(&caller)),
+            Parameters(tools::jobs::CancelJobArgs {
+                job: id,
+                note: None,
+            }),
+        )
+        .await);
+    assert_eq!(code_of(&e), "invalid_argument");
+    assert!(
+        e.message.contains("no cancellation request"),
+        "{}",
+        e.message
+    );
+}
+
 /// Most jobs have no linked ticket. Their hot path must stay the same cheap
 /// queue transition it was before tracker write-back existed.
 #[sqlx::test(migrations = "../of-core/migrations")]
@@ -980,6 +1094,8 @@ fn the_advertised_surface_is_exactly_what_the_design_specifies() {
         "activate_job",
         "complete_job",
         "fail_job",
+        "request_cancel",
+        "cancel_job",
         "repend_job",
         "set_dependencies",
         "ready",
