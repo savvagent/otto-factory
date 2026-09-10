@@ -926,12 +926,30 @@ async fn rls_scopes_the_lease_resource_backfills_per_org_loop(pool: PgPool) {
     let db = db(pool);
     let a = tenant(&db, "acme", "git@github.com:acme/api.git").await;
 
-    // Seed a row the way one would have looked before 0027 ever ran: an unprefixed
-    // `resource`, written directly on the pool, standing in for a row 0027's toggle-
-    // based backfill somehow missed.
+    // Row 1: the way a row would have looked before 0027 ever ran -- an unprefixed
+    // branch name, `acquired_at` before 0027 was installed. 0030's provenance bound
+    // must catch this one.
+    sqlx::query(
+        "INSERT INTO repo_leases (org_id, repo_id, resource, holder_user_id, expires_at, \
+                                   acquired_at, renewed_at) \
+         VALUES ($1, $2, 'main', $3, now() + interval '1 hour', \
+                 (SELECT installed_on FROM _sqlx_migrations WHERE version = 27) - interval '1 hour', \
+                 (SELECT installed_on FROM _sqlx_migrations WHERE version = 27) - interval '1 hour')",
+    )
+    .bind(a.org)
+    .bind(a.repo)
+    .bind(a.user)
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    // Row 2: a genuinely free-form, non-branch resource taken *after* 0027 shipped the
+    // generalized `resource` column -- exactly the kind of row an earlier, shape-based
+    // guard (`resource NOT LIKE 'branch:%'` with no provenance bound) would have
+    // wrongly rewritten. 0030 must leave this alone.
     sqlx::query(
         "INSERT INTO repo_leases (org_id, repo_id, resource, holder_user_id, expires_at) \
-         VALUES ($1, $2, 'main', $3, now() + interval '1 hour')",
+         VALUES ($1, $2, 'deploy:staging', $3, now() + interval '1 hour')",
     )
     .bind(a.org)
     .bind(a.repo)
@@ -946,36 +964,31 @@ async fn rls_scopes_the_lease_resource_backfills_per_org_loop(pool: PgPool) {
         .await
         .unwrap();
 
-    // 0030's own statement, verbatim.
-    sqlx::query(
-        "DO $$
-         DECLARE
-           o uuid;
-         BEGIN
-           FOR o IN SELECT id FROM orgs LOOP
-             PERFORM set_config('app.org_id', o::text, true);
-             UPDATE repo_leases
-               SET resource = 'branch:' || resource
-               WHERE org_id = o AND resource NOT LIKE 'branch:%';
-           END LOOP;
-           PERFORM set_config('app.org_id', '', true);
-         END $$;",
-    )
+    // 0030's own file, read at test time rather than copied inline, so this test is a
+    // regression guard on the artifact that actually ships, not on a string that could
+    // drift from it.
+    sqlx::query(include_str!(
+        "../migrations/0030_lease_resource_backfill.sql"
+    ))
     .execute(&mut *tx)
     .await
     .unwrap();
     tx.commit().await.unwrap();
 
     let mut tx = db.begin(a.org).await.unwrap();
-    let resource: String = sqlx::query_scalar("SELECT resource FROM repo_leases")
-        .fetch_one(tx.conn())
-        .await
-        .unwrap();
+    let resources: Vec<String> =
+        sqlx::query_scalar("SELECT resource FROM repo_leases ORDER BY resource")
+            .fetch_all(tx.conn())
+            .await
+            .unwrap();
     tx.commit().await.unwrap();
     assert_eq!(
-        resource, "branch:main",
-        "the per-org loop should have prefixed the seeded row even though it ran \
-         under a role RLS actually binds, unlike a bare unscoped UPDATE"
+        resources,
+        vec!["branch:main".to_string(), "deploy:staging".to_string()],
+        "the pre-0027 branch row should have been prefixed by the provenance-bounded \
+         loop, and the post-0027 free-form resource must be left exactly as it was -- \
+         rewriting it would silently break the exact-string match acquire_lease/\
+         renew_lease/release_lease key on"
     );
 }
 

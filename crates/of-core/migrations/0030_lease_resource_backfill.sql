@@ -2,42 +2,49 @@
 -- the NO FORCE / FORCE ROW LEVEL SECURITY toggle pattern, before CLAUDE.md's tenant-
 -- isolation section documented that toggle as "not recommended" in favor of a per-org
 -- loop with both an explicit org_id predicate and set_config('app.org_id', ..., true).
--- 0027 is an already-applied migration, so it is not edited in place. On this
--- deployment's actual shape (the connecting role is a superuser, so RLS is bypassed
--- regardless of FORCE) 0027's backfill already ran correctly -- verified against the
--- deployed database, every row reads 'branch:<name>' with no unprefixed leftovers -- so
--- there is nothing left to fix. This migration exists for precedent/consistency with the
--- documented pattern and as a safety net for a deployment where guard 2 is on the
--- FORCE-RLS-fallback shape rather than superuser-bypass: 0027's own UPDATE carries no
--- WHERE clause, so on that shape it is all-or-nothing per deployment -- either every row
--- got prefixed (if the migrating role owned the table) or none did (if RLS blocked it
--- entirely, since no app.org_id is ever set for a migration). This migration's
--- `resource NOT LIKE 'branch:%'` guard makes it a no-op wherever 0027 already did the
--- work, same as this migration's own reproduction test shows.
+-- 0027 is an already-applied migration, so it is not edited in place.
 --
--- The guard has one known, accepted residual risk: it cannot distinguish "0027 already
--- prefixed this row" from "this row's raw branch name was already literally
--- 'branch:<something>'". 0027 prefixed unconditionally rather than guarding for exactly
--- this reason -- a legacy branch named e.g. 'branch:main' would, under a guard, share a
--- string with a genuine 'main' branch's lease once that one gets prefixed, whereas
--- unconditional prefixing keeps them distinct via a double 'branch:branch:main'. That
--- ambiguity is only live in the narrow compound case this migration exists to cover in
--- the first place (0027 failed entirely on some deployment) AND a colliding branch name
--- is present. If both rows are simultaneously live it fails loudly: repo_leases_live_key
--- (0002_repos.sql) is a unique index on (repo_id, resource) WHERE released_at IS NULL,
--- so the second UPDATE raises a unique-violation and this migration does not silently
--- apply. See docs/specs/2026-09-10-lease-resource-backfill-org-loop-design.md's Risks &
--- Open Questions for the full reasoning; a guard that could tell the two cases apart
--- would need a signal this schema doesn't carry.
+-- An earlier draft of this migration guarded by `resource NOT LIKE 'branch:%'`, matching
+-- any row that didn't already look prefixed. That is wrong: 0027 is the same migration
+-- that generalized `resource` from "always a branch name" to free-form ("a branch, a
+-- staging slot, a migration lock" -- crates/of-mcp/src/tools/coord.rs's acquire_lease
+-- description), and only the *branch* case uses the `branch:<name>` form. Every
+-- non-branch lease taken since 0027 shipped -- 'deploy:staging', 'migration-lock', a
+-- deliberate bare 'main' held alongside 'branch:main' -- legitimately has no prefix and
+-- is not a leftover. A shape-based guard would silently rewrite every one of them on the
+-- next deploy, breaking the exact-string match acquire_lease/renew_lease/release_lease
+-- key on (crates/of-core/src/leases.rs) and falsifying retained lease history in the
+-- process -- caught in PR review, not shipped.
+--
+-- 0027's own UPDATE carries no WHERE clause and its NO FORCE step requires table
+-- ownership (ALTER TABLE errors outright for a non-owner), so 0027 cannot have partially
+-- succeeded: either every row present at that moment got prefixed, or the whole migration
+-- -- and every one after it, including this one -- never ran at all. There is therefore no
+-- reachable deployment where an unprefixed *pre-0027* row survives for this migration to
+-- find. The only predicate that can safely repeat 0027's transformation is one bounded by
+-- provenance rather than by the value's shape: `acquired_at` before 0027 was installed.
+-- Under the reasoning above that always selects zero rows -- this migration is expected
+-- to be a true no-op everywhere -- but unlike a shape guard it is safe *by construction*:
+-- it cannot match a resource written under the free-form contract 0027 itself introduced,
+-- regardless of whether the "0027 cannot partially fail" reasoning above turns out to be
+-- wrong for some deployment shape not yet audited. See
+-- docs/specs/2026-09-10-lease-resource-backfill-org-loop-design.md's Risks & Open
+-- Questions for the full history of this reasoning, including the shape-guard's rejected
+-- collision risk.
 DO $$
 DECLARE
   o uuid;
+  cutoff timestamptz;
 BEGIN
+  SELECT installed_on INTO cutoff FROM _sqlx_migrations WHERE version = 27;
+
   FOR o IN SELECT id FROM orgs LOOP
     PERFORM set_config('app.org_id', o::text, true);
     UPDATE repo_leases
       SET resource = 'branch:' || resource
-      WHERE org_id = o AND resource NOT LIKE 'branch:%';
+      WHERE org_id = o
+        AND resource NOT LIKE 'branch:%'
+        AND acquired_at < cutoff;
   END LOOP;
   -- Leaving `app.org_id` set past the loop would apply it to any later statement in
   -- this same migration file on an RLS-applying shape -- restore it to unset.
