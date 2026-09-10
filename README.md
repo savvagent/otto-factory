@@ -18,9 +18,9 @@ That is the entire client-side install.
 ## Design principles
 
 **It is about coordinating work, anchored on repositories.** A repo is a first-class,
-org-owned entity, not a config string. Jobs belong to repos, agents announce which repo and
-resource (a branch, a staging slot, a migration lock) they hold, and the primitives that
-stop two agents colliding are repo-scoped.
+org-owned entity, not a config string. Jobs belong to repos, agents announce which repo
+they are in and which resource within it they hold (a branch, a staging slot, a migration
+lock), and the primitives that stop two agents colliding are repo-scoped.
 
 **It is a substrate, not a workflow.** otto-factory deliberately does less than its
 ancestor. It provides coordination primitives and ships no opinion about how work should be
