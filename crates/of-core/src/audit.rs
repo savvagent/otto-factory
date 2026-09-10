@@ -25,12 +25,19 @@ pub mod action {
     pub const LOGIN_SUCCEEDED: &str = "auth.login.succeeded";
     pub const LOGIN_FAILED: &str = "auth.login.failed";
     pub const LOGOUT: &str = "auth.logout";
+    /// Historical only. TOTP was removed from this product; rows with this
+    /// action predate `PASSKEY_REGISTERED` and are not rewritten. Nothing
+    /// writes this constant anymore.
     pub const TOTP_ENROLLED: &str = "auth.totp.enrolled";
+    /// Historical only, for the same reason as `TOTP_ENROLLED`. Superseded by
+    /// `PASSKEY_CLEARED`.
     pub const TOTP_RESET: &str = "auth.totp.reset";
     pub const RECOVERY_CODE_USED: &str = "auth.recovery_code.used";
     pub const MAGIC_LINK_SENT: &str = "auth.magic_link.sent";
     pub const MAGIC_LINK_CONSUMED: &str = "auth.magic_link.consumed";
     pub const EMAIL_VERIFIED: &str = "auth.email.verified";
+    pub const PASSKEY_REGISTERED: &str = "auth.passkey.registered";
+    pub const PASSKEY_CLEARED: &str = "auth.passkey.cleared";
 
     // OAuth / tokens (org-scoped: the org is bound at authorization time).
     pub const CLIENT_REGISTERED: &str = "oauth.client.registered";

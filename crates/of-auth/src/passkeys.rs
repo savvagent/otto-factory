@@ -252,9 +252,16 @@ pub async fn finish_registration(
         _ => AuthError::from(e),
     })?;
 
-    let _ = db
-        .audit_global(Entry::new(action::TOTP_ENROLLED).actor(user_id))
-        .await;
+    if let Err(e) = db
+        .audit_global(Entry::new(action::PASSKEY_REGISTERED).actor(user_id))
+        .await
+    {
+        tracing::error!(
+            error = %e,
+            user_id = %user_id,
+            "failed to write audit event for passkey registration"
+        );
+    }
 
     Ok(user_id)
 }
@@ -351,7 +358,17 @@ pub async fn finish_authentication(
 
     let keys: Vec<DiscoverableKey> = stored
         .into_iter()
-        .filter_map(|raw| serde_json::from_value::<Passkey>(raw).ok())
+        .filter_map(|raw| match serde_json::from_value::<Passkey>(raw) {
+            Ok(passkey) => Some(passkey),
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    user_id = %user_id,
+                    "stored passkey credential failed to deserialize; skipping it"
+                );
+                None
+            }
+        })
         .map(|p| DiscoverableKey::from(&p))
         .collect();
 
@@ -494,13 +511,20 @@ pub async fn clear(db: &Db, user: UserId, ip: Option<&str>) -> Result<u64> {
         .await?
         .rows_affected();
 
-    let _ = db
+    if let Err(e) = db
         .audit_global(
-            Entry::new(action::TOTP_RESET)
+            Entry::new(action::PASSKEY_CLEARED)
                 .actor(user)
                 .from_request(ip, None),
         )
-        .await;
+        .await
+    {
+        tracing::error!(
+            error = %e,
+            user_id = %user,
+            "failed to write audit event for passkey clear"
+        );
+    }
 
     Ok(removed)
 }
@@ -591,8 +615,16 @@ async fn update_stored_credential(
     .await?;
 
     let Some(raw) = raw else { return Ok(()) };
-    let Ok(mut passkey) = serde_json::from_value::<Passkey>(raw) else {
-        return Ok(());
+    let mut passkey = match serde_json::from_value::<Passkey>(raw) {
+        Ok(passkey) => passkey,
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                user_id = %user,
+                "stored passkey credential failed to deserialize during a sign-counter update; skipping it"
+            );
+            return Ok(());
+        }
     };
 
     if passkey.update_credential(result).is_some() {
