@@ -1556,6 +1556,25 @@ async fn an_admin_can_reset_a_members_authenticator_but_gains_nothing_by_it(pool
     );
     assert_eq!(rows[0]["targetId"].as_str().unwrap(), bob.user.to_string());
 
+    // The global auth.passkey.cleared row is attributed to Rob, who performed
+    // the reset, not to Bob, whose account it happened to — Bob did not clear
+    // his own passkeys. See savvagent/otto-factory#87.
+    let cleared: (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT actor_user_id::text, target_id FROM audit_events \
+         WHERE action = $1 AND org_id IS NULL",
+    )
+    .bind(of_core::audit::action::PASSKEY_CLEARED)
+    .fetch_one(h.db.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        cleared.0.as_deref(),
+        Some(rob.user.to_string().as_str()),
+        "the admin-assisted clear must attribute the global audit row to the \
+         admin who performed it, not the member it happened to"
+    );
+    assert_eq!(cleared.1.as_deref(), Some(bob.user.to_string().as_str()));
+
     let stale_action = Call::get("/api/orgs/acme/audit?actionPrefix=auth.totp")
         .with_session(&rob.session)
         .send(&h.router)
