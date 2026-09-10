@@ -503,9 +503,17 @@ async fn removing_a_passkey_writes_the_passkey_removed_action(pool: PgPool) {
             for_soft_token(ceremony.challenge),
         )
         .unwrap();
-    passkeys::finish_registration(&db, &webauthn, ceremony.id, &credential, Some("phone"))
-        .await
-        .unwrap();
+    passkeys::finish_registration(
+        &db,
+        &webauthn,
+        ceremony.id,
+        &credential,
+        Some("phone"),
+        passkeys::RegistrationVia::Add,
+        None,
+    )
+    .await
+    .unwrap();
 
     let keys = passkeys::list(&db, user).await.unwrap();
     assert_eq!(keys.len(), 2);
