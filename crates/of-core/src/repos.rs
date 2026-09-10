@@ -346,14 +346,23 @@ impl Tx<'_> {
         Ok(normalized)
     }
 
-    pub async fn list_repos(&mut self, include_inactive: bool) -> Result<Vec<Repo>> {
+    /// Like every other list in `of-core`, bounded rather than exhaustive —
+    /// a console poll that fetches this every 30 seconds has no business
+    /// re-reading an unbounded table on every tick just because the org's
+    /// repo count happens to keep growing.
+    pub async fn list_repos(
+        &mut self,
+        include_inactive: bool,
+        limit: Option<i64>,
+    ) -> Result<Vec<Repo>> {
         let org = self.org();
         let repos = sqlx::query_as(&format!(
             "SELECT {REPO_COLS} FROM repos \
-             WHERE org_id = $1 AND ($2 OR active) ORDER BY slug"
+             WHERE org_id = $1 AND ($2 OR active) ORDER BY slug LIMIT $3"
         ))
         .bind(org)
         .bind(include_inactive)
+        .bind(limit.unwrap_or(200).clamp(1, 1000))
         .fetch_all(self.conn())
         .await?;
         Ok(repos)
@@ -448,7 +457,7 @@ impl Tx<'_> {
     /// looking for a typo that is not there.
     async fn unresolved(&mut self, attempted: &str) -> Result<Error> {
         let known = self
-            .list_repos(false)
+            .list_repos(false, None)
             .await?
             .into_iter()
             .map(|r| r.slug)

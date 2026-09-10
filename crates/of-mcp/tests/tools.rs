@@ -246,6 +246,7 @@ async fn a_read_only_token_can_look_but_not_touch(pool: PgPool) {
             Extension(parts(&reader)),
             Parameters(tools::repos::ListReposArgs {
                 include_inactive: false,
+                limit: None,
             }),
         )
         .await);
@@ -626,6 +627,7 @@ async fn one_orgs_token_cannot_see_or_touch_anothers_work(pool: PgPool) {
             Extension(parts(&intruder)),
             Parameters(tools::repos::ListReposArgs {
                 include_inactive: true,
+                limit: None,
             }),
         )
         .await);

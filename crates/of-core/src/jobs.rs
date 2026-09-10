@@ -681,6 +681,29 @@ impl Tx<'_> {
         Ok(job)
     }
 
+    /// Keeps `orgs.jobs_completed_total`/`jobs_failed_total` exactly in step
+    /// with every transition into or out of a terminal status, so the
+    /// org-wide branch of `stats` can read them instead of re-scanning the
+    /// org's whole job history on every call. A no-op for any other status —
+    /// callers pass the status being left (on the way out of terminal) or
+    /// entered (on the way in), not a pre-classified boolean, so the match
+    /// here is the single place that decides which counter, if any, moves.
+    async fn bump_terminal_counter(&mut self, status: Status, delta: i64) -> Result<()> {
+        let column = match status {
+            Status::Completed => "jobs_completed_total",
+            Status::Failed => "jobs_failed_total",
+            Status::Pending | Status::InProgress | Status::Active => return Ok(()),
+        };
+        sqlx::query(&format!(
+            "UPDATE orgs SET {column} = {column} + $2 WHERE id = $1"
+        ))
+        .bind(self.org())
+        .bind(delta)
+        .execute(self.conn())
+        .await?;
+        Ok(())
+    }
+
     async fn finalize(
         &mut self,
         id: &JobId,
@@ -716,6 +739,7 @@ impl Tx<'_> {
         .bind(error)
         .fetch_one(self.conn())
         .await?;
+        self.bump_terminal_counter(to, 1).await?;
 
         Ok(job)
     }
@@ -773,6 +797,7 @@ impl Tx<'_> {
         .bind(remote_revision)
         .fetch_one(self.conn())
         .await?;
+        self.bump_terminal_counter(to, 1).await?;
 
         Ok(job)
     }
@@ -806,21 +831,23 @@ impl Tx<'_> {
         .bind(id)
         .fetch_one(self.conn())
         .await?;
+        self.bump_terminal_counter(current, -1).await?;
 
         Ok(job)
     }
 
     pub async fn delete_job(&mut self, id: &JobId) -> Result<()> {
         let org = self.org();
-        let n = sqlx::query("DELETE FROM jobs WHERE org_id = $1 AND id = $2")
-            .bind(org)
-            .bind(id)
-            .execute(self.conn())
-            .await?
-            .rows_affected();
-        if n == 0 {
+        let deleted: Option<Status> =
+            sqlx::query_scalar("DELETE FROM jobs WHERE org_id = $1 AND id = $2 RETURNING status")
+                .bind(org)
+                .bind(id)
+                .fetch_optional(self.conn())
+                .await?;
+        let Some(status) = deleted else {
             return Err(Error::JobNotFound(id.clone()));
-        }
+        };
+        self.bump_terminal_counter(status, -1).await?;
         Ok(())
     }
 
@@ -1017,8 +1044,17 @@ impl Tx<'_> {
         Ok(jobs)
     }
 
+    /// Repo-scoped calls keep the exact, full-scan query below — the org-wide
+    /// counters this maintains have no repo dimension to slice by, and a
+    /// repo-scoped read is not the console overview's 30-second poll (that
+    /// one is always org-wide), so it is not the cost this exists to bound.
     pub async fn stats(&mut self, repo_id: Option<RepoId>) -> Result<Stats> {
         let org = self.org();
+
+        let Some(repo_id) = repo_id else {
+            return self.org_wide_stats(org).await;
+        };
+
         let stats = sqlx::query_as(
             "SELECT \
                COUNT(*) FILTER (WHERE status = 'pending')     AS pending, \
@@ -1032,12 +1068,63 @@ impl Tx<'_> {
                  WHERE d.org_id = j.org_id AND d.job_id = j.id \
                    AND dep.status <> 'completed'))            AS blocked, \
                COUNT(*)                                       AS total \
-             FROM jobs j WHERE j.org_id = $1 AND ($2::uuid IS NULL OR j.repo_id = $2)",
+             FROM jobs j WHERE j.org_id = $1 AND j.repo_id = $2",
         )
         .bind(org)
         .bind(repo_id)
         .fetch_one(self.conn())
         .await?;
         Ok(stats)
+    }
+
+    /// `completed`/`failed` come from `orgs.jobs_completed_total`/
+    /// `jobs_failed_total` — counters kept exactly in step by
+    /// `bump_terminal_counter` — rather than a `COUNT(*)` over every job the
+    /// org has ever run. Only `pending`/`in-progress`/`active`/`blocked` need
+    /// a live scan, and that scan is restricted to non-terminal rows, so its
+    /// cost tracks current queue depth rather than the org's lifetime volume.
+    async fn org_wide_stats(&mut self, org: OrgId) -> Result<Stats> {
+        let (completed, failed): (i64, i64) = sqlx::query_as(
+            "SELECT jobs_completed_total, jobs_failed_total FROM orgs WHERE id = $1",
+        )
+        .bind(org)
+        .fetch_optional(self.conn())
+        .await?
+        .ok_or(Error::OrgNotFound(org))?;
+
+        #[derive(sqlx::FromRow)]
+        struct Live {
+            pending: i64,
+            in_progress: i64,
+            active: i64,
+            blocked: i64,
+        }
+
+        let live: Live = sqlx::query_as(
+            "SELECT \
+               COUNT(*) FILTER (WHERE status = 'pending')     AS pending, \
+               COUNT(*) FILTER (WHERE status = 'in-progress') AS in_progress, \
+               COUNT(*) FILTER (WHERE status = 'active')      AS active, \
+               COUNT(*) FILTER (WHERE status = 'pending' AND EXISTS ( \
+                 SELECT 1 FROM job_dependencies d \
+                 JOIN jobs dep ON dep.org_id = d.org_id AND dep.id = d.depends_on \
+                 WHERE d.org_id = j.org_id AND d.job_id = j.id \
+                   AND dep.status <> 'completed'))            AS blocked \
+             FROM jobs j \
+             WHERE j.org_id = $1 AND j.status NOT IN ('completed', 'failed')",
+        )
+        .bind(org)
+        .fetch_one(self.conn())
+        .await?;
+
+        Ok(Stats {
+            pending: live.pending,
+            in_progress: live.in_progress,
+            active: live.active,
+            completed,
+            failed,
+            blocked: live.blocked,
+            total: live.pending + live.in_progress + live.active + completed + failed,
+        })
     }
 }

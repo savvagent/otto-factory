@@ -30,13 +30,13 @@ async fn repos_are_invisible_across_orgs(pool: PgPool) {
     let b = tenant(&db, "globex", "git@github.com:globex/api.git").await;
 
     let mut tx = db.begin(a.org).await.unwrap();
-    let seen = tx.list_repos(true).await.unwrap();
+    let seen = tx.list_repos(true, None).await.unwrap();
     tx.commit().await.unwrap();
     assert_eq!(seen.len(), 1);
     assert_eq!(seen[0].name, "acme api");
 
     let mut tx = db.begin(b.org).await.unwrap();
-    let seen = tx.list_repos(true).await.unwrap();
+    let seen = tx.list_repos(true, None).await.unwrap();
     tx.commit().await.unwrap();
     assert_eq!(seen.len(), 1);
     assert_eq!(seen[0].name, "globex api");
@@ -431,7 +431,7 @@ async fn unknown_org_sees_nothing(pool: PgPool) {
 
     let nobody = OrgId::new();
     let mut tx = db.begin(nobody).await.unwrap();
-    assert!(tx.list_repos(true).await.unwrap().is_empty());
+    assert!(tx.list_repos(true, None).await.unwrap().is_empty());
     assert!(tx
         .list_jobs(&JobFilter::default())
         .await
@@ -757,10 +757,10 @@ async fn verifying_isolation_does_not_poison_the_pool(pool: PgPool) {
     let a = tenant(&db, "acme", "git@github.com:acme/api.git").await;
     let b = tenant(&db, "globex", "git@github.com:globex/api.git").await;
     let mut tx = db.begin(a.org).await.unwrap();
-    assert_eq!(tx.list_repos(true).await.unwrap().len(), 1);
+    assert_eq!(tx.list_repos(true, None).await.unwrap().len(), 1);
     tx.commit().await.unwrap();
     let mut tx = db.begin(b.org).await.unwrap();
-    assert_eq!(tx.list_repos(true).await.unwrap().len(), 1);
+    assert_eq!(tx.list_repos(true, None).await.unwrap().len(), 1);
     tx.commit().await.unwrap();
 }
 

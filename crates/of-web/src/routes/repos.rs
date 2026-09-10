@@ -143,7 +143,7 @@ pub async fn list_repos(
     axum::extract::Query(q): axum::extract::Query<ListReposQuery>,
 ) -> ApiResult<Json<Vec<Repo>>> {
     let mut tx = state.db.begin(ctx.org.id).await?;
-    let repos = tx.list_repos(q.include_inactive).await?;
+    let repos = tx.list_repos(q.include_inactive, None).await?;
     let repos = visible_repos(&mut tx, &ctx, repos).await?;
     tx.commit().await?;
     Ok(Json(repos))
