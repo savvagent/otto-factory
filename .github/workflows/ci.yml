@@ -32,7 +32,11 @@ jobs:
   # Mirrors the hand-run gate exactly: fmt --check, clippy -D warnings, then
   # cargo test. All three ran by hand against the same checkout, so they stay
   # one job rather than three — a fmt failure should still let clippy and
-  # test report their own results in the same log.
+  # test report their own results in the same log. Also carries one
+  # pre-toolchain repo-hygiene check (the .claude/skills assertion below) —
+  # folded in here rather than a dedicated job because it needs no toolchain
+  # and runs in well under a second; see
+  # docs/specs/2026-09-10-ci-assert-skills-symlink-design.md.
   rust:
     runs-on: ubuntu-latest
     services:
@@ -59,10 +63,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # .claude/skills is a git-tracked symlink to ../.github/skills so Claude Code
+      # discovers this repo's skills on a fresh clone (see savvagent/otto-factory#124);
+      # nothing previously noticed if that symlink broke or got repointed
+      # (savvagent/otto-factory#127). Reads the committed tree object rather than the
+      # live filesystem for the first two checks so it still catches a broken commit
+      # even under a checkout that didn't materialize the symlink. `$line`/`$target`
+      # come from a blob any PR author controls, so both are stripped of embedded
+      # newlines before being echoed into a `::error::` workflow-command line or
+      # compared — GitHub Actions parses any `::`-prefixed stdout line as a command,
+      # and command substitution silently strips only a *trailing* newline, which
+      # would otherwise let a target differing only by a trailing "\n" compare equal.
       - name: Assert .claude/skills resolves to .github/skills
         run: |
           set -euo pipefail
-          line=$(git ls-tree HEAD .claude/skills)
+          line=$(git ls-tree HEAD .claude/skills | tr -d '\n\r')
           if [ -z "$line" ]; then
             echo "::error::.claude/skills does not exist in HEAD (expected a symlink)"
             exit 1
@@ -74,7 +89,7 @@ jobs:
             echo "::error::.claude/skills is not a symlink blob in HEAD (git ls-tree: $line)"
             exit 1
           fi
-          target=$(git cat-file blob HEAD:.claude/skills)
+          target=$(git cat-file blob HEAD:.claude/skills | tr -d '\n\r')
           if [ "$target" != "../.github/skills" ]; then
             echo "::error::.claude/skills points at '$target', expected '../.github/skills'"
             exit 1

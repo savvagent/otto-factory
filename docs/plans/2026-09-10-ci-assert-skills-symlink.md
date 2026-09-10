@@ -11,10 +11,18 @@ implements it exactly.
 
 ## Status — 2026-09-10
 
-Approved after two critique rounds (one real bug found and fixed: the deleted-path negative
-check originally pointed at a pre-#124 commit that still had `.claude/skills` as a real tracked
-directory, not an absent path — fixed to point at the repo's actual root commit `7cbddbb`).
-Implementation not yet started.
+**Done.** Task 1 (✅ below) shipped in `savvagent/otto-factory#129`, closing #127. Plan critique
+found one real bug before implementation (the deleted-path negative check originally pointed at a
+pre-#124 commit that still had `.claude/skills` as a real tracked directory, not an absent path —
+fixed to point at the repo's actual root commit `7cbddbb`). The PR review round (mandatory
+rust-pro/architect/blind-security trio plus pr-review-toolkit passes) found two further real
+issues beyond this plan's own critique: the spec's own deleted-path verification claim still named
+the wrong (pre-#124) commit after the plan had already been corrected, and `$line`/`$target` in
+the script were echoed unsanitized into `::error::` lines — a blob any PR author controls, so an
+embedded newline could inject a workflow command and a trailing newline was silently stripped by
+command substitution, letting a wrong target compare equal. Both fixed before merge (spec
+corrected; script pipes both values through `tr -d '\n\r'`); see the spec's Status block for
+detail.
 
 ---
 
@@ -47,18 +55,18 @@ One task — one file, one step, no dependencies to sequence.
 
 ---
 
-## Task 1 — Add the CI assertion step ⬜
+## Task 1 — Add the CI assertion step ✅
 
 **Files:** `.github/workflows/ci.yml`.
 
 **Interfaces:** none produced or consumed — this is a CI-only change with no Rust or `web/`
 interface surface.
 
-- [ ] Read the current `rust` job in `.github/workflows/ci.yml` and confirm the insertion point:
+- [x] Read the current `rust` job in `.github/workflows/ci.yml` and confirm the insertion point:
       immediately after the `- uses: actions/checkout@v4` step and before the
       `- name: Install Rust toolchain` step. (Already confirmed during spec review; re-confirm
       here since a merge from `master` could have shifted it before this task starts.)
-- [ ] There is no automated test harness for workflow YAML in this repo (the spec's §2 Testing
+- [x] There is no automated test harness for workflow YAML in this repo (the spec's §2 Testing
       section documents this explicitly), so this task's "failing test first" step is a manual
       empirical run of the intended script against the current tree, executed as scratch shell
       commands in the worktree (not committed) — expected to **pass** on the untouched tree,
@@ -76,7 +84,7 @@ interface surface.
       test -f .claude/skills/otto-factory-development/SKILL.md
       echo ALL PASS
       ```
-- [ ] Add the step from spec §1 verbatim to `.github/workflows/ci.yml`'s `rust` job, between
+- [x] Add the step from spec §1 verbatim to `.github/workflows/ci.yml`'s `rust` job, between
       `actions/checkout@v4` and `Install Rust toolchain`:
       ```yaml
       - name: Assert .claude/skills resolves to .github/skills
@@ -104,12 +112,12 @@ interface surface.
             exit 1
           fi
       ```
-- [ ] Validate the edited YAML parses: `gh workflow view ci.yml --repo savvagent/otto-factory`
+- [x] Validate the edited YAML parses: `gh workflow view ci.yml --repo savvagent/otto-factory`
       (reads the version on `master`, so this only confirms syntax generically before push — the
       real validation is the branch's own PR run in a later step) or a local YAML parse, e.g.
       `python3 -c "import yaml,sys; yaml.safe_load(open('.github/workflows/ci.yml'))"`. Expect no
       parse error.
-- [ ] Run the negative checks by hand once, in scratch locations, to confirm the script's error
+- [x] Run the negative checks by hand once, in scratch locations, to confirm the script's error
       paths actually fire as designed (this is what the spec's §2 Testing section commits to
       reporting in the PR body — do this now so the PR body can state real results, not
       predictions):
@@ -129,7 +137,7 @@ interface surface.
         `120000 blob` — confirms the mode/type branch would fire for this case without needing a
         dedicated scratch repo.
       Record the three outcomes for the PR body's test plan.
-- [ ] Format and commit: this task touches no Rust or `web/` source, so there is nothing for
+- [x] Format and commit: this task touches no Rust or `web/` source, so there is nothing for
       `cargo fmt` or `npm run lint` to reformat — commit directly:
       `git add .github/workflows/ci.yml && git commit -m "ci: assert .claude/skills still resolves to .github/skills"`.
 

@@ -13,6 +13,20 @@
 > intended `::error::` message, not a mid-script `git rev-parse` abort. All four cases (current tree,
 > deleted, wrong target, real directory instead of a symlink) were re-verified empirically after the
 > fix — see the updated Premise corrections and Error Handling sections.
+>
+> **Post-review correction:** the mandatory-trio review on the PR (savvagent/otto-factory#129) found
+> two further issues, both fixed before merge: this document's own deleted-path verification claim
+> named "the pre-#124 commit," which is wrong — that commit still has `.claude/skills` as a real
+> `040000 tree` directory (#124 converted an existing directory into a symlink, it didn't create the
+> path), so it exercises the mode/type branch, not the existence branch; the genuinely-absent-path
+> commit is the repo's root commit `7cbddbb`, corrected throughout below. Separately, `$line`/
+> `$target` in §1's script are read from a blob any PR author controls and were echoed unsanitized
+> into `::error::` lines — a crafted blob containing an embedded newline could inject a second
+> workflow command (low severity here: `contents: read`, no secrets, `pull_request` not
+> `pull_request_target`, and a fork PR already gets code execution later in the same job) and a
+> trailing newline was silently stripped by command substitution, letting a target differing only by
+> a trailing `\n` compare equal. Both closed by piping through `tr -d '\n\r'` before comparing or
+> printing either value.
 
 ## Goal & Success Criteria
 
@@ -92,7 +106,7 @@ toolchain, so ordering it first fails fast and cheaply if it's ever going to fai
 - name: Assert .claude/skills resolves to .github/skills
   run: |
     set -euo pipefail
-    line=$(git ls-tree HEAD .claude/skills)
+    line=$(git ls-tree HEAD .claude/skills | tr -d '\n\r')
     if [ -z "$line" ]; then
       echo "::error::.claude/skills does not exist in HEAD (expected a symlink)"
       exit 1
@@ -104,7 +118,7 @@ toolchain, so ordering it first fails fast and cheaply if it's ever going to fai
       echo "::error::.claude/skills is not a symlink blob in HEAD (git ls-tree: $line)"
       exit 1
     fi
-    target=$(git cat-file blob HEAD:.claude/skills)
+    target=$(git cat-file blob HEAD:.claude/skills | tr -d '\n\r')
     if [ "$target" != "../.github/skills" ]; then
       echo "::error::.claude/skills points at '$target', expected '../.github/skills'"
       exit 1
@@ -114,6 +128,13 @@ toolchain, so ordering it first fails fast and cheaply if it's ever going to fai
       exit 1
     fi
 ```
+
+`$line`/`$target` are read from a blob any PR author controls, so both are piped through
+`tr -d '\n\r'` before being compared or echoed into a `::error::` line — GitHub Actions parses any
+`::`-prefixed stdout line as a workflow command, so an embedded newline in the blob content could
+otherwise inject a second command, and command substitution only strips a *trailing* newline, which
+would otherwise let a target differing solely by a trailing `\n` compare equal (see the Status
+blockquote's Post-review correction).
 
 - `git ls-tree` / `git cat-file` read the committed tree object directly — this checks what's
   *committed*, the same thing `verify_tenant_isolation`-style guards in this repo check state rather
@@ -145,8 +166,10 @@ sense. Verification is:
 - A manual negative check performed locally (not committed) to confirm the assertions actually fail
   on a broken symlink — this repo's CI doesn't have a "test the test" harness for workflow YAML, so
   this is done by hand and reported in the PR body rather than committed as an automated meta-test.
-  Performed during spec revision against: the current tree (pass), the pre-#124 commit where
-  `.claude/skills` doesn't exist yet (fails on the existence check), a scratch repo with the symlink
+  Performed during spec revision against: the current tree (pass), the repo's root commit
+  `7cbddbb` — which genuinely predates `.claude/skills` existing as any path at all; a commit
+  merely before #124 still has it present as a `040000 tree` directory, exercising the mode/type
+  branch instead — (fails on the existence check), a scratch repo with the symlink
   repointed at a different target (fails on the target check), and the current tree read as a `git
   ls-tree` mode/type check to confirm a real directory would fail the same way (`040000 tree` ≠
   `120000 blob`). All four produced the expected `::error::` message.
@@ -176,8 +199,9 @@ sense. Verification is:
 - **`.claude/skills` deleted entirely.** `git ls-tree HEAD .claude/skills` returns empty output,
   caught by the explicit `-z "$line"` check before any other `git` call runs, so the step fails with
   the intended `::error::.claude/skills does not exist in HEAD` message rather than a raw `git`
-  failure from an unguarded downstream call. Verified empirically against the pre-#124 commit where
-  the path didn't exist yet.
+  failure from an unguarded downstream call. Verified empirically against the repo's root commit
+  `7cbddbb`, the actual point at which the path didn't exist yet (a merely-pre-#124 commit still
+  has it as a real directory — see §2 Testing).
 - **`.claude/skills` becomes a real directory instead of a symlink** (e.g. someone `rm`s the link and
   copies files in, forking the single-source-of-truth CLAUDE.md warns against). `git ls-tree` reports
   it as `040000 tree ...`, not `120000 blob ...`, so `mode` is `040000` and the mode/type assertion
