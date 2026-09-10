@@ -1,10 +1,20 @@
 # Migration-time unscoped writes against tenant tables
 
-> **Status:** DRAFT — fixes `savvagent/otto-factory#70`: `0020_rename_trigger_label_default.sql`'s
-> relabeling `UPDATE` runs with no `app.org_id` set, which is invisible under this deployment's
-> current superuser connecting role but would silently match zero rows on the FORCE-RLS-fallback
-> deployment shape. Investigation found no stale data to correct; this spec documents the general
-> rule and adds a regression test, not a data migration.
+> **Status:** IMPLEMENTED — shipped in `savvagent/otto-factory#111`, closing
+> `savvagent/otto-factory#70`. `0020_rename_trigger_label_default.sql`'s relabeling `UPDATE` runs
+> with no `app.org_id` set, which is invisible under this deployment's current superuser
+> connecting role but would silently match zero rows on the FORCE-RLS-fallback deployment shape.
+> Investigation found no stale data to correct; this spec documents the general rule and adds a
+> regression test, not a data migration. Three rounds of PR review corrected two real errors in
+> the rule's first drafts before merge — see the "Revision notes" under §1 — so read the rule in
+> `CLAUDE.md` itself, not just this spec's intent, before relying on it. Deployed and verified via
+> the merge commit's own CI run (`cargo test --workspace`, `cargo clippy --all-targets -- -D
+> warnings`, `cargo fmt --all --check`, `pr-title` all green).
+>
+> Two follow-ups filed, not fixed, in `#111`: `savvagent/otto-factory#106` (`fly.toml`'s header
+> comment contradicts `docs/deploy/fly.md` on the deployment shape) and
+> `savvagent/otto-factory#112` (`Db::begin_unpinned`'s doc comment asserts a safety property false
+> under a superuser connecting role).
 
 ## Goal & Success Criteria
 

@@ -11,10 +11,12 @@ implements it exactly.
 
 ## Status — 2026-09-10
 
-Task 1 implemented in PR #111 (`core/migration-org-scoped-writes`), including fixes from PR review
-(corrected RLS mechanics in the CLAUDE.md paragraph and the test's inline comment, a positive
-control added to the test). Not yet merged — this plan's marker and the spec's `Status:` blockquote
-flip to shipped in the post-merge record-as-shipped commit, per house convention.
+✅ Done. Task 1 shipped in PR #111 (`core/migration-org-scoped-writes`, merged as `d6385a6`),
+closing `savvagent/otto-factory#70`. Three rounds of PR review corrected real errors in the rule's
+first drafts (see the spec's "Revision notes" under §1) before merge; the shipped `CLAUDE.md`
+paragraph and the regression test both hold up under empirical verification against a real
+Postgres. Two follow-ups filed separately: `#106` (`fly.toml` doc drift), `#112`
+(`Db::begin_unpinned` doc comment).
 
 ---
 
@@ -52,7 +54,7 @@ following that reference — writing one without the other leaves a dangling cit
 
 ---
 
-## Task 1 — Document the rule and add the regression test
+## Task 1 — Document the rule and add the regression test ✅
 
 **Files:** `CLAUDE.md`, `crates/of-core/tests/isolation.rs`.
 
