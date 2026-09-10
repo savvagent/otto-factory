@@ -135,7 +135,19 @@ compiles unchanged, per the Global Constraints note).
 
 ## Task 2 — `of-mcp`: `resource` input, `branch` alias, tool descriptions ⬜
 
-**Files:** `crates/of-mcp/src/tools/coord.rs`, `crates/of-mcp/tests/tools.rs`
+**Files:** `crates/of-mcp/src/tools/coord.rs`, `crates/of-mcp/tests/tools.rs`,
+`crates/of-mcp/src/error.rs`
+
+**Discovered during Task 1 implementation, not caught by spec or plan critique:**
+`crates/of-mcp/src/error.rs:163-167` has a unit test
+(`every_error_carries_a_code_and_a_retriable_flag`) that constructs
+`CoreError::LeaseHeld { branch: "main".into(), holder: ..., expires_at: ... }` as a struct
+literal. This does not appear in any `grep` for `.acquire_lease(`/`.branch\b` because it
+constructs the error variant directly rather than calling a lease function, and it lives in
+a `#[cfg(test)]` module so `cargo build -p of-mcp` (no `--tests`) does not catch it —
+`cargo check -p of-mcp --all-targets` does, with `error[E0559]: variant
+of_core::Error::LeaseHeld has no field named branch`. Fix: change `branch: "main".into()` to
+`resource: "main".into()` at that call site. No other test in this file touches `LeaseHeld`.
 
 **Interfaces:** consumes Task 1's `Tx::acquire_lease` / `Error::LeaseHeld`; produces the
 public `acquire_lease` MCP tool's new input shape and all four lease tools' output (via
@@ -188,6 +200,15 @@ public `acquire_lease` MCP tool's new input shape and all four lease tools' outp
       `take` closure at ~1176 both need `resource: None,` added and `branch: "main".into()`
       changed to `branch: Some("main".into())`; the override literal at ~1208
       (`branch: "feature/x".into(), ..take()`) needs `branch: Some("feature/x".into())`.
+- [ ] Fix `crates/of-mcp/src/error.rs:163-167`'s `CoreError::LeaseHeld { branch:
+      "main".into(), ... }` struct literal (inside `every_error_carries_a_code_and_a_retriable_flag`)
+      to `resource: "main".into()` — see the note above the Files list for how this was found.
+- [ ] Run `cargo check -p of-mcp --all-targets` — confirm a clean compile across lib, tests,
+      and any other target in this crate, not just the default build (this is what would
+      have caught the `error.rs` literal above; a plain `cargo build -p of-mcp` does not
+      compile `#[cfg(test)]` code and would not).
+- [ ] Run `cargo test -p of-mcp --lib` — confirms `every_error_carries_a_code_and_a_retriable_flag`
+      (the `error.rs` unit test fixed above) passes.
 - [ ] Run `cargo test -p of-mcp --test tools` — all coordination tests pass, including the
       four new ones and the fixed existing test.
 - [ ] Run `cargo clippy -p of-mcp --all-targets -- -D warnings`.
