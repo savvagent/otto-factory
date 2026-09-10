@@ -87,10 +87,16 @@ bump).
   `GITHUB_TOKEN`, scoped to just the `release-please` job via a job-level `permissions:` block.
   Confirmed via the GitHub API immediately before writing this spec; v5.0.0's only breaking change
   vs v4 is a Node 24 runtime bump, no config-schema change.
-- **`amannn/action-semantic-pull-request` pinned to the `v6` major tag** (not a SHA) for the PR-title
-  lint — it never sees a secret (default read-only `GITHUB_TOKEN` is enough to read a PR title),
-  matching this repo's existing precedent for non-privileged actions (`Swatinem/rust-cache@v2`,
-  `dorny/paths-filter@v3`).
+- **`amannn/action-semantic-pull-request` pinned to the exact commit behind `v6.1.1`
+  (`48f256284bd46cdaab1048c3721360e808335d50`), not a mutable tag.** The original reasoning for a
+  tag pin here — "it never sees a secret, default read-only `GITHUB_TOKEN` is enough" — turned out
+  to assume a fact about this repo's settings rather than about the action: `GITHUB_TOKEN`'s
+  default scope is a *repository* setting, not a property of what an action needs, and this repo's
+  default is `write`. A mutable tag on a job holding a write-scoped token by default is the same
+  supply-chain exposure the SHA-pinned `release-please-action`/`flyctl-actions` precedent exists to
+  avoid — this job earns it too, not an exception from it. The job itself is additionally scoped
+  down to `permissions: pull-requests: read` (§2) so the token it actually holds is minimal
+  regardless.
 - **No branch protection change.** `master` currently has no configured branch protection
   (`gh api repos/savvagent/otto-factory/branches/master/protection` → 404, checked directly) — the
   PR-title lint (§2) reports a failed check either way, and enabling required-status-checks is a
@@ -250,8 +256,11 @@ gates its filter step the same way — PR-only signal, no push-side meaning):
   pr-title:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
+    timeout-minutes: 5
+    permissions:
+      pull-requests: read
     steps:
-      - uses: amannn/action-semantic-pull-request@v6
+      - uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:

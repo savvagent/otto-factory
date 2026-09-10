@@ -102,8 +102,13 @@ These hold for every task below:
       `45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0`), `with.config-file` and
       `with.manifest-file` pointing at Task 1's two files.
 - [ ] Append the `pr-title` job from spec §2: `if: github.event_name == 'pull_request'`,
-      `amannn/action-semantic-pull-request@v6` with the `types`, `scopes`, `requireScope: false`,
-      and `subjectPattern` values from the spec verbatim.
+      `amannn/action-semantic-pull-request` pinned to the exact commit behind `v6.1.1`
+      (`48f256284bd46cdaab1048c3721360e808335d50`) — not the mutable `@v6` tag; a security review
+      of this PR found the job's original "never sees a secret" tag-pin reasoning assumed a repo
+      setting rather than a property of the action, so it earns the same SHA-pin precedent as
+      every other privileged step — with the `types`, `scopes`, `requireScope: false`, and
+      `subjectPattern` values from the spec verbatim, plus `permissions: pull-requests: read` and
+      `timeout-minutes: 5`.
 - [ ] Change `deploy`'s `needs:` from `[rust, web, docker-build]` to `[release-please]` and its
       `if:` from `github.event_name == 'push'` to
       `needs.release-please.outputs.release_created == 'true'`. Leave every other line of `deploy`
