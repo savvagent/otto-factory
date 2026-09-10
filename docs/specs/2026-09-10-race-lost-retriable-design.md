@@ -49,7 +49,11 @@ Per Non-Negotiable Rule 6, this is **additive, not breaking**:
 - The console API's `{"error": {"code": …, "message": …}}` envelope (`of-web`) gains one new
   possible `code`/`status` pairing (`"race_lost"` / `503`), the same additive shape every prior
   `Error` variant already gave it — no existing pairing changes.
-- No version bump is required; every crate stays at the workspace `0.1.0`.
+- No manual version bump is required. The workspace is at `0.3.0` as of this change, not
+  `0.1.0` — but the number is not the reason a bump is unnecessary: this PR's commit type is
+  `fix:`, and release-please reads that from commit history to cut a patch release
+  automatically. A manual bump, or a `!`/`BREAKING CHANGE:` marker, is only for a genuinely
+  breaking change, which this is not.
 
 ## Scope
 
@@ -283,18 +287,37 @@ other.to_string()` fallback already handles it correctly with no new arm needed.
 
 ## Risks & Open Questions
 
-- The live concurrent race (the winner's committed row deleted by a second connection
-  strictly between the first connection's SAVEPOINT-violation and its immediately-following
-  recovery SELECT, both awaits inside one async function call with no externally-triggerable
-  yield point) is not deterministically testable through the public API without adding a
-  test-only instrumentation hook to production code, which is out of scope for this
-  bug-fix-sized change. Unlike the existing `concurrent_add_job_idempotency_converges_on_one_job`/
+- The live concurrent race through `add_job` itself (the winner's committed row deleted by a
+  second connection strictly between `add_job`'s own SAVEPOINT-violation and its
+  immediately-following recovery SELECT, both awaits inside one async function call with no
+  externally-triggerable yield point) still cannot be driven deterministically as a black box
+  through the public API without adding a test-only instrumentation hook to production code —
+  unlike the existing `concurrent_add_job_idempotency_converges_on_one_job`/
   `concurrent_create_from_ticket_converges_on_one_job` tests (which tolerate either of two
   orderings and work with sleep-based `tokio::join!` timing), this scenario needs one specific
-  narrow interleaving with a sub-millisecond window, which sleep-based timing cannot reliably
-  produce without flaking. Coverage relies on `crates/of-core/src/error.rs`'s
-  `race_lost_is_retriable` test (the variant's `code()`/`retriable()` behavior) plus the
-  mechanical nature of the four call-site changes (a one-line `Error::Invalid` →
+  narrow interleaving with a sub-millisecond window that sleep-based timing cannot reliably
+  produce without flaking, and that instrumentation hook is out of scope for a bug-fix-sized
+  change.
+
+  What *is* now deterministically proven, by
+  `crates/of-core/tests/jobs.rs`'s
+  `a_deleted_and_committed_winner_row_is_invisible_to_the_recovery_select`, is the actual
+  database-level premise every `RaceLost` construction site rests on: reproducing `add_job`'s
+  identical SAVEPOINT / insert / violation / rollback / recovery-SELECT sequence by hand, via
+  `Tx::conn()`, on a `Tx` the test fully controls, with the winner row's deletion injected — by
+  the test itself, not by racing a background task — at the exact point that matters. That
+  test does not call `add_job` (or `link_ticket`/`create_from_ticket`/`send_message`); it
+  proves that *if* one of those functions' own SAVEPOINT recovery reaches its `ok_or_else` with
+  the winner row already deleted-and-committed, the recovery SELECT really does see nothing —
+  Postgres does not resurrect the row, and MVCC visibility does not somehow race the rollback.
+  What remains unverified is narrower than before: not "does Postgres behave the way `RaceLost`
+  assumes" (now proven directly) but only "does the real sub-millisecond interleaving inside
+  `add_job`'s own async function body actually reach that arm in production" — which is a
+  timing question about `tokio`/`sqlx` scheduling, not a correctness question about the SQL,
+  and is the part that would need production instrumentation to observe. Coverage otherwise
+  relies on `crates/of-core/src/error.rs`'s `race_lost_is_retriable` test (the variant's
+  `code()`/`retriable()` behavior) plus the mechanical nature of the four call-site changes (a
+  one-line `Error::Invalid` →
   `Error::RaceLost` swap with unchanged `format!` arguments, reviewable directly against the
   diff) and the full existing test suite continuing to pass unchanged (proving the sibling
   branches — `TicketAlreadyLinked`, `IdempotencyKeyConflict`, the happy-path recovery arms —
