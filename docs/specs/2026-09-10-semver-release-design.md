@@ -21,6 +21,14 @@
 > lower-priority CI-hardening findings savvagent/otto-factory#114 left unfixed (job timeouts,
 > `deploy`'s remaining unpinned checkout step, the repo's PR-self-approval setting) are tracked in
 > savvagent/otto-factory#117.
+>
+> **Update, savvagent/otto-factory#115:** the release-PR path above is no longer unexercised.
+> #115 (`feat: generalize repo leases…`, merged `6fe084e0`) is this repo's first `feat:`-typed
+> merge since #114, and its push triggered `release-please` opening
+> savvagent/otto-factory#121 (`chore: release 0.2.0`) — confirming the repo setting flagged
+> above as unverified does in fact allow it. `deploy` still correctly skipped on #115's own
+> push, since #121 (the release PR) has not yet merged; see #115's design spec Status
+> blockquote for the full account.
 
 ## Goal & Success Criteria
 
