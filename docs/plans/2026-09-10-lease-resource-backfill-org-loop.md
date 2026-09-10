@@ -10,7 +10,12 @@ This plan implements it exactly.
 
 ## Status — 2026-09-10
 
-Not started.
+Task 1 implemented and locally green (migration + test written, `cargo test -p of-core --test
+isolation` and `--test queue` pass, `cargo clippy --all-targets -- -D warnings` and `cargo fmt
+--all` clean). Not yet through the spec-compliance review, code-quality review, or PR (Phase 3
+steps C/E and Phase 4 of otto-factory-development, run from the parent session rather than this
+plan document). PR will reference `savvagent/otto-factory#119` directly (`Closes #119`) — no
+separate tracker-transition step needed on the GitHub-issue path beyond what the ship phase does.
 
 ## Global Constraints
 

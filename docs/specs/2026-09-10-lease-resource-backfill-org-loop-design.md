@@ -145,3 +145,26 @@ No `of-billing::classify` entry needed — this change adds no MCP tool.
   pointless — the value is the precedent (a real, working example of the documented pattern in the
   migration history) and the safety net for an edge case (a missed row, a differently-shaped
   future deployment) that is real but currently unobserved.
+- **The idempotency guard (`resource NOT LIKE 'branch:%'`) cannot distinguish "0027 already
+  transformed this row" from "this row's raw, pre-migration branch name was already literally
+  `branch:<something>`.** 0027's own comment explains why it prefixed unconditionally rather than
+  guarding: a legacy branch named `branch:main` would, under a guard, end up sharing a string with
+  a genuine `main` branch's lease once that one gets prefixed — 0027 accepted a cosmetic double
+  prefix (`branch:branch:main`) specifically to keep such rows distinct, and called that "correct,
+  not merely simpler." Because 0027's own `UPDATE` carries no `WHERE` clause, its only two possible
+  outcomes on any deployment are "every existing row gets prefixed" (the migrating role could see
+  the rows) or "zero rows get prefixed" (RLS blocked all of them) — never a partial subset. So the
+  one scenario where 0030's guard's ambiguity is live is the same one it exists to catch: 0027
+  failed entirely on some deployment. In that compound case, if a repo has both an unreleased lease
+  on a real `main` branch (raw resource `main`) and an unreleased lease on a branch genuinely named
+  `branch:main` (raw resource `branch:main`), 0030 prefixes the first and, misreading the second as
+  already-done, leaves it — producing two live rows with the same `(repo_id, resource)`. This does
+  not silently corrupt data: `repo_leases_live_key` (`0002_repos.sql`) is a unique index on exactly
+  that pair `WHERE released_at IS NULL`, so the colliding `UPDATE` fails with a Postgres unique-
+  violation and the migration does not apply — a loud failure, not silent corruption, surfaced at
+  deploy time on the one deployment shape where it could ever occur. A guard that could tell these
+  two cases apart would need a signal this schema doesn't carry (no schema-version column, no lease-
+  format marker), so the choice here is the same shape as 0027's own trade-off: accept a narrow,
+  loud-failure corner case in exchange for the guard doing its job everywhere else, rather than
+  reintroducing 0027's real, silent-corruption-in-the-common-case failure mode (unconditional
+  re-prefixing of rows 0027 already touched) to close it.
