@@ -62,7 +62,7 @@ pub struct AcquireLeaseArgs {
     pub job: Option<String>,
     /// How long to hold it before it expires. Defaults to 15 minutes, capped
     /// at 4 hours. Renew rather than asking for a long one: a lease that
-    /// outlives a crashed agent blocks the branch for everyone.
+    /// outlives a crashed agent blocks the resource for everyone.
     #[serde(default)]
     pub ttl_seconds: Option<i64>,
 }
