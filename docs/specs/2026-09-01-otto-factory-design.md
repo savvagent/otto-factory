@@ -192,8 +192,10 @@ repo is an error naming the registered slugs and pointing at `register_repo`; it
 silently falls back to a different repo's queue.
 
 **Repo leases** are the primitive that stops two agents colliding. An agent takes a lease
-on `(repo, branch)` for a bounded TTL, renews it while working, and releases it on
-completion. Leases are advisory and time-bounded — a crashed agent's lease expires rather
+on `(repo, resource)` for a bounded TTL, renews it while working, and releases it on
+completion — `resource` is free-form, with `branch:main` as the convention for the git
+branch case, so agents can also serialize on a staging slot, a migration lock, or a shared
+fixture. Leases are advisory and time-bounded — a crashed agent's lease expires rather
 than deadlocking the repo — and `list_leases` answers "who is in this repo right now".
 The server never enforces a lease against a git operation it cannot see; it makes
 collisions *visible and avoidable*, which is what coordination means here.
@@ -404,9 +406,10 @@ Fly.io or ECS behind a TLS terminator; Neon or Aurora for Postgres.
 3. **Repo resolution ambiguity.** Monorepos, forks, and mirrors can present remotes that
    map to several plausible rows. Mitigation: resolution is explicit-first and errors on
    ambiguity rather than guessing.
-4. **Lease semantics are advisory.** The server cannot see git operations, so a determined
-   agent can ignore a lease. This is documented, not hidden — leases make collisions
-   visible; they are not a mutex.
+4. **Lease semantics are advisory.** The server cannot see what an agent actually does with
+   a leased resource — a git operation, a migration run, a deploy — so a determined agent
+   can ignore any lease it holds. This is documented, not hidden; leases make collisions
+   visible, not impossible.
 5. **Tracker sync loops.** Mitigated by revision recording, but webhook replay and
    third-party edits during a sync window need soak testing.
 6. **Per-org job counters serialize inserts within an org.** Fine at expected volume; move
