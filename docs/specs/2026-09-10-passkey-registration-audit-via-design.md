@@ -4,8 +4,8 @@
 > filed as a lower-severity follow-up during the review of `savvagent/otto-factory#86` (see
 > `docs/specs/2026-09-10-passkey-audit-events-design.md`, which shipped the `auth.passkey.registered`
 > / `auth.passkey.cleared` rename this spec builds on). Deployed and verified via the merge commit's
-> own CI run (`cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all
-> --check`, `npm run check`/`lint`/`test` all green) and the automatic `flyctl deploy` to
+> own CI run (`cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`,
+> `cargo fmt --all --check`, `npm run check`/`lint`/`test` all green) and the automatic `flyctl deploy` to
 > `otto-factory-mcp` that followed it. Three follow-up issues were filed rather than folded in, per
 > the independent security reviewer's own recommendation not to hold the merge for them: `#108`
 > (`finish_registration`'s credential INSERT and its audit write are not atomic), `#109`
