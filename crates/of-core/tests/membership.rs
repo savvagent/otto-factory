@@ -158,6 +158,27 @@ async fn team_membership_requires_org_membership(pool: PgPool) {
     tx.commit().await.unwrap();
 }
 
+/// A passkey creates the account before an address is ever set — `TeamMember`
+/// must decode that row like every other member, not error out the whole list.
+#[sqlx::test]
+async fn listing_a_team_with_an_addressless_member_does_not_error(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+    let unclaimed = db.create_unclaimed_user().await.unwrap();
+    db.add_member(t.org, unclaimed.id, Role::Member)
+        .await
+        .unwrap();
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let team = tx.create_team("platform", "Platform").await.unwrap();
+    tx.add_team_member(team.id, unclaimed.id).await.unwrap();
+
+    let members = tx.list_team_members(team.id).await.unwrap();
+    assert_eq!(members.len(), 1);
+    assert_eq!(members[0].email, None);
+    tx.commit().await.unwrap();
+}
+
 #[sqlx::test]
 async fn leaving_the_org_clears_every_team_membership(pool: PgPool) {
     let db = db(pool);

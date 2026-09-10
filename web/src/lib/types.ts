@@ -175,7 +175,7 @@ export interface Team {
 
 export interface TeamMember {
   userId: string;
-  email: string;
+  email: string | null;
   name: string | null;
   /** See `User.label` — what to render where an address is missing. */
   label: string;
