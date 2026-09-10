@@ -13,3 +13,7 @@ web/project.inlang/cache
 # Feature worktrees live inside the repo; never stage their contents.
 .worktrees/
 .vscode/
+# Claude Code writes machine-local state (permission allowlists, task locks)
+# into .claude/. Only the tracked `skills` symlink belongs in the repo.
+.claude/*
+!.claude/skills

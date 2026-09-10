@@ -177,6 +177,17 @@ database per test, migrations auto-applied. There are no mocks for the database,
 purpose: RLS, `FOR UPDATE`, `LISTEN`/`NOTIFY`, and enum round-tripping are the things most
 likely to be wrong, and a mock cannot tell you about any of them.
 
+## Development skills
+
+This repo's own development skill (and anything else added alongside it) lives at
+`.github/skills/`, not `.claude/skills/` — that stays the single source of truth, so it never
+forks into per-agent copies that can drift. `.claude/skills` is a git-tracked directory symlink
+into it, purely a discovery alias for Claude Code, which only reads project skills from
+`.claude/skills/`. Adding a second agent's own discovery path later means another symlink beside
+it, never a copy of the content. (On a Windows checkout without `core.symlinks` enabled, the link
+checks out as a text file instead of resolving, and the skill silently isn't discovered — the
+same as not having it at all, not a crash.)
+
 ## Architecture
 
 One binary (`of-server`) mounts every HTTP surface on one port. The crates are a

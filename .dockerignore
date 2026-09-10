@@ -15,4 +15,5 @@ web/.svelte-kit
 
 .git
 .github
+.claude
 *.log
