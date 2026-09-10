@@ -401,19 +401,24 @@ impl Tx<'_> {
                             tool: "add_job",
                         });
                     }
-                    // The MCP layer (tools::jobs::add_job) always calls
-                    // Factory::charge before reaching this insert once
-                    // find_replayed_job has returned None, so this branch
-                    // means the *loser* of the race was already billed for
-                    // a call that created nothing — an accepted, narrow
-                    // exception documented in the idempotency-key design
-                    // spec §8, not a bug. Logged so the anomaly is at least
-                    // observable rather than silent.
+                    // Reachable two ways, and `Tx::add_job` cannot tell
+                    // which: a genuine concurrent race (two callers both saw
+                    // `find_replayed_job` return `None`, one lost the
+                    // insert), or a direct of-core caller that skips the
+                    // find_replayed_job pre-check entirely and relies on
+                    // this fallback alone. Via `tools::jobs::add_job` (the
+                    // production path) only the first is possible, and it
+                    // means the loser was already billed via Factory::charge
+                    // for a call that created nothing — accepted and
+                    // documented in the idempotency-key design spec §8, not
+                    // a bug, logged so it is observable rather than silent.
                     tracing::warn!(
                         org = %org,
                         key,
-                        "add_job lost a concurrent idempotency-key race; the caller was \
-                         billed for a call that converged onto an existing job"
+                        "add_job's idempotency-key insert hit a unique violation and \
+                         converged onto an existing job instead of failing; expected under \
+                         concurrent replay of the same new key (see design spec §8) — \
+                         unexpected otherwise"
                     );
                     (self.get_job(&winner.0).await?, false)
                 }

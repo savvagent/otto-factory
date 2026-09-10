@@ -316,17 +316,18 @@ impl Tx<'_> {
                             tool: "send_message",
                         });
                     }
-                    // See jobs::add_job's identical comment: the MCP layer
-                    // always charges before reaching this insert once
-                    // find_replayed_message has returned None, so the
-                    // loser of this race was already billed for a call
-                    // that created nothing — accepted and documented in
-                    // the design spec §8, logged so it is observable.
+                    // See jobs::add_job's identical comment: this is
+                    // reachable via a genuine concurrent race through the
+                    // production (MCP) path, or via a direct of-core caller
+                    // that skips the find_replayed_message pre-check — this
+                    // function cannot tell which.
                     tracing::warn!(
                         org = %org,
                         key,
-                        "send_message lost a concurrent idempotency-key race; the caller \
-                         was billed for a call that converged onto an existing message"
+                        "send_message's idempotency-key insert hit a unique violation and \
+                         converged onto an existing message instead of failing; expected \
+                         under concurrent replay of the same new key (see design spec §8) \
+                         — unexpected otherwise"
                     );
                     sqlx::query_as(&format!(
                         "SELECT {MSG_COLS} FROM messages WHERE org_id = $1 AND id = $2"

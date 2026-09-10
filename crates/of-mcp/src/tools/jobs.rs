@@ -604,6 +604,36 @@ impl Factory {
         caller.require_scope(scope::JOBS_WRITE).mcp()?;
 
         let mut tx = self.tx(&caller).await?;
+
+        // No key: reproduce today's behavior exactly, including charging as
+        // the literal first thing after the transaction opens (see
+        // Factory::charge's doc comment) — there is no replay question to
+        // answer first, so nothing should run ahead of it.
+        let Some(key) = args.idempotency_key else {
+            self.charge(&mut tx, &caller, "add_job").await?;
+            let repo = repo_of(&mut tx, args.repo, args.remote).await?;
+            let job = tx
+                .add_job(NewJob {
+                    repo_id: repo.id,
+                    title: args.title,
+                    description: args.description,
+                    ticket_ref: args.ticket_ref,
+                    agent_type: args.agent_type,
+                    metadata: args.metadata,
+                    depends_on: ids(args.depends_on),
+                    created_by: Some(caller.user_id),
+                    ..Default::default()
+                })
+                .await
+                .mcp()?;
+            tx.commit().await.mcp()?;
+            return Ok(Json(out::JobOut { job }));
+        };
+
+        // A key was supplied: replay-vs-new must be resolved before
+        // charging (a replay must never be billed, and there is no way to
+        // un-charge after the fact — see Factory::charge's third exception),
+        // which needs `repo.id` to build the payload to check.
         let repo = repo_of(&mut tx, args.repo, args.remote).await?;
         let new_job = NewJob {
             repo_id: repo.id,
@@ -614,14 +644,10 @@ impl Factory {
             metadata: args.metadata,
             depends_on: ids(args.depends_on),
             created_by: Some(caller.user_id),
-            idempotency_key: args.idempotency_key,
+            idempotency_key: Some(key),
             ..Default::default()
         };
 
-        // A replay must never be billed (see Factory::charge's doc comment
-        // for the third exception this is) — so resolve replay-vs-new
-        // before calling charge, not after. The no-key path returns None
-        // immediately and pays no extra query for it.
         if let Some(existing) = tx.find_replayed_job(&new_job).await.mcp()? {
             self.record_replay(&mut tx, &caller, "add_job").await?;
             tx.commit().await.mcp()?;

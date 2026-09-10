@@ -306,27 +306,55 @@ impl Factory {
         };
 
         let mut tx = self.tx(&caller).await?;
+
+        // No key: reproduce today's behavior exactly, charging as the
+        // literal first thing after the transaction opens — see add_job's
+        // identical comment (tools::jobs) and Factory::charge's doc comment.
+        let Some(key) = args.idempotency_key else {
+            self.charge(&mut tx, &caller, "send_message").await?;
+            let repo_id = maybe_repo_of(&mut tx, args.repo, args.remote).await?;
+            let message = tx
+                .send_message(
+                    caller.user_id,
+                    NewMessage {
+                        body: args.body,
+                        recipient_user_id: recipient,
+                        kind,
+                        // Always `Agent` from this surface. A human writing
+                        // in the console is the same user authenticating the
+                        // same way, so this is a rendering hint and never an
+                        // authorization claim — which is why it is set here
+                        // rather than accepted from the caller.
+                        sender_kind: SenderKind::Agent,
+                        sender_label: args.agent,
+                        repo_id,
+                        job_id: args.job.map(JobId::from),
+                        in_reply_to: args.in_reply_to,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .mcp()?;
+            tx.commit().await.mcp()?;
+            return Ok(Json(out::MessageOut { message }));
+        };
+
+        // A key was supplied: replay-vs-new must be resolved before
+        // charging, which needs `repo_id` to build the payload to check.
         let repo_id = maybe_repo_of(&mut tx, args.repo, args.remote).await?;
         let new_message = NewMessage {
             body: args.body,
             recipient_user_id: recipient,
             kind,
-            // Always `Agent` from this surface. A human writing in the
-            // console is the same user authenticating the same way, so
-            // this is a rendering hint and never an authorization
-            // claim — which is why it is set here rather than accepted
-            // from the caller.
             sender_kind: SenderKind::Agent,
             sender_label: args.agent,
             repo_id,
             job_id: args.job.map(JobId::from),
             in_reply_to: args.in_reply_to,
-            idempotency_key: args.idempotency_key,
+            idempotency_key: Some(key),
             ..Default::default()
         };
 
-        // See add_job's identical comment (tools::jobs) and Factory::charge's
-        // doc comment for why this has to run before charge.
         if let Some(existing) = tx
             .find_replayed_message(caller.user_id, &new_message)
             .await
