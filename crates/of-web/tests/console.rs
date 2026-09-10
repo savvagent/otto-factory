@@ -196,6 +196,82 @@ async fn console_signal_matches_the_challenge(pool: PgPool) {
     );
 }
 
+/// `add_passkey_finish` (`POST /api/me/passkeys/finish`) is the one call site
+/// #88 gave genuinely new logic: a fresh `Parts` extractor and a `client_ip`
+/// call of its own. Drive a real second-key ceremony through it and check the
+/// audit row it writes carries both fields `finish_registration`'s `via`/`ip`
+/// parameters exist to record — `via: "add"`, and an IP that is not null.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn add_passkey_finish_records_the_add_flow_and_its_ip(pool: PgPool) {
+    let db = of_core::Db::from_pool(pool);
+    let mut config = of_web::Config::new(common::PUBLIC_URL, common::RESOURCE);
+    config.client_ip_header = Some("x-forwarded-for".into());
+    let webauthn = of_web::relying_party(&config).expect("relying party");
+    let state = of_web::AppState::new(db.clone(), common::cipher(), webauthn, config);
+    let h = common::Harness {
+        db,
+        router: of_web::router(state),
+        cipher: common::cipher(),
+    };
+
+    let rob = onboard(&h, "rob@acme.test").await;
+
+    let started = Call::post("/api/me/passkeys/start")
+        .with_session(&rob.session)
+        .send(&h.router)
+        .await;
+    started.expect(StatusCode::OK);
+
+    // `SoftToken` cannot hold discoverable credentials — see `of-auth`'s
+    // `tests/passkeys.rs` for the full note — so the resident-key requirement
+    // is dropped before it is handed the challenge. Only what the fake
+    // authenticator sees is softened; the server path is the production one.
+    let mut challenge: webauthn_rs::prelude::CreationChallengeResponse =
+        serde_json::from_value(started.body["challenge"].clone()).unwrap();
+    if let Some(selection) = challenge.public_key.authenticator_selection.as_mut() {
+        selection.require_resident_key = false;
+        selection.resident_key = None;
+    }
+
+    let mut second_device = common::authenticator();
+    let credential = second_device
+        .do_registration(
+            webauthn_rs::prelude::Url::parse(common::PUBLIC_URL).unwrap(),
+            challenge,
+        )
+        .expect("the authenticator refused the registration challenge");
+
+    let finished = Call::post("/api/me/passkeys/finish")
+        .with_session(&rob.session)
+        .header("x-forwarded-for", "203.0.113.7")
+        .json(serde_json::json!({
+            "ceremonyId": started.body["ceremonyId"].as_str().unwrap(),
+            "credential": credential,
+        }))
+        .send(&h.router)
+        .await;
+    finished.expect(StatusCode::NO_CONTENT);
+
+    // One query for both columns, ordered by `id` rather than `created_at` —
+    // `created_at` defaults to the transaction's start time and can tie.
+    let row: (serde_json::Value, Option<String>) = sqlx::query_as(
+        "SELECT detail->'via', ip FROM audit_events \
+         WHERE action = $1 AND actor_user_id = $2 \
+         ORDER BY id DESC LIMIT 1",
+    )
+    .bind(of_core::audit::action::PASSKEY_REGISTERED)
+    .bind(rob.user)
+    .fetch_one(h.db.pool())
+    .await
+    .unwrap();
+    assert_eq!(row.0, serde_json::json!("add"));
+    assert!(
+        row.1.is_some(),
+        "add_passkey_finish must record the caller's IP, not just signup's"
+    );
+    assert_eq!(row.1.as_deref(), Some("203.0.113.7"));
+}
+
 /// `signalAllAcceptedCredentials` names the credentials that still exist, and a
 /// browser matches them by credential id — so a list that carries only a row's
 /// UUID leaves a deleted passkey being offered in the picker forever. The

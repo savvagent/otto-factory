@@ -201,7 +201,7 @@ pub async fn signup_finish(
         req.ceremony_id,
         &req.credential,
         req.nickname.as_deref(),
-        "signup",
+        passkeys::RegistrationVia::Signup,
         ip.as_deref(),
     )
     .await?;
@@ -286,7 +286,7 @@ pub async fn claim_finish(
         req.ceremony_id,
         &req.credential,
         req.nickname.as_deref(),
-        "claim",
+        passkeys::RegistrationVia::Claim,
         ip.as_deref(),
     )
     .await?;
@@ -469,7 +469,7 @@ pub async fn add_passkey_finish(
         req.ceremony_id,
         &req.credential,
         req.nickname.as_deref(),
-        "add",
+        passkeys::RegistrationVia::Add,
         ip.as_deref(),
     )
     .await?;

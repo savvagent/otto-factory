@@ -95,7 +95,7 @@ async fn register_new(db: &Db, auth: &mut WebauthnAuthenticator<SoftToken>) -> U
         ceremony.id,
         &credential,
         Some("laptop"),
-        "signup",
+        passkeys::RegistrationVia::Signup,
         None,
     )
     .await
@@ -183,7 +183,7 @@ async fn a_second_passkey_also_opens_the_account(pool: PgPool) {
         ceremony.id,
         &credential,
         Some("phone"),
-        "add",
+        passkeys::RegistrationVia::Add,
         None,
     )
     .await
@@ -436,35 +436,29 @@ async fn registration_records_which_flow_wrote_it(pool: PgPool) {
         ceremony.id,
         &credential,
         None,
-        "claim",
+        passkeys::RegistrationVia::Claim,
         Some("203.0.113.7"),
     )
     .await
     .unwrap();
 
-    let via: serde_json::Value = sqlx::query_scalar(
-        "SELECT detail->'via' FROM audit_events \
+    // One query for both columns, ordered by `id` rather than `created_at` —
+    // `created_at` defaults to the transaction's start time and can tie, and
+    // `of_core::audit`'s own reader already orders by `created_at DESC, id
+    // DESC` for exactly that reason. Two separate queries could in principle
+    // disagree about which row is "latest"; one query cannot.
+    let row: (serde_json::Value, Option<String>) = sqlx::query_as(
+        "SELECT detail->'via', ip FROM audit_events \
          WHERE action = $1 AND actor_user_id = $2 \
-         ORDER BY created_at DESC LIMIT 1",
+         ORDER BY id DESC LIMIT 1",
     )
     .bind(of_core::audit::action::PASSKEY_REGISTERED)
     .bind(user)
     .fetch_one(db.pool())
     .await
     .unwrap();
-    assert_eq!(via, serde_json::json!("claim"));
-
-    let ip: Option<String> = sqlx::query_scalar(
-        "SELECT ip FROM audit_events \
-         WHERE action = $1 AND actor_user_id = $2 \
-         ORDER BY created_at DESC LIMIT 1",
-    )
-    .bind(of_core::audit::action::PASSKEY_REGISTERED)
-    .bind(user)
-    .fetch_one(db.pool())
-    .await
-    .unwrap();
-    assert_eq!(ip.as_deref(), Some("203.0.113.7"));
+    assert_eq!(row.0, serde_json::json!("claim"));
+    assert_eq!(row.1.as_deref(), Some("203.0.113.7"));
 }
 
 /// Clearing writes the new `auth.passkey.cleared` action, never the old
@@ -695,10 +689,17 @@ async fn a_second_key_on_one_account_is_named_like_the_first(pool: PgPool) {
     let credential = auth
         .do_registration(Url::parse(ORIGIN).unwrap(), for_soft_token(first.challenge))
         .unwrap();
-    let user =
-        passkeys::finish_registration(&db, &webauthn, first.id, &credential, None, "signup", None)
-            .await
-            .unwrap();
+    let user = passkeys::finish_registration(
+        &db,
+        &webauthn,
+        first.id,
+        &credential,
+        None,
+        passkeys::RegistrationVia::Signup,
+        None,
+    )
+    .await
+    .unwrap();
 
     let second = passkeys::start_registration(&db, &webauthn, Some(user))
         .await
