@@ -119,11 +119,6 @@ and reads `WWW-Authenticate` needs nothing else.
 
 ## Fixed by this run
 
-**`server_info` now reports otto-factory's own name/version at `initialize`.** Previously every client
-saw `name: "rmcp"`, `version: "2.0.0"` regardless of what otto-factory was running — the MCP
-transport layer's own identity was leaked instead of the server's. Fixed in this change, not
-re-verified against a live client as part of this run.
-
 **`http://localhost:<port>` redirect URIs were refused, which meant Claude Code had no
 OAuth path at all.** Registration answered
 `redirect_uri must use https, except for http on 127.0.0.1 or [::1]`, and Claude Code
@@ -190,6 +185,18 @@ refuses an unrequested version would fail, and the fix belongs upstream in `rmcp
   renders an error page and redirects nowhere; `code_challenge_method=plain`, an unknown
   scope, and a foreign `resource` are each a `400`; a replayed authorization code revokes
   the tokens it issued; a reused refresh token revokes the family.
+
+---
+
+## Fixed since this run, not re-verified live
+
+Recorded code-level fixes that landed after 2026-09-02 and were not re-exercised against a real
+client as part of a conformance run — unlike everything above, which was.
+
+**`server_info` now reports otto-factory's own name/version at `initialize`.** Previously every
+client saw `name: "rmcp"`, `version: "2.0.0"` regardless of what otto-factory was running — the
+MCP transport layer's own identity was leaked instead of the server's
+(`docs/specs/2026-09-10-semver-release-design.md` §3).
 
 ---
 
