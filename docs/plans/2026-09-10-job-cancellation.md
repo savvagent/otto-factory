@@ -153,12 +153,18 @@ breaking.
         `"in-progress"` with `cancelRequestedAt`/`cancelRequestedBy`/`cancelReason` set →
         `cancel_job` → job `"cancelled"`.
       - `cancel_job` on a claimed job with no `request_cancel` call returns an error.
-      - Both tools appear in the tool list, each with a non-empty description (extend
-        `every_tool_documents_itself`'s existing tool-name list with `"request_cancel"`,
-        `"cancel_job"`).
-      - Extend the billing test(s) — `every_tool_has_a_price`'s tool-surface list (wherever
-        it enumerates `of-mcp`'s actual router tools; this is likely the same place
-        `"activate_job"` was added for the prior status-value change) with both new names.
+      - Both tools appear in the tool list: extend `the_advertised_surface_is_exactly_what_the_design_specifies`'s
+        (`crates/of-mcp/tests/tools.rs`) hardcoded `expected` vec with `"request_cancel"`,
+        `"cancel_job"` in the `// Jobs` section, alongside `"activate_job"` — this is the
+        test that fails once the router gains new tools and nothing else names them.
+        (`every_tool_documents_itself` needs no change — it loops generically over the
+        router and asserts every tool it finds has a description; it has no name list.)
+      - Extend `work_is_billable_and_looking_is_not` (`crates/of-billing/src/classify.rs`)
+        with both new tool names in its billable-tools list, matching how `"activate_job"`
+        was added there for the prior status-value change. (`every_tool_has_a_price` needs
+        no manual edit — it builds its tool list from the live router automatically and
+        calls `classify::exhaustive_over`, so it already covers any correctly-classified
+        new tool with zero list maintenance.)
 - [ ] Run `cargo test -p of-mcp --test tools` — expect compile failure (tools do not exist
       yet) or, if it compiles against stubs, straightforward assertion failures.
 - [ ] Implement `RequestCancelArgs`/`CancelJobArgs` and the `request_cancel`/`cancel_job`
