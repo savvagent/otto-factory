@@ -1,6 +1,59 @@
 # Leases: generalize (repo, branch) to (repo, resource) design
 
-> **Status:** DRAFT — closes savvagent/otto-factory#69.
+> **Status:** IMPLEMENTED — closes savvagent/otto-factory#69.
+>
+> Shipped in `savvagent/otto-factory#115`, merged as
+> `6fe084e0c145c9d59d646e89f198a14398787db1`. Green on `master`'s CI run
+> `34477977385` — `rust`, `web`, `docker-build` all succeeded. `pr-title` is a
+> `pull_request`-only check and correctly does not run on a master push (it ran green on
+> #115 itself); `release-please` **ran and succeeded**, and — because #115 is this repo's
+> first `feat:`-typed merge — opened this repo's first release PR,
+> `savvagent/otto-factory#121` (`chore: release 0.2.0`); `deploy` correctly skipped because
+> it fires only once release-please has *cut* a release, not merely opened the PR for one
+> (`docs/specs/2026-09-10-semver-release-design.md`). **The change is on `master` but not
+> yet deployed** — that spec's "not yet exercised live" caveat is what #121 will resolve,
+> and this is the merge that exercised release-please's release-PR path for the first time.
+>
+> **A follow-up, not a fix, was filed as `savvagent/otto-factory#119`, tracking a new
+> migration — never an edit to the applied `0027_lease_resource.sql`.** `#111` — merged
+> concurrently with `savvagent/otto-factory#115` (12:17 UTC vs. #115's 12:39 UTC merge, same
+> day) — added CLAUDE.md guidance on migrations that rewrite tenant-table data, generalizing
+> the same
+> class of bug the bolded note in §1 found here. CLAUDE.md states **both** branches of that
+> bug, and both matter: a bare `UPDATE` against a tenant table inside `Db::migrate` (which
+> never sets `app.org_id`) is a silent zero-row no-op where RLS applies, **and** — on a
+> connecting role that bypasses RLS (a superuser or `BYPASSRLS`) — the identical unscoped
+> `UPDATE` instead silently rewrites *every org's* matching rows in one statement, a
+> cross-tenant write. `docs/deploy/fly.md` confirms the actual deployment's *migration*
+> connection (`otto_factory_mcp`) is a superuser, i.e. the second branch, not the first —
+> the one CLAUDE.md's own §70 precedent (`0020_rename_trigger_label_default.sql`) also hit.
+> CLAUDE.md now recommends a per-org loop (explicit `org_id` predicate *and*
+> `set_config('app.org_id', ...)`) over the `NO FORCE`/`FORCE` toggle §1 uses, because the
+> toggle only helps when the migrating role owns the table, and a forgotten restore is
+> caught by `Db::verify_tenant_isolation` only on the non-bypass shape — never on today's
+> actual shape, where the check itself runs as `of_app`, which owns nothing.
+>
+> **This is a real gap in the general pattern, and 0027 is not an instance of it — verified,
+> not assumed.** `0027`'s backfill (`resource = 'branch:' || resource`) is a uniform,
+> org-agnostic transformation applied identically to every row regardless of org, the same
+> shape CLAUDE.md's own `0020` precedent calls safe under an unscoped rewrite (Success
+> Criteria, §70). Its `NO FORCE`/`FORCE` toggle is a no-op on today's superuser migration
+> connection either way, was restored in the same statement sequence, and sqlx runs every
+> migration inside its own transaction (no `-- no-transaction` marker appears anywhere under
+> `crates/of-core/migrations/`), so an abort between the toggle's two halves would roll both
+> back together rather than leaving the table unprotected. None of that generalizes to a
+> *future* migration that computes a per-org-different value the same way — which is exactly
+> what the new CLAUDE.md pattern exists to make safe by construction, and why `#119` tracks
+> bringing 0027's *shape* in line with it going forward, as a new migration, not a rewrite of
+> this one.
+>
+> One clarification this record should not omit, since a `SET LOCAL ROLE of_app` fact
+> determines whether the sentence above means "production bypasses RLS" or something far
+> narrower: it is the *migration* connection that bypasses RLS as a superuser, once, at
+> startup. Every tenant *request* still drops into the `of_app` role via `Db::begin`'s
+> `SET LOCAL ROLE of_app`, which is what carries guard 2 for every read and write this
+> server actually serves — see `docs/deploy/fly.md` and CLAUDE.md's tenant-isolation section
+> for the full account; this record deliberately does not repeat the privilege details here.
 >
 > **PR review round found six further corrections, all applied before merge:** (1) the
 > migration's backfill `UPDATE` ran under `repo_leases`' `FORCE ROW LEVEL SECURITY` with no

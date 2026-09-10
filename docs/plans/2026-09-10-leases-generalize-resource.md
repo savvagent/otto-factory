@@ -11,6 +11,18 @@ This plan implements it exactly.
 
 ## Status — 2026-09-10
 
+**Done.** Shipped in `savvagent/otto-factory#115`, merged as
+`6fe084e0c145c9d59d646e89f198a14398787db1`, green on master's CI run `34477977385`
+(`rust`/`web`/`docker-build` succeeded; `pr-title` correctly did not run on the push;
+`release-please` succeeded and opened this repo's first release PR,
+`savvagent/otto-factory#121`; `deploy` correctly waits for that PR to merge — the change is
+on `master` but not yet deployed). A follow-up tracking a *new* migration (never an edit to
+the already-applied `0027_lease_resource.sql`) was filed as `savvagent/otto-factory#119`
+for the migration's `NO FORCE`/`FORCE` pattern, which a concurrently-merged sibling PR
+(#111) generalized CLAUDE.md's guidance away from after this branch was already in flight —
+see the spec's Status blockquote for why `0027` itself is verified safe under both
+deployment shapes, not just the one this repo currently runs.
+
 All four tasks below (✅) were implemented, reviewed, and shipped, but the mandatory
 PR-review trio (rust-pro, architect-reviewer, blind security-auditor) plus the
 pr-review-toolkit passes found six further real issues beyond what this plan's own
