@@ -142,15 +142,78 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # Automates docs/deploy/fly.md's manual `fly deploy -a otto-factory-mcp`: every push to master
-  # that passes rust+web+docker-build deploys for real. flyctl builds remotely on Fly's own
-  # builder (--remote-only), the same path a human runs by hand -- this job doesn't reuse
-  # docker-build's image (that job never pushes anywhere; see its own design spec) so the image is
-  # built twice, which is an accepted tradeoff for keeping this to one job and one new secret.
-  deploy:
+  # Enforces Conventional Commits on PR titles, which become the master commit on squash-merge --
+  # release-please's version-bump computation reads a commit's type (feat/fix/...), so a title
+  # release-please can't parse is silently excluded from the changelog and the version bump. See
+  # docs/specs/2026-09-10-semver-release-design.md §2 and CLAUDE.md's "Releases & versioning".
+  pr-title:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: amannn/action-semantic-pull-request@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            perf
+            refactor
+            docs
+            test
+            build
+            ci
+            chore
+            revert
+          scopes: |
+            of-core
+            of-auth
+            of-mcp
+            of-billing
+            of-trackers
+            of-web
+            of-server
+            web
+            docs
+            ci
+            release
+          requireScope: false
+          subjectPattern: ^(?![A-Z]).+$
+
+  # Computes the next SemVer version and CHANGELOG.md entry from Conventional Commits history
+  # since the last release, and maintains a single "chore: release X.Y.Z" PR carrying that bump.
+  # On an ordinary push this just updates that PR (release_created stays false). When the PR
+  # itself is merged, release-please recognizes its own commit, cuts the git tag + GitHub
+  # Release, and release_created becomes true -- the signal `deploy` below gates on. See
+  # docs/specs/2026-09-10-semver-release-design.md §1.
+  release-please:
     runs-on: ubuntu-latest
     needs: [rust, web, docker-build]
     if: github.event_name == 'push'
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  # Automates docs/deploy/fly.md's manual `fly deploy -a otto-factory-mcp`: only a push that
+  # release-please just turned into a real release (tag + GitHub Release cut) deploys --
+  # deploying on every push to master is what release-please's version gate replaces. flyctl
+  # builds remotely on Fly's own builder (--remote-only), the same path a human runs by hand --
+  # this job doesn't reuse docker-build's image (that job never pushes anywhere; see its own
+  # design spec) so the image is built twice, which is an accepted tradeoff for keeping this to
+  # one job and one new secret.
+  deploy:
+    runs-on: ubuntu-latest
+    needs: [release-please]
+    if: needs.release-please.outputs.release_created == 'true'
     timeout-minutes: 10
     permissions:
       contents: read
