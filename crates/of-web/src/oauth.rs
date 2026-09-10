@@ -89,8 +89,7 @@ pub async fn register_client(
 ) -> Result<Response, OAuthError> {
     if let Some(ip) = client_ip(&parts, &state.config) {
         let bucket = format!("dcr:{ip}");
-        of_auth::ratelimit::check(&state.db, &bucket).await?;
-        of_auth::ratelimit::charge(&state.db, &bucket).await?;
+        of_auth::ratelimit::check_and_charge(&state.db, &bucket).await?;
     }
 
     let registered = oauth::register_client(&state.db, req).await?;
