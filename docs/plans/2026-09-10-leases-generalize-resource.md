@@ -80,14 +80,18 @@ compiles unchanged, per the Global Constraints note).
 
 - [ ] Write a failing test in `crates/of-core/tests/queue.rs`, appended after
       `leases_are_per_branch` (around line 1398-1417): a new test
-      `leases_are_per_resource_not_just_branch` that acquires a lease on
-      `"branch:main"` for one user and `"deploy:staging"` for another user on the **same**
-      repo, asserts both succeed (proving two different non-overlapping resources don't
-      collide — the literal AC from GH#69), then asserts a second `acquire_lease` on
-      `"deploy:staging"` by a third user fails with `code() == "lease_held"` and the error
-      message contains `"deploy:staging"` (proving `Error::LeaseHeld` names the resource,
-      not a hardcoded "branch"). Use the same `TestOrg`/`other` helper pattern as the
-      surrounding tests in this file.
+      `leases_are_per_resource_not_just_branch` that follows the exact pattern of
+      `leases_are_per_branch`/`a_second_agent_cannot_take_a_held_lease` immediately above
+      it (`let db = db(pool); let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;`,
+      a second `other` user via `db.upsert_user(...)` + `db.add_member(...)`, then
+      `db.begin(t.org)` / `tx.acquire_lease(...)` / `tx.commit()`): acquire a lease on
+      `"branch:main"` for `t.user` and `"deploy:staging"` for `other` on the **same** repo
+      in one transaction, assert both succeed and `tx.list_leases(Some(t.repo))` returns 2
+      (proving two different non-overlapping resources don't collide — the literal AC from
+      GH#69); then, in a fresh transaction, assert a second `acquire_lease` on
+      `"deploy:staging"` by a third user fails with `err.code() == "lease_held"` and
+      `err.to_string().contains("deploy:staging")` (proving `Error::LeaseHeld` names the
+      resource, not a hardcoded "branch").
 - [ ] Run `cargo test -p of-core --test queue leases_are_per_resource_not_just_branch` —
       confirm it fails to compile or fails the assertion (the column is still named
       `branch`, but positional calls still compile against the current signature, so this
@@ -184,15 +188,21 @@ public `acquire_lease` MCP tool's new input shape and all four lease tools' outp
 returns `of_core::leases::Lease` verbatim).
 
 - [ ] Add a new test in `crates/of-web/tests/console.rs` (this route currently has zero
-      coverage): acquire a lease via `of-core`'s `Tx::acquire_lease` directly in test setup
-      (matching how other console tests seed data), then `GET
-      /api/orgs/{org}/repos/{repo}/leases` through the console test harness and assert the
-      JSON response's lease object has a `"resource"` field (not `"branch"`) with the
-      expected value. This is not a failing-first step in the usual sense: `of-web`
-      requires no code change (the route already returns `of_core::leases::Lease`
-      unchanged, and Task 1 already renamed that field), so the test is expected to pass
-      as soon as it is written — its value is closing the pre-existing zero-coverage gap on
-      a route whose response shape this plan just renamed.
+      coverage), following the file's established pattern
+      (`let h = harness(pool); let rob = onboard(&h, "rob@acme.test").await; let acme =
+      org_with_owner(&h, "acme", &rob).await;`, then create a repo via
+      `Call::post("/api/orgs/acme/repos")...`, matching `the_queue_view_lists_filters_and_counts`'s
+      setup): seed a lease by opening `h.db.begin(acme)` and calling `tx.acquire_lease(...)`
+      directly (mirroring the file's `enqueue` helper's own comment on why reaching past
+      the API to seed fixtures is correct here — leases, like jobs, are written by an agent
+      over MCP, never by the console), then `Call::get("/api/orgs/acme/repos/api/leases")
+      .with_session(&rob.session).send(&h.router).await` and assert the JSON response's
+      lease object has a `"resource"` field (not `"branch"`) with the expected value. This
+      is not a failing-first step in the usual sense: `of-web` requires no code change (the
+      route already returns `of_core::leases::Lease` unchanged, and Task 1 already renamed
+      that field), so the test is expected to pass as soon as it is written — its value is
+      closing the pre-existing zero-coverage gap on a route whose response shape this plan
+      just renamed.
 - [ ] Run `cargo test -p of-web --test console <new test name>` — passes immediately, per
       the note above; treat a failure here as a signal that Task 1 did not fully land.
 - [ ] In `web/src/lib/types.ts`: rename the `Lease` interface's `branch: string` field to
