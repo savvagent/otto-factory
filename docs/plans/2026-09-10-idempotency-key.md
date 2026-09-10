@@ -22,9 +22,13 @@ These hold for every task:
 - Every SQL statement lives in `of-core` — nothing in `of-mcp` issues SQL directly.
 - Tests need `podman compose up -d` and a `.env` (`cp .env.example .env`) — a real Postgres,
   no mocks.
-- Per-task gate: `cargo test --workspace` (or the narrower `-p`/`--test` command named in
-  the task, run first for speed, full workspace test before the task's commit),
-  `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all`.
+- Per-task gate: each task names its own gate below — Tasks 1–3 run `cargo test -p of-core`
+  (the workspace's `of-mcp` code does not exist yet at those points, so a full workspace
+  test would just repeat the same of-core run); Tasks 4–5 add `cargo test -p of-mcp` plus a
+  `cargo test -p of-core` regression run. Every task's gate also runs
+  `cargo clippy --all-targets -- -D warnings` and `cargo fmt --all`. The one full
+  `cargo test --workspace` run is the **Final Gate** after Task 5, immediately before
+  opening the PR.
 - Tenant isolation: `jobs` and `messages` are already registered tenant tables in
   `0007_rls.sql`; the new columns this plan adds need no new RLS policy (Load-Bearing
   Invariant 1 is about new *tables*), but every new `of-core` function still takes its
@@ -32,9 +36,10 @@ These hold for every task:
   negative test proving guard 1 holds for the new code paths.
 - Metering: `add_job` and `send_message` are already classified `Billable` in
   `of-billing::classify` — no new tool is added, so no new classify entry is needed. What
-  changes is *when* `charge` runs relative to the rest of each handler; Task 4/5 update
-  `Factory::charge`'s doc comment in the same commit that changes the ordering, per the
-  spec's §5.
+  changes is *when* `charge` runs relative to the rest of each handler. `Factory::charge`'s
+  doc comment (`crates/of-mcp/src/server.rs`) already names both tools in one added
+  paragraph (spec §5), so it is edited exactly **once**, in Task 4 — Task 5 does not touch
+  `server.rs` again.
 - The fingerprint functions (Task 2, Task 3) MUST destructure `NewJob`/`NewMessage` by name
   with no `..` catch-all, exactly as the spec's §4/§6 show — this is a compile-time
   guardrail against silent fingerprint drift when either struct gains a field later, not a
@@ -68,8 +73,9 @@ These hold for every task:
    leads with, and `messages.rs` is a near-mechanical repeat of the same shape once
    `jobs.rs` is proven, which de-risks it.
 3. `of-core::error` changes ride along with Task 2 (the first task that needs the new error
-   variant) rather than being its own task — there's nothing to test about the variant in
-   isolation.
+   variant) rather than being its own task — the variant's own unit test
+   (`!IdempotencyKeyConflict{..}.retriable()`) is a one-line addition to `error.rs`, not
+   enough surface to justify a separate task.
 4. `of-mcp` tasks (jobs tool, then coord tool) come last, once the `of-core` layer both
    tools sit on is done and tested — mirrors the jobs-then-messages ordering above.
 
@@ -218,43 +224,53 @@ These hold for every task:
 MCP tool — `add_job`'s existing `outputSchema` (`out::JobOut`) is unchanged; only its
 `inputSchema` gains one optional property.
 
-- [ ] `crates/of-mcp/src/server.rs`: add the new paragraph to `Factory::charge`'s doc
-      comment, exactly as the (post-critique) spec §5 gives it — the "third, different-shaped
-      exception" framing, explicit that it is a read with no unrollbackable effect, distinct
-      from `watch`/`sync_ticket`'s reasoning. Do this in the same commit as the handler
-      change below, not separately — the doc comment is describing code this commit
-      introduces.
 - [ ] `crates/of-mcp/src/tools/jobs.rs`: add `idempotency_key: Option<String>` to
-      `AddJobArgs` with `#[serde(default)]` and the doc comment from spec §5.
-- [ ] Restructure `add_job`'s handler exactly as spec §5's (post-critique) code shows: build
-      `new_job` once after `repo_of`; call `tx.find_replayed_job(&new_job).await.mcp()?`
-      before `self.charge(...)`; on `Some(existing)`, `tx.commit()` and return early with
-      `out::JobOut { job: existing }`; otherwise `self.charge(...)` then `tx.add_job(new_job)`
-      then commit, unchanged from today past that point.
-- [ ] Update `add_job`'s `#[tool(description = "...")]` string to append the
-      `idempotencyKey` sentence from spec §5.
+      `AddJobArgs` with `#[serde(default)]` and the doc comment from spec §5. The handler
+      does not read this field yet — that is deliberate, see the next steps.
 - [ ] Compiler will now flag every existing `AddJobArgs { ... }` literal missing the new
       field (no `Default` derive on `AddJobArgs`) — fix each of the 5 sites in
       `crates/of-mcp/tests/tools.rs` (lines ~173, ~259, ~791, ~1441, ~1511 as of this plan's
       writing; re-`grep -n "AddJobArgs {" crates/of-mcp/tests/tools.rs` to get current line
       numbers before editing, they will have shifted) by adding
       `idempotency_key: None,` to each. This is mechanical — the compiler names every site
-      that needs it.
-- [ ] Failing test first (add before the fix above compiles clean, or immediately after as
-      the next red step — whichever is more natural given the mechanical fixes just made):
-      in `crates/of-mcp/tests/tools.rs`, `add_job_with_an_idempotency_key_replays_instead_of_duplicating`
-      — call `env.factory.add_job` twice through the tool surface with the same
-      `idempotency_key` and identical other args, assert the same returned job `id` both
-      times, and assert `env.usage(&caller)`'s `billableUsed` increased by exactly 1 across
-      both calls (the metering proof from spec §9 / §8's "closed" case).
+      that needs it. The workspace compiles again after this step, with the field present
+      but functionally inert.
+- [ ] **Failing test, genuinely red at runtime, not just at compile time:** add
+      `add_job_with_an_idempotency_key_replays_instead_of_duplicating` to
+      `crates/of-mcp/tests/tools.rs` — call `env.factory.add_job` twice through the tool
+      surface with the same `idempotency_key` and identical other args, assert the same
+      returned job `id` both times, and assert `env.usage(&caller)`'s `billableUsed`
+      increased by exactly 1 across both calls (the metering proof from spec §9 / §8's
+      "closed" case). Run it now: because the handler does not use `idempotency_key` yet
+      (previous step only added the field), this must fail at runtime — two distinct job
+      ids and `billableUsed` up by 2 — not fail to compile. Confirm that is the actual
+      failure mode before proceeding; if it fails to compile instead, something upstream of
+      this step was missed.
 - [ ] Add `add_job_with_a_reused_idempotency_key_and_a_different_title_errors`: same key,
       different `title` the second call, assert the error's `code_of(&e) ==
-      "idempotency_key_conflict"`.
-- [ ] Add a regression check that `every_tool_has_a_price`/`exhaustive_over`-style existing
-      tests (search `crates/of-billing/src/classify.rs`'s test module and
-      `crates/of-mcp/tests/tools.rs` for where the full tool list is asserted) still pass
-      unchanged — no new tool was added, this should need no edits, just confirm the gate
-      below is green.
+      "idempotency_key_conflict"`. This one currently fails differently — the handler
+      creates two unrelated jobs and returns no error at all — which is also a genuine red,
+      just not the same shape as the test above; note that in a comment if it helps whoever
+      runs this.
+- [ ] Now make both tests pass. Restructure `add_job`'s handler exactly as spec §5's
+      (post-critique) code shows: build `new_job` once after `repo_of`; call
+      `tx.find_replayed_job(&new_job).await.mcp()?` before `self.charge(...)`; on
+      `Some(existing)`, `tx.commit()` and return early with `out::JobOut { job: existing }`;
+      otherwise `self.charge(...)` then `tx.add_job(new_job)` then commit, unchanged from
+      today past that point. Re-run both new tests — green.
+- [ ] Update `add_job`'s `#[tool(description = "...")]` string to append the
+      `idempotencyKey` sentence from spec §5.
+- [ ] `crates/of-mcp/src/server.rs`: add the new paragraph to `Factory::charge`'s doc
+      comment, exactly as the (post-critique) spec §5 gives it — the "third, different-shaped
+      exception" framing, explicit that it is a read with no unrollbackable effect, distinct
+      from `watch`/`sync_ticket`'s reasoning. This paragraph names **both** `add_job` and
+      `send_message`, so it is written once, here — Task 5 does not edit `server.rs` again.
+- [ ] Confirm (no edit expected) that the existing exhaustive tool-surface tests still pass
+      unchanged: `crates/of-billing/src/classify.rs`'s `exhaustive_over`/
+      `every_tool_has_a_price` tests and `crates/of-mcp/tests/tools.rs`'s
+      `every_tool_documents_itself`-style assertion. No new tool was added, so these need no
+      edits — this step is a check, not a change; if either fails, something added a tool
+      rather than an argument, and that is a plan violation to stop and fix, not paper over.
 - [ ] Full gate: `cargo test -p of-mcp`, `cargo test -p of-core` (regression),
       `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all`.
 - [ ] Commit: `of-mcp: accept an idempotency key on add_job`.
@@ -268,20 +284,32 @@ MCP tool — `add_job`'s existing `outputSchema` (`out::JobOut`) is unchanged; o
 
 - [ ] `crates/of-mcp/src/tools/coord.rs`: add `idempotency_key: Option<String>` to
       `SendMessageArgs` with `#[serde(default)]`, doc comment mirroring `AddJobArgs`'s in
-      spirit ("call this every time if your connection can drop...").
-- [ ] Restructure `send_message`'s handler the same way Task 4 restructured `add_job`'s:
-      build the `NewMessage` once, `tx.find_replayed_message(caller.user_id, &new_message)`
-      before `self.charge(...)`, early-return on a hit, charge-then-insert otherwise.
-- [ ] Update `send_message`'s tool description with the same `idempotencyKey` sentence
-      pattern as `add_job`'s.
+      spirit ("call this every time if your connection can drop..."). The handler does not
+      read this field yet.
 - [ ] Fix the 2 existing `SendMessageArgs { ... }` literal sites in
       `crates/of-mcp/tests/tools.rs` (~914, ~1046 as of this plan's writing — re-grep before
-      editing) adding `idempotency_key: None,`.
-- [ ] Failing test first: `send_message_with_an_idempotency_key_replays_instead_of_duplicating`
-      — same shape as Task 4's job test, asserting the same message `id` and a single
-      metered call across two identical calls.
+      editing) adding `idempotency_key: None,`. Workspace compiles again, field still inert.
+- [ ] **Failing test, genuinely red at runtime:**
+      `send_message_with_an_idempotency_key_replays_instead_of_duplicating` — same shape as
+      Task 4's job test, asserting the same message `id` and a single metered call across
+      two identical calls. Confirm it fails at runtime (two distinct message ids,
+      `billableUsed` up by 2), not at compile time, for the same reason as Task 4's
+      equivalent step.
 - [ ] `send_message_with_a_reused_idempotency_key_and_a_different_body_errors` — same key,
-      different `body`, asserts `idempotency_key_conflict`.
+      different `body`, asserts `idempotency_key_conflict`. Also currently red (no error is
+      raised today).
+- [ ] Now make both pass. Restructure `send_message`'s handler the same way Task 4
+      restructured `add_job`'s: build the `NewMessage` once,
+      `tx.find_replayed_message(caller.user_id, &new_message)` before `self.charge(...)`,
+      early-return on a hit, charge-then-insert otherwise. Re-run both new tests — green.
+- [ ] Update `send_message`'s tool description with the same `idempotencyKey` sentence
+      pattern as `add_job`'s. Do **not** re-edit `crates/of-mcp/src/server.rs` — Task 4
+      already added the one `Factory::charge` doc-comment paragraph covering both tools.
+- [ ] Not tested by a dedicated case, and left that way deliberately (spec's Error Handling
+      section notes it, not a gap): the same key string reused across `add_job` and
+      `send_message` does not conflict, because the two tools' unique indexes are on
+      different tables (`jobs` vs `messages`). Low-risk enough that a passing mention here
+      is sufficient — add a test only if implementation reveals this assumption was wrong.
 - [ ] Full gate: `cargo test -p of-mcp`, `cargo test -p of-core` (regression),
       `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all`.
 - [ ] Commit: `of-mcp: accept an idempotency key on send_message`.
