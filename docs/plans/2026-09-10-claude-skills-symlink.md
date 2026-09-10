@@ -21,16 +21,19 @@ than "usable by any coding-agent tool" and the honest one.) Implements savvagent
 
 ## Status — 2026-09-10
 
-✅ Shipped in savvagent/otto-factory#124 (merged as `bb8c138`), closing #123.
+✅ Shipped in savvagent/otto-factory#124 (squash-merged as `bb8c138`), closing #123. Follow-ups
+filed as savvagent/otto-factory#126 (CODEOWNERS) and #127 (CI symlink guard).
 
 **Merge-conflict note:** while this PR was in review, an unrelated PR (savvagent/otto-factory#79,
 job `agent_type` filtering) independently merged its own `.claude/skills/otto-factory-development`
 per-skill symlink to `master` — someone else hit the same untracked-local-symlink annoyance this
 plan set out to fix, and their fix got bundled into an unrelated PR without review scrutiny on
-that one file. This PR's merge commit (`4b9590e`) resolves that conflict by replacing the
-per-skill symlink with this plan's directory-level one — a strict upgrade: the per-skill form
-needs a new symlink added by hand for every future skill under `.github/skills/`, the
-directory-level form covers all of them, present and future, with the one link already in place.
+that one file. The PR branch resolved that conflict in-branch (merge commit `4b9590e`, present
+only in the PR's own pre-squash history, not reachable from `master`) by replacing the per-skill
+symlink with this plan's directory-level one — a strict upgrade: the per-skill form needs a new
+symlink added by hand for every future skill under `.github/skills/`, the directory-level form
+covers all of them, present and future, with the one link already in place. The actual `master`
+history records this as a single squash commit, `bb8c138`.
 
 ## Global Constraints
 
