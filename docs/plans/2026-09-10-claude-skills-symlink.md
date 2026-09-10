@@ -24,6 +24,15 @@ than "usable by any coding-agent tool" and the honest one.) Implements savvagent
 🚧 Implemented, PR open: savvagent/otto-factory#124 (closes #123). Flip to ✅ Shipped with the
 merge commit SHA once merged (record-as-shipped).
 
+**Merge-conflict note:** while this PR was in review, an unrelated PR (savvagent/otto-factory#79,
+job `agent_type` filtering) independently merged its own `.claude/skills/otto-factory-development`
+per-skill symlink to `master` — someone else hit the same untracked-local-symlink annoyance this
+plan set out to fix, and their fix got bundled into an unrelated PR without review scrutiny on
+that one file. This PR's merge commit (`4b9590e`) resolves that conflict by replacing the
+per-skill symlink with this plan's directory-level one — a strict upgrade: the per-skill form
+needs a new symlink added by hand for every future skill under `.github/skills/`, the
+directory-level form covers all of them, present and future, with the one link already in place.
+
 ## Global Constraints
 
 - No AI self-attribution anywhere — commits, comments, docs.
