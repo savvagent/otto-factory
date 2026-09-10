@@ -1,6 +1,6 @@
 # Passkey registration audit: distinguish signup/claim/add, and carry an IP
 
-> **Status:** DRAFT — closes `savvagent/otto-factory#88`, filed as a lower-severity follow-up during
+> **Status:** APPROVED — closes `savvagent/otto-factory#88`, filed as a lower-severity follow-up during
 > the review of `savvagent/otto-factory#86` (see
 > `docs/specs/2026-09-10-passkey-audit-events-design.md`, which shipped the `auth.passkey.registered`
 > / `auth.passkey.cleared` rename this spec builds on).
