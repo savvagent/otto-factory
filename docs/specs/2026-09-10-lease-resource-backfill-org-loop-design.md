@@ -25,8 +25,9 @@
 > from the start, not an oversight. The PR body hands a human with deploy access the
 > correct provenance-bounded check to run post-deploy.
 >
-> A real merge conflict with a concurrently-merged, unrelated PR (`#131`/`#137`, both also
-> touching `crates/of-core/tests/isolation.rs`) was resolved by merge (not rebase, since
+> A real merge conflict with a concurrently-merged, unrelated PR (`#131`, which also touched
+> `crates/of-core/tests/isolation.rs`; `#137` is `#131`'s own record-as-shipped follow-up
+> and touched no code) was resolved by merge (not rebase, since
 > this branch had accumulated several commits touching the same test across its own review
 > cycle) before the final push.
 

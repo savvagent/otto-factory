@@ -35,8 +35,9 @@ watched the corrected test fail with exactly the original symptom, restored it).
 body was corrected before merge (architect-reviewer's Important finding): its "Known
 limitation" verification query originally predated the provenance fix.
 
-**A real merge conflict surfaced at ship time**: `#131`/`#137` (an unrelated fix, merged to
-`master` while this branch was in its own review cycle) also touched
+**A real merge conflict surfaced at ship time**: `#131` (an unrelated fix, merged to
+`master` while this branch was in its own review cycle; `#137` is `#131`'s own
+record-as-shipped follow-up and touched no code) also touched
 `crates/of-core/tests/isolation.rs`. Resolved via `git merge origin/master` (not rebase —
 this branch's own commits had already touched the same test across two review-fix rounds,
 so a merge needed only one conflict resolution instead of replaying it per commit); both
