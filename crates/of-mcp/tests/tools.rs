@@ -179,6 +179,7 @@ impl Env {
                     agent_type: None,
                     metadata: None,
                     depends_on: vec![],
+                    idempotency_key: None,
                 }),
             )
             .await)["job"]
@@ -265,12 +266,97 @@ async fn a_read_only_token_can_look_but_not_touch(pool: PgPool) {
                 agent_type: None,
                 metadata: None,
                 depends_on: vec![],
+                idempotency_key: None,
             }),
         )
         .await);
 
     assert_eq!(code_of(&e), "insufficient_scope");
     assert!(e.message.contains("jobs:write"), "{}", e.message);
+}
+
+// ------------------------------------------------------------ idempotency
+
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn add_job_with_an_idempotency_key_replays_instead_of_duplicating(pool: PgPool) {
+    let (env, caller) = env(pool).await;
+    env.register(&caller).await;
+
+    let billable_before = env.usage(&caller).await["billableUsed"].as_i64().unwrap();
+
+    let args = || tools::jobs::AddJobArgs {
+        title: "wire up the health endpoint".into(),
+        description: None,
+        repo: Some("api".into()),
+        remote: None,
+        ticket_ref: None,
+        agent_type: None,
+        metadata: None,
+        depends_on: vec![],
+        idempotency_key: Some("retry-1".into()),
+    };
+
+    let first = ok(env
+        .factory
+        .add_job(Extension(parts(&caller)), Parameters(args()))
+        .await);
+    let second = ok(env
+        .factory
+        .add_job(Extension(parts(&caller)), Parameters(args()))
+        .await);
+
+    assert_eq!(first["job"]["id"], second["job"]["id"]);
+
+    let billable_after = env.usage(&caller).await["billableUsed"].as_i64().unwrap();
+    assert_eq!(
+        billable_after - billable_before,
+        1,
+        "a replay must not be billed a second time"
+    );
+}
+
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn add_job_with_a_reused_idempotency_key_and_a_different_title_errors(pool: PgPool) {
+    let (env, caller) = env(pool).await;
+    env.register(&caller).await;
+
+    ok(env
+        .factory
+        .add_job(
+            Extension(parts(&caller)),
+            Parameters(tools::jobs::AddJobArgs {
+                title: "first title".into(),
+                description: None,
+                repo: Some("api".into()),
+                remote: None,
+                ticket_ref: None,
+                agent_type: None,
+                metadata: None,
+                depends_on: vec![],
+                idempotency_key: Some("retry-1".into()),
+            }),
+        )
+        .await);
+
+    let e = err(env
+        .factory
+        .add_job(
+            Extension(parts(&caller)),
+            Parameters(tools::jobs::AddJobArgs {
+                title: "a different title".into(),
+                description: None,
+                repo: Some("api".into()),
+                remote: None,
+                ticket_ref: None,
+                agent_type: None,
+                metadata: None,
+                depends_on: vec![],
+                idempotency_key: Some("retry-1".into()),
+            }),
+        )
+        .await);
+
+    assert_eq!(code_of(&e), "idempotency_key_conflict");
 }
 
 // --------------------------------------------------------------- repo anchor
@@ -797,6 +883,7 @@ async fn an_unresolvable_repo_says_what_is_registered_and_what_to_call(pool: PgP
                 agent_type: None,
                 metadata: None,
                 depends_on: vec![],
+                idempotency_key: None,
             }),
         )
         .await);
@@ -1447,6 +1534,7 @@ async fn a_failed_call_is_not_billed(pool: PgPool) {
                 agent_type: None,
                 metadata: None,
                 depends_on: vec![],
+                idempotency_key: None,
             }),
         )
         .await);
@@ -1517,6 +1605,7 @@ async fn enforcement_stops_work_but_never_reads(pool: PgPool) {
                 agent_type: None,
                 metadata: None,
                 depends_on: vec![],
+                idempotency_key: None,
             }),
         )
         .await);

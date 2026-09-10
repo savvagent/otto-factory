@@ -156,6 +156,17 @@ impl Factory {
     /// in a second one — a quota refusal there means the call is not billed
     /// and the caller sees an error, but the write-back survives so a retry
     /// does not re-post to the tracker.
+    ///
+    /// A third, different-shaped exception: `add_job`/`send_message`'s
+    /// idempotent-replay check. Unlike `watch`/`sync_ticket` above, this one
+    /// has no unrollbackable external effect to protect — it is a plain
+    /// read (`Tx::find_replayed_job`/`find_replayed_message`) inside the
+    /// same transaction `charge` would use. It still has to run before
+    /// `charge`, because the only way to guarantee a replay is never billed
+    /// is to know it is a replay before billing anything; there is no way
+    /// to refund a charge already recorded. See `tools::jobs::add_job` /
+    /// `tools::coord::send_message` and the idempotency-key design spec's
+    /// §5/§8.
     pub async fn charge(
         &self,
         tx: &mut Tx<'_>,
