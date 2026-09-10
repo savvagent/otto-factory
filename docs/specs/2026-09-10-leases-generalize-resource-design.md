@@ -1,6 +1,27 @@
 # Leases: generalize (repo, branch) to (repo, resource) design
 
-> **Status:** DRAFT — closes savvagent/otto-factory#69.
+> **Status:** IMPLEMENTED — closes savvagent/otto-factory#69.
+>
+> Shipped in `savvagent/otto-factory#115`, merged as
+> `6fe084e0c145c9d59d646e89f198a14398787db1` and green on `master`'s own CI run (rust, web,
+> docker-build, pr-title all succeeded; `deploy` and `release-please` correctly skipped —
+> `deploy` now runs only when release-please has just cut a release, per
+> `docs/specs/2026-09-10-semver-release-design.md`, not on every push).
+>
+> **A follow-up, not a fix, was filed as `savvagent/otto-factory#119`.** `#111` — merged
+> concurrently with this PR (12:17 UTC vs. this PR's 12:39 UTC merge, same day) — added
+> CLAUDE.md guidance on migrations that rewrite tenant-table data, generalizing the same
+> class of bug §1's `Post-review correction` found here (a bare `UPDATE` against a `FORCE
+> ROW LEVEL SECURITY` table is a silent no-op under `Db::migrate`, which never sets
+> `app.org_id`). CLAUDE.md now recommends a per-org loop (explicit `org_id` predicate *and*
+> `set_config('app.org_id', ...)`) over the `NO FORCE`/`FORCE` toggle §1 uses, because the
+> toggle only helps when the migrating role owns the table and a forgotten restore is
+> caught by `Db::verify_tenant_isolation` only on the non-bypass deployment shape. Verified
+> this is **not a live bug**: `docs/deploy/fly.md` confirms the actual deployment's
+> connecting role is a superuser, which bypasses RLS regardless of `FORCE` either way, so
+> `0027_lease_resource.sql`'s toggle is a no-op in production and was restored correctly in
+> the same migration regardless. `#119` tracks bringing it in line with the newer pattern
+> for consistency, not correctness.
 >
 > **PR review round found six further corrections, all applied before merge:** (1) the
 > migration's backfill `UPDATE` ran under `repo_leases`' `FORCE ROW LEVEL SECURITY` with no

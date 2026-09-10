@@ -11,6 +11,13 @@ This plan implements it exactly.
 
 ## Status — 2026-09-10
 
+**Done.** Shipped in `savvagent/otto-factory#115`, merged as
+`6fe084e0c145c9d59d646e89f198a14398787db1`, green on master's own CI. A consistency
+follow-up (not a live bug — see the spec's Status blockquote) was filed as
+`savvagent/otto-factory#119` for the migration's `NO FORCE`/`FORCE` pattern, which a
+concurrently-merged sibling PR (#111) generalized CLAUDE.md's guidance away from after
+this branch was already in flight.
+
 All four tasks below (✅) were implemented, reviewed, and shipped, but the mandatory
 PR-review trio (rust-pro, architect-reviewer, blind security-auditor) plus the
 pr-review-toolkit passes found six further real issues beyond what this plan's own
