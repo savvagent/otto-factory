@@ -5,12 +5,22 @@ on:
     branches: [master]
   pull_request:
 
-# A second push to the same branch/PR should cancel the run already in
-# flight rather than queue behind it — nobody wants CI results for a commit
-# they've already superseded.
+# A second push to the same PR should cancel the run already in flight rather than queue
+# behind it — nobody wants CI results for a commit they've already superseded. Pushes to
+# master must NOT cancel each other: every push to master shares one group (github.ref is
+# refs/heads/master for all of them), and under the release-gated deploy below a cancelled
+# push is no longer self-healing the way it was when every push deployed -- if the push that
+# merges release-please's release PR is cancelled after the tag/Release already exist but
+# before `deploy` runs, no later push re-triggers it (release_created only flips true once,
+# on the commit that actually created the release). See docs/specs/2026-09-10-semver-release-design.md.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Read-only by default; only the jobs below that name their own broader `permissions:` block
+# (release-please) get more. Nothing else in this workflow writes to the repo or needs to.
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -149,8 +159,11 @@ jobs:
   pr-title:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
+    timeout-minutes: 5
+    permissions:
+      pull-requests: read
     steps:
-      - uses: amannn/action-semantic-pull-request@v6
+      - uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -190,6 +203,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [rust, web, docker-build]
     if: github.event_name == 'push'
+    timeout-minutes: 10
     permissions:
       contents: write
       pull-requests: write
@@ -213,7 +227,14 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     needs: [release-please]
-    if: needs.release-please.outputs.release_created == 'true'
+    # A deploy credential deserves its own predicate, not one inherited transitively from
+    # release-please's own `if:` and `on.push.branches` -- spelled out explicitly here so an
+    # edit to either of those (e.g. adding workflow_dispatch, or another push branch) can't
+    # silently re-arm this job.
+    if: |
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/master' &&
+      needs.release-please.outputs.release_created == 'true'
     timeout-minutes: 10
     permissions:
       contents: read

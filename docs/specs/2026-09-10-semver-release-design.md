@@ -182,6 +182,7 @@ bump).
       "release-type": "simple",
       "changelog-path": "CHANGELOG.md",
       "pull-request-title-pattern": "chore: release ${version}",
+      "bootstrap-sha": "<origin/master's tip immediately before this PR opened — see Risks>",
       "extra-files": [
         { "type": "toml", "path": "Cargo.toml", "jsonpath": "$.workspace.package.version" },
         { "type": "json", "path": "web/package.json", "jsonpath": "$.version" }
@@ -289,6 +290,15 @@ subject style (checked against recent `git log` subjects).
 This is the enforcement point for the format change in Assumptions: `<type>(<scope>): <subject>` —
 e.g. `fix(of-core): reap expired job claims` — or `<type>(<scope>)!: <subject>` /
 a `BREAKING CHANGE:` footer for a Non-Negotiable-Rule-6 breaking change.
+
+**This job never actually runs on release-please's own PR.** GitHub does not fire `pull_request`
+events for a PR authored by the default `GITHUB_TOKEN` (a recursion guard), and release-please
+authenticates as exactly that — so `pr-title` shows no check at all on the release PR, not a green
+one. `pull-request-title-pattern` above is still worth keeping: it's what the *squashed* commit
+that eventually lands on `master` looks like, and it's cheap insurance for the day branch
+protection or a human re-opens the PR changes that picture. The real gate on the release path is
+unaffected either way — the push that merges the release PR still runs `rust`/`web`/`docker-build`
+(via `release-please`'s own `needs:`) before `deploy` can fire.
 
 ## §3 MCP identity + OpenAPI version regression test
 
@@ -415,9 +425,21 @@ see `docs/specs/2026-09-10-semver-release-design.md` §4.
   release PR merges, until the next `cargo build`/`test` run regenerates them (no `--locked` flag
   anywhere in this repo's CI or plan, see Assumptions) — cosmetic, not a build break, but worth a
   human noticing if `git diff` after a release looks unexpectedly quiet in `Cargo.lock`.
-- **Deploy cadence drops from "every merge" to "every release-please PR merge."** Named explicitly
-  in Assumptions as the accepted, requested tradeoff — flagged again here because it's the single
-  biggest behavioral change in this spec and worth the architect reviewer's attention.
+- **Deploy cadence drops from "every merge" to "every release-please PR merge" — and it's sharper
+  than that framing suggests.** release-please only opens/updates a release PR for `feat`, `fix`,
+  `perf`, or a breaking change; `docs`, `chore`, `ci`, `test`, `build`, and `refactor` are hidden,
+  non-bumping types. This repo's own pattern of following a shipped change with a separate
+  `docs: record X as shipped` commit means a stretch of purely such commits deploys nothing at
+  all, not merely "less often." Named explicitly in Assumptions as the accepted, requested
+  tradeoff — flagged again here because it's the single biggest behavioral change in this spec and
+  worth the architect reviewer's attention.
+- **`release-please-config.json`'s `bootstrap-sha` is a point-in-time value, set to `origin/master`'s
+  tip immediately before this PR was opened.** Any commit that lands on `master` between then and
+  this PR's actual merge (from another concurrent change) is included in the first release's
+  history window rather than excluded — harmless in practice, since such a commit predates this
+  spec's PR-title convention and so is silently unparseable by release-please's Conventional
+  Commits scan (excluded from the changelog and from the version bump, per the Error Handling
+  section above), not backfilled incorrectly.
 - **The `"simple"` release-type plus explicit `extra-files` was chosen over the `"rust"` strategy's
   built-in Cargo/workspace handling specifically because this spec's author could not verify the
   latter's exact behavior against this workspace's `[workspace.package]`-inherited version shape

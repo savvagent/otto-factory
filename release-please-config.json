@@ -6,6 +6,7 @@
       "release-type": "simple",
       "changelog-path": "CHANGELOG.md",
       "pull-request-title-pattern": "chore: release ${version}",
+      "bootstrap-sha": "797b9964c7b8da6dbca4b403aeebb19cf5626ec7",
       "extra-files": [
         { "type": "toml", "path": "Cargo.toml", "jsonpath": "$.workspace.package.version" },
         { "type": "json", "path": "web/package.json", "jsonpath": "$.version" }

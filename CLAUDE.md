@@ -427,7 +427,12 @@ claims`, `feat(of-mcp): add a repo-scoped watch filter` — where `<type>` is on
 crate/area vocabulary (a crate directory name, or `web`/`docs`/`ci`/`release`), omittable for a
 change with no single honest scope. A `pr-title` CI check enforces this on every PR.
 
-**A breaking change to a public interface gets its version bump from the same signal Non-Negotiable
-Rule 6 already requires you to raise.** Write `<type>(<scope>)!: <subject>` or add a `BREAKING
-CHANGE: …` footer, and release-please cuts a major version from it — the same marker that tells the
-architect reviewer to look hard is what tells the release automation to treat it as one.
+**A breaking change to a public interface gets its version bump from the same signal the
+otto-factory-development skill's Non-Negotiable Rule 6 already requires you to raise there.**
+Write `<type>(<scope>)!: <subject>` or add a `BREAKING CHANGE: …` footer, and release-please cuts
+a major version from it — the same marker that tells the architect reviewer to look hard is what
+tells the release automation to treat it as one.
+
+`deploy` in `.github/workflows/ci.yml` runs only when release-please has just cut a release (i.e.
+its auto-maintained "chore: release X.Y.Z" PR was just merged), not on every push to `master` —
+see `docs/specs/2026-09-10-semver-release-design.md` §4.
