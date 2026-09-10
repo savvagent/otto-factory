@@ -498,7 +498,7 @@ pub async fn has_credential(db: &Db, user: UserId) -> Result<bool> {
 /// your own account with no email to recover through, and the click that does
 /// it looks exactly like tidying up a stale device. Someone who genuinely wants
 /// out deletes the account.
-pub async fn remove(db: &Db, user: UserId, key: Uuid) -> Result<()> {
+pub async fn remove(db: &Db, user: UserId, key: Uuid, ip: Option<&str>) -> Result<()> {
     let remaining = count(db, user).await?;
     if remaining <= 1 {
         return Err(AuthError::LastPasskey);
@@ -514,10 +514,33 @@ pub async fn remove(db: &Db, user: UserId, key: Uuid) -> Result<()> {
     if affected == 0 {
         return Err(AuthError::UnknownCredential);
     }
+
+    if let Err(e) = db
+        .audit_global(
+            Entry::new(action::PASSKEY_REMOVED)
+                .actor(user)
+                .target("passkey", key.to_string())
+                .from_request(ip, None),
+        )
+        .await
+    {
+        tracing::error!(
+            error = %e,
+            user_id = %user,
+            "failed to write audit event for passkey removal"
+        );
+    }
+
     Ok(())
 }
 
-pub async fn rename(db: &Db, user: UserId, key: Uuid, nickname: &str) -> Result<()> {
+pub async fn rename(
+    db: &Db,
+    user: UserId,
+    key: Uuid,
+    nickname: &str,
+    ip: Option<&str>,
+) -> Result<()> {
     let affected = sqlx::query("UPDATE passkeys SET nickname = $3 WHERE user_id = $1 AND id = $2")
         .bind(user)
         .bind(key)
@@ -529,6 +552,23 @@ pub async fn rename(db: &Db, user: UserId, key: Uuid, nickname: &str) -> Result<
     if affected == 0 {
         return Err(AuthError::UnknownCredential);
     }
+
+    if let Err(e) = db
+        .audit_global(
+            Entry::new(action::PASSKEY_RENAMED)
+                .actor(user)
+                .target("passkey", key.to_string())
+                .from_request(ip, None),
+        )
+        .await
+    {
+        tracing::error!(
+            error = %e,
+            user_id = %user,
+            "failed to write audit event for passkey rename"
+        );
+    }
+
     Ok(())
 }
 
