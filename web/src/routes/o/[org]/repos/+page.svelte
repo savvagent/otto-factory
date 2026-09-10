@@ -17,9 +17,9 @@
    * Repos, and who is holding a lease on one right now.
    *
    * The leases are the reason this page is worth opening. A lease is advisory —
-   * the server cannot see a git operation and cannot stop one — so its whole
-   * value is being *visible*: "why is my agent waiting?" is answered by a name
-   * and a branch, not by a lock.
+   * the server cannot see what an agent does with the resource and cannot stop
+   * it — so its whole value is being *visible*: "why is my agent waiting?" is
+   * answered by a name and a resource, not by a lock.
    *
    * Leases are loaded per repo and only when a row is expanded. Fetching every
    * repo's leases up front would be one request per repo on every page load, to
@@ -361,7 +361,7 @@
                 <ul class="space-y-1.5">
                   {#each leases[repo.slug] as Lease[] as lease (lease.id)}
                     <li class="flex flex-wrap items-baseline gap-x-3 text-sm">
-                      <span class="of-mono text-ink">{lease.branch}</span>
+                      <span class="of-mono text-ink">{lease.resource}</span>
                       <span class="text-muted">
                         {lease.holderLabel ?? m.repos_lease_holder_unknown()}
                       </span>

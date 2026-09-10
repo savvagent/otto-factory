@@ -248,14 +248,14 @@ export interface TrackerBinding {
 }
 
 /**
- * An advisory, time-bounded claim on one branch. The server cannot enforce it
- * against a git operation it cannot see; it makes collisions visible rather
- * than impossible.
+ * An advisory, time-bounded claim on one resource. The server cannot enforce
+ * it against what an agent actually does with the resource, which it cannot
+ * see; it makes collisions visible rather than impossible.
  */
 export interface Lease {
   id: string;
   repoId: string;
-  branch: string;
+  resource: string;
   holderUserId: string;
   holderLabel: string | null;
   jobId: string | null;

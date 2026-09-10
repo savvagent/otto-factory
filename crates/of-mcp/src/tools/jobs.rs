@@ -834,8 +834,8 @@ impl Factory {
 
     #[tool(
         name = "renew_claim",
-        description = "Push a claim you hold forward, the way renew_lease extends a branch \
-                       lease. Call this on a cadence comfortably shorter than the claim's TTL \
+        description = "Push a claim you hold forward, the way renew_lease extends a \
+                       resource lease. Call this on a cadence comfortably shorter than the claim's TTL \
                        while a long-running job is still in progress: an unrenewed claim \
                        expires and the job becomes claimable by someone else, which is what \
                        lets a crashed agent's abandoned job be picked back up. Fails if you are \

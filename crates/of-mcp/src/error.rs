@@ -161,7 +161,7 @@ mod tests {
             CoreError::JobNotFound(JobId::from("job-1")),
             CoreError::Invalid("nope".into()),
             CoreError::LeaseHeld {
-                branch: "main".into(),
+                resource: "main".into(),
                 holder: "agent-a".into(),
                 expires_at: chrono::Utc::now(),
             },

@@ -1415,6 +1415,75 @@ async fn leases_are_per_branch(pool: PgPool) {
     assert_eq!(live.len(), 2);
 }
 
+/// A lease is on a resource, not necessarily a branch — a staging slot or a
+/// migration lock is as leasable as `branch:main`. Two different resources on
+/// the same repo don't collide, and the "held" error names whatever resource
+/// string was actually passed, not a hardcoded "branch".
+#[sqlx::test]
+async fn leases_are_per_resource_not_just_branch(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+    let other = db.upsert_user("other@acme.test", None).await.unwrap();
+    db.add_member(t.org, other.id, of_core::orgs::Role::Member)
+        .await
+        .unwrap();
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    tx.acquire_lease(t.repo, "branch:main", t.user, Some("a"), None, None)
+        .await
+        .unwrap();
+    tx.acquire_lease(t.repo, "deploy:staging", other.id, Some("b"), None, None)
+        .await
+        .unwrap();
+    let live = tx.list_leases(Some(t.repo)).await.unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(live.len(), 2);
+
+    let third = db.upsert_user("third@acme.test", None).await.unwrap();
+    db.add_member(t.org, third.id, of_core::orgs::Role::Member)
+        .await
+        .unwrap();
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let err = tx
+        .acquire_lease(t.repo, "deploy:staging", third.id, Some("c"), None, None)
+        .await
+        .unwrap_err();
+    tx.rollback().await.unwrap();
+
+    assert_eq!(err.code(), "lease_held");
+    assert!(
+        err.to_string().contains("deploy:staging"),
+        "the error must name the resource, not a hardcoded \"branch\": {err}"
+    );
+}
+
+/// A free-form resource has no natural length ceiling the way a branch name
+/// used to imply, and a released lease row is kept for history rather than
+/// deleted — without a cap, the column becomes unbounded free storage, and an
+/// oversized value that only fails at the database's btree index limit would
+/// surface to a caller as a retriable internal error instead of a clear,
+/// non-retriable refusal.
+#[sqlx::test]
+async fn an_oversized_resource_is_refused_before_it_reaches_the_database(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+
+    let too_long = "x".repeat(of_core::leases::MAX_RESOURCE_LEN + 1);
+    let mut tx = db.begin(t.org).await.unwrap();
+    let err = tx
+        .acquire_lease(t.repo, &too_long, t.user, None, None, None)
+        .await
+        .unwrap_err();
+    tx.rollback().await.unwrap();
+
+    assert_eq!(err.code(), "invalid_argument");
+    assert!(
+        !err.retriable(),
+        "an oversized resource is never fixed by retrying"
+    );
+}
+
 /// Re-acquiring your own lease renews it rather than failing, so an agent that
 /// lost track of its own state converges instead of deadlocking against itself.
 #[sqlx::test]

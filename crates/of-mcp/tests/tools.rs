@@ -539,7 +539,7 @@ async fn activate_job_on_an_unclaimed_job_is_refused(pool: PgPool) {
 }
 
 /// `renew_claim` is what lets a long-running agent keep a claim it is still
-/// actively working, the same way `renew_lease` keeps a branch lease alive —
+/// actively working, the same way `renew_lease` keeps a resource lease alive —
 /// and the claim it extends must still finish normally afterwards.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn renew_claim_extends_the_claim_and_completion_still_works(pool: PgPool) {
@@ -1178,7 +1178,8 @@ async fn a_held_lease_names_its_holder_to_the_next_agent(pool: PgPool) {
         .acquire_lease(
             Extension(parts(&first)),
             Parameters(tools::coord::AcquireLeaseArgs {
-                branch: "main".into(),
+                resource: None,
+                branch: Some("main".into()),
                 repo: Some("api".into()),
                 remote: None,
                 agent: Some("agent-one".into()),
@@ -1190,7 +1191,8 @@ async fn a_held_lease_names_its_holder_to_the_next_agent(pool: PgPool) {
 
     let mate = env.teammate(first.org_id, "sam@acme.test").await;
     let take = || tools::coord::AcquireLeaseArgs {
-        branch: "main".into(),
+        resource: None,
+        branch: Some("main".into()),
         repo: Some("api".into()),
         remote: None,
         agent: Some("agent-two".into()),
@@ -1222,7 +1224,7 @@ async fn a_held_lease_names_its_holder_to_the_next_agent(pool: PgPool) {
         .acquire_lease(
             Extension(parts(&mate)),
             Parameters(tools::coord::AcquireLeaseArgs {
-                branch: "feature/x".into(),
+                branch: Some("feature/x".into()),
                 ..take()
             }),
         )
@@ -1255,6 +1257,171 @@ async fn a_held_lease_names_its_holder_to_the_next_agent(pool: PgPool) {
         2,
         "both of sam's leases"
     );
+}
+
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn acquire_lease_accepts_a_free_form_resource(pool: PgPool) {
+    let (env, first) = env(pool).await;
+    env.register(&first).await;
+
+    let lease = ok(env
+        .factory
+        .acquire_lease(
+            Extension(parts(&first)),
+            Parameters(tools::coord::AcquireLeaseArgs {
+                resource: Some("deploy:staging".into()),
+                branch: None,
+                repo: Some("api".into()),
+                remote: None,
+                agent: Some("agent-one".into()),
+                job: None,
+                ttl_seconds: None,
+            }),
+        )
+        .await);
+
+    assert_eq!(lease["lease"]["resource"], "deploy:staging");
+}
+
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn acquire_lease_branch_alias_prefixes_and_still_works(pool: PgPool) {
+    let (env, first) = env(pool).await;
+    env.register(&first).await;
+
+    let lease = ok(env
+        .factory
+        .acquire_lease(
+            Extension(parts(&first)),
+            Parameters(tools::coord::AcquireLeaseArgs {
+                resource: None,
+                branch: Some("main".into()),
+                repo: Some("api".into()),
+                remote: None,
+                agent: Some("agent-one".into()),
+                job: None,
+                ttl_seconds: None,
+            }),
+        )
+        .await);
+
+    assert_eq!(lease["lease"]["resource"], "branch:main");
+}
+
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn acquire_lease_rejects_an_empty_branch_alias(pool: PgPool) {
+    let (env, first) = env(pool).await;
+    env.register(&first).await;
+
+    let e = err(env
+        .factory
+        .acquire_lease(
+            Extension(parts(&first)),
+            Parameters(tools::coord::AcquireLeaseArgs {
+                resource: None,
+                branch: Some("   ".into()),
+                repo: Some("api".into()),
+                remote: None,
+                agent: Some("agent-one".into()),
+                job: None,
+                ttl_seconds: None,
+            }),
+        )
+        .await);
+
+    assert_eq!(
+        e.code,
+        rmcp::model::ErrorCode::INVALID_PARAMS,
+        "an empty branch must not become the lease \"branch:\""
+    );
+}
+
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn acquire_lease_needs_resource_or_branch(pool: PgPool) {
+    let (env, first) = env(pool).await;
+    env.register(&first).await;
+
+    let e = err(env
+        .factory
+        .acquire_lease(
+            Extension(parts(&first)),
+            Parameters(tools::coord::AcquireLeaseArgs {
+                resource: None,
+                branch: None,
+                repo: Some("api".into()),
+                remote: None,
+                agent: Some("agent-one".into()),
+                job: None,
+                ttl_seconds: None,
+            }),
+        )
+        .await);
+
+    assert_eq!(e.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    assert!(
+        e.message.contains("resource"),
+        "the error should name the missing field: {}",
+        e.message
+    );
+}
+
+/// Passing both is refused rather than guessed: silently preferring `resource`
+/// would let a caller who meant the `branch` alias lease the wrong thing with
+/// no error, the exact "errors that guess are worse than errors that stop"
+/// failure this project's style rules out.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn acquire_lease_refuses_both_resource_and_branch(pool: PgPool) {
+    let (env, first) = env(pool).await;
+    env.register(&first).await;
+
+    let e = err(env
+        .factory
+        .acquire_lease(
+            Extension(parts(&first)),
+            Parameters(tools::coord::AcquireLeaseArgs {
+                resource: Some("deploy:staging".into()),
+                branch: Some("main".into()),
+                repo: Some("api".into()),
+                remote: None,
+                agent: Some("agent-one".into()),
+                job: None,
+                ttl_seconds: None,
+            }),
+        )
+        .await);
+
+    assert_eq!(e.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    assert!(
+        e.message.contains("resource") && e.message.contains("branch"),
+        "the error should name both fields so the caller knows which to drop: {}",
+        e.message
+    );
+}
+
+/// A blank `resource` must not mask a perfectly good `branch` — a client that
+/// always populates `resource` with an empty default alongside a real `branch`
+/// is exactly the caller the deprecated alias exists to keep working.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn acquire_lease_falls_back_to_branch_when_resource_is_blank(pool: PgPool) {
+    let (env, first) = env(pool).await;
+    env.register(&first).await;
+
+    let lease = ok(env
+        .factory
+        .acquire_lease(
+            Extension(parts(&first)),
+            Parameters(tools::coord::AcquireLeaseArgs {
+                resource: Some("   ".into()),
+                branch: Some("main".into()),
+                repo: Some("api".into()),
+                remote: None,
+                agent: Some("agent-one".into()),
+                job: None,
+                ttl_seconds: None,
+            }),
+        )
+        .await);
+
+    assert_eq!(lease["lease"]["resource"], "branch:main");
 }
 
 #[sqlx::test(migrations = "../of-core/migrations")]

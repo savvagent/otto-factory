@@ -52,7 +52,7 @@ pub const FREE: &[&str] = &[
     // a job claim you already paid to take with claim_jobs. Charging per
     // renewal would bill an agent for holding still, and charging for release
     // would create an incentive not to release — which costs everyone else the
-    // branch until the lease expires. Coordination hygiene must never have a
+    // resource until the lease expires. Coordination hygiene must never have a
     // price on it.
     "renew_lease",
     "release_lease",

@@ -1,9 +1,9 @@
 //! Coordination tools — leases, the message channel, and change notification.
 //!
 //! These are what make a queue into coordination. Leases answer "is anyone else
-//! in this branch"; messages let agents hand off context a job field cannot
-//! hold; `watch` lets an agent sit still until something happens instead of
-//! asking every few seconds.
+//! using this resource"; messages let agents hand off context a job field
+//! cannot hold; `watch` lets an agent sit still until something happens
+//! instead of asking every few seconds.
 
 use std::time::Duration;
 
@@ -38,8 +38,19 @@ const _: () = assert!(WATCH_MAX_SECS <= 60);
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AcquireLeaseArgs {
-    /// The branch you are about to work on.
-    pub branch: String,
+    /// A free-form name for whatever you are taking exclusive use of — a
+    /// branch, a staging slot, a migration lock, anything your team needs to
+    /// serialize on. For the branch case, use the form `branch:<name>` (e.g.
+    /// `branch:main`) so every caller converges on the same spelling. Pass
+    /// exactly one of `resource` or `branch`, never both.
+    #[serde(default)]
+    pub resource: Option<String>,
+    /// Deprecated shorthand for `resource: "branch:<branch>"`. Prefer
+    /// `resource` directly; this is kept only so existing callers naming a
+    /// branch keep working. Pass exactly one of `resource` or `branch`, never
+    /// both — supplying both is refused rather than guessed.
+    #[serde(default)]
+    pub branch: Option<String>,
     #[serde(default)]
     pub repo: Option<String>,
     #[serde(default)]
@@ -53,7 +64,7 @@ pub struct AcquireLeaseArgs {
     pub job: Option<String>,
     /// How long to hold it before it expires. Defaults to 15 minutes, capped
     /// at 4 hours. Renew rather than asking for a long one: a lease that
-    /// outlives a crashed agent blocks the branch for everyone.
+    /// outlives a crashed agent blocks the resource for everyone.
     #[serde(default)]
     pub ttl_seconds: Option<i64>,
 }
@@ -176,12 +187,22 @@ fn message_kind(raw: Option<&str>) -> Result<MessageKind, ErrorData> {
 impl Factory {
     #[tool(
         name = "acquire_lease",
-        description = "Announce that you are working on a branch of a repository, so other \
-                       agents can see it and go elsewhere. Take one before you start editing \
-                       and renew it while you work. If someone already holds it the error \
-                       names them and says when it expires, so you can wait, message them, or \
-                       pick different work. Leases are advisory: the server cannot see your \
-                       git operations, so this makes collisions visible rather than impossible."
+        description = "Announce that you are taking exclusive use of something in a \
+                       repository — a branch, or anything else your team needs to serialize \
+                       on, such as a staging slot or a migration lock — so other agents can \
+                       see it and go elsewhere. Two agents in two different repositories can \
+                       hold the same resource name independently; a lease only ever \
+                       serializes within one repository. Pass `resource` as a free-form \
+                       name; for a branch, use the form `branch:<name>` (e.g. `branch:main`) \
+                       so every caller converges on the same spelling — a bare `main` and \
+                       `branch:main` are different resources. `branch` is accepted as a \
+                       deprecated shorthand for `resource: \"branch:<branch>\"`; pass one or \
+                       the other, never both. Take one before you start and renew it while \
+                       you work. If someone already holds it the error names them and says \
+                       when it expires, so you can wait, message them, or pick different \
+                       work. Leases are advisory: the server cannot see what you actually do \
+                       with the resource, so this makes collisions visible rather than \
+                       impossible."
     )]
     pub async fn acquire_lease(
         &self,
@@ -191,6 +212,46 @@ impl Factory {
         let caller = self.caller(&parts)?;
         caller.require_scope(scope::JOBS_WRITE).mcp()?;
 
+        // A blank string and an absent field are the same request ("I gave you
+        // nothing usable"), so both are folded to `None` before matching —
+        // otherwise `resource: Some("")` would mask a perfectly good `branch`
+        // instead of falling back to it, and would reach `of-core`'s guard only
+        // after this handler had already opened a transaction and charged the
+        // meter for a call that was always going to fail.
+        let resource = args
+            .resource
+            .as_deref()
+            .map(str::trim)
+            .filter(|r| !r.is_empty());
+        let branch = args
+            .branch
+            .as_deref()
+            .map(str::trim)
+            .filter(|b| !b.is_empty());
+
+        let resource = match (resource, branch) {
+            // Both given is refused rather than guessed: `resource` silently
+            // winning would mean a caller who meant the branch alias (and got
+            // the resource field populated by, say, a stale default) leases the
+            // wrong thing with no error — "errors that guess are worse than
+            // errors that stop."
+            (Some(_), Some(_)) => {
+                return Err(ErrorData::invalid_params(
+                    "acquire_lease got both resource and the deprecated branch; pass only \
+                     one (resource, or branch as a shorthand for \"branch:<branch>\")",
+                    None,
+                ))
+            }
+            (Some(r), None) => r.to_string(),
+            (None, Some(b)) => format!("branch:{b}"),
+            (None, None) => {
+                return Err(ErrorData::invalid_params(
+                    "acquire_lease needs resource (or the deprecated branch)",
+                    None,
+                ))
+            }
+        };
+
         let job = args.job.map(JobId::from);
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "acquire_lease").await?;
@@ -198,7 +259,7 @@ impl Factory {
         let lease = tx
             .acquire_lease(
                 repo.id,
-                &args.branch,
+                &resource,
                 caller.user_id,
                 args.agent.as_deref(),
                 job.as_ref(),
@@ -215,7 +276,7 @@ impl Factory {
         name = "renew_lease",
         description = "Extend a lease you hold, before it expires. Renew on a cadence \
                        comfortably shorter than the TTL: if it lapses, another agent may take \
-                       the branch while you are still in it."
+                       the resource while you are still in it."
     )]
     pub async fn renew_lease(
         &self,
@@ -239,7 +300,7 @@ impl Factory {
 
     #[tool(
         name = "release_lease",
-        description = "Give up a lease you hold, freeing the branch immediately instead of \
+        description = "Give up a lease you hold, freeing the resource immediately instead of \
                        waiting for it to expire. Do this as soon as you stop working."
     )]
     pub async fn release_lease(
@@ -262,7 +323,7 @@ impl Factory {
     #[tool(
         name = "list_leases",
         description = "Who is working where right now: the live leases across the organization \
-                       or one repository, with the holder, the branch, and when each expires. \
+                       or one repository, with the holder, the resource, and when each expires. \
                        Expired leases are not listed."
     )]
     pub async fn list_leases(
