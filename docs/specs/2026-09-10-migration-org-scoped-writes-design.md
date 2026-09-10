@@ -23,7 +23,7 @@ that confirmation — not a guess — is what lets this spec skip a corrective d
   under `of_app` with no `app.org_id` set, assert zero rows affected.
 - No corrective migration ships, because production `tracker_bindings` was confirmed empty (see
   Premise corrections) — there is nothing to relabel.
-- All 25 applied migrations are audited for the same shape; the audit and its result are recorded
+- All 26 applied migrations are audited for the same shape; the audit and its result are recorded
   here rather than repeated by the next reader.
 - `cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`, and `cargo fmt --all
   --check` all pass.
@@ -81,7 +81,7 @@ guarding against; it simply has not yet had an opportunity to corrupt data in *t
   context to filter with, and naming the two ways to write one safely (see §2).
 - One new regression test in `crates/of-core/tests/isolation.rs`, in the `rls_scopes_*` family,
   reproducing the exact failure mode using 0020's own `UPDATE` statement text.
-- The audit of all 25 applied migrations for the same shape (§3), recorded in this spec rather than
+- The audit of all 26 applied migrations for the same shape (§3), recorded in this spec rather than
   left for the next investigator to redo.
 - A follow-up GH issue for the `fly.toml`/`docs/deploy/fly.md` documentation drift found during
   investigation (Premise correction 2), filed but not fixed in this PR.
@@ -274,7 +274,7 @@ checked, so the next contributor with the same question does not have to re-run 
 
 - **The guard is documentation plus one worked example, not an automated check.** A lint that parses
   migration SQL for unscoped `UPDATE`/`DELETE` against tables in the `tenant_tables` arrays was
-  considered and rejected as disproportionate: two occurrences of the risky shape in 25 migrations,
+  considered and rejected as disproportionate: two occurrences of the risky shape in 26 migrations,
   both now accounted for, and a hand-written SQL parser is itself a maintenance liability. If this
   shape recurs after this spec ships, that is evidence the documentation-only guard was insufficient
   and a follow-up should build the lint — not evidence this spec should have built it pre-emptively.
