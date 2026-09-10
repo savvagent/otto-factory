@@ -49,9 +49,10 @@ use crate::error;
 /// polling instead of waiting.
 const INSTRUCTIONS: &str = "\
 otto-factory coordinates agentic coding work across a team. Everything here is \
-anchored on repositories: a job belongs to a repo, a lease is taken on a repo's \
-branch, and a tool that cannot work out which repo you mean will refuse rather \
-than guess.
+anchored on repositories: a job belongs to a repo, a lease is taken on a resource \
+within a repo — a branch (spelled `branch:<name>`, e.g. `branch:main`), or anything \
+else your team needs to serialize on, such as a staging slot or a migration lock — \
+and a tool that cannot work out which repo you mean will refuse rather than guess.
 
 Getting started in a new session:
   1. Call whoami to see which organization this token opens and what you may do.
@@ -62,10 +63,11 @@ matches, list_repos shows what is registered and register_repo adds this one.
 or fail_job when you are done. Never start work you have not claimed: claiming \
 is what stops two agents doing the same job.
 
-Before editing a branch, take a lease on it with acquire_lease and renew it \
-while you work. Leases are advisory — the server cannot see your git \
-operations — so they make collisions visible rather than impossible. \
-list_leases answers 'who else is in this repo right now'.
+Before editing a branch (or starting anything else others could collide with), \
+take a lease on it with acquire_lease and renew it while you work. Leases are \
+advisory — the server cannot see your git operations — so they make collisions \
+visible rather than impossible. list_leases answers 'who else is in this repo \
+right now'.
 
 Use watch instead of polling. It blocks until something in your organization \
 changes and returns 'changed' or 'timeout'; call it again either way. Your own \
