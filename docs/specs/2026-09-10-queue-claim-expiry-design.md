@@ -1,6 +1,9 @@
 # Queue claim expiry and claimer-checked finalize design
 
-> **Status:** DRAFT — closes savvagent/otto-factory#65.
+> **Status:** APPROVED — closes savvagent/otto-factory#65. Spec critique approved this
+> design with two minor non-blocking corrections (both applied): §3's `JOB_COLS` ordering
+> comment no longer implies positional `sqlx::FromRow` decoding, and §8 no longer claims a
+> queue-list placement precedent that does not exist.
 
 ## Goal & Success Criteria
 
@@ -238,9 +241,10 @@ One new field, placed after `claimed_by_label` — "who claimed it, and until wh
 pub claim_expires_at: Option<chrono::DateTime<chrono::Utc>>,
 ```
 
-`JOB_COLS` gains `, claim_expires_at` at the end (matching the cancellation columns'
-precedent of appending rather than reordering existing entries, so every existing
-positional `RETURNING`/`SELECT` stays correct).
+`JOB_COLS` gains `, claim_expires_at` at the end, matching the cancellation columns'
+precedent of appending rather than reordering existing entries — `Job` derives
+`sqlx::FromRow` and decodes every `JOB_COLS` query by column name, not position, so nothing
+here is positionally load-bearing; appending is simply the smaller, more reviewable diff.
 
 ### `claim_jobs`
 
@@ -589,10 +593,11 @@ prior job-field addition (§7 of the cancellation design made the identical poin
     return new Date(job.claimExpiresAt).getTime() <= Date.now();
   }
   ```
-- `src/routes/o/[org]/queue/+page.svelte`: the status cell renders a small stranded note
-  beneath the `StatusPill` when `isClaimStranded(job)` is true, following the existing
-  cancellation-requested precedent's placement style (a small `text-bad` line, not a new
-  column — the table is already dense).
+- `src/routes/o/[org]/queue/+page.svelte`: no existing precedent to follow here — today's
+  status cell is a bare `<StatusPill status={job.status} />` with nothing beneath it in the
+  table. This establishes a new placement: a small `text-bad` line under the pill in the
+  same cell (not a new column — the table is already dense), matching only the *color*
+  convention the detail page's cancellation-requested line already uses.
 - `src/routes/o/[org]/queue/[job]/+page.svelte`: the header block gains a stranded line
   next to the existing cancellation-requested line, shown when `isClaimStranded(job)`.
 - `web/messages/{en,es,de,fr,it,hi}.json`: a new `job_claim_stranded` key in each, next to
