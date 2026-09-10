@@ -806,6 +806,116 @@ async fn rls_scopes_tracker_bindings(pool: PgPool) {
     assert_eq!(after.external_ref, "acme/api");
 }
 
+/// **What 0020_rename_trigger_label_default.sql got wrong, reproduced.**
+///
+/// That migration relabels `tracker_bindings.trigger_label` with a bare
+/// `UPDATE ... WHERE trigger_label = 'dark-factory'`. `Db::migrate` runs every
+/// migration on the raw pool (`db.rs`) — never `Db::begin`, so never `SET
+/// LOCAL ROLE of_app` and never `set_config('app.org_id', …)`. On this
+/// deployment's actual connecting role (a superuser, confirmed against
+/// `docs/deploy/fly.md`), that is invisible in the opposite direction from
+/// what this test demonstrates: a superuser bypasses RLS outright, so the
+/// statement would touch *every* org's matching rows, not none. `SET LOCAL
+/// ROLE of_app` below drops to a role RLS actually binds — `of_app` owns
+/// nothing, so it needs no `FORCE` to lose the exemption a table owner would
+/// otherwise get; the FORCE-RLS-fallback deployment shape hits the same zero
+/// for a related but distinct reason (that role *is* the owner, which is what
+/// `FORCE` binds — see `CLAUDE.md`), and this test, run from a superuser
+/// connection, can only exercise the non-owner path. Either way
+/// `current_org()` stays NULL for the statement's entire lifetime, so
+/// `org_id = current_org()` is never true and the UPDATE silently matches
+/// zero rows, for every tenant, forever.
+///
+/// `savvagent/otto-factory#70`. No corrective data migration accompanies this
+/// test — `docs/specs/2026-09-10-migration-org-scoped-writes-design.md`
+/// (Premise corrections, dated 2026-09-10) records that this deployment's own
+/// `tracker_bindings` was empty at investigation time, and that migrations
+/// there currently run as the superuser described above. Neither fact is
+/// re-verified by this test; it guards the deployment shape where the second
+/// one stops being true.
+#[sqlx::test]
+async fn rls_scopes_a_migration_style_update_with_no_org_context(pool: PgPool) {
+    let db = db(pool);
+    let a = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+
+    // Seed a row the way a pre-0020 database would have had one: written
+    // directly on the pool (bypassing `Tx`, standing in for data a migration
+    // — not application code — would be rewriting).
+    sqlx::query(
+        "INSERT INTO tracker_bindings (org_id, repo_id, provider, external_ref, trigger_label) \
+         VALUES ($1, $2, 'github', 'acme/api', 'dark-factory')",
+    )
+    .bind(a.org)
+    .bind(a.repo)
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    // `of_app` owns nothing here, so it needs no `FORCE` to be bound by RLS —
+    // a non-owner grantee role is never exempt. Neither superuser nor
+    // BYPASSRLS, and no `app.org_id` ever set — `Db::migrate` pins no org
+    // automatically; a migration that needs one sets it itself (CLAUDE.md's
+    // per-org loop), which this bare `UPDATE` never did.
+    let mut tx = db.begin_unpinned().await.unwrap();
+    sqlx::query("SET LOCAL ROLE of_app")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+
+    // 0020's own statement, verbatim.
+    let updated = sqlx::query(
+        "UPDATE tracker_bindings SET trigger_label = 'otto-factory' \
+         WHERE trigger_label = 'dark-factory'",
+    )
+    .execute(&mut *tx)
+    .await
+    .unwrap()
+    .rows_affected();
+    tx.commit().await.unwrap();
+
+    assert_eq!(
+        updated, 0,
+        "a bare UPDATE against an RLS-active tenant table with no app.org_id \
+         set is exactly the failure this test exists to keep visible — if \
+         this starts affecting rows, something about the deployment's \
+         isolation shape changed and every migration written under the old \
+         assumption needs re-auditing"
+    );
+
+    // Positive control: the row is still there, still stale. The zero above
+    // is the missing org context, not a missing or already-touched row —
+    // the distinction CLAUDE.md's own guard-1/guard-2 split insists a test
+    // in this family has to make.
+    let mut tx = db.begin(a.org).await.unwrap();
+    let label: String = sqlx::query_scalar("SELECT trigger_label FROM tracker_bindings")
+        .fetch_one(tx.conn())
+        .await
+        .unwrap();
+    assert_eq!(
+        label, "dark-factory",
+        "the row 0020 should have relabelled must still be there, untouched, \
+         for the zero above to mean what this test claims it means"
+    );
+
+    // And the same statement, with org context supplied, does relabel it —
+    // proving the statement is capable of matching at all, so the zero above
+    // is attributable to the missing `app.org_id`, not to a typo in the seed
+    // or the UPDATE's own WHERE clause.
+    let updated = sqlx::query(
+        "UPDATE tracker_bindings SET trigger_label = 'otto-factory' \
+         WHERE trigger_label = 'dark-factory'",
+    )
+    .execute(tx.conn())
+    .await
+    .unwrap()
+    .rows_affected();
+    tx.commit().await.unwrap();
+    assert_eq!(
+        updated, 1,
+        "the same statement, org-scoped, should have matched the seeded row"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The guard on the guard.
 //
