@@ -435,9 +435,9 @@ impl Tx<'_> {
                     .await?
                     .ok_or_else(|| {
                         Error::RaceLost(format!(
-                            "add_job lost a unique-violation race for idempotency key {key:?} but no \
-                             concurrently-created job was found — this is a transient server-side race; \
-                             retry the call"
+                            "add_job lost a unique-violation race for idempotency key {key:?} but \
+                             no concurrently-created job was found — this is a transient \
+                             server-side race; retry after a short backoff"
                         ))
                     })?;
                     if winner.1 != hash {
@@ -659,7 +659,18 @@ impl Tx<'_> {
             // ticket a different live job already owns — a genuine conflict
             // to name, not a race to silently converge on (unlike
             // create_from_ticket's handling of the same index).
-            Err(sqlx::Error::Database(db)) if db.is_unique_violation() => {
+            //
+            // The literal index name here must match 0017's
+            // `CREATE UNIQUE INDEX jobs_org_repo_tracker_ticket_open_idx`
+            // exactly: if that index is ever renamed without updating this
+            // match, the guard below silently stops matching and this whole
+            // recovery path falls through to the generic `Err(Error::Db)`
+            // arm instead — a correctness regression with no compiler error
+            // to catch it.
+            Err(sqlx::Error::Database(db))
+                if db.is_unique_violation()
+                    && db.constraint() == Some("jobs_org_repo_tracker_ticket_open_idx") =>
+            {
                 sqlx::query("ROLLBACK TO SAVEPOINT link_ticket")
                     .execute(self.conn())
                     .await?;
@@ -671,8 +682,9 @@ impl Tx<'_> {
                     .await?
                     .ok_or_else(|| {
                         Error::RaceLost(format!(
-                            "link_ticket lost a unique-violation for {ticket_ref:?} but no conflicting job \
-                             was found — this is a transient server-side race; retry the call"
+                            "link_ticket lost a unique-violation for {ticket_ref:?} but no \
+                             conflicting job was found — this is a transient server-side race; \
+                             retry after a short backoff"
                         ))
                     })?;
                 return Err(Error::TicketAlreadyLinked {
@@ -772,7 +784,18 @@ impl Tx<'_> {
             // just created rather than failing the caller (the webhook route
             // would otherwise 500 on a request that, semantically, succeeded)
             // — never guessed, since the id burned above is simply unused.
-            Err(sqlx::Error::Database(db)) if db.is_unique_violation() => {
+            //
+            // The literal index name here must match 0017's
+            // `CREATE UNIQUE INDEX jobs_org_repo_tracker_ticket_open_idx`
+            // exactly: if that index is ever renamed without updating this
+            // match, the guard below silently stops matching and this whole
+            // recovery path falls through to the generic `Err(Error::Db)`
+            // arm instead — a correctness regression with no compiler error
+            // to catch it.
+            Err(sqlx::Error::Database(db))
+                if db.is_unique_violation()
+                    && db.constraint() == Some("jobs_org_repo_tracker_ticket_open_idx") =>
+            {
                 sqlx::query("ROLLBACK TO SAVEPOINT create_from_ticket")
                     .execute(self.conn())
                     .await?;
@@ -783,9 +806,9 @@ impl Tx<'_> {
                     .await?
                     .ok_or_else(|| {
                         Error::RaceLost(format!(
-                            "create_from_ticket lost a unique-violation race for {ticket_ref:?} but no \
-                             concurrently-created job was found — this is a transient server-side race; \
-                             retry the call"
+                            "create_from_ticket lost a unique-violation race for {ticket_ref:?} \
+                             but no concurrently-created job was found — this is a transient \
+                             server-side race; retry after a short backoff"
                         ))
                     })?
             }

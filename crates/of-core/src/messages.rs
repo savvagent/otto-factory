@@ -304,11 +304,28 @@ impl Tx<'_> {
                     .bind(key)
                     .fetch_optional(self.conn())
                     .await?
+                    // Unlike its three siblings (add_job's own idempotency
+                    // recovery, link_ticket, create_from_ticket), this
+                    // specific branch's precondition — the winner's row
+                    // vanishing between the violation and this re-query —
+                    // cannot currently occur: no code path in this codebase
+                    // ever deletes a `users` or `orgs` row, and this insert
+                    // has no other foreign key whose loss could produce the
+                    // same shape. It stays classified as `RaceLost`
+                    // (retriable) for structural consistency with the other
+                    // three SAVEPOINT-recovery sites, and in case a future
+                    // account- or org-deletion feature changes that. If such
+                    // a feature is ever added, re-check this reasoning
+                    // rather than assume it still holds — a retry here would
+                    // resend the same `sender_user_id`, which could just as
+                    // easily fail again on a foreign-key constraint
+                    // (surfacing as `Error::Db`, not a second `RaceLost`)
+                    // instead of succeeding.
                     .ok_or_else(|| {
                         Error::RaceLost(format!(
-                            "send_message lost a unique-violation race for idempotency key {key:?} but no \
-                             concurrently-created message was found — this is a transient server-side \
-                             race; retry the call"
+                            "send_message lost a unique-violation race for idempotency key {key:?} \
+                             but no concurrently-created message was found — this is a transient \
+                             server-side race; retry after a short backoff"
                         ))
                     })?;
                     if winner.1 != hash {
