@@ -1007,6 +1007,7 @@ async fn a_message_cannot_be_addressed_to_someone_in_another_org(pool: PgPool) {
         job: None,
         in_reply_to: None,
         agent: None,
+        idempotency_key: None,
     };
 
     let existing = err(env
@@ -1139,6 +1140,7 @@ async fn messages_reach_the_inbox_and_the_cursor_clears_them(pool: PgPool) {
                 job: None,
                 in_reply_to: None,
                 agent: Some("agent-one".into()),
+                idempotency_key: None,
             }),
         )
         .await);
@@ -1191,6 +1193,88 @@ async fn messages_reach_the_inbox_and_the_cursor_clears_them(pool: PgPool) {
         .unread_count(Extension(parts(&mate)), Parameters(tools::coord::NoArgs {}))
         .await);
     assert_eq!(unread["unread"], 0);
+}
+
+// ------------------------------------------------------------ idempotency
+
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn send_message_with_an_idempotency_key_replays_instead_of_duplicating(pool: PgPool) {
+    let (env, caller) = env(pool).await;
+
+    let billable_before = env.usage(&caller).await["billableUsed"].as_i64().unwrap();
+
+    let args = || tools::coord::SendMessageArgs {
+        body: "hand-off note".into(),
+        to: None,
+        kind: None,
+        repo: None,
+        remote: None,
+        job: None,
+        in_reply_to: None,
+        agent: None,
+        idempotency_key: Some("retry-1".into()),
+    };
+
+    let first = ok(env
+        .factory
+        .send_message(Extension(parts(&caller)), Parameters(args()))
+        .await);
+    let second = ok(env
+        .factory
+        .send_message(Extension(parts(&caller)), Parameters(args()))
+        .await);
+
+    assert_eq!(first["message"]["id"], second["message"]["id"]);
+
+    let billable_after = env.usage(&caller).await["billableUsed"].as_i64().unwrap();
+    assert_eq!(
+        billable_after - billable_before,
+        1,
+        "a replay must not be billed a second time"
+    );
+}
+
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn send_message_with_a_reused_idempotency_key_and_a_different_body_errors(pool: PgPool) {
+    let (env, caller) = env(pool).await;
+
+    ok(env
+        .factory
+        .send_message(
+            Extension(parts(&caller)),
+            Parameters(tools::coord::SendMessageArgs {
+                body: "first note".into(),
+                to: None,
+                kind: None,
+                repo: None,
+                remote: None,
+                job: None,
+                in_reply_to: None,
+                agent: None,
+                idempotency_key: Some("retry-1".into()),
+            }),
+        )
+        .await);
+
+    let e = err(env
+        .factory
+        .send_message(
+            Extension(parts(&caller)),
+            Parameters(tools::coord::SendMessageArgs {
+                body: "a totally different note".into(),
+                to: None,
+                kind: None,
+                repo: None,
+                remote: None,
+                job: None,
+                in_reply_to: None,
+                agent: None,
+                idempotency_key: Some("retry-1".into()),
+            }),
+        )
+        .await);
+
+    assert_eq!(code_of(&e), "idempotency_key_conflict");
 }
 
 /// `watch` has to return rather than hang when nothing happens, or an agent's
