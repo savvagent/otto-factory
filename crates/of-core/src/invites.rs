@@ -259,22 +259,7 @@ impl Db {
         issued_by: Option<UserId>,
     ) -> Result<()> {
         let mut tx = self.begin_unpinned().await?;
-
-        sqlx::query("DELETE FROM account_claims WHERE user_id = $1 AND consumed_at IS NULL")
-            .bind(user)
-            .execute(&mut *tx)
-            .await?;
-
-        sqlx::query(
-            "INSERT INTO account_claims (user_id, token_hash, issued_by, expires_at) \
-             VALUES ($1, $2, $3, now() + make_interval(days => 14))",
-        )
-        .bind(user)
-        .bind(token_hash)
-        .bind(issued_by)
-        .execute(&mut *tx)
-        .await?;
-
+        create_account_claim_tx(&mut tx, user, token_hash, issued_by).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -310,4 +295,36 @@ impl Db {
 
         user.ok_or(Error::InviteInvalid)
     }
+}
+
+/// The same claim-code issuance as [`Db::create_account_claim`], but run
+/// against a connection the caller already holds a transaction on.
+///
+/// `of_web::routes::orgs::reset_member_passkeys` calls this: clearing a
+/// member's passkeys, revoking their sessions, and minting the code that gets
+/// them back in must commit together, or a failure after the passkeys are
+/// gone but before the code exists leaves the account locked out with no
+/// record of it. See `savvagent/otto-factory#87`.
+pub async fn create_account_claim_tx(
+    conn: &mut sqlx::PgConnection,
+    user: UserId,
+    token_hash: &[u8],
+    issued_by: Option<UserId>,
+) -> Result<()> {
+    sqlx::query("DELETE FROM account_claims WHERE user_id = $1 AND consumed_at IS NULL")
+        .bind(user)
+        .execute(&mut *conn)
+        .await?;
+
+    sqlx::query(
+        "INSERT INTO account_claims (user_id, token_hash, issued_by, expires_at) \
+         VALUES ($1, $2, $3, now() + make_interval(days => 14))",
+    )
+    .bind(user)
+    .bind(token_hash)
+    .bind(issued_by)
+    .execute(conn)
+    .await?;
+
+    Ok(())
 }

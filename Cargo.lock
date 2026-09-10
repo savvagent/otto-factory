@@ -1400,12 +1400,13 @@ dependencies = [
 
 [[package]]
 name = "of-auth"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "axum",
  "base64 0.22.1",
  "chrono",
+ "futures",
  "hmac",
  "http",
  "of-core",
@@ -1429,7 +1430,7 @@ dependencies = [
 
 [[package]]
 name = "of-billing"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -1450,7 +1451,7 @@ dependencies = [
 
 [[package]]
 name = "of-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",
@@ -1472,7 +1473,7 @@ dependencies = [
 
 [[package]]
 name = "of-mcp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "chrono",
@@ -1497,7 +1498,7 @@ dependencies = [
 
 [[package]]
 name = "of-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1522,7 +1523,7 @@ dependencies = [
 
 [[package]]
 name = "of-trackers"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -1544,7 +1545,7 @@ dependencies = [
 
 [[package]]
 name = "of-web"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",

@@ -199,6 +199,11 @@ pub struct JobFilter {
     pub team_id: Option<TeamId>,
     /// Restrict to jobs this user created. Used by "what did I queue?" views.
     pub created_by: Option<UserId>,
+    /// A routing hint, not access control: matches jobs with this exact
+    /// `agent_type` **and** jobs with no `agent_type` at all, because an
+    /// unrouted job is work anyone may take. Never validated against a list —
+    /// same reasoning as `agent_type` itself.
+    pub agent_type: Option<String>,
     pub limit: Option<i64>,
 }
 
@@ -825,14 +830,16 @@ impl Tx<'_> {
                AND ($3::uuid IS NULL OR repo_id = $3) \
                AND ($4::uuid IS NULL OR team_id = $4) \
                AND ($5::uuid IS NULL OR created_by = $5) \
+               AND ($6::text IS NULL OR agent_type = $6 OR agent_type IS NULL) \
              ORDER BY created_at DESC \
-             LIMIT $6"
+             LIMIT $7"
         ))
         .bind(org)
         .bind(f.status)
         .bind(f.repo_id)
         .bind(f.team_id)
         .bind(f.created_by)
+        .bind(&f.agent_type)
         .bind(f.limit.unwrap_or(200).clamp(1, 1000))
         .fetch_all(self.conn())
         .await?;
@@ -1494,7 +1501,15 @@ impl Tx<'_> {
     /// Also includes a job stuck `in-progress`/`active` whose claim has
     /// lapsed: nobody is actually working it, and there is no background
     /// sweeper to reap it proactively, so `ready()` itself has to say so.
-    pub async fn ready(&mut self, repo_id: Option<RepoId>) -> Result<Vec<Job>> {
+    ///
+    /// `agent_type` is a routing hint, not access control: passing it returns
+    /// jobs with that exact `agent_type` **and** jobs with no `agent_type` at
+    /// all, since an unrouted job is work anyone may take.
+    pub async fn ready(
+        &mut self,
+        repo_id: Option<RepoId>,
+        agent_type: Option<&str>,
+    ) -> Result<Vec<Job>> {
         let org = self.org();
         let jobs = sqlx::query_as(&format!(
             "SELECT {JOB_COLS} FROM jobs j \
@@ -1502,6 +1517,7 @@ impl Tx<'_> {
                AND (j.status = 'pending' \
                     OR (j.status IN ('in-progress', 'active') AND j.claim_expires_at <= now())) \
                AND ($2::uuid IS NULL OR j.repo_id = $2) \
+               AND ($3::text IS NULL OR j.agent_type = $3 OR j.agent_type IS NULL) \
                AND NOT EXISTS ( \
                  SELECT 1 FROM job_dependencies d \
                  JOIN jobs dep ON dep.org_id = d.org_id AND dep.id = d.depends_on \
@@ -1510,6 +1526,7 @@ impl Tx<'_> {
         ))
         .bind(org)
         .bind(repo_id)
+        .bind(agent_type)
         .fetch_all(self.conn())
         .await?;
         Ok(jobs)

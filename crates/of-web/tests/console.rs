@@ -10,7 +10,10 @@
 mod common;
 
 use base64::Engine;
-use common::{add_member, harness, harness_with_trackers, onboard, org_with_owner, sign_in, Call};
+use common::{
+    add_member, harness, harness_behind_proxy, harness_with_trackers, onboard, org_with_owner,
+    present_credential, sign_in, unregistered_credential, Call, CLIENT_IP_HEADER,
+};
 use http::StatusCode;
 use of_core::orgs::Role;
 use sqlx::PgPool;
@@ -123,6 +126,176 @@ async fn signing_out_everywhere_ends_every_session(pool: PgPool) {
             .send(&h.router)
             .await
             .expect(StatusCode::UNAUTHORIZED);
+    }
+}
+
+// ---------------------------------------------------- login/finish throttle
+
+/// The whole point of #75: a source address shared by many honest sign-ins
+/// must be throttled, never locked out. `LOGIN_IP_CAP.hard_cap` is generous
+/// (50, against the lockout's `MAX_FAILURES` of 5) specifically so a realistic
+/// shared-address failure burst never gets near it; this drives failures from
+/// several distinct unregistered credentials — staying under each one's own,
+/// much tighter, credential cap — so the address bucket alone is what is under
+/// test.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_shared_address_is_throttled_not_locked_out(pool: PgPool) {
+    let h = harness_behind_proxy(pool);
+    let office = "198.51.100.4";
+
+    let per_credential = (of_auth::ratelimit::LOGIN_CRED_CAP.hard_cap - 1) as usize;
+    let needed = of_auth::ratelimit::LOGIN_IP_CAP.hard_cap as usize;
+    let mut sent = 0usize;
+
+    'outer: loop {
+        let (mut stranger, unknown) = unregistered_credential(&h).await;
+        for attempt in 0..per_credential {
+            if sent >= needed {
+                break 'outer;
+            }
+            let reply = present_credential(&h, &mut stranger, &unknown, Some(office)).await;
+            assert_eq!(
+                reply.error_code(),
+                Some("unknown_credential"),
+                "attempt {sent} (credential attempt {attempt}) should still be answered — \
+                 far more than the old lockout's 5-failure threshold has landed"
+            );
+            sent += 1;
+        }
+    }
+
+    // Past the address cap, a brand-new credential from the same office is
+    // refused before any credential work runs — the address itself is what
+    // is throttled, independent of which credential is being tried.
+    let (mut stranger, unknown) = unregistered_credential(&h).await;
+    let refused = present_credential(&h, &mut stranger, &unknown, Some(office)).await;
+    refused.expect(StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(refused.error_code(), Some("rate_limited"));
+    let retry_after: i64 = refused
+        .headers
+        .get(http::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse().ok())
+        .expect("a rate-limited reply must carry Retry-After");
+
+    // Keep flooding and confirm the wait never grows — a lockout would double
+    // it on every further failure; a cap holds it flat at the window length.
+    for round in 1..=5 {
+        let (mut stranger, unknown) = unregistered_credential(&h).await;
+        let refused = present_credential(&h, &mut stranger, &unknown, Some(office)).await;
+        refused.expect(StatusCode::TOO_MANY_REQUESTS);
+        let again: i64 = refused
+            .headers
+            .get(http::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse().ok())
+            .unwrap();
+        assert_eq!(
+            again, retry_after,
+            "round {round}: retry-after must stay flat, never escalate like the lockout does"
+        );
+    }
+
+    // A different address is unaffected: the bucket is keyed on the source,
+    // not shared globally.
+    let elsewhere = "203.0.113.44";
+    let (mut stranger, unknown) = unregistered_credential(&h).await;
+    let reply = present_credential(&h, &mut stranger, &unknown, Some(elsewhere)).await;
+    assert_eq!(reply.error_code(), Some("unknown_credential"));
+}
+
+/// The credential-keyed bucket (#75): probing repeats against *one specific*
+/// credential id is capped far tighter than the address bucket, and
+/// independently of it — a brand new credential from the very same address
+/// that just tripped the credential cap is still answered.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn probing_one_credential_is_capped_independently_of_the_address(pool: PgPool) {
+    let h = harness_behind_proxy(pool);
+    let (mut stranger, credential_id) = unregistered_credential(&h).await;
+    let prober = "203.0.113.7";
+
+    for attempt in 1..=of_auth::ratelimit::LOGIN_CRED_CAP.hard_cap {
+        let reply = present_credential(&h, &mut stranger, &credential_id, Some(prober)).await;
+        assert_eq!(
+            reply.error_code(),
+            Some("unknown_credential"),
+            "attempt {attempt} against this id should still be answered"
+        );
+    }
+
+    let refused = present_credential(&h, &mut stranger, &credential_id, Some(prober)).await;
+    refused.expect(StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(refused.error_code(), Some("rate_limited"));
+
+    // A different credential id, same address: unaffected. The credential cap
+    // bounds repetition against one id, not every id one address tries.
+    let (mut other, other_id) = unregistered_credential(&h).await;
+    let reply = present_credential(&h, &mut other, &other_id, Some(prober)).await;
+    assert_eq!(reply.error_code(), Some("unknown_credential"));
+
+    // Signing up from the same address is also unaffected: a different
+    // surface, a different bucket.
+    Call::post("/api/auth/signup/start")
+        .header(CLIENT_IP_HEADER, prober)
+        .send(&h.router)
+        .await
+        .expect(StatusCode::OK);
+}
+
+/// `CeremonyExpired` must never count against either bucket (#75): replaying a
+/// ceremony that has already been consumed — exactly what an abandoned tab
+/// looks like from the server's side — must keep answering `ceremony_expired`
+/// no matter how many times it is retried, never `rate_limited`.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn ceremony_expired_is_never_charged_against_any_bucket(pool: PgPool) {
+    let h = harness_behind_proxy(pool);
+    let mut rob = onboard(&h, "rob@acme.test").await;
+    let prober = "203.0.113.9";
+
+    let started = Call::post("/api/auth/login/start").send(&h.router).await;
+    started.expect(StatusCode::OK);
+    let ceremony_id = started.body["ceremonyId"].as_str().unwrap().to_string();
+
+    let mut challenge_value = started.body["challenge"].clone();
+    challenge_value["publicKey"]["allowCredentials"] = serde_json::json!([
+        { "type": "public-key", "id": rob.credential_id }
+    ]);
+    let challenge: webauthn_rs::prelude::RequestChallengeResponse =
+        serde_json::from_value(challenge_value).unwrap();
+
+    let credential = rob
+        .auth
+        .do_authentication(
+            webauthn_rs::prelude::Url::parse(common::PUBLIC_URL).unwrap(),
+            challenge,
+        )
+        .expect("the authenticator refused the sign-in challenge");
+
+    let body = serde_json::json!({ "ceremonyId": ceremony_id, "credential": credential });
+
+    // The first presentation succeeds and consumes the ceremony.
+    Call::post("/api/auth/login/finish")
+        .header(CLIENT_IP_HEADER, prober)
+        .json(body.clone())
+        .send(&h.router)
+        .await
+        .expect(StatusCode::OK);
+
+    // Every further presentation of that same, now-consumed ceremony id must
+    // report it as expired — well past the credential cap's hard limit —
+    // and never once degrade into a rate-limit refusal.
+    let attempts = of_auth::ratelimit::LOGIN_CRED_CAP.hard_cap + 5;
+    for attempt in 1..=attempts {
+        let reply = Call::post("/api/auth/login/finish")
+            .header(CLIENT_IP_HEADER, prober)
+            .json(body.clone())
+            .send(&h.router)
+            .await;
+        assert_eq!(
+            reply.error_code(),
+            Some("ceremony_expired"),
+            "attempt {attempt} should still report the expired ceremony, not a rate limit"
+        );
     }
 }
 
@@ -1555,6 +1728,25 @@ async fn an_admin_can_reset_a_members_authenticator_but_gains_nothing_by_it(pool
         rob.user.to_string()
     );
     assert_eq!(rows[0]["targetId"].as_str().unwrap(), bob.user.to_string());
+
+    // The global auth.passkey.cleared row is attributed to Rob, who performed
+    // the reset, not to Bob, whose account it happened to — Bob did not clear
+    // his own passkeys. See savvagent/otto-factory#87.
+    let cleared: (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT actor_user_id::text, target_id FROM audit_events \
+         WHERE action = $1 AND org_id IS NULL",
+    )
+    .bind(of_core::audit::action::PASSKEY_CLEARED)
+    .fetch_one(h.db.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        cleared.0.as_deref(),
+        Some(rob.user.to_string().as_str()),
+        "the admin-assisted clear must attribute the global audit row to the \
+         admin who performed it, not the member it happened to"
+    );
+    assert_eq!(cleared.1.as_deref(), Some(bob.user.to_string().as_str()));
 
     let stale_action = Call::get("/api/orgs/acme/audit?actionPrefix=auth.totp")
         .with_session(&rob.session)

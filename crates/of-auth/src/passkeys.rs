@@ -498,7 +498,7 @@ pub async fn has_credential(db: &Db, user: UserId) -> Result<bool> {
 /// your own account with no email to recover through, and the click that does
 /// it looks exactly like tidying up a stale device. Someone who genuinely wants
 /// out deletes the account.
-pub async fn remove(db: &Db, user: UserId, key: Uuid) -> Result<()> {
+pub async fn remove(db: &Db, user: UserId, key: Uuid, ip: Option<&str>) -> Result<()> {
     let remaining = count(db, user).await?;
     if remaining <= 1 {
         return Err(AuthError::LastPasskey);
@@ -514,10 +514,33 @@ pub async fn remove(db: &Db, user: UserId, key: Uuid) -> Result<()> {
     if affected == 0 {
         return Err(AuthError::UnknownCredential);
     }
+
+    if let Err(e) = db
+        .audit_global(
+            Entry::new(action::PASSKEY_REMOVED)
+                .actor(user)
+                .target("passkey", key.to_string())
+                .from_request(ip, None),
+        )
+        .await
+    {
+        tracing::error!(
+            error = %e,
+            user_id = %user,
+            "failed to write audit event for passkey removal"
+        );
+    }
+
     Ok(())
 }
 
-pub async fn rename(db: &Db, user: UserId, key: Uuid, nickname: &str) -> Result<()> {
+pub async fn rename(
+    db: &Db,
+    user: UserId,
+    key: Uuid,
+    nickname: &str,
+    ip: Option<&str>,
+) -> Result<()> {
     let affected = sqlx::query("UPDATE passkeys SET nickname = $3 WHERE user_id = $1 AND id = $2")
         .bind(user)
         .bind(key)
@@ -529,6 +552,23 @@ pub async fn rename(db: &Db, user: UserId, key: Uuid, nickname: &str) -> Result<
     if affected == 0 {
         return Err(AuthError::UnknownCredential);
     }
+
+    if let Err(e) = db
+        .audit_global(
+            Entry::new(action::PASSKEY_RENAMED)
+                .actor(user)
+                .target("passkey", key.to_string())
+                .from_request(ip, None),
+        )
+        .await
+    {
+        tracing::error!(
+            error = %e,
+            user_id = %user,
+            "failed to write audit event for passkey rename"
+        );
+    }
+
     Ok(())
 }
 
@@ -536,23 +576,25 @@ pub async fn rename(db: &Db, user: UserId, key: Uuid, nickname: &str) -> Result<
 ///
 /// Leaves the account with no way in **by design** — the caller must issue a
 /// claim code, or the account becomes claimable by whoever reaches registration
-/// first. `of_web::routes::orgs::reset_member_passkeys` does both, but **not**
-/// atomically — each of `clear`, `sessions::revoke_all`, and the claim-code
-/// insert commits on its own connection before the next runs. A failure partway
-/// through is a real, currently-unhandled lockout risk; see
-/// `docs/specs/2026-09-10-passkey-audit-events-design.md` §1a for how this was
-/// found and `savvagent/otto-factory#87` for the follow-up to fix it.
-pub async fn clear(db: &Db, user: UserId, ip: Option<&str>) -> Result<u64> {
-    let removed = sqlx::query("DELETE FROM passkeys WHERE user_id = $1")
-        .bind(user)
-        .execute(db.pool())
-        .await?
-        .rows_affected();
+/// first. `of_web::routes::orgs::reset_member_passkeys` runs this, the session
+/// revocation, and the claim-code insert in one transaction via [`clear_tx`],
+/// so a failure partway through cannot leave the account cleared with no way
+/// back in — see `savvagent/otto-factory#87`.
+///
+/// The audit row is attributed to `actor`, not `user`: this is always called on
+/// somebody else's behalf (there is no self-service passkey clear yet), and a
+/// row that named the affected member as its own actor would misattribute an
+/// admin's action to the person it happened to.
+pub async fn clear(db: &Db, user: UserId, actor: UserId, ip: Option<&str>) -> Result<u64> {
+    let mut tx = db.begin_unpinned().await?;
+    let removed = clear_tx(&mut tx, user).await?;
+    tx.commit().await?;
 
     if let Err(e) = db
         .audit_global(
             Entry::new(action::PASSKEY_CLEARED)
-                .actor(user)
+                .actor(actor)
+                .target("user", user.to_string())
                 .from_request(ip, None),
         )
         .await
@@ -564,6 +606,24 @@ pub async fn clear(db: &Db, user: UserId, ip: Option<&str>) -> Result<u64> {
         );
     }
 
+    Ok(removed)
+}
+
+/// The delete half of [`clear`], against a connection the caller already holds
+/// a transaction on.
+///
+/// No audit row here: the row [`clear`] writes is global (no org), and the
+/// transaction this runs inside during an admin-assisted reset is pinned to
+/// one org — an insert with a null `org_id` would violate `audit_events`'s
+/// row-level-security policy on that connection. The caller writes it
+/// separately, after commit, as the best-effort record `audit_global` already
+/// documents itself to be.
+pub async fn clear_tx(conn: &mut sqlx::PgConnection, user: UserId) -> Result<u64> {
+    let removed = sqlx::query("DELETE FROM passkeys WHERE user_id = $1")
+        .bind(user)
+        .execute(conn)
+        .await?
+        .rows_affected();
     Ok(removed)
 }
 

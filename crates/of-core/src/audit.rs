@@ -41,6 +41,8 @@ pub mod action {
     pub const EMAIL_VERIFIED: &str = "auth.email.verified";
     pub const PASSKEY_REGISTERED: &str = "auth.passkey.registered";
     pub const PASSKEY_CLEARED: &str = "auth.passkey.cleared";
+    pub const PASSKEY_REMOVED: &str = "auth.passkey.removed";
+    pub const PASSKEY_RENAMED: &str = "auth.passkey.renamed";
 
     // OAuth / tokens (org-scoped: the org is bound at authorization time).
     pub const CLIENT_REGISTERED: &str = "oauth.client.registered";
