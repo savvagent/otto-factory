@@ -78,7 +78,17 @@ pub fn generate(prefix: &str) -> Secret {
 /// latency to every authenticated request, which is a denial-of-service vector
 /// rather than a defense. Argon2 belongs on passwords, and otto-factory has none.
 pub fn hash(token: &str) -> Vec<u8> {
-    Sha256::digest(token.as_bytes()).to_vec()
+    hash_bytes(token.as_bytes())
+}
+
+/// Hash arbitrary bytes for use as a rate-limit bucket key — a WebAuthn
+/// credential id, say, which is not text and must not be decoded as any.
+///
+/// Same algorithm as [`hash`] and the same justification: these are
+/// high-entropy bytes minted by an authenticator, not a guessable secret, so
+/// there is nothing for a slow hash to protect against.
+pub fn hash_bytes(data: &[u8]) -> Vec<u8> {
+    Sha256::digest(data).to_vec()
 }
 
 /// Constant-time comparison. Used wherever a comparison result could otherwise

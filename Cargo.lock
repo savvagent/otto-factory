@@ -1406,6 +1406,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "chrono",
+ "futures",
  "hmac",
  "http",
  "of-core",
