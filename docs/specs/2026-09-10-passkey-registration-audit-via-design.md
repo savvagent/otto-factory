@@ -1,9 +1,23 @@
 # Passkey registration audit: distinguish signup/claim/add, and carry an IP
 
-> **Status:** APPROVED — closes `savvagent/otto-factory#88`, filed as a lower-severity follow-up during
-> the review of `savvagent/otto-factory#86` (see
+> **Status:** APPROVED, amended during PR review — closes `savvagent/otto-factory#88`, filed as a
+> lower-severity follow-up during the review of `savvagent/otto-factory#86` (see
 > `docs/specs/2026-09-10-passkey-audit-events-design.md`, which shipped the `auth.passkey.registered`
 > / `auth.passkey.cleared` rename this spec builds on).
+>
+> **Amendment (PR #107 review):** the original plan for `via` below is `via: &str` with call-site
+> string literals, matching every other `.detail(json!({...}))` call site in the codebase (see the
+> "No `via` enum" bullet in Scope/Out). Two independent reviewers on the mandatory review trio
+> (architect-reviewer and the type-design-analyzer pass) flagged that this specific call site differs
+> from that precedent in a way that matters: `via` crosses a crate boundary (`of-web` → `of-auth`) as
+> a function parameter, which is exactly the shape `crates/of-core/src/audit.rs`'s own module doc
+> warns about for action names ("a typo in a literal produces an event nobody will ever find") — the
+> six precedent call sites are all single-site literals inside one `json!` call, not a value threaded
+> across crates. The implementation was changed to a small `of_auth::passkeys::RegistrationVia` enum
+> (`Signup` / `Add` / `Claim`) with `.as_str()` feeding the same `json!({"via": ...})` call — the wire
+> shape of `detail.via` is unchanged, only the Rust-level parameter type. Every code sample and
+> signature below still shows the original `via: &str` design; read `RegistrationVia` wherever `via:
+> &str` appears, and read the "No `via` enum" bullet as superseded by this amendment.
 
 ## Goal & Success Criteria
 

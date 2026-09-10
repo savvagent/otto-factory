@@ -9,7 +9,22 @@ implements it exactly.
 
 ## Status — 2026-09-10
 
-Approved for implementation. No blocking issues from plan review; advisory note: the `add_passkey_finish` (the "add" path) is the one call site gaining a genuinely new `parts: Parts` extractor rather than just a new trailing argument, and no test asserts its specific via/ip values -- the implementer should double-check argument order there with extra care since a transposed via/ip would only be caught by review, not by any test in this plan.
+Shipped as PR #107, with one design change made during PR review (see amendment below). No blocking
+issues from plan review; advisory note that was raised and then addressed in review: the
+`add_passkey_finish` (the "add" path) was the one call site gaining a genuinely new `parts: Parts`
+extractor rather than just a new trailing argument, and no test asserted its specific via/ip values —
+`add_passkey_finish_records_the_add_flow_and_its_ip` in `crates/of-web/tests/console.rs` closed that
+gap during the review round.
+
+**Amendment (PR #107 review):** every step and code sample below shows `via: &str` with call-site
+string literals — that was the original, approved design. Two independent reviewers on the mandatory
+review trio flagged that a value crossing the `of-web` → `of-auth` crate boundary as a closed 3-value
+set is exactly the shape `of-core/src/audit.rs`'s own module doc warns against for stringly-typed
+action names, so the implementation was changed to a small `of_auth::passkeys::RegistrationVia` enum
+(`Signup` / `Add` / `Claim`, with `.as_str()` feeding the unchanged `json!({"via": ...})` call) in the
+same PR, before merge. Read `RegistrationVia::Signup`/`::Add`/`::Claim` wherever a step below shows
+the string literals `"signup"`/`"add"`/`"claim"` as a `finish_registration` argument — see the spec's
+own amendment note for the full rationale.
 
 ## Global Constraints
 
