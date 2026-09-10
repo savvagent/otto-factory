@@ -1,11 +1,35 @@
 # Repeat the lease-resource backfill with the documented per-org loop
 
-> **Status:** DRAFT — closes savvagent/otto-factory#119. **Revised after PR #135 review**:
-> the original design's `resource NOT LIKE 'branch:%'` guard was Critical-severity wrong —
-> `security-auditor`, `architect-reviewer`, and `pr-review-toolkit:code-reviewer` independently
-> found it during the mandatory review trio, before merge. See Risks & Open Questions for the
-> full history; the corrected design below is provenance-bounded (by `acquired_at` against
-> `0027`'s `installed_on`), not shape-guarded.
+> **Status:** IMPLEMENTED — closes savvagent/otto-factory#119.
+>
+> Shipped in `savvagent/otto-factory#135`, merged as
+> `f85f0861b1f2f969465042b48974ce375d5aaa9c`. Green on the merge commit's own CI run
+> (`34518592895`) — `rust`, `web`, `docker-build` all succeeded; `deploy` correctly skipped
+> (release-please opened a release PR from this `fix:`-typed merge but had not yet cut a
+> release at that point). Out-of-band verified: `podman compose down -v && podman compose
+> up -d` then `cargo test -p of-core` against the fresh cluster, all green, confirming 0030
+> applies cleanly in sequence after 0027–0029.
+>
+> **Revised after PR #135 review**: the original design's `resource NOT LIKE 'branch:%'`
+> guard was Critical-severity wrong — `security-auditor`, `architect-reviewer`, and
+> `pr-review-toolkit:code-reviewer` independently found it during the mandatory review
+> trio, before merge. See Risks & Open Questions for the full history; the shipped design
+> is provenance-bounded (by `acquired_at` against `0027`'s `installed_on`), not
+> shape-guarded. A second review round (all three re-dispatched against the fix) approved
+> merge, with one Medium follow-up applied: the test covers two orgs, not one, so the
+> loop's `org_id` predicate — the guard this deployment's actual RLS-bypassed shape relies
+> on — is proven to reach every org rather than only the one it was seeded with.
+>
+> **Production verification remains out of reach for this workflow** (no deploy
+> credentials) — per the Scope and Risks sections below, this was a known, deliberate gap
+> from the start, not an oversight. The PR body hands a human with deploy access the
+> correct provenance-bounded check to run post-deploy.
+>
+> A real merge conflict with a concurrently-merged, unrelated PR (`#131`, which also touched
+> `crates/of-core/tests/isolation.rs`; `#137` is `#131`'s own record-as-shipped follow-up
+> and touched no code) was resolved by merge (not rebase, since
+> this branch had accumulated several commits touching the same test across its own review
+> cycle) before the final push.
 
 ## Assumptions
 
