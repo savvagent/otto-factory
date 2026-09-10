@@ -1,7 +1,9 @@
 # Job cancellation design
 
 > **Status:** IMPLEMENTED — lets anyone with `jobs:write` ask a job to stop, closing
-> savvagent/otto-factory#67. Shipped in PR #93.
+> savvagent/otto-factory#67. Shipped in savvagent/otto-factory#93, merged as `4dd0f5e` and
+> deployed. See the implementation plan's Status block for what changed from this spec
+> during review (§4's tracker-sync design gained a dedicated `JobTransition::Cancelled`).
 
 ## Goal & Success Criteria
 
@@ -688,8 +690,11 @@ Deliberately **not** touched: the org overview page's stat tiles (see Scope/Out)
 
 - `ALTER TYPE ... ADD VALUE` inside a migration transaction already works in this
   codebase (0016 proved it against the same Postgres 16 the test suite runs against), so
-  this is not a fresh risk — flagged only because 0023 repeats that pattern and must stay
-  its own migration file, never combined with 0024.
+  this is not a fresh risk. **Post-review correction:** unlike the 0016/0017 precedent,
+  0024 never actually references the `'cancelled'` literal, so nothing in this specific
+  pair forces the split — 0023's own comment was softened during review to say so rather
+  than overclaim a necessity that doesn't hold here. Kept as two files anyway, as a
+  stylistic separation of "enum value" from "columns" concerns.
 - The choice to store `cancel_job`'s `note` in the existing `error` column (rather than a
   fourth `cancel_note` column) trades a small semantic overload for one fewer column;
   flagged for the spec critique to weigh in on directly, since it is the one place this
