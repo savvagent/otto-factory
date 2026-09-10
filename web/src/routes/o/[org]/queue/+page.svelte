@@ -1,6 +1,6 @@
 <script lang="ts">
   import { page } from '$app/state';
-  import { replaceState } from '$app/navigation';
+  import { goto } from '$app/navigation';
 
   import { api } from '$lib/api';
   import { messageFor } from '$lib/errors';
@@ -24,9 +24,12 @@
    * The console's job is to answer "what is happening, and why is my agent
    * waiting" — see the leases on the Repos page for the second half of that.
    *
-   * Filters live in the URL so a view can be linked to. `replaceState` rather
-   * than `goto`: changing a filter is not a place in history to go back to, and
-   * a dozen entries per session makes the browser's back button useless.
+   * Filters live in the URL so a view can be linked to. `goto(..., { replaceState: true })`
+   * — not bare `replaceState` from `$app/navigation`, which never updates the reactive
+   * `page.url` this page's filters read — applies a filter by actually navigating while
+   * still replacing the current history entry: changing a filter is not a place in
+   * history to go back to, and a dozen entries per session makes the browser's back
+   * button useless.
    */
 
   const org = useOrg();
@@ -106,7 +109,9 @@
     const url = new URL(page.url);
     if (value === undefined || value === '') url.searchParams.delete(key);
     else url.searchParams.set(key, value);
-    replaceState(url, page.state);
+    // `page.state` is intentionally not passed through: this page never calls
+    // `pushState` or otherwise sets custom page state, so there is nothing to carry.
+    void goto(url, { replaceState: true, keepFocus: true, noScroll: true });
   }
 
   const filtered = $derived(
@@ -189,7 +194,12 @@
     {#if filtered}
       <button
         class="ml-auto pb-2 text-xs text-muted underline hover:text-ink"
-        onclick={() => replaceState(new URL(page.url.pathname, location.origin), page.state)}
+        onclick={() =>
+          void goto(new URL(page.url.pathname, location.origin), {
+            replaceState: true,
+            keepFocus: true,
+            noScroll: true
+          })}
       >
         {m.queue_clear_filters()}
       </button>
