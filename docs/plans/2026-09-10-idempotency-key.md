@@ -11,7 +11,13 @@ reproduces today's behavior exactly, at zero extra cost. Closes savvagent/otto-f
 
 ## Status — 2026-09-10
 
-Not started. All five tasks below are ⬜.
+Done. All five tasks shipped in savvagent/otto-factory#99, merged as `bd00a1a`. The
+mandatory review trio plus pr-review-toolkit's code-reviewer, silent-failure-hunter,
+pr-test-analyzer, comment-analyzer, and type-design-analyzer all ran; the required fix
+(a replay was not being *recorded*, only not billed — see the spec's Status block) and
+Copilot's automated-review findings (no-key metering ordering, a CHECK constraint on the
+migration) were applied before merge in three follow-up commits beyond the five tasks'
+own. `docs/specs/2026-09-10-idempotency-key-design.md`'s Status block has the specifics.
 
 ## Global Constraints
 
@@ -79,7 +85,7 @@ These hold for every task:
 4. `of-mcp` tasks (jobs tool, then coord tool) come last, once the `of-core` layer both
    tools sit on is done and tested — mirrors the jobs-then-messages ordering above.
 
-## Task 1 — Migration + shared idempotency module ⬜
+## Task 1 — Migration + shared idempotency module ✅
 
 **Files:** `crates/of-core/migrations/0025_idempotency_keys.sql` (create),
 `crates/of-core/src/idempotency.rs` (create), `crates/of-core/src/lib.rs` (modify),
@@ -116,7 +122,7 @@ These hold for every task:
       `cargo test -p of-core`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all`.
 - [ ] Commit: `of-core: add idempotency-key migration and shared validation/fingerprint module`.
 
-## Task 2 — `jobs.rs`: idempotent `add_job` ⬜
+## Task 2 — `jobs.rs`: idempotent `add_job` ✅
 
 **Files:** `crates/of-core/src/jobs.rs`, `crates/of-core/src/error.rs`,
 `crates/of-core/tests/queue.rs`, `crates/of-core/tests/isolation.rs`.
@@ -176,7 +182,7 @@ These hold for every task:
       `cargo fmt --all`.
 - [ ] Commit: `of-core: make add_job idempotent on a caller-supplied key`.
 
-## Task 3 — `messages.rs`: idempotent `send_message` ⬜
+## Task 3 — `messages.rs`: idempotent `send_message` ✅
 
 **Files:** `crates/of-core/src/messages.rs`, `crates/of-core/tests/queue.rs`,
 `crates/of-core/tests/isolation.rs`.
@@ -215,7 +221,7 @@ These hold for every task:
       `cargo fmt --all`.
 - [ ] Commit: `of-core: make send_message idempotent on a caller-supplied key`.
 
-## Task 4 — `of-mcp`: `add_job` tool ⬜
+## Task 4 — `of-mcp`: `add_job` tool ✅
 
 **Files:** `crates/of-mcp/src/tools/jobs.rs`, `crates/of-mcp/src/server.rs`,
 `crates/of-mcp/tests/tools.rs`.
@@ -275,7 +281,7 @@ MCP tool — `add_job`'s existing `outputSchema` (`out::JobOut`) is unchanged; o
       `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all`.
 - [ ] Commit: `of-mcp: accept an idempotency key on add_job`.
 
-## Task 5 — `of-mcp`: `send_message` tool ⬜
+## Task 5 — `of-mcp`: `send_message` tool ✅
 
 **Files:** `crates/of-mcp/src/tools/coord.rs`, `crates/of-mcp/tests/tools.rs`.
 
