@@ -1,7 +1,7 @@
 # Job cancellation design
 
-> **Status:** DRAFT — lets anyone with `jobs:write` ask a job to stop, closing
-> savvagent/otto-factory#67.
+> **Status:** IMPLEMENTED — lets anyone with `jobs:write` ask a job to stop, closing
+> savvagent/otto-factory#67. Shipped in PR #93.
 
 ## Goal & Success Criteria
 

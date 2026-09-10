@@ -11,7 +11,11 @@ implements it exactly.
 
 ## Status — 2026-09-10
 
-Not started. All four tasks below are ⬜.
+Done. All four tasks shipped in PR #93 (savvagent/otto-factory#93), including two follow-up
+review-response rounds that added a `JobTransition::Cancelled` variant (`crates/of-trackers`)
+to fix an incorrect JIRA transition the original plan didn't anticipate, corrected several
+tool-description inaccuracies, and strengthened the `cancel_job` cross-org negative test.
+Merged as commit `4dd0f5e`, deployed to production the same push.
 
 ---
 
@@ -72,7 +76,7 @@ breaking.
 
 ---
 
-## Task 1 — `of-core`: the `Cancelled` status and its two transitions
+## Task 1 — `of-core`: the `Cancelled` status and its two transitions ✅
 
 **Files:** `crates/of-core/migrations/0023_job_cancelled_status.sql` (create),
 `crates/of-core/migrations/0024_job_cancellation_columns.sql` (create),
@@ -138,7 +142,7 @@ breaking.
 - [ ] `cargo clippy --all-targets -- -D warnings` clean. `cargo fmt --all`.
 - [ ] Commit: `git commit -m "of-core: add job cancellation (request_cancel, cancel_job, Cancelled status)"`.
 
-## Task 2 — `of-mcp` + `of-billing`: the two new tools
+## Task 2 — `of-mcp` + `of-billing`: the two new tools ✅
 
 **Files:** `crates/of-mcp/src/tools/jobs.rs`, `crates/of-billing/src/classify.rs`,
 `crates/of-mcp/tests/tools.rs`.
@@ -198,7 +202,7 @@ breaking.
 - [ ] `cargo clippy --all-targets -- -D warnings` clean. `cargo fmt --all`.
 - [ ] Commit: `git commit -m "of-mcp: add request_cancel and cancel_job tools"`.
 
-## Task 3 — `of-web`: schema and doc-comment updates
+## Task 3 — `of-web`: schema and doc-comment updates ✅
 
 **Files:** `crates/of-web/src/openapi.rs`, `crates/of-web/src/routes/jobs.rs`.
 
@@ -224,7 +228,7 @@ breaking.
 - [ ] `cargo clippy --all-targets -- -D warnings` clean. `cargo fmt --all`.
 - [ ] Commit: `git commit -m "of-web: surface job cancellation fields in the console schema"`.
 
-## Task 4 — `web/`: console presentation
+## Task 4 — `web/`: console presentation ✅
 
 **Files:** `web/src/lib/types.ts`, `web/src/lib/labels.ts`,
 `web/messages/{en,es,de,fr,it,hi}.json`, `web/src/lib/components/StatusPill.svelte`,
