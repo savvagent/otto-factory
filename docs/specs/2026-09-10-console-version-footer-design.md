@@ -129,10 +129,13 @@ and extend the footer:
 </footer>
 ```
 
-The middle `<span aria-hidden="true">` is a plain visual separator (matches the "·" already used
-between locale-neutral fragments elsewhere in this file's header); it carries no text a screen
-reader needs to announce twice, so it is hidden from the accessibility tree rather than read as
-"middle dot".
+The middle `<span aria-hidden="true">` is a plain visual separator between the two footer items. It
+carries no text a screen reader needs to announce twice, so it is hidden from the accessibility
+tree rather than read as "middle dot". (A "·" separator appears elsewhere in the console —
+`settings/+page.svelte`, `o/[org]/+page.svelte`, `o/[org]/repos/+page.svelte` — but always as
+inline punctuation inside one translated message string, not as a standalone `aria-hidden` span
+between two locale-neutral fragments; this footer has no existing pattern to match, so this is a
+new, self-contained choice rather than a precedent being followed.)
 
 ## Testing
 
