@@ -11,7 +11,10 @@ implements it exactly.
 
 ## Status — 2026-09-10
 
-Not started.
+Task 1 implemented in PR #111 (`core/migration-org-scoped-writes`), including fixes from PR review
+(corrected RLS mechanics in the CLAUDE.md paragraph and the test's inline comment, a positive
+control added to the test). Not yet merged — this plan's marker and the spec's `Status:` blockquote
+flip to shipped in the post-merge record-as-shipped commit, per house convention.
 
 ---
 
