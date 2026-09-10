@@ -1,9 +1,24 @@
 # Passkey audit events design
 
-> **Status:** DRAFT — give passkey registration and clearing their own `auth.passkey.*` audit
-> action names instead of the TOTP names they currently borrow, stop discarding the two audit
-> writes on those paths, and log (without changing behavior) the two places a stored credential
-> that fails to deserialize is silently dropped. Filed as `savvagent/otto-factory#76`.
+> **Status:** IMPLEMENTED, with one open security follow-up — give passkey registration and
+> clearing their own `auth.passkey.*` audit action names instead of the TOTP names they used to
+> borrow, stop discarding the two audit writes on those paths, and log (without changing behavior)
+> the two places a stored credential that fails to deserialize is silently dropped. Shipped in
+> `savvagent/otto-factory#86`, closing `savvagent/otto-factory#76`, deployed and verified via the
+> merge commit's own CI run (`cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`,
+> `cargo fmt --all --check` all green) and a subsequent successful `flyctl deploy` to
+> `otto-factory-mcp`. Three findings from the mandatory review trio were addressed in the same PR
+> (a false atomicity claim in a doc comment, a missing IP on the admin-reset's audit row, an
+> incomplete historical-constant doc comment).
+>
+> **`savvagent/otto-factory#87` is the one to track before treating this area as closed**: the
+> admin-assisted passkey reset is not atomic (a partial failure can leave an account with no
+> passkeys and no outstanding claim code — the exact takeover window the claim-code coupling exists
+> to close), and its global audit row may not name the admin who performed it. Two lower-severity
+> gaps were also filed rather than folded in — `savvagent/otto-factory#88` (registration's audit
+> row can't distinguish signup/claim/add-key and carries no IP), `savvagent/otto-factory#89`
+> (`passkeys::remove`/`rename` write no audit row; `login::logout` still discards its write
+> silently).
 
 ## Goal & Success Criteria
 

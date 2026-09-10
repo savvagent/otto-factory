@@ -9,9 +9,11 @@ can hit it, with no change to what either path returns.
 
 ## Status — 2026-09-10
 
-✅ Both tasks landed and reviewed. Task 1: `5670bdd`. Task 2: `6e0d2ff`. Full workspace
-`cargo test`, `cargo clippy --all-targets -- -D warnings`, and `cargo fmt --all --check` all green
-on the branch as a whole.
+✅ Shipped in `savvagent/otto-factory#86`, merged as `5db1e4a`, closing `savvagent/otto-factory#76`. Task 1: `5670bdd`.
+Task 2: `6e0d2ff`. Review-response fixes (an admin-reset audit row missing its IP, two doc
+comments that overclaimed, a missing negative test assertion): `5edb012`. Deployed and verified
+via the merge's own CI run plus a subsequent successful `flyctl deploy`. Follow-ups filed rather
+than folded in: `savvagent/otto-factory#87`, `savvagent/otto-factory#88`, `savvagent/otto-factory#89`.
 
 **Spec:** `docs/specs/2026-09-10-passkey-audit-events-design.md` — read it first. This plan
 implements it exactly. Closes `savvagent/otto-factory#76`.
@@ -62,9 +64,9 @@ independent of Task 1's implementation details — it touches a different crate 
 constant — so there is no ordering constraint between them beyond both needing to land before the
 PR opens.
 
-## Task 1 — Real action names, logged writes, logged decode failures
+## Task 1 — Real action names, logged writes, logged decode failures ✅
 
-✅ Landed as `5670bdd` — `of-auth: give passkeys their own auth.passkey.* audit actions`.
+Landed as `5670bdd` — `of-auth: give passkeys their own auth.passkey.* audit actions`.
 
 **Files:** `crates/of-core/src/audit.rs`, `crates/of-auth/src/passkeys.rs`,
 `crates/of-auth/tests/passkeys.rs`
@@ -290,9 +292,9 @@ pre-existing, unchanged signatures). Produces two new `pub const` action strings
 - [x] Run `cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all`.
 - [x] `git commit -m "of-auth: name passkey audit events for real, stop dropping failed writes silently"`
 
-## Task 2 — The admin-assisted reset's own org-scoped event
+## Task 2 — The admin-assisted reset's own org-scoped event ✅
 
-✅ Landed as `6e0d2ff` — `of-web: name the admin-assisted passkey reset's own audit event`.
+Landed as `6e0d2ff` — `of-web: name the admin-assisted passkey reset's own audit event`.
 
 **Files:** `crates/of-core/src/audit.rs` (if not already amended by Task 1's implementer; add the
 constant if missing), `crates/of-web/src/routes/orgs.rs`, `crates/of-web/tests/console.rs`
