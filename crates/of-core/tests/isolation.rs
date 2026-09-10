@@ -916,6 +916,69 @@ async fn rls_scopes_a_migration_style_update_with_no_org_context(pool: PgPool) {
     );
 }
 
+/// 0030_lease_resource_backfill.sql's own safety net, exercised the way a migration
+/// actually runs: as `of_app`, a non-owner role FORCE binds without needing to own the
+/// table, with no `app.org_id` ever set automatically. Unlike the bare UPDATE above,
+/// this statement supplies its own org context via the per-org loop, so — unlike that
+/// one — it must actually match the seeded row, not just fail safely.
+#[sqlx::test]
+async fn rls_scopes_the_lease_resource_backfills_per_org_loop(pool: PgPool) {
+    let db = db(pool);
+    let a = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+
+    // Seed a row the way one would have looked before 0027 ever ran: an unprefixed
+    // `resource`, written directly on the pool, standing in for a row 0027's toggle-
+    // based backfill somehow missed.
+    sqlx::query(
+        "INSERT INTO repo_leases (org_id, repo_id, resource, holder_user_id, expires_at) \
+         VALUES ($1, $2, 'main', $3, now() + interval '1 hour')",
+    )
+    .bind(a.org)
+    .bind(a.repo)
+    .bind(a.user)
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    let mut tx = db.begin_unpinned().await.unwrap();
+    sqlx::query("SET LOCAL ROLE of_app")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+
+    // 0030's own statement, verbatim.
+    sqlx::query(
+        "DO $$
+         DECLARE
+           o uuid;
+         BEGIN
+           FOR o IN SELECT id FROM orgs LOOP
+             PERFORM set_config('app.org_id', o::text, true);
+             UPDATE repo_leases
+               SET resource = 'branch:' || resource
+               WHERE org_id = o AND resource NOT LIKE 'branch:%';
+           END LOOP;
+           PERFORM set_config('app.org_id', '', true);
+         END $$;",
+    )
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    let mut tx = db.begin(a.org).await.unwrap();
+    let resource: String = sqlx::query_scalar("SELECT resource FROM repo_leases")
+        .fetch_one(tx.conn())
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(
+        resource, "branch:main",
+        "the per-org loop should have prefixed the seeded row even though it ran \
+         under a role RLS actually binds, unlike a bare unscoped UPDATE"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The guard on the guard.
 //
