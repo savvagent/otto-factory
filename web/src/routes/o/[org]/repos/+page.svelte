@@ -361,7 +361,7 @@
                 <ul class="space-y-1.5">
                   {#each leases[repo.slug] as Lease[] as lease (lease.id)}
                     <li class="flex flex-wrap items-baseline gap-x-3 text-sm">
-                      <span class="of-mono text-ink">{lease.branch}</span>
+                      <span class="of-mono text-ink">{lease.resource}</span>
                       <span class="text-muted">
                         {lease.holderLabel ?? m.repos_lease_holder_unknown()}
                       </span>

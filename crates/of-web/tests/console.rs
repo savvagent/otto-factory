@@ -1142,6 +1142,58 @@ async fn one_orgs_queue_is_invisible_to_another(pool: PgPool) {
     elsewhere.expect(StatusCode::NOT_FOUND);
 }
 
+// ----------------------------------------------------------------- leases
+
+/// Leases, like jobs, are written by an agent over MCP, never by the console
+/// — there is no route to create one here, so seeding one for this fixture
+/// means reaching past the API into `of-core`, the same way `enqueue` does
+/// for jobs above.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn the_lease_route_reports_the_resource_field(pool: PgPool) {
+    let h = harness(pool);
+    let rob = onboard(&h, "rob@acme.test").await;
+    let acme = org_with_owner(&h, "acme", &rob).await;
+
+    let api: of_core::ids::RepoId = {
+        let created = Call::post("/api/orgs/acme/repos")
+            .with_session(&rob.session)
+            .json(serde_json::json!({ "slug": "api" }))
+            .send(&h.router)
+            .await;
+        created.expect(StatusCode::CREATED);
+        created.body["id"].as_str().unwrap().parse().unwrap()
+    };
+
+    {
+        let mut tx = h.db.begin(acme).await.unwrap();
+        tx.acquire_lease(
+            api,
+            "src/main.rs",
+            rob.user,
+            Some("claude-code"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+    }
+
+    let leases = Call::get("/api/orgs/acme/repos/api/leases")
+        .with_session(&rob.session)
+        .send(&h.router)
+        .await;
+    leases.expect(StatusCode::OK);
+    let all = leases.body.as_array().unwrap();
+    assert_eq!(all.len(), 1);
+    assert_eq!(
+        all[0]["resource"], "src/main.rs",
+        "the console reads of_core::leases::Lease verbatim, so its wire shape \
+         must carry `resource`, not `branch`: {}",
+        leases.body
+    );
+}
+
 // --------------------------------------------------------- tokens & usage
 
 #[sqlx::test(migrations = "../of-core/migrations")]
