@@ -1,7 +1,16 @@
 # Idempotency key design
 
-> **Status:** DRAFT — adds an optional caller-supplied idempotency key to `add_job` and
-> `send_message`, closing savvagent/otto-factory#68.
+> **Status:** IMPLEMENTED — adds an optional caller-supplied idempotency key to `add_job`
+> and `send_message`, closing savvagent/otto-factory#68. Shipped in savvagent/otto-factory#99,
+> merged as `bd00a1a`. Review found two changes from this draft, both applied before merge:
+> a replay is now recorded (as `Free`) rather than metered not at all (`Meter::record_replay`
+> / `Factory::record_replay`), keeping `of_billing::classify`'s "every call is recorded
+> regardless of class" rule intact for replays too; and the no-key path in both MCP handlers
+> was restructured to branch before touching the transaction, restoring byte-identical
+> ordering (charge as the literal first statement) for the common no-key case rather than
+> only for its query cost. `crates/of-core/migrations/0025_idempotency_keys.sql` also gained
+> a `CHECK` constraint (not in this draft) tying `idempotency_key`/`idempotency_payload_hash`
+> nullability together on both tables.
 
 ## Goal & Success Criteria
 
