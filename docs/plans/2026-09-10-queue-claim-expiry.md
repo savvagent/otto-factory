@@ -18,7 +18,12 @@ the changing signatures directly and were missing from the file lists; and
 `ClaimJobsArgs`'s 14 existing test-literal call sites needing a new `ttl: None` field
 each). Round 2 confirmed all four fixes and found one more of the same class —
 `crates/of-core/tests/isolation.rs` has 2 existing `.claim_jobs(...)` call sites also
-missing from the file list. All five are now fixed below.
+missing from the file list. All five are now fixed. A repo-wide grep for every
+`.claim_jobs(`/`.complete_job(`/`.fail_job(` call site (34 total across the workspace)
+confirms every one is now either unaffected (the of-mcp-level `ClaimJobsArgs`/
+`CompleteJobArgs`/`FailJobArgs` struct-literal call sites in `crates/of-mcp/tests/tools.rs`,
+already covered by Task 2's `ttl: None` step) or accounted for by name in this plan
+(`jobs.rs`, `queue.rs`, `isolation.rs`, `console.rs`) — no further revision round needed.
 
 ---
 
