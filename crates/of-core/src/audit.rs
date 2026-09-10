@@ -73,6 +73,10 @@ pub mod action {
     pub const TRACKER_DISCONNECTED: &str = "tracker.disconnected";
     pub const TRACKER_BOUND: &str = "tracker.repo.bound";
     pub const TRACKER_UNBOUND: &str = "tracker.repo.unbound";
+
+    // Jobs.
+    pub const JOB_CANCEL_REQUESTED: &str = "job.cancel.requested";
+    pub const JOB_CANCELLED: &str = "job.cancelled";
 }
 
 /// One recorded event. Built with the fluent constructors rather than a struct

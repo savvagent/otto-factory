@@ -99,6 +99,27 @@ async fn cross_org_mutation_is_refused(pool: PgPool) {
     let target = tx.add_job(job(&a, "acme work")).await.unwrap();
     tx.commit().await.unwrap();
 
+    // A second job, claimed and carrying a live cancellation request, so the
+    // cross-org `cancel_job` assertion below actually proves guard 1.
+    // `cancel_job` requires in-progress/active status *and* a cancellation
+    // request on file; `target` (pending, nothing requested) satisfies
+    // neither, so calling `cancel_job` on it fails on status grounds alone —
+    // it would fail identically for org A. `claimed` is put in the one state
+    // where an in-org call would actually succeed, so its failure here can
+    // only be attributed to the org-scoping predicate finding no row.
+    let mut tx = db.begin(a.org).await.unwrap();
+    let claimed = tx.add_job(job(&a, "acme in-flight work")).await.unwrap();
+    tx.claim_jobs(std::slice::from_ref(&claimed.id), a.user, None)
+        .await
+        .unwrap();
+    let claimed = tx
+        .request_cancel(&claimed.id, a.user, Some("stop"))
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(claimed.status, of_core::jobs::Status::InProgress);
+    assert!(claimed.cancel_requested_at.is_some());
+
     // Every mutating verb, from the wrong org.
     let mut tx = db.begin(b.org).await.unwrap();
     assert!(tx
@@ -111,14 +132,22 @@ async fn cross_org_mutation_is_refused(pool: PgPool) {
         .await
         .is_err());
     assert!(tx.repend_job(&target.id).await.is_err());
+    assert!(tx.request_cancel(&target.id, b.user, None).await.is_err());
+    assert!(tx.cancel_job(&claimed.id, None).await.is_err());
     let _ = tx.rollback().await;
 
-    // A's job is untouched.
+    // A's jobs are untouched — including `claimed`'s in-progress status and
+    // its cancellation request, which the failed cross-org `cancel_job` call
+    // must not have been able to finalize.
     let mut tx = db.begin(a.org).await.unwrap();
     let after = tx.get_job(&target.id).await.unwrap();
+    let after_claimed = tx.get_job(&claimed.id).await.unwrap();
     tx.commit().await.unwrap();
     assert_eq!(after.title, "acme work");
     assert_eq!(after.status, of_core::jobs::Status::Pending);
+    assert_eq!(after_claimed.status, of_core::jobs::Status::InProgress);
+    assert!(after_claimed.cancel_requested_at.is_some());
+    assert_eq!(after_claimed.cancel_reason.as_deref(), Some("stop"));
 }
 
 /// The tracker-sync accessors added for the two-way sync engine (Task 4) are

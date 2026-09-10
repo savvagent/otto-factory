@@ -42,6 +42,9 @@ fn job(status: Status, tracker: Tracker, ticket_ref: &str, remote_revision: Opti
         created_by: None,
         claimed_by: None,
         claimed_by_label: None,
+        cancel_requested_at: None,
+        cancel_requested_by: None,
+        cancel_reason: None,
     }
 }
 
@@ -385,4 +388,34 @@ fn outbound_returns_none_when_no_jira_transition_matches() {
     );
 
     assert!(chosen.is_none());
+}
+
+/// `Cancelled` gets its own comment-only shape rather than reusing `Failed`'s:
+/// reusing `Failed` would fire `outbound_decision`'s `(Failed, Jira)` arm and
+/// transition a cancelled ticket back to "new" — announcing "still needs
+/// doing" about work someone just asked to stop.
+#[test]
+fn outbound_cancelled_never_transitions_or_closes_a_tracker() {
+    let with_detail = of_trackers::sync::outbound_decision(
+        of_trackers::sync::JobTransition::Cancelled,
+        Tracker::Jira,
+        Some("stopped as requested"),
+    );
+    assert_eq!(with_detail.comment, "stopped as requested");
+    assert!(with_detail.jira_transition.is_none());
+
+    let no_detail = of_trackers::sync::outbound_decision(
+        of_trackers::sync::JobTransition::Cancelled,
+        Tracker::Jira,
+        None,
+    );
+    assert_eq!(no_detail.comment, "Cancelled.");
+    assert!(no_detail.jira_transition.is_none());
+
+    let github = of_trackers::sync::outbound_decision(
+        of_trackers::sync::JobTransition::Cancelled,
+        Tracker::Github,
+        None,
+    );
+    assert!(github.github_close.is_none());
 }

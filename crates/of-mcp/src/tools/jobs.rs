@@ -8,6 +8,7 @@
 //! shows what is claimable, `claim_jobs` takes it atomically, and starting
 //! work you have not claimed is how two agents end up writing the same file.
 
+use of_core::audit::{action, Entry};
 use of_core::ids::JobId;
 use of_core::jobs::{Job, JobFilter, NewJob, Status, Tracker};
 use of_core::trackers::{
@@ -115,7 +116,7 @@ pub struct JobArgs {
 #[serde(rename_all = "camelCase")]
 pub struct ListJobsArgs {
     /// Only jobs in this state: "pending", "in-progress", "active",
-    /// "completed" or "failed". Omit for all of them.
+    /// "completed", "failed" or "cancelled". Omit for all of them.
     #[serde(default)]
     pub status: Option<String>,
     #[serde(default)]
@@ -183,6 +184,26 @@ pub struct FailJobArgs {
     /// Why it failed, specifically enough that the next attempt can do better.
     #[serde(default)]
     pub error: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestCancelArgs {
+    /// The job to ask to stop.
+    pub job: String,
+    /// Why, for whoever is holding it and for the audit trail.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelJobArgs {
+    /// The job you were working on and are stopping.
+    pub job: String,
+    /// What you were doing when you stopped, for whoever reads this later.
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -803,6 +824,127 @@ impl Factory {
     }
 
     #[tool(
+        name = "request_cancel",
+        description = "Ask a job to stop. If nobody has claimed it yet, this cancels it \
+                       immediately — there is no agent to wait on. If it is claimed \
+                       (in-progress or active), this only sets a flag: the server cannot \
+                       stop the agent holding it, any more than it can stop a git push. The \
+                       holder sees the request the next time it calls get_job or wakes from \
+                       watch, and is expected to call cancel_job once it actually stops (or \
+                       fail_job, if it disagrees and finishes anyway). Fails if the job is \
+                       already completed, failed, or cancelled. Anything that depends on this \
+                       job stays blocked until the dependency actually completes — repend_job \
+                       only returns this job to pending for another attempt, it does not \
+                       complete it, so anything waiting on it is still waiting; use \
+                       set_dependencies instead if you need to remove the dependency entirely."
+    )]
+    pub async fn request_cancel(
+        &self,
+        Extension(parts): Extension<http::request::Parts>,
+        Parameters(args): Parameters<RequestCancelArgs>,
+    ) -> Result<Json<out::JobOut>, ErrorData> {
+        let caller = self.caller(&parts)?;
+        caller.require_scope(scope::JOBS_WRITE).mcp()?;
+
+        let mut tx = self.tx(&caller).await?;
+        self.charge(&mut tx, &caller, "request_cancel").await?;
+        let id = JobId::from(args.job);
+        let job = tx
+            .request_cancel(&id, caller.user_id, args.reason.as_deref())
+            .await
+            .mcp()?;
+
+        tx.audit(
+            Entry::new(action::JOB_CANCEL_REQUESTED)
+                .actor(caller.user_id)
+                .target("job", job.id.to_string())
+                .detail(serde_json::json!({ "reason": args.reason })),
+        )
+        .await
+        .mcp()?;
+
+        // A pending job with nobody to wait on is finalized in the same call —
+        // record that outcome too, distinctly, so the audit trail always shows
+        // both events regardless of which path a job took.
+        let finalized_now = job.status == Status::Cancelled;
+        if finalized_now {
+            tx.audit(
+                Entry::new(action::JOB_CANCELLED)
+                    .actor(caller.user_id)
+                    .target("job", job.id.to_string())
+                    .detail(serde_json::json!({ "reason": args.reason })),
+            )
+            .await
+            .mcp()?;
+        }
+        tx.commit().await.mcp()?;
+
+        let out = Json(out::JobOut { job: job.clone() });
+        if finalized_now {
+            let detail = args
+                .reason
+                .clone()
+                .unwrap_or_else(|| "Cancelled before being claimed.".to_string());
+            self.sync_jobs_after_transition(
+                std::slice::from_ref(&job),
+                JobTransition::Cancelled,
+                Some(&detail),
+            )
+            .await;
+        }
+        Ok(out)
+    }
+
+    #[tool(
+        name = "cancel_job",
+        description = "Finalize a job you were working on as cancelled, because you were \
+                       asked to stop via request_cancel and are complying. Fails if this job \
+                       never had a cancellation requested — if you are stopping for your own \
+                       reasons, call fail_job instead, so the audit trail keeps distinguishing \
+                       'asked to stop, and did' from an ordinary failure. Also fails if the \
+                       job is not currently in-progress or active — still pending, or already \
+                       completed, failed, or cancelled."
+    )]
+    pub async fn cancel_job(
+        &self,
+        Extension(parts): Extension<http::request::Parts>,
+        Parameters(args): Parameters<CancelJobArgs>,
+    ) -> Result<Json<out::JobOut>, ErrorData> {
+        let caller = self.caller(&parts)?;
+        caller.require_scope(scope::JOBS_WRITE).mcp()?;
+
+        let mut tx = self.tx(&caller).await?;
+        self.charge(&mut tx, &caller, "cancel_job").await?;
+        let job = tx
+            .cancel_job(&JobId::from(args.job), args.note.as_deref())
+            .await
+            .mcp()?;
+        tx.audit(
+            Entry::new(action::JOB_CANCELLED)
+                .actor(caller.user_id)
+                .target("job", job.id.to_string())
+                .detail(serde_json::json!({ "note": args.note })),
+        )
+        .await
+        .mcp()?;
+        tx.commit().await.mcp()?;
+
+        let out = Json(out::JobOut { job: job.clone() });
+        let detail = args
+            .note
+            .clone()
+            .or_else(|| job.cancel_reason.clone())
+            .unwrap_or_else(|| "Cancelled.".to_string());
+        self.sync_jobs_after_transition(
+            std::slice::from_ref(&job),
+            JobTransition::Cancelled,
+            Some(&detail),
+        )
+        .await;
+        Ok(out)
+    }
+
+    #[tool(
         name = "activate_job",
         description = "Confirm a job you claimed is being actively worked on right now, not \
                        just claimed. This is what lets a console or API client tell a stalled \
@@ -828,8 +970,9 @@ impl Factory {
 
     #[tool(
         name = "repend_job",
-        description = "Return a completed or failed job to pending so it can be claimed again. \
-                       The attempt count is preserved, so repeated failures stay visible."
+        description = "Return a completed, failed, cancelled, in-progress, or active job to \
+                       pending so it can be claimed again. The attempt count is preserved, so \
+                       repeated failures stay visible."
     )]
     pub async fn repend_job(
         &self,
@@ -924,8 +1067,8 @@ impl Factory {
     #[tool(
         name = "stats",
         description = "Counts of jobs by state — pending, in-progress, active, completed, \
-                       failed, and how many of the pending ones are blocked — for the whole \
-                       organization or one repository."
+                       failed, cancelled, and how many of the pending ones are blocked — for \
+                       the whole organization or one repository."
     )]
     pub async fn stats(
         &self,
@@ -975,16 +1118,20 @@ impl Factory {
     #[tool(
         name = "sync_ticket",
         description = "Force an immediate outbound write-back to the ticket a job is linked to, \
-                       reflecting the job's current status (in-progress, active, completed, or \
-                       failed) as a comment and, where the tracker supports it, a status \
-                       transition. \
+                       reflecting the job's current status (in-progress, active, completed, \
+                       failed, or cancelled) as a comment and, where the tracker supports it, a \
+                       status transition. \
                        Use this after link_ticket, when nothing has been posted yet because no \
                        transition has fired since the link was made, or to retry after a \
                        tracker outage — unlike the automatic write-back after claim_jobs, \
-                       complete_job and fail_job, this call surfaces a tracker failure as its \
-                       own error rather than swallowing it, because talking to the tracker is \
+                       complete_job, fail_job, and cancel_job (and after request_cancel, but \
+                       only when it immediately finalizes a pending job with nobody to wait \
+                       on; a request that only flags a claimed job does not sync until \
+                       cancel_job later finalizes it), this call surfaces a tracker failure as \
+                       its own error rather than swallowing it, because talking to the tracker is \
                        the entire point of calling it. Requires the job to already be linked \
-                       via link_ticket and to be in-progress, active, completed, or failed."
+                       via link_ticket and to be in-progress, active, completed, failed, or \
+                       cancelled."
     )]
     pub async fn sync_ticket(
         &self,
@@ -1037,6 +1184,27 @@ impl Factory {
             Status::Active => (JobTransition::Claimed, job.claimed_by_label.clone()),
             Status::Completed => (JobTransition::Completed, job.result.clone()),
             Status::Failed => (JobTransition::Failed, job.error.clone()),
+            // No dedicated outbound "cancelled" signal exists for either tracker (no
+            // `not_planned` GitHub close reason, no distinct JIRA status category), so
+            // `JobTransition::Cancelled` gets the same comment-only, no-close,
+            // no-transition shape as `Failed` — but its own variant, not a reuse of
+            // `Failed` itself, because that arm's JIRA handling transitions a ticket to
+            // the "new" status category, which would announce "still needs doing" about
+            // work someone just asked to stop. The detail prefers `error`, which is
+            // populated whenever `cancel_job` (as opposed to `request_cancel`'s
+            // immediate-finalize path) produced the cancellation, then falls back to
+            // `cancel_reason` and finally a fixed string, so the tracker comment is
+            // never `outbound_decision`'s literal "Cancelled." default when a more
+            // specific one is available.
+            Status::Cancelled => (
+                JobTransition::Cancelled,
+                Some(
+                    job.error
+                        .clone()
+                        .or_else(|| job.cancel_reason.clone())
+                        .unwrap_or_else(|| "Cancelled.".into()),
+                ),
+            ),
         };
 
         let provider = provider_of(tracker);

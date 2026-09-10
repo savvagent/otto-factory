@@ -70,6 +70,8 @@ pub const BILLABLE: &[&str] = &[
     "complete_job",
     "fail_job",
     "repend_job",
+    "request_cancel",
+    "cancel_job",
     "set_dependencies",
     "send_message",
     "acquire_lease",
@@ -169,6 +171,8 @@ mod tests {
             "activate_job",
             "complete_job",
             "acquire_lease",
+            "request_cancel",
+            "cancel_job",
         ] {
             assert_eq!(classify(tool), Class::Billable, "{tool}");
         }
