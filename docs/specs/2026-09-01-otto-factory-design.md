@@ -197,8 +197,9 @@ completion — `resource` is free-form, with `branch:main` as the convention for
 branch case, so agents can also serialize on a staging slot, a migration lock, or a shared
 fixture. Leases are advisory and time-bounded — a crashed agent's lease expires rather
 than deadlocking the repo — and `list_leases` answers "who is in this repo right now".
-The server never enforces a lease against a git operation it cannot see; it makes
-collisions *visible and avoidable*, which is what coordination means here.
+The server never enforces a lease against what an agent actually does with the resource,
+which it cannot see; it makes collisions *visible and avoidable*, which is what
+coordination means here.
 
 ## Authentication
 

@@ -65,8 +65,9 @@ is what stops two agents doing the same job.
 
 Before editing a branch (or starting anything else others could collide with), \
 take a lease on it with acquire_lease and renew it while you work. Leases are \
-advisory — the server cannot see your git operations — so they make collisions \
-visible rather than impossible. list_leases answers 'who else is in this repo \
+advisory — the server cannot see what you actually do with the resource — so \
+they make collisions visible rather than impossible. list_leases answers \
+'who else is in this repo \
 right now'.
 
 Use watch instead of polling. It blocks until something in your organization \

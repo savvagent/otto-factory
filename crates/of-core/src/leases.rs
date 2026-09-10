@@ -1,8 +1,9 @@
 //! Repo leases — the primitive that stops two agents colliding on one resource.
 //!
-//! A lease is **advisory and time-bounded**. otto-factory cannot see git
-//! operations, so it cannot prevent a determined agent from working on a leased
-//! resource; what it can do is make the collision visible before it happens and
+//! A lease is **advisory and time-bounded**. otto-factory cannot see what an
+//! agent actually does with a leased resource — a git operation, a migration
+//! run, a deploy — so it cannot prevent a determined agent from working on one
+//! anyway; what it can do is make the collision visible before it happens and
 //! give a well-behaved agent somewhere else to go. That limitation is deliberate
 //! and is documented to customers rather than hidden — a lease is a coordination
 //! signal, not a mutex.

@@ -200,8 +200,9 @@ impl Factory {
                        the other, never both. Take one before you start and renew it while \
                        you work. If someone already holds it the error names them and says \
                        when it expires, so you can wait, message them, or pick different \
-                       work. Leases are advisory: the server cannot see your git operations, \
-                       so this makes collisions visible rather than impossible."
+                       work. Leases are advisory: the server cannot see what you actually do \
+                       with the resource, so this makes collisions visible rather than \
+                       impossible."
     )]
     pub async fn acquire_lease(
         &self,

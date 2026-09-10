@@ -9,7 +9,7 @@ savvagent/otto-factory#69.
 **Spec:** `docs/specs/2026-09-10-leases-generalize-resource-design.md` — read it first.
 This plan implements it exactly.
 
-## Status — post-PR-review
+## Status — 2026-09-10
 
 All four tasks below (✅) were implemented, reviewed, and shipped, but the mandatory
 PR-review trio (rust-pro, architect-reviewer, blind security-auditor) plus the
