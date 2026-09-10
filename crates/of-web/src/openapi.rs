@@ -653,7 +653,9 @@ fn queue_schemas() -> Value {
                 "description": { "type": ["string", "null"] },
                 "status": {
                     "type": "string",
-                    "enum": ["pending", "in-progress", "active", "completed", "failed"],
+                    "enum": [
+                        "pending", "in-progress", "active", "completed", "failed", "cancelled",
+                    ],
                 },
                 "ticketRef": { "type": ["string", "null"], "examples": ["ACME-17"] },
                 "tracker": { "type": ["string", "null"], "enum": ["jira", "github", null] },
@@ -673,6 +675,9 @@ fn queue_schemas() -> Value {
                 "createdBy": { "type": ["string", "null"], "format": "uuid" },
                 "claimedBy": { "type": ["string", "null"], "format": "uuid" },
                 "claimedByLabel": { "type": ["string", "null"] },
+                "cancelRequestedAt": { "type": ["string", "null"], "format": "date-time" },
+                "cancelRequestedBy": { "type": ["string", "null"], "format": "uuid" },
+                "cancelReason": { "type": ["string", "null"] },
             },
             "required": ["id", "orgId", "repoId", "title", "status", "createdAt", "attempts"],
         },
@@ -706,11 +711,13 @@ fn queue_schemas() -> Value {
                 "active": { "type": "integer" },
                 "completed": { "type": "integer" },
                 "failed": { "type": "integer" },
+                "cancelled": { "type": "integer" },
                 "blocked": { "type": "integer" },
                 "total": { "type": "integer" },
             },
             "required": [
-                "pending", "inProgress", "active", "completed", "failed", "blocked", "total",
+                "pending", "inProgress", "active", "completed", "failed", "cancelled", "blocked",
+                "total",
             ],
         },
     })
@@ -1123,6 +1130,49 @@ mod tests {
         assert!(
             stats_required.iter().any(|v| v == "active"),
             "QueueStats.required is missing \"active\": {stats_required:?}"
+        );
+    }
+
+    /// This is a hand-maintained JSON literal, not generated from
+    /// `of_core::jobs::Status`/`Job`/`Stats` — nothing else catches it drifting
+    /// out of sync with a status or field the server actually returns.
+    #[test]
+    fn the_job_schema_and_queue_stats_know_about_cancelled() {
+        let doc = doc();
+        let schemas = &doc["components"]["schemas"];
+
+        let status_enum = schemas["Job"]["properties"]["status"]["enum"]
+            .as_array()
+            .expect("Job.status has no enum array");
+        assert!(
+            status_enum.iter().any(|v| v == "cancelled"),
+            "Job.status.enum is missing \"cancelled\": {status_enum:?}"
+        );
+
+        let job_props = schemas["Job"]["properties"]
+            .as_object()
+            .expect("Job has no properties object");
+        for field in ["cancelRequestedAt", "cancelRequestedBy", "cancelReason"] {
+            assert!(
+                job_props.contains_key(field),
+                "Job.properties is missing {field:?}"
+            );
+        }
+
+        let stats_props = schemas["QueueStats"]["properties"]
+            .as_object()
+            .expect("QueueStats has no properties object");
+        assert!(
+            stats_props.contains_key("cancelled"),
+            "QueueStats.properties is missing \"cancelled\""
+        );
+
+        let stats_required = schemas["QueueStats"]["required"]
+            .as_array()
+            .expect("QueueStats has no required array");
+        assert!(
+            stats_required.iter().any(|v| v == "cancelled"),
+            "QueueStats.required is missing \"cancelled\": {stats_required:?}"
         );
     }
 
