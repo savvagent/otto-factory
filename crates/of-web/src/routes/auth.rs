@@ -490,9 +490,11 @@ pub async fn list_passkeys(
 pub async fn remove_passkey(
     State(state): State<AppState>,
     caller: CurrentUser,
+    parts: Parts,
     axum::extract::Path(id): axum::extract::Path<uuid::Uuid>,
 ) -> ApiResult<Response> {
-    passkeys::remove(&state.db, caller.user.id, id).await?;
+    let ip = client_ip(&parts, &state.config);
+    passkeys::remove(&state.db, caller.user.id, id, ip.as_deref()).await?;
     Ok(http::StatusCode::NO_CONTENT.into_response())
 }
 
@@ -500,10 +502,12 @@ pub async fn remove_passkey(
 pub async fn rename_passkey(
     State(state): State<AppState>,
     caller: CurrentUser,
+    parts: Parts,
     axum::extract::Path(id): axum::extract::Path<uuid::Uuid>,
     Json(req): Json<RenameKeyRequest>,
 ) -> ApiResult<Response> {
-    passkeys::rename(&state.db, caller.user.id, id, &req.nickname).await?;
+    let ip = client_ip(&parts, &state.config);
+    passkeys::rename(&state.db, caller.user.id, id, &req.nickname, ip.as_deref()).await?;
     Ok(http::StatusCode::NO_CONTENT.into_response())
 }
 

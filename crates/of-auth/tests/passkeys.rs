@@ -299,7 +299,7 @@ async fn the_last_passkey_cannot_be_removed(pool: PgPool) {
     assert_eq!(keys.len(), 1);
     assert_eq!(keys[0].nickname.as_deref(), Some("laptop"));
 
-    let refused = passkeys::remove(&db, user, keys[0].id).await;
+    let refused = passkeys::remove(&db, user, keys[0].id, None).await;
     assert!(refused.is_err(), "the only passkey was removed");
     assert_eq!(passkeys::count(&db, user).await.unwrap(), 1);
 }
@@ -416,6 +416,62 @@ async fn clearing_writes_the_passkey_cleared_action(pool: PgPool) {
         action_count(&db, of_core::audit::action::TOTP_RESET, user).await,
         0,
         "clearing must not write the historical TOTP action"
+    );
+}
+
+/// Removing a key (never the last) writes `auth.passkey.removed`. Evicting the
+/// legitimate owner's key is the standard persistence step after a session
+/// takeover, so this must be visible in the trail (#89).
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn removing_a_passkey_writes_the_passkey_removed_action(pool: PgPool) {
+    let db = Db::from_pool(pool);
+    let mut first = authenticator();
+    let user = register_new(&db, &mut first).await;
+
+    let webauthn = rp();
+    let mut second = authenticator();
+    let ceremony = passkeys::start_registration(&db, &webauthn, Some(user))
+        .await
+        .unwrap();
+    let credential = second
+        .do_registration(
+            Url::parse(ORIGIN).unwrap(),
+            for_soft_token(ceremony.challenge),
+        )
+        .unwrap();
+    passkeys::finish_registration(&db, &webauthn, ceremony.id, &credential, Some("phone"))
+        .await
+        .unwrap();
+
+    let keys = passkeys::list(&db, user).await.unwrap();
+    assert_eq!(keys.len(), 2);
+    passkeys::remove(&db, user, keys[0].id, Some("203.0.113.9"))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        action_count(&db, of_core::audit::action::PASSKEY_REMOVED, user).await,
+        1,
+        "removing a key must write auth.passkey.removed"
+    );
+}
+
+/// Renaming a key writes `auth.passkey.renamed`.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn renaming_a_passkey_writes_the_passkey_renamed_action(pool: PgPool) {
+    let db = Db::from_pool(pool);
+    let mut auth = authenticator();
+    let user = register_new(&db, &mut auth).await;
+    let keys = passkeys::list(&db, user).await.unwrap();
+
+    passkeys::rename(&db, user, keys[0].id, "renamed laptop", None)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        action_count(&db, of_core::audit::action::PASSKEY_RENAMED, user).await,
+        1,
+        "renaming a key must write auth.passkey.renamed"
     );
 }
 

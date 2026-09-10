@@ -99,13 +99,16 @@ pub async fn logout(db: &Db, session_token: &str, ip: Option<&str>) -> Result<()
     sessions::revoke(db, session_token).await?;
 
     if let Some(user) = user {
-        let _ = db
+        if let Err(e) = db
             .audit_global(
                 Entry::new(action::LOGOUT)
                     .actor(user)
                     .from_request(ip, None),
             )
-            .await;
+            .await
+        {
+            tracing::error!(error = %e, user_id = %user, "failed to write audit event for logout");
+        }
     }
     Ok(())
 }
