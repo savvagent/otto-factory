@@ -10,35 +10,44 @@ This plan implements it exactly.
 
 ## Status — 2026-09-10
 
-Task 1 implemented, reviewed, corrected, and re-reviewed. PR #135 opened, `Closes #119`. The
-mandatory review trio (Phase 4 step 8) found a **Critical** bug in the original design before
-merge: `security-auditor`, `architect-reviewer`, and `pr-review-toolkit:code-reviewer`
-independently flagged that the `resource NOT LIKE 'branch:%'` guard would silently rewrite every
-live non-branch lease (`deploy:staging`, a migration lock, etc.) in every org, since `resource`
-has been free-form — not branch-only — since 0027 itself shipped. Fixed by rebinding the
-migration's predicate to provenance (`acquired_at` before `0027`'s `installed_on`) instead of
-value shape; see the spec's Risks & Open Questions for the full history.
+**Shipped.** Task 1 implemented, reviewed, corrected, re-reviewed, and merged as
+`savvagent/otto-factory#135` (squash commit `f85f0861b1f2f969465042b48974ce375d5aaa9c`),
+closing `#119`. The mandatory review trio (Phase 4 step 8) found a **Critical** bug in the
+original design before merge: `security-auditor`, `architect-reviewer`, and
+`pr-review-toolkit:code-reviewer` independently flagged that the `resource NOT LIKE
+'branch:%'` guard would silently rewrite every live non-branch lease (`deploy:staging`, a
+migration lock, etc.) in every org, since `resource` has been free-form — not branch-only —
+since 0027 itself shipped. Fixed by rebinding the migration's predicate to provenance
+(`acquired_at` before `0027`'s `installed_on`) instead of value shape; see the spec's Risks
+& Open Questions for the full history.
 
-A second review round (all three of security-auditor, architect-reviewer, rust-pro re-dispatched
-against the fix) reported **Approved to merge** from all three, with one Medium
-(security-auditor) and one Important-but-doc-only (architect-reviewer) follow-up, both applied:
-the test now seeds two orgs (not one), proving the loop's `org_id = o` predicate — the guard this
-deployment's actual RLS-bypassed shape relies on — genuinely reaches every org rather than only
-the one it happened to be seeded alongside; and the migration's comment was corrected on an
-imprecise ownership claim, given a stated rationale for depending on sqlx's own
-`_sqlx_migrations` table, and the Error Handling section now documents the NULL-cutoff and
-unique-violation-on-collision cases explicitly. `architect-reviewer` verified the fix by mutation
-testing (removed the provenance bound, watched the corrected test fail with exactly the original
-symptom, restored it).
+A second review round (all three of security-auditor, architect-reviewer, rust-pro
+re-dispatched against the fix) reported **Approved to merge** from all three, with one
+Medium (security-auditor) and one Important-but-doc-only (architect-reviewer) follow-up,
+both applied: the test now seeds two orgs (not one), proving the loop's `org_id = o`
+predicate — the guard this deployment's actual RLS-bypassed shape relies on — genuinely
+reaches every org rather than only the one it happened to be seeded alongside; and the
+migration's comment was corrected on an imprecise ownership claim, given a stated rationale
+for depending on sqlx's own `_sqlx_migrations` table, and the Error Handling section
+documents the NULL-cutoff and unique-violation-on-collision cases explicitly.
+`architect-reviewer` verified the fix by mutation testing (removed the provenance bound,
+watched the corrected test fail with exactly the original symptom, restored it). The PR
+body was corrected before merge (architect-reviewer's Important finding): its "Known
+limitation" verification query originally predated the provenance fix.
 
-Final verification: `cargo test -p of-core --test isolation` (30 passed, including the two-org
-positive/negative test) and `--test queue` (65 passed), `cargo clippy --all-targets -- -D
-warnings`, `cargo fmt --all --check` — all clean. PR body still needs a two-line correction
-(architect-reviewer's Important finding) before merge: its "Known limitation" verification query
-predates the provenance fix and would mislead a human doing the post-deploy check. Not yet
-merged — awaiting explicit go-ahead per this session's process (git-expert-scope operations like
-merge are confirmed with the user, not run autonomously, especially after a near-miss like this
-one).
+**A real merge conflict surfaced at ship time**: `#131`/`#137` (an unrelated fix, merged to
+`master` while this branch was in its own review cycle) also touched
+`crates/of-core/tests/isolation.rs`. Resolved via `git merge origin/master` (not rebase —
+this branch's own commits had already touched the same test across two review-fix rounds,
+so a merge needed only one conflict resolution instead of replaying it per commit); both
+tests kept, no overlap in what they exercise.
+
+Final verification, all green: `cargo test --workspace`, `cargo clippy --all-targets -- -D
+warnings`, `cargo fmt --all --check`; the merge commit's own CI run
+(`34518592895`) — `rust`/`web`/`docker-build` succeeded, `deploy` correctly skipped
+(release-please opened a release PR but had not yet cut a release); a fresh-cluster
+migration-apply check (`podman compose down -v && podman compose up -d` then `cargo test -p
+of-core`) confirming 0030 applies cleanly in sequence.
 
 ## Global Constraints
 
