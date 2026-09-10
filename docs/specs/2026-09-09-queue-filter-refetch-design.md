@@ -1,7 +1,6 @@
 # Queue filter refetch design
 
-> **Status:** DRAFT — fix the queue page's Status/Repo/"only what I queued" filters, which update the
-> URL but never re-fetch or re-render the table
+> **Status:** IMPLEMENTED — shipped in `savvagent/otto-factory#85`
 
 ## Premise corrections
 

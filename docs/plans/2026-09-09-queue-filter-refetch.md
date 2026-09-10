@@ -7,9 +7,9 @@ re-fetches, because `setFilter` and the "Clear filters" button use SvelteKit's `
 (which only updates `history` and the address bar) instead of `goto` (which updates the reactive
 `page.url` every filter's `$derived` and the fetch `$effect` depend on).
 
-## Status — 2026-09-09
+## Status — 2026-09-10
 
-Implementation complete — PR #85 open for review.
+✅ Shipped in `savvagent/otto-factory#85`.
 
 **Spec:** `docs/specs/2026-09-09-queue-filter-refetch-design.md` — read it first. This plan
 implements it exactly.
