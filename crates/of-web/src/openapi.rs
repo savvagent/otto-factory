@@ -765,19 +765,6 @@ fn response_schemas() -> Value {
             },
             "required": ["user", "shouldAddPasskey"],
         },
-        "Enrollment": {
-            "type": "object",
-            "description": "Shown exactly once. Only hashes are stored.",
-            "properties": {
-                "provisioningUri": {
-                    "type": "string",
-                    "description": "otpauth:// URI — render as a QR code.",
-                },
-                "manualKey": { "type": "string" },
-                "recoveryCodes": { "type": "array", "items": { "type": "string" } },
-            },
-            "required": ["provisioningUri", "manualKey", "recoveryCodes"],
-        },
         "WebauthnConfig": {
             "type": "object",
             "description":
@@ -890,14 +877,6 @@ fn request_schemas() -> Value {
     };
 
     json!({
-        "SignupRequest": {
-            "type": "object",
-            "properties": {
-                "email": { "type": "string", "format": "email" },
-                "name": { "type": ["string", "null"] },
-            },
-            "required": ["email"],
-        },
         "FinishRegistration": {
             "type": "object",
             "properties": {
@@ -949,19 +928,6 @@ fn request_schemas() -> Value {
             "type": "object",
             "properties": { "nickname": { "type": "string" } },
             "required": ["nickname"],
-        },
-        "LoginRequest": {
-            "type": "object",
-            "properties": {
-                "email": { "type": "string", "format": "email" },
-                "code": { "type": "string" },
-            },
-            "required": ["email", "code"],
-        },
-        "ConfirmTotpRequest": {
-            "type": "object",
-            "properties": { "code": { "type": "string" } },
-            "required": ["code"],
         },
         "CreateOrgRequest": {
             "type": "object",
@@ -1079,6 +1045,31 @@ mod tests {
             assert!(
                 schemas.contains_key(&name),
                 "the document references #/components/schemas/{name}, which is not defined"
+            );
+        }
+    }
+
+    /// The inverse of the drift test above. `Enrollment`, `SignupRequest`,
+    /// `LoginRequest` and `ConfirmTotpRequest` all outlived the TOTP-era
+    /// flows that returned or took them, as dead documentation nothing
+    /// caught — a hand-maintained document has no compiler to notice an
+    /// endpoint stopped existing. A schema no `$ref` anywhere in the
+    /// document names is exactly that: describing a shape the server no
+    /// longer sends or accepts.
+    #[test]
+    fn every_defined_schema_is_referenced() {
+        let doc = doc();
+        let schemas = doc["components"]["schemas"].as_object().unwrap();
+
+        let mut refs = Vec::new();
+        collect_refs(&doc, &mut refs);
+        let refs: std::collections::HashSet<_> = refs.into_iter().collect();
+
+        for name in schemas.keys() {
+            assert!(
+                refs.contains(name),
+                "components/schemas/{name} is defined but nothing $refs it \
+                 anywhere in the document"
             );
         }
     }
