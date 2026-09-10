@@ -74,43 +74,60 @@ and it survives both deployment shapes. `#[sqlx::test]` connects as a superuser 
 bypasses RLS, so a test of such a policy **must** `SET LOCAL ROLE of_app` explicitly or it
 passes against no policy at all.
 
-**A migration that touches a tenant table's data needs its own `org_id` predicate — RLS is
-not available to supply one.** `Db::migrate` runs every migration statement on the connection
-pool directly, never through `Db::begin`: `app.org_id` is never set and `of_app` is never
-assumed. What that means depends on which side of guard 2 the connecting role is on, and the
-two outcomes are opposites, not variations on a theme. If the connecting role is a superuser
-or has `BYPASSRLS` — this deployment's actual shape today, per `docs/deploy/fly.md` — RLS does
-not apply at all, `FORCE` included, because that exemption has nothing to do with `of_app`
-being assumable; every tenant table gets `FORCE ROW LEVEL SECURITY` unconditionally
-(`0007_rls.sql`/`0011_trackers.sql`), so an unscoped `UPDATE`/`DELETE` against one silently
-rewrites **every org's matching rows in one statement** — a cross-tenant write, not a no-op.
-If the connecting role is neither superuser nor `BYPASSRLS` (the managed-Postgres fallback
-shape, where that role is also the table's owner — the exemption `FORCE` exists to remove),
-`current_org()` is NULL for the statement's entire lifetime, so `org_id = current_org()` is
-never true and the statement silently matches **zero rows, for every tenant**, forever.
-`savvagent/otto-factory#70` found the second outcome in
-`0020_rename_trigger_label_default.sql`'s relabeling `UPDATE` — safe there only because that
-rewrite was genuinely meant to apply the same way to every org, so "zero rows" was the one
-failure mode actually in play;
-`rls_scopes_a_migration_style_update_with_no_org_context` in `tests/isolation.rs` reproduces
-it. A migration whose rewrite is *not* meant to apply uniformly across orgs (a per-org
-counter, a conditional backfill) is exposed to the first, worse outcome instead — silently,
-on whichever deployment happens to be running it. Two correct shapes, and they answer
-different needs: for a rewrite that must vary by org, loop over every org and bind
-`org_id = $<n>` **explicitly in the statement itself** (`set_config('app.org_id', ..., true)`
-alongside it is consistent with request-time code but does not do the scoping on its own — it
-does nothing when RLS is bypassed, which is exactly the case that most needs the predicate);
-for a rewrite that is genuinely org-agnostic, wrap the statement in
-`ALTER TABLE <table> NO FORCE ROW LEVEL SECURITY` / `ALTER TABLE <table> FORCE ROW LEVEL
-SECURITY`, restored before the migration transaction commits (this needs the migrating role to
-own the table, true of both of this codebase's documented deployment shapes; a migration that
-leaves a tenant table un-forced is caught at the next boot, not silently — `Db::verify_tenant_isolation`
-reads `relforcerowsecurity` back from the catalog and refuses to bind a port on an un-forced
-tenant table). `TRUNCATE` and `COPY ... FROM` are covered by neither pattern — RLS policies
-never apply to `TRUNCATE` at all, and a migration must never use it against a tenant table; use
-a per-org `DELETE`/`INSERT` instead. A schema-only change (`ALTER TABLE ... ADD COLUMN`, a new
-`DEFAULT`, an index) is unaffected — RLS only constrains `SELECT`/`INSERT`/`UPDATE`/`DELETE`
-against existing rows, never DDL.
+**A migration that touches a tenant table's data needs its own `org_id` scoping — RLS is not
+available to supply one.** `Db::migrate` runs every migration statement on the connection pool
+directly, never through `Db::begin`: `app.org_id` is never set and `of_app` is never assumed.
+What that means depends on which side of guard 2 the connecting role is on. If it is a
+superuser or has `BYPASSRLS` — this deployment's actual shape today, per `docs/deploy/fly.md`
+— RLS does not apply at all, `FORCE` included; an unscoped `UPDATE`/`DELETE` against a tenant
+table silently rewrites **every org's matching rows in one statement**, a cross-tenant write,
+not a no-op. Otherwise RLS does apply — every tenant table is `ENABLE`/`FORCE ROW LEVEL
+SECURITY` unconditionally (`0007_rls.sql`, `0008_audit.sql`, `0011_trackers.sql`), which holds
+whether the migrating role happens to own the table (where `FORCE` is what removes its
+exemption) or not (where a non-owner has no exemption to begin with) — and `current_org()` is
+NULL for the statement's entire lifetime, so `org_id = current_org()` is never true and the
+statement silently matches **zero rows, for every tenant**, forever. `savvagent/otto-factory#70`
+is the second outcome: it would have hit exactly this had
+`0020_rename_trigger_label_default.sql` run under a non-bypassing role; under this deployment's
+actual (bypassing) role it hit the first outcome instead, harmlessly, because that rewrite was
+genuinely meant to apply the same way to every org.
+`rls_scopes_a_migration_style_update_with_no_org_context` in `tests/isolation.rs` reproduces the
+zero-rows outcome directly, as a non-owner role — which needs no `FORCE` to be bound, and is the
+only path a superuser-connected `#[sqlx::test]` can exercise; both paths produce the same zero.
+
+The one pattern that is safe under every shape, for any migration that must rewrite existing
+tenant-table data — org-agnostic or not: loop over every org and give the statement **both** an
+explicit `org_id` predicate (what saves it when RLS is bypassed) **and**
+`set_config('app.org_id', ..., true)` (what saves it when RLS applies) — a migration author
+cannot know in advance which deployment will run it, so both together, not either alone.
+`Db::migrate` runs raw SQL with no parameter binding, so this is plpgsql, not a bound query:
+
+```sql
+DO $$
+DECLARE
+  o uuid;
+BEGIN
+  FOR o IN SELECT id FROM orgs LOOP
+    PERFORM set_config('app.org_id', o::text, true);
+    UPDATE tracker_bindings SET trigger_label = 'otto-factory'
+      WHERE org_id = o AND trigger_label = 'dark-factory';
+  END LOOP;
+END $$;
+```
+
+Temporarily toggling `ALTER TABLE <table> NO FORCE ROW LEVEL SECURITY` / `... FORCE ROW LEVEL
+SECURITY` around an unscoped statement is not recommended: it only helps when the migrating role
+owns the table, and a forgotten restore is caught by `Db::verify_tenant_isolation` at the next
+boot only on the fallback shape — on the `of_app`-assumable shape (this deployment's actual
+shape today) the startup check itself runs as `of_app`, which owns nothing, so `FORCE` is not
+load-bearing for that check either and a forgotten restore is not caught there at all. The loop
+above has no such gap. `TRUNCATE` against a tenant table must never appear in a migration —
+Postgres has no RLS policy class for `TRUNCATE` at all, so neither guard covers it, ever.
+`COPY ... FROM` is refused outright when RLS applies ("`COPY FROM not supported with row-level
+security`"), but runs exactly like an unscoped `INSERT` when RLS is bypassed — it needs the same
+per-org treatment as the loop above, not `TRUNCATE`'s blanket ban. A schema-only change
+(`ALTER TABLE ... ADD COLUMN`, a new `DEFAULT`, an index) is unaffected — none of this constrains
+a table's own schema, only what its rows may be read, written, or matched against.
 
 Note that ordinary cross-org tests pass on the strength of guard 1 alone. The tests that
 actually exercise RLS are the `rls_scopes_*` ones in `tests/isolation.rs`, which issue

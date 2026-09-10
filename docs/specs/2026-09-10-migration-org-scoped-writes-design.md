@@ -124,53 +124,86 @@ immediately after the existing "A privilege granted to `of_app` is not a protect
 managed-Postgres shape; this one is about migrations not carrying any org context through it at
 all):
 
-> **A migration that touches a tenant table's data needs its own `org_id` predicate — RLS is
-> not available to supply one.** `Db::migrate` runs every migration statement on the connection
-> pool directly, never through `Db::begin`: `app.org_id` is never set and `of_app` is never
-> assumed. What that means depends on which side of guard 2 the connecting role is on, and the
-> two outcomes are opposites, not variations on a theme. If the connecting role is a superuser
-> or has `BYPASSRLS` — this deployment's actual shape today, per `docs/deploy/fly.md` — RLS does
-> not apply at all, `FORCE` included, because that exemption has nothing to do with `of_app`
-> being assumable; every tenant table gets `FORCE ROW LEVEL SECURITY` unconditionally
-> (`0007_rls.sql`/`0011_trackers.sql`), so an unscoped `UPDATE`/`DELETE` against one silently
-> rewrites **every org's matching rows in one statement** — a cross-tenant write, not a no-op.
-> If the connecting role is neither superuser nor `BYPASSRLS` (the managed-Postgres fallback
-> shape, where that role is also the table's owner — the exemption `FORCE` exists to remove),
-> `current_org()` is NULL for the statement's entire lifetime, so `org_id = current_org()` is
-> never true and the statement silently matches **zero rows, for every tenant**, forever.
-> `savvagent/otto-factory#70` found the second outcome in
-> `0020_rename_trigger_label_default.sql`'s relabeling `UPDATE` — safe there only because that
-> rewrite was genuinely meant to apply the same way to every org, so "zero rows" was the one
-> failure mode actually in play;
-> `rls_scopes_a_migration_style_update_with_no_org_context` in `tests/isolation.rs` reproduces
-> it. A migration whose rewrite is *not* meant to apply uniformly across orgs (a per-org
-> counter, a conditional backfill) is exposed to the first, worse outcome instead — silently,
-> on whichever deployment happens to be running it. Two correct shapes, and they answer
-> different needs: for a rewrite that must vary by org, loop over every org and bind
-> `org_id = $<n>` **explicitly in the statement itself** (`set_config('app.org_id', ..., true)`
-> alongside it is consistent with request-time code but does not do the scoping on its own — it
-> does nothing when RLS is bypassed, which is exactly the case that most needs the predicate);
-> for a rewrite that is genuinely org-agnostic, wrap the statement in
-> `ALTER TABLE <table> NO FORCE ROW LEVEL SECURITY` / `ALTER TABLE <table> FORCE ROW LEVEL
-> SECURITY`, restored before the migration transaction commits (this needs the migrating role to
-> own the table, true of both of this codebase's documented deployment shapes; a migration that
-> leaves a tenant table un-forced is caught at the next boot, not silently — `Db::verify_tenant_isolation`
-> reads `relforcerowsecurity` back from the catalog and refuses to bind a port on an un-forced
-> tenant table). `TRUNCATE` and `COPY ... FROM` are covered by neither pattern — RLS policies
-> never apply to `TRUNCATE` at all, and a migration must never use it against a tenant table; use
-> a per-org `DELETE`/`INSERT` instead. A schema-only change (`ALTER TABLE ... ADD COLUMN`, a new
-> `DEFAULT`, an index) is unaffected — RLS only constrains `SELECT`/`INSERT`/`UPDATE`/`DELETE`
-> against existing rows, never DDL.
+> **A migration that touches a tenant table's data needs its own `org_id` scoping — RLS is not
+> available to supply one.** `Db::migrate` runs every migration statement on the connection pool
+> directly, never through `Db::begin`: `app.org_id` is never set and `of_app` is never assumed.
+> What that means depends on which side of guard 2 the connecting role is on. If it is a
+> superuser or has `BYPASSRLS` — this deployment's actual shape today, per `docs/deploy/fly.md`
+> — RLS does not apply at all, `FORCE` included; an unscoped `UPDATE`/`DELETE` against a tenant
+> table silently rewrites **every org's matching rows in one statement**, a cross-tenant write,
+> not a no-op. Otherwise RLS does apply — every tenant table is `ENABLE`/`FORCE ROW LEVEL
+> SECURITY` unconditionally (`0007_rls.sql`, `0008_audit.sql`, `0011_trackers.sql`), which holds
+> whether the migrating role happens to own the table (where `FORCE` is what removes its
+> exemption) or not (where a non-owner has no exemption to begin with) — and `current_org()` is
+> NULL for the statement's entire lifetime, so `org_id = current_org()` is never true and the
+> statement silently matches **zero rows, for every tenant**, forever. `savvagent/otto-factory#70`
+> is the second outcome: it would have hit exactly this had
+> `0020_rename_trigger_label_default.sql` run under a non-bypassing role; under this deployment's
+> actual (bypassing) role it hit the first outcome instead, harmlessly, because that rewrite was
+> genuinely meant to apply the same way to every org.
+> `rls_scopes_a_migration_style_update_with_no_org_context` in `tests/isolation.rs` reproduces the
+> zero-rows outcome directly, as a non-owner role — which needs no `FORCE` to be bound, and is the
+> only path a superuser-connected `#[sqlx::test]` can exercise; both paths produce the same zero.
+>
+> The one pattern that is safe under every shape, for any migration that must rewrite existing
+> tenant-table data — org-agnostic or not: loop over every org and give the statement **both** an
+> explicit `org_id` predicate (what saves it when RLS is bypassed) **and**
+> `set_config('app.org_id', ..., true)` (what saves it when RLS applies) — a migration author
+> cannot know in advance which deployment will run it, so both together, not either alone.
+> `Db::migrate` runs raw SQL with no parameter binding, so this is plpgsql, not a bound query:
+>
+> ```sql
+> DO $$
+> DECLARE
+>   o uuid;
+> BEGIN
+>   FOR o IN SELECT id FROM orgs LOOP
+>     PERFORM set_config('app.org_id', o::text, true);
+>     UPDATE tracker_bindings SET trigger_label = 'otto-factory'
+>       WHERE org_id = o AND trigger_label = 'dark-factory';
+>   END LOOP;
+> END $$;
+> ```
+>
+> Temporarily toggling `ALTER TABLE <table> NO FORCE ROW LEVEL SECURITY` / `... FORCE ROW LEVEL
+> SECURITY` around an unscoped statement is not recommended: it only helps when the migrating role
+> owns the table, and a forgotten restore is caught by `Db::verify_tenant_isolation` at the next
+> boot only on the fallback shape — on the `of_app`-assumable shape (this deployment's actual
+> shape today) the startup check itself runs as `of_app`, which owns nothing, so `FORCE` is not
+> load-bearing for that check either and a forgotten restore is not caught there at all. The loop
+> above has no such gap. `TRUNCATE` against a tenant table must never appear in a migration —
+> Postgres has no RLS policy class for `TRUNCATE` at all, so neither guard covers it, ever.
+> `COPY ... FROM` is refused outright when RLS applies ("`COPY FROM not supported with row-level
+> security`"), but runs exactly like an unscoped `INSERT` when RLS is bypassed — it needs the same
+> per-org treatment as the loop above, not `TRUNCATE`'s blanket ban. A schema-only change
+> (`ALTER TABLE ... ADD COLUMN`, a new `DEFAULT`, an index) is unaffected — none of this
+> constrains a table's own schema, only what its rows may be read, written, or matched against.
 
-**Revision note.** An earlier draft of this paragraph claimed the table owner is exempt from RLS
-"regardless of `FORCE`" — backwards: `FORCE` exists specifically to remove that exemption, as the
-existing "A privilege granted to `of_app` is not a protection" paragraph three lines above already
-says. It also prescribed the per-org loop pattern with `set_config` alone and no explicit `org_id`
-predicate in the statement — which does not scope anything when RLS is bypassed (the superuser
-case), so it would have shipped a "safe pattern" that silently writes every org's rows under this
-deployment's actual connecting role. Both were caught in PR review before merge; the text above is
-the corrected version, and this note stays so a reader diffing against an earlier read of this spec
-can see what changed and why.
+**Revision notes.** Two rounds of PR review, both caught before merge:
+
+- **Round 1** — an earlier draft claimed the table owner is exempt from RLS "regardless of
+  `FORCE`" (backwards: `FORCE` exists specifically to remove that exemption), and prescribed a
+  per-org loop with `set_config` alone and no explicit `org_id` predicate — which scopes nothing
+  when RLS is bypassed, so it would have shipped a "safe pattern" that silently writes every
+  org's rows under this deployment's actual connecting role.
+- **Round 2** — the round-1 fix introduced a new, subtler overclaim: it said a forgotten restore
+  of `ALTER TABLE ... FORCE ROW LEVEL SECURITY` is "caught at the next boot" by
+  `Db::verify_tenant_isolation`, stated unconditionally. Empirically false on this deployment's
+  actual shape: `verify_tenant_isolation`'s own check runs as `of_app` (`Db::begin`'s effective
+  role), which owns nothing in either shape (confirmed: `pg_has_role('of_app', tracker_bindings'
+  owner, 'USAGE')` → `f`), so `FORCE` is never load-bearing for *that check* — the safety net
+  only exists on the fallback shape, where the effective role is the connecting role itself. The
+  round-1 fix also left the `$<n>` bind-parameter syntax in a context (`Db::migrate` runs raw
+  SQL) where no such binding is possible, and the test's own comments still credited `FORCE` for
+  an outcome `of_app`'s plain `ENABLE`-only exposure already produces (verified: dropping `FORCE`
+  from a non-owner-granted table changes nothing). The text above replaces the two-pattern
+  prescription with the one pattern verified safe under every shape (the loop, with both the
+  predicate and `set_config` always present together) and drops the `NO FORCE`/`FORCE` toggle to
+  a discouraged alternative with its real caveat stated. Every claim in the current text was
+  checked empirically against the local Postgres before this revision was committed — see the
+  transcript-equivalent checks summarized in the paragraph itself (ownership queries, a `COPY
+  FROM` run under both a bypassing and a non-bypassing role, the loop pattern executed end to
+  end).
 
 ## §2 The regression test
 
@@ -188,12 +221,15 @@ LOCAL ROLE of_app`, no `app.org_id`):
 /// LOCAL ROLE of_app` and never `set_config('app.org_id', …)`. On this
 /// deployment's actual connecting role (a superuser, confirmed against
 /// `docs/deploy/fly.md`), that is invisible in the opposite direction from
-/// what this test demonstrates: a superuser bypasses RLS outright, `FORCE`
-/// included, so the statement would touch *every* org's matching rows, not
-/// none. The `SET LOCAL ROLE of_app` below stands in for the FORCE-RLS
-/// fallback deployment shape's connecting role instead — non-superuser,
-/// non-`BYPASSRLS`, and (per `CLAUDE.md`) the owner `FORCE` exists to bind —
-/// where `current_org()` stays NULL for the statement's entire lifetime, so
+/// what this test demonstrates: a superuser bypasses RLS outright, so the
+/// statement would touch *every* org's matching rows, not none. `SET LOCAL
+/// ROLE of_app` below drops to a role RLS actually binds — `of_app` owns
+/// nothing, so it needs no `FORCE` to lose the exemption a table owner would
+/// otherwise get; the FORCE-RLS-fallback deployment shape hits the same zero
+/// for a related but distinct reason (that role *is* the owner, which is what
+/// `FORCE` binds — see `CLAUDE.md`), and this test, run from a superuser
+/// connection, can only exercise the non-owner path. Either way
+/// `current_org()` stays NULL for the statement's entire lifetime, so
 /// `org_id = current_org()` is never true and the UPDATE silently matches
 /// zero rows, for every tenant, forever.
 ///
@@ -222,10 +258,10 @@ async fn rls_scopes_a_migration_style_update_with_no_org_context(pool: PgPool) {
     .await
     .unwrap();
 
-    // The FORCE-RLS-fallback deployment shape's connecting role: owns the
-    // table (like every role that has ever run this database's migrations),
-    // neither superuser nor BYPASSRLS, and no `app.org_id` ever set — a
-    // schema migration has no tenant to set it to.
+    // `of_app` owns nothing here, so it needs no `FORCE` to be bound by RLS —
+    // a non-owner grantee role is never exempt. Neither superuser nor
+    // BYPASSRLS, and no `app.org_id` ever set — a schema migration has no
+    // tenant to set it to.
     let mut tx = db.begin_unpinned().await.unwrap();
     sqlx::query("SET LOCAL ROLE of_app")
         .execute(&mut *tx)
@@ -245,11 +281,11 @@ async fn rls_scopes_a_migration_style_update_with_no_org_context(pool: PgPool) {
 
     assert_eq!(
         updated, 0,
-        "a bare UPDATE against a FORCE RLS tenant table with no app.org_id set \
-         is exactly the failure this test exists to keep visible — if this \
-         starts affecting rows, something about the deployment's isolation \
-         shape changed and every migration written under the old assumption \
-         needs re-auditing"
+        "a bare UPDATE against an RLS-active tenant table with no app.org_id \
+         set is exactly the failure this test exists to keep visible — if \
+         this starts affecting rows, something about the deployment's \
+         isolation shape changed and every migration written under the old \
+         assumption needs re-auditing"
     );
 
     // Positive control: the row is still there, still stale. The zero above

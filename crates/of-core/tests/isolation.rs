@@ -814,12 +814,15 @@ async fn rls_scopes_tracker_bindings(pool: PgPool) {
 /// LOCAL ROLE of_app` and never `set_config('app.org_id', …)`. On this
 /// deployment's actual connecting role (a superuser, confirmed against
 /// `docs/deploy/fly.md`), that is invisible in the opposite direction from
-/// what this test demonstrates: a superuser bypasses RLS outright, `FORCE`
-/// included, so the statement would touch *every* org's matching rows, not
-/// none. The `SET LOCAL ROLE of_app` below stands in for the FORCE-RLS
-/// fallback deployment shape's connecting role instead — non-superuser,
-/// non-`BYPASSRLS`, and (per `CLAUDE.md`) the owner `FORCE` exists to bind —
-/// where `current_org()` stays NULL for the statement's entire lifetime, so
+/// what this test demonstrates: a superuser bypasses RLS outright, so the
+/// statement would touch *every* org's matching rows, not none. `SET LOCAL
+/// ROLE of_app` below drops to a role RLS actually binds — `of_app` owns
+/// nothing, so it needs no `FORCE` to lose the exemption a table owner would
+/// otherwise get; the FORCE-RLS-fallback deployment shape hits the same zero
+/// for a related but distinct reason (that role *is* the owner, which is what
+/// `FORCE` binds — see `CLAUDE.md`), and this test, run from a superuser
+/// connection, can only exercise the non-owner path. Either way
+/// `current_org()` stays NULL for the statement's entire lifetime, so
 /// `org_id = current_org()` is never true and the UPDATE silently matches
 /// zero rows, for every tenant, forever.
 ///
@@ -848,10 +851,10 @@ async fn rls_scopes_a_migration_style_update_with_no_org_context(pool: PgPool) {
     .await
     .unwrap();
 
-    // The FORCE-RLS-fallback deployment shape's connecting role: owns the
-    // table (like every role that has ever run this database's migrations),
-    // neither superuser nor BYPASSRLS, and no `app.org_id` ever set — a
-    // schema migration has no tenant to set it to.
+    // `of_app` owns nothing here, so it needs no `FORCE` to be bound by RLS —
+    // a non-owner grantee role is never exempt. Neither superuser nor
+    // BYPASSRLS, and no `app.org_id` ever set — a schema migration has no
+    // tenant to set it to.
     let mut tx = db.begin_unpinned().await.unwrap();
     sqlx::query("SET LOCAL ROLE of_app")
         .execute(&mut *tx)
@@ -871,11 +874,11 @@ async fn rls_scopes_a_migration_style_update_with_no_org_context(pool: PgPool) {
 
     assert_eq!(
         updated, 0,
-        "a bare UPDATE against a FORCE RLS tenant table with no app.org_id set \
-         is exactly the failure this test exists to keep visible — if this \
-         starts affecting rows, something about the deployment's isolation \
-         shape changed and every migration written under the old assumption \
-         needs re-auditing"
+        "a bare UPDATE against an RLS-active tenant table with no app.org_id \
+         set is exactly the failure this test exists to keep visible — if \
+         this starts affecting rows, something about the deployment's \
+         isolation shape changed and every migration written under the old \
+         assumption needs re-auditing"
     );
 
     // Positive control: the row is still there, still stale. The zero above
