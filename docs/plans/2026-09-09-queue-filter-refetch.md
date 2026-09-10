@@ -67,12 +67,26 @@ same module). Produces no new interface — internal event-handler behavior only
          filters" link never appears. This is the failing state the task fixes.
 - [ ] In `web/src/routes/o/[org]/queue/+page.svelte`, change the import on line 3 from
       `import { replaceState } from '$app/navigation';` to `import { goto } from '$app/navigation';`.
+- [ ] **Update the file's top-of-component doc comment (lines 27-29)**, which currently reads:
+      ```
+      * Filters live in the URL so a view can be linked to. `replaceState` rather
+      * than `goto`: changing a filter is not a place in history to go back to, and
+      * a dozen entries per session makes the browser's back button useless.
+      ```
+      This is the exact rationale the fix overturns — left as-is, it flatly contradicts the code
+      right below it and is the comment most likely to mislead a future editor into reverting to
+      bare `replaceState`. Replace it with something that states the corrected fact: filters live
+      in the URL so a view can be linked to, and `goto(..., { replaceState: true })` (not bare
+      `replaceState` from `$app/navigation`, which never updates the reactive `page.url` this page's
+      filters read) is what applies a filter without adding a history entry per change.
 - [ ] Replace the body of `setFilter` (around line 105-110):
       ```js
       function setFilter(key: string, value: string | undefined) {
         const url = new URL(page.url);
         if (value === undefined || value === '') url.searchParams.delete(key);
         else url.searchParams.set(key, value);
+        // `page.state` is intentionally not passed through: this page never calls
+        // `pushState` or otherwise sets custom page state, so there is nothing to carry.
         void goto(url, { replaceState: true, keepFocus: true, noScroll: true });
       }
       ```
@@ -81,17 +95,15 @@ same module). Produces no new interface — internal event-handler behavior only
 - [ ] Replace the "Clear filters" button's `onclick` (around line 190-195):
       ```svelte
       onclick={() =>
-        goto(new URL(page.url.pathname, location.origin), {
+        void goto(new URL(page.url.pathname, location.origin), {
           replaceState: true,
           keepFocus: true,
           noScroll: true
         })}
       ```
-- [ ] Add a short comment above `setFilter` naming the failure mode explicitly, so a future edit
-      that reaches for `replaceState` again sees the warning inline (per the spec's Risks section):
-      a one-line comment stating that `replaceState` from `$app/navigation` does not update the
-      reactive `page.url` this page's filters depend on, and that `goto(..., { replaceState: true
-      })` is required instead.
+      (Same `void` prefix as `setFilter`, for consistency between the two call sites this task
+      touches — the codebase uses both `await goto(...)` and `void goto(...)` elsewhere, so either
+      is acceptable, but the two sites in this file should match each other.)
 - [ ] Repeat the manual browser check from the first step (Status, then Repo, then "only what I
       queued", then "Clear filters") against the same seeded data. Confirm each change narrows or
       restores the table immediately with no reload, and that repeated filter changes do not grow
