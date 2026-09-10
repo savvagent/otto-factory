@@ -10,12 +10,18 @@ This plan implements it exactly.
 
 ## Status — 2026-09-10
 
-Task 1 implemented and locally green (migration + test written, `cargo test -p of-core --test
-isolation` and `--test queue` pass, `cargo clippy --all-targets -- -D warnings` and `cargo fmt
---all` clean). Not yet through the spec-compliance review, code-quality review, or PR (Phase 3
-steps C/E and Phase 4 of otto-factory-development, run from the parent session rather than this
-plan document). PR will reference `savvagent/otto-factory#119` directly (`Closes #119`) — no
-separate tracker-transition step needed on the GitHub-issue path beyond what the ship phase does.
+Task 1 implemented, reviewed, and corrected. PR #135 opened, `Closes #119`. The mandatory review
+trio (Phase 4 step 8) found a **Critical** bug in the original design before merge:
+`security-auditor`, `architect-reviewer`, and `pr-review-toolkit:code-reviewer` independently
+flagged that the `resource NOT LIKE 'branch:%'` guard would silently rewrite every live
+non-branch lease (`deploy:staging`, a migration lock, etc.) in every org, since `resource` has
+been free-form — not branch-only — since 0027 itself shipped. Fixed by rebinding the migration's
+predicate to provenance (`acquired_at` before `0027`'s `installed_on`) instead of value shape;
+see the spec's Risks & Open Questions for the full history. Re-verified green after the fix:
+`cargo test -p of-core --test isolation` (30 passed, including a test that now also asserts a
+post-0027 `deploy:staging` row stays untouched) and `--test queue` (65 passed), `cargo clippy
+--all-targets -- -D warnings`, `cargo fmt --all --check`. Awaiting the trio's re-review of the
+fix before merge.
 
 ## Global Constraints
 
@@ -55,25 +61,25 @@ the deployment shape where it matters."
 `Db::begin_unpinned`/`Db::begin` helpers already used by the neighboring `rls_scopes_*` tests.
 Produces: no new interface — this is a migration + test only.
 
-- [x] Write the failing test first: add `rls_scopes_the_lease_resource_backfills_per_org_loop` to
+- [x] Write `rls_scopes_the_lease_resource_backfills_per_org_loop` in
       `crates/of-core/tests/isolation.rs`, placed immediately after
       `rls_scopes_a_migration_style_update_with_no_org_context` (before the "guard on the guard"
-      section comment). Seed a `repo_leases` row directly on the pool with an unprefixed
-      `resource = 'main'` (via `tenant(&db, ...)` for the org/repo/user, then a bound `INSERT`),
-      open `db.begin_unpinned()`, `SET LOCAL ROLE of_app`, run 0030's own `DO $$ ... $$` statement
-      verbatim, commit, then read the row back through `db.begin(a.org)` and assert
-      `resource == "branch:main"`.
-- [x] Run `cargo test -p of-core --test isolation rls_scopes_the_lease_resource_backfills_per_org_loop`
-      and confirm it FAILS (the migration file does not exist yet, so 0030 has not created the
-      target state — actually: since the test invokes the SQL inline rather than relying on the
-      migration having run, confirm instead that it fails for the *right* reason before the
-      migration file exists: it should still pass once the inline SQL is correct, since the test
-      exercises the statement directly, not the migration file. If it already passes at this point,
-      note that in the report — the true regression check is the negative test beside it staying
-      green, not this one being red first, since there is no application code this test is
-      characterizing behavior *before* rather than *after* writing.)
-- [x] Write `crates/of-core/migrations/0030_lease_resource_backfill.sql` exactly as specified in
-      the spec's §1 (the `DO $$ ... $$` block with the `resource NOT LIKE 'branch:%'` guard).
+      section comment). Seed two `repo_leases` rows directly on the pool (via `tenant(&db, ...)`
+      for the org/repo/user, then bound `INSERT`s): an unprefixed `resource = 'main'` with
+      `acquired_at` backdated to before `_sqlx_migrations`'s `installed_on` for version 27
+      (a genuinely pre-0027 row), and an unprefixed `resource = 'deploy:staging'` with a normal
+      `acquired_at` (a legitimate post-0027 free-form lease). Open `db.begin_unpinned()`, `SET
+      LOCAL ROLE of_app`, run 0030's migration file via
+      `include_str!("../migrations/0030_lease_resource_backfill.sql")` (not a copied string, so
+      the test can't drift from what ships), commit, then read both rows back through
+      `db.begin(a.org)` and assert the first is now `branch:main` while the second is still
+      `deploy:staging` unchanged.
+- [x] Write `crates/of-core/migrations/0030_lease_resource_backfill.sql` per the spec's §1: the
+      `DO $$ ... $$` block bounded by `resource NOT LIKE 'branch:%' AND acquired_at < cutoff`,
+      where `cutoff` is `_sqlx_migrations.installed_on` for version 27 — **not** a shape-only
+      guard. (The original shape-only guard shipped in this same PR, was caught as Critical by
+      the mandatory review trio, and was corrected to this provenance-bounded form before merge
+      — see the spec's Risks & Open Questions.)
 - [x] Run `cargo test -p of-core --test isolation` (the full suite) and confirm all tests pass,
       including the new one and the existing `rls_scopes_a_migration_style_update_with_no_org_context`
       (unaffected — different table, different statement).
