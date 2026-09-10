@@ -203,10 +203,20 @@ pub const MEMBER_PASSKEYS_RESET: &str = "org.member.passkeys_reset";
 `reset_member_passkeys`'s write changes to `Entry::new(action::MEMBER_PASSKEYS_RESET)`, with its
 `.actor(...)` / `.target(...)` chain unchanged. This write already uses `tx.audit(...).await?` — it
 propagates its error, not best-effort — so §2 does not apply to it: it fails the request (500) if
-the audit write fails, which is existing behavior this spec does not change. That asymmetry is
-correct as-is: this write is inside the same pinned transaction as the claim-code creation, so a
-failed audit write here means the whole admin action rolls back together, exactly what `Tx::audit`'s
-doc comment promises ("an action and its record commit or abort together").
+the audit write fails, which is existing behavior this spec does not change.
+
+**Correction: this write is not inside the same transaction as the claim code, contrary to an
+earlier draft of this section.** `create_account_claim` (`crates/of-core/src/invites.rs`) commits
+its own transaction before `let mut tx = state.db.begin(ctx.org.id)` is even opened for the audit
+write — by the time this `tx.audit(...)` call runs, `passkeys::clear`, `sessions::revoke_all`, and
+the claim-code insert have already committed. A failure here rolls back only this write's own
+(otherwise-empty) transaction, and the request answers 500 after those side effects already
+happened. This is pre-existing structure — this spec's diff only changes the literal action string
+bound in an `.await?` call that was already error-propagating, so no runtime behavior changes here
+— but the justification for the asymmetry is narrower than the earlier draft claimed: it is simply
+that this write already propagates its error and this spec has no reason to change that, not that
+the write is atomic with anything else. Filing the actual non-atomicity as a separate concern is
+out of scope for this rename.
 
 ## §2 Stop discarding the two audit writes
 

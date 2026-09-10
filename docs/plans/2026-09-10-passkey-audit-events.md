@@ -9,9 +9,9 @@ can hit it, with no change to what either path returns.
 
 ## Status — 2026-09-10
 
-🚧 In progress. Task 1 done (landed as `5670bdd`, verified against the spec below and re-checked
-with `cargo check -p of-auth -p of-core` — compiles clean). Task 2 (the `of-web` third call site,
-found during plan review, not in the original issue) not started.
+✅ Both tasks landed and reviewed. Task 1: `5670bdd`. Task 2: `6e0d2ff`. Full workspace
+`cargo test`, `cargo clippy --all-targets -- -D warnings`, and `cargo fmt --all --check` all green
+on the branch as a whole.
 
 **Spec:** `docs/specs/2026-09-10-passkey-audit-events-design.md` — read it first. This plan
 implements it exactly. Closes `savvagent/otto-factory#76`.
@@ -292,7 +292,7 @@ pre-existing, unchanged signatures). Produces two new `pub const` action strings
 
 ## Task 2 — The admin-assisted reset's own org-scoped event
 
-⬜
+✅ Landed as `6e0d2ff` — `of-web: name the admin-assisted passkey reset's own audit event`.
 
 **Files:** `crates/of-core/src/audit.rs` (if not already amended by Task 1's implementer; add the
 constant if missing), `crates/of-web/src/routes/orgs.rs`, `crates/of-web/tests/console.rs`
