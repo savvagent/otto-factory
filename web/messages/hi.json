@@ -297,6 +297,7 @@
   "job_field_started": "प्रारंभ",
   "job_field_finished": "समाप्त",
   "job_field_attempts": "प्रयास",
+  "job_cancellation_requested": "रद्द करने का अनुरोध",
   "job_agent_type_any": "कोई भी",
   "job_waiting_on_title": "प्रतीक्षा में",
   "job_waiting_on_description": "जब तक ये सभी पूर्ण नहीं हो जाते, यह कार्य लिया नहीं जा सकता।",

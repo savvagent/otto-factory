@@ -286,6 +286,9 @@ export interface Job {
   createdBy: string | null;
   claimedBy: string | null;
   claimedByLabel: string | null;
+  cancelRequestedAt: string | null;
+  cancelRequestedBy: string | null;
+  cancelReason: string | null;
 }
 
 export interface JobDetail extends Job {

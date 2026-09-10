@@ -301,6 +301,7 @@
   "job_field_started": "Avviato",
   "job_field_finished": "Terminato",
   "job_field_attempts": "Tentativi",
+  "job_cancellation_requested": "Annullamento richiesto",
   "job_agent_type_any": "qualsiasi",
   "job_waiting_on_title": "In attesa di",
   "job_waiting_on_description": "Questo processo non può essere preso in carico finché tutti questi non sono completati.",

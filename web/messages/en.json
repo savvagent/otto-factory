@@ -297,6 +297,7 @@
   "job_field_started": "Started",
   "job_field_finished": "Finished",
   "job_field_attempts": "Attempts",
+  "job_cancellation_requested": "Cancellation requested",
   "job_agent_type_any": "any",
   "job_waiting_on_title": "Waiting on",
   "job_waiting_on_description": "This job cannot be claimed until all of these are completed.",

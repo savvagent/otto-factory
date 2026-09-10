@@ -297,6 +297,7 @@
   "job_field_started": "Gestartet",
   "job_field_finished": "Beendet",
   "job_field_attempts": "Versuche",
+  "job_cancellation_requested": "Abbruch angefordert",
   "job_agent_type_any": "beliebig",
   "job_waiting_on_title": "Wartet auf",
   "job_waiting_on_description": "Dieser Auftrag kann erst übernommen werden, wenn alle davon abgeschlossen sind.",
