@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.3.1](https://github.com/savvagent/otto-factory/compare/v0.3.0...v0.3.1) (2026-09-10)
+
+
+### Bug Fixes
+
+* **of-auth:** make finish_registration's credential insert and audit write atomic ([#131](https://github.com/savvagent/otto-factory/issues/131)) ([692e795](https://github.com/savvagent/otto-factory/commit/692e795bc259b2d09ad64ee374b843088934490e))
+* **of-core:** repeat lease-resource backfill using the documented per-org-loop pattern ([#135](https://github.com/savvagent/otto-factory/issues/135)) ([f85f086](https://github.com/savvagent/otto-factory/commit/f85f0861b1f2f969465042b48974ce375d5aaa9c))
+* **of-core:** return a retriable RaceLost error when a unique-violation race is lost with no winner ([#138](https://github.com/savvagent/otto-factory/issues/138)) ([a86a807](https://github.com/savvagent/otto-factory/commit/a86a8079aa44a7452df2c881d36d7af37a6f842f))
+
 ## [0.3.0](https://github.com/savvagent/otto-factory/compare/v0.2.0...v0.3.0) (2026-09-10)
 
 
