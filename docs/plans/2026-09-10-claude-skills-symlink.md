@@ -21,8 +21,7 @@ than "usable by any coding-agent tool" and the honest one.) Implements savvagent
 
 ## Status — 2026-09-10
 
-🚧 Implemented, PR open: savvagent/otto-factory#124 (closes #123). Flip to ✅ Shipped with the
-merge commit SHA once merged (record-as-shipped).
+✅ Shipped in savvagent/otto-factory#124 (merged as `bb8c138`), closing #123.
 
 **Merge-conflict note:** while this PR was in review, an unrelated PR (savvagent/otto-factory#79,
 job `agent_type` filtering) independently merged its own `.claude/skills/otto-factory-development`
