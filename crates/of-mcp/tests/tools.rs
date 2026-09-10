@@ -1162,7 +1162,8 @@ async fn a_held_lease_names_its_holder_to_the_next_agent(pool: PgPool) {
         .acquire_lease(
             Extension(parts(&first)),
             Parameters(tools::coord::AcquireLeaseArgs {
-                branch: "main".into(),
+                resource: None,
+                branch: Some("main".into()),
                 repo: Some("api".into()),
                 remote: None,
                 agent: Some("agent-one".into()),
@@ -1174,7 +1175,8 @@ async fn a_held_lease_names_its_holder_to_the_next_agent(pool: PgPool) {
 
     let mate = env.teammate(first.org_id, "sam@acme.test").await;
     let take = || tools::coord::AcquireLeaseArgs {
-        branch: "main".into(),
+        resource: None,
+        branch: Some("main".into()),
         repo: Some("api".into()),
         remote: None,
         agent: Some("agent-two".into()),
@@ -1206,7 +1208,7 @@ async fn a_held_lease_names_its_holder_to_the_next_agent(pool: PgPool) {
         .acquire_lease(
             Extension(parts(&mate)),
             Parameters(tools::coord::AcquireLeaseArgs {
-                branch: "feature/x".into(),
+                branch: Some("feature/x".into()),
                 ..take()
             }),
         )
@@ -1238,6 +1240,111 @@ async fn a_held_lease_names_its_holder_to_the_next_agent(pool: PgPool) {
         live["leases"].as_array().unwrap().len(),
         2,
         "both of sam's leases"
+    );
+}
+
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn acquire_lease_accepts_a_free_form_resource(pool: PgPool) {
+    let (env, first) = env(pool).await;
+    env.register(&first).await;
+
+    let lease = ok(env
+        .factory
+        .acquire_lease(
+            Extension(parts(&first)),
+            Parameters(tools::coord::AcquireLeaseArgs {
+                resource: Some("deploy:staging".into()),
+                branch: None,
+                repo: Some("api".into()),
+                remote: None,
+                agent: Some("agent-one".into()),
+                job: None,
+                ttl_seconds: None,
+            }),
+        )
+        .await);
+
+    assert_eq!(lease["lease"]["resource"], "deploy:staging");
+}
+
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn acquire_lease_branch_alias_prefixes_and_still_works(pool: PgPool) {
+    let (env, first) = env(pool).await;
+    env.register(&first).await;
+
+    let lease = ok(env
+        .factory
+        .acquire_lease(
+            Extension(parts(&first)),
+            Parameters(tools::coord::AcquireLeaseArgs {
+                resource: None,
+                branch: Some("main".into()),
+                repo: Some("api".into()),
+                remote: None,
+                agent: Some("agent-one".into()),
+                job: None,
+                ttl_seconds: None,
+            }),
+        )
+        .await);
+
+    assert_eq!(lease["lease"]["resource"], "branch:main");
+}
+
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn acquire_lease_rejects_an_empty_branch_alias(pool: PgPool) {
+    let (env, first) = env(pool).await;
+    env.register(&first).await;
+
+    let e = err(env
+        .factory
+        .acquire_lease(
+            Extension(parts(&first)),
+            Parameters(tools::coord::AcquireLeaseArgs {
+                resource: None,
+                branch: Some("   ".into()),
+                repo: Some("api".into()),
+                remote: None,
+                agent: Some("agent-one".into()),
+                job: None,
+                ttl_seconds: None,
+            }),
+        )
+        .await);
+
+    assert_eq!(
+        e.code,
+        rmcp::model::ErrorCode::INVALID_PARAMS,
+        "an empty branch must not become the lease \"branch:\""
+    );
+}
+
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn acquire_lease_needs_resource_or_branch(pool: PgPool) {
+    let (env, first) = env(pool).await;
+    env.register(&first).await;
+
+    let e = err(env
+        .factory
+        .acquire_lease(
+            Extension(parts(&first)),
+            Parameters(tools::coord::AcquireLeaseArgs {
+                resource: None,
+                branch: None,
+                repo: Some("api".into()),
+                remote: None,
+                agent: Some("agent-one".into()),
+                job: None,
+                ttl_seconds: None,
+            }),
+        )
+        .await);
+
+    assert_eq!(e.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    assert!(
+        e.message.contains("resource"),
+        "the error should name the missing field: {}",
+        e.message
     );
 }
 
