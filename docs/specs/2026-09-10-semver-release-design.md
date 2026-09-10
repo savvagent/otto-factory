@@ -9,15 +9,18 @@
 > added to `release-please-config.json` so the first changelog doesn't backfill this repo's
 > pre-convention history. See savvagent/otto-factory#114 for the full review discussion.
 >
-> **Not yet exercised live, as of this record.** `rust`/`web`/`docker-build`/`pr-title` all ran
-> green on `670860e`'s own merge, and the MCP identity fix and OpenAPI regression test are
-> covered by that run — but `release-please` itself has not run to completion yet (both `#114`
-> and this record are non-bumping `ci:`/`docs:` commits, so the first release PR only appears on
-> the next `feat`/`fix`/`perf`/breaking merge), and its first attempt depends on the repo setting
-> "Allow GitHub Actions to create and approve pull requests" being enabled — flagged in #114,
-> unverified from any diff. Three lower-priority CI-hardening findings #114 left unfixed
-> (job timeouts, `deploy`'s remaining unpinned checkout step, the repo's PR-self-approval
-> setting) are tracked in savvagent/otto-factory#117.
+> **Not yet exercised live, as of this record.** `pr-title` ran green on savvagent/otto-factory#114
+> itself (it only runs on `pull_request` events, not on the merge push); `rust`/`web`/`docker-build`
+> ran green on `670860e`'s merge push, covering the MCP identity fix and the OpenAPI regression
+> test. `release-please` has run on that push too (it's `needs: [rust, web, docker-build]`, all
+> three passed) — but it has not yet *created a release PR or cut a release*, since both
+> savvagent/otto-factory#114 and this record are non-bumping `ci:`/`docs:` commits; the first
+> release PR only appears on the next `feat`/`fix`/`perf`/breaking merge. Its first attempt to open
+> a PR at all still depends on the repo setting "Allow GitHub Actions to create and approve pull
+> requests" being enabled — flagged in savvagent/otto-factory#114, unverified from any diff. Three
+> lower-priority CI-hardening findings savvagent/otto-factory#114 left unfixed (job timeouts,
+> `deploy`'s remaining unpinned checkout step, the repo's PR-self-approval setting) are tracked in
+> savvagent/otto-factory#117.
 
 ## Goal & Success Criteria
 

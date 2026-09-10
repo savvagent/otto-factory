@@ -16,8 +16,8 @@ savvagent/otto-factory#84.
 ✅ Shipped. All five tasks landed in savvagent/otto-factory#114 (merged as `670860e`), closing
 savvagent/otto-factory#84, with additional hardening from the mandatory review trio and an
 independent re-verification round folded in before merge (see the spec's Status block for what
-changed post-review, and for what's not yet exercised live — `release-please` itself hasn't run
-to completion as of this record).
+changed post-review, and for what's not yet exercised live — `release-please` has run
+successfully but hasn't yet created a release PR or cut a release, as of this record).
 
 ## Global Constraints
 
