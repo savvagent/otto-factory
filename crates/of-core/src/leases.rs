@@ -19,7 +19,7 @@ use sqlx::FromRow;
 
 /// Default lease lifetime. Long enough that a working agent renewing on a normal
 /// cadence never loses its lease mid-task, short enough that a crashed agent
-/// frees the branch while a human is still in the room.
+/// frees the resource while a human is still in the room.
 pub const DEFAULT_TTL_SECS: i64 = 900;
 
 /// Upper bound on a client-requested TTL. Without a cap, one buggy agent could
