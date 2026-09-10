@@ -41,8 +41,12 @@ pub enum Error {
         expected: String,
     },
 
-    #[error("job {job} was claimed by someone else")]
-    AlreadyClaimed { job: JobId },
+    #[error(
+        "job {job} is currently claimed by {holder}, not you — your claim likely expired \
+         and was taken over. Call get_job to see its current state, or claim_jobs if it \
+         becomes available again; do not retry this call as-is."
+    )]
+    AlreadyClaimed { job: JobId, holder: String },
 
     #[error(
         "ticket {ticket_ref} is already linked to job {job} — unlink it there first, \
@@ -170,11 +174,19 @@ impl Error {
     /// Whether retrying the identical call could plausibly succeed. `LeaseHeld`
     /// is retriable (the lease expires); `DependencyCycle` is not (the request
     /// is wrong). Agents use this to decide between backing off and rethinking.
+    ///
+    /// `AlreadyClaimed` is **not** retriable, unlike `LeaseHeld`, even though
+    /// both describe "someone else has this right now": a lease's holder can
+    /// let it lapse without acting, so waiting and retrying the identical
+    /// `acquire_lease` call can succeed on its own. `AlreadyClaimed` today is
+    /// raised only by `ensure_claim_held` — a caller that is not (or is no
+    /// longer) a job's claim holder — and retrying `complete_job`/`fail_job`/
+    /// `cancel_job`/`renew_claim` with the same arguments can never succeed;
+    /// the only way forward is a different call (`claim_jobs`, or `get_job`
+    /// to see who holds it now). Telling an agent this is retriable would
+    /// have it busy-loop a call that is structurally doomed.
     pub fn retriable(&self) -> bool {
-        matches!(
-            self,
-            Error::LeaseHeld { .. } | Error::AlreadyClaimed { .. } | Error::Db(_)
-        )
+        matches!(self, Error::LeaseHeld { .. } | Error::Db(_))
     }
 }
 

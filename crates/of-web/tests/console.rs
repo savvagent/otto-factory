@@ -882,6 +882,7 @@ async fn the_queue_view_lists_filters_and_counts(pool: PgPool) {
             std::slice::from_ref(&first.id),
             rob.user,
             Some("claude-code"),
+            None,
         )
         .await
         .unwrap();
@@ -978,9 +979,14 @@ async fn an_active_job_is_visible_in_the_queue_and_its_stats(pool: PgPool) {
     let job = enqueue(&h, acme, api, "activate then check", rob.user).await;
     {
         let mut tx = h.db.begin(acme).await.unwrap();
-        tx.claim_jobs(std::slice::from_ref(&job.id), rob.user, Some("agent-one"))
-            .await
-            .unwrap();
+        tx.claim_jobs(
+            std::slice::from_ref(&job.id),
+            rob.user,
+            Some("agent-one"),
+            None,
+        )
+        .await
+        .unwrap();
         tx.activate_job(&job.id).await.unwrap();
         tx.commit().await.unwrap();
     }

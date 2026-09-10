@@ -77,6 +77,35 @@ impl std::str::FromStr for Status {
     }
 }
 
+/// Default claim lifetime. Same value as `leases::DEFAULT_TTL_SECS`, and
+/// for the same reason: long enough that a working agent renewing on a
+/// normal cadence never loses its claim mid-task, short enough that a
+/// crashed agent's job becomes claimable again while a human is still in the
+/// room. Defined separately from the lease constant rather than imported —
+/// jobs and leases are different resources with independently tunable
+/// lifetimes that only happen to start at the same number today.
+pub const DEFAULT_CLAIM_TTL_SECS: i64 = 900;
+
+/// Lower bound on a client-requested claim TTL, mirroring
+/// `MAX_CLAIM_TTL_SECS`'s reasoning at the other end: without a floor, a
+/// value close to zero would make an ordinary round trip to the database
+/// race the claim's own expiry.
+pub const MIN_CLAIM_TTL_SECS: i64 = 60;
+
+/// Upper bound on a client-requested claim TTL, for the same reason
+/// `leases::MAX_TTL_SECS` caps leases: without one, a single
+/// `claim_jobs` call could take an effectively permanent claim that only
+/// `repend_job` could clear.
+pub const MAX_CLAIM_TTL_SECS: i64 = 4 * 3600;
+
+/// Shared by `claim_jobs` and `renew_claim` so the two never drift apart on
+/// what "an out-of-range TTL" means.
+fn clamp_claim_ttl(ttl_secs: Option<i64>) -> i64 {
+    ttl_secs
+        .unwrap_or(DEFAULT_CLAIM_TTL_SECS)
+        .clamp(MIN_CLAIM_TTL_SECS, MAX_CLAIM_TTL_SECS)
+}
+
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type, schemars::JsonSchema,
 )]
@@ -112,6 +141,16 @@ pub struct Job {
     pub created_by: Option<UserId>,
     pub claimed_by: Option<UserId>,
     pub claimed_by_label: Option<String>,
+    /// When the current claim lapses and the job becomes claimable again via
+    /// `ready()`/`claim_jobs`, the way an expired `repo_leases` row frees its
+    /// branch. `None` for a job that has never been claimed, or whose claim
+    /// was finalized (`complete_job`/`fail_job`/`cancel_job`/
+    /// `close_from_ticket`), reaped, or reset (`repend_job`) — every one of
+    /// those write paths clears this column, so only a live
+    /// `in-progress`/`active` claim ever has it set. A job in
+    /// `in-progress`/`active` with this timestamp in the past is *stranded*:
+    /// nobody is actually working it, but nothing has reclaimed it yet.
+    pub claim_expires_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Set by `request_cancel`. `None` means nobody has ever asked this job to
     /// stop. **Check `status` before acting on this**: it is only a live "stop,
     /// please" while `status` is `in-progress` or `active` — that is when you,
@@ -180,7 +219,7 @@ const JOB_COLS: &str = "id, org_id, repo_id, team_id, title, description, status
                         tracker, remote_revision, agent_type, metadata, created_at, started_at, \
                         completed_at, attempts, result, error, created_by, claimed_by, \
                         claimed_by_label, cancel_requested_at, cancel_requested_by, \
-                        cancel_reason";
+                        cancel_reason, claim_expires_at";
 
 /// Fingerprint the fields that define "the same `add_job` call" — see the
 /// `idempotency` module doc. Named-field destructure with no `..`: adding a
@@ -814,18 +853,27 @@ impl Tx<'_> {
         ids: &[JobId],
         claimer: UserId,
         label: Option<&str>,
+        ttl_secs: Option<i64>,
     ) -> Result<Vec<Job>> {
         if ids.is_empty() {
             return Err(Error::Invalid(
                 "claim_jobs needs at least one job id".into(),
             ));
         }
+        let ttl = clamp_claim_ttl(ttl_secs);
 
         let org = self.org();
         let mut sorted: Vec<String> = ids.iter().map(|i| i.0.clone()).collect();
         sorted.sort();
         sorted.dedup();
 
+        // Lock every requested row in sorted order *first* — this is the
+        // invariant this function already promised ("rows are locked in a
+        // deterministic order so two agents claiming overlapping batches
+        // cannot deadlock each other"), and the reap below must not acquire
+        // any lock this statement didn't already take, or two concurrent
+        // calls reaping overlapping stale batches could lock in opposite
+        // orders and deadlock.
         let locked: Vec<(String, Status)> = sqlx::query_as(
             "SELECT id, status FROM jobs WHERE org_id = $1 AND id = ANY($2) \
              ORDER BY id FOR UPDATE",
@@ -846,8 +894,34 @@ impl Tx<'_> {
             return Err(Error::JobNotFound(JobId(missing)));
         }
 
+        // Reap any of the *requested* jobs whose claim has lapsed, exactly the
+        // way acquire_lease reaps an expired lease on the specific branch
+        // being acquired before checking availability — scoped to these ids,
+        // not organization-wide, because there is no background sweeper: a
+        // stale claim on a job nobody is trying to (re)claim simply sits
+        // until someone does, and ready() already tells callers it is
+        // claimable in the meantime. Runs against rows the SELECT above
+        // already holds the lock on, so this acquires no *new* locks and
+        // cannot reorder anything. Clears the same fields repend_job clears
+        // for the same reason: a reap is an involuntary repend, and a stale
+        // cancellation request or note left behind would misattribute to
+        // whoever claims the job next.
+        let reaped: Vec<String> = sqlx::query_scalar(
+            "UPDATE jobs SET status = 'pending', claimed_by = NULL, \
+                    claimed_by_label = NULL, started_at = NULL, claim_expires_at = NULL, \
+                    cancel_requested_at = NULL, cancel_requested_by = NULL, cancel_reason = NULL \
+             WHERE org_id = $1 AND id = ANY($2) AND status IN ('in-progress', 'active') \
+               AND claim_expires_at <= now() \
+             RETURNING id",
+        )
+        .bind(org)
+        .bind(&sorted)
+        .fetch_all(self.conn())
+        .await?;
+        let reaped: std::collections::HashSet<&str> = reaped.iter().map(String::as_str).collect();
+
         for (id, status) in &locked {
-            if *status != Status::Pending {
+            if *status != Status::Pending && !reaped.contains(id.as_str()) {
                 return Err(Error::WrongStatus {
                     job: JobId(id.clone()),
                     actual: status.as_str().to_string(),
@@ -877,13 +951,15 @@ impl Tx<'_> {
 
         let jobs: Vec<Job> = sqlx::query_as(&format!(
             "UPDATE jobs SET status = 'in-progress', started_at = now(), \
-                    attempts = attempts + 1, claimed_by = $3, claimed_by_label = $4 \
+                    attempts = attempts + 1, claimed_by = $3, claimed_by_label = $4, \
+                    claim_expires_at = now() + make_interval(secs => $5) \
              WHERE org_id = $1 AND id = ANY($2) RETURNING {JOB_COLS}"
         ))
         .bind(org)
         .bind(&sorted)
         .bind(claimer)
         .bind(label)
+        .bind(ttl as f64)
         .fetch_all(self.conn())
         .await?;
 
@@ -891,13 +967,24 @@ impl Tx<'_> {
     }
 
     /// Mark an in-progress (or active) job completed.
-    pub async fn complete_job(&mut self, id: &JobId, result: Option<&str>) -> Result<Job> {
-        self.finalize(id, Status::Completed, result, None).await
+    pub async fn complete_job(
+        &mut self,
+        id: &JobId,
+        caller: UserId,
+        result: Option<&str>,
+    ) -> Result<Job> {
+        self.finalize(id, caller, Status::Completed, result, None)
+            .await
     }
 
     /// Mark an in-progress (or active) job failed.
-    pub async fn fail_job(&mut self, id: &JobId, error: Option<&str>) -> Result<Job> {
-        self.finalize(id, Status::Failed, None, error).await
+    pub async fn fail_job(
+        &mut self,
+        id: &JobId,
+        caller: UserId,
+        error: Option<&str>,
+    ) -> Result<Job> {
+        self.finalize(id, caller, Status::Failed, None, error).await
     }
 
     /// Confirm a claimed job is being actively worked on, not merely claimed.
@@ -935,32 +1022,60 @@ impl Tx<'_> {
         Ok(job)
     }
 
+    /// Lock the job row, confirm it is claimed (`in-progress` or `active`), and
+    /// confirm `caller` is the one who holds it. Shared by `finalize` and
+    /// `renew_claim` — both need the identical fencing check.
+    async fn ensure_claim_held(&mut self, id: &JobId, caller: UserId) -> Result<()> {
+        let org = self.org();
+        let row: Option<(Status, Option<UserId>, Option<String>)> = sqlx::query_as(
+            "SELECT status, claimed_by, claimed_by_label FROM jobs \
+             WHERE org_id = $1 AND id = $2 FOR UPDATE",
+        )
+        .bind(org)
+        .bind(id)
+        .fetch_optional(self.conn())
+        .await?;
+        let (status, claimed_by, claimed_by_label) =
+            row.ok_or_else(|| Error::JobNotFound(id.clone()))?;
+
+        if !matches!(status, Status::InProgress | Status::Active) {
+            return Err(Error::WrongStatus {
+                job: id.clone(),
+                actual: status.as_str().to_string(),
+                expected: "in-progress or active".into(),
+            });
+        }
+        if claimed_by != Some(caller) {
+            return Err(Error::AlreadyClaimed {
+                job: id.clone(),
+                // The `unwrap_or_else` arm is unreachable in practice: the
+                // only path to `InProgress`/`Active` is `claim_jobs`, which
+                // always sets `claimed_by`. It is worded as a data-
+                // inconsistency report rather than a plausible-sounding
+                // "claimed by nobody" so that if this invariant is ever
+                // broken by a future change, the resulting error is legible
+                // as a bug report rather than a normal business state.
+                holder: claimed_by_label
+                    .or_else(|| claimed_by.map(|u| u.to_string()))
+                    .unwrap_or_else(|| "no recorded holder (data inconsistency)".into()),
+            });
+        }
+        Ok(())
+    }
+
     async fn finalize(
         &mut self,
         id: &JobId,
+        caller: UserId,
         to: Status,
         result: Option<&str>,
         error: Option<&str>,
     ) -> Result<Job> {
+        self.ensure_claim_held(id, caller).await?;
         let org = self.org();
-        let current: Option<Status> =
-            sqlx::query_scalar("SELECT status FROM jobs WHERE org_id = $1 AND id = $2 FOR UPDATE")
-                .bind(org)
-                .bind(id)
-                .fetch_optional(self.conn())
-                .await?;
-
-        let current = current.ok_or_else(|| Error::JobNotFound(id.clone()))?;
-        if !matches!(current, Status::InProgress | Status::Active) {
-            return Err(Error::WrongStatus {
-                job: id.clone(),
-                actual: current.as_str().to_string(),
-                expected: "in-progress or active".into(),
-            });
-        }
-
         let job = sqlx::query_as(&format!(
-            "UPDATE jobs SET status = $3, completed_at = now(), result = $4, error = $5 \
+            "UPDATE jobs SET status = $3, completed_at = now(), result = $4, error = $5, \
+                    claim_expires_at = NULL \
              WHERE org_id = $1 AND id = $2 RETURNING {JOB_COLS}"
         ))
         .bind(org)
@@ -968,6 +1083,31 @@ impl Tx<'_> {
         .bind(to)
         .bind(result)
         .bind(error)
+        .fetch_one(self.conn())
+        .await?;
+
+        Ok(job)
+    }
+
+    /// Push a held claim's expiry forward without completing or failing the
+    /// job — the direct analog of `renew_lease`. Only the current holder may
+    /// renew, via the same `ensure_claim_held` check `finalize` uses.
+    pub async fn renew_claim(
+        &mut self,
+        id: &JobId,
+        caller: UserId,
+        ttl_secs: Option<i64>,
+    ) -> Result<Job> {
+        self.ensure_claim_held(id, caller).await?;
+        let ttl = clamp_claim_ttl(ttl_secs);
+        let org = self.org();
+        let job = sqlx::query_as(&format!(
+            "UPDATE jobs SET claim_expires_at = now() + make_interval(secs => $3) \
+             WHERE org_id = $1 AND id = $2 RETURNING {JOB_COLS}"
+        ))
+        .bind(org)
+        .bind(id)
+        .bind(ttl as f64)
         .fetch_one(self.conn())
         .await?;
 
@@ -1043,26 +1183,27 @@ impl Tx<'_> {
     /// Refuses a job with no cancellation request on file: a holder stopping
     /// for its own reasons, unrelated to a request, should call `fail_job`
     /// instead — the distinction is what lets an observer tell "asked to stop
-    /// and did" apart from "gave up on its own".
-    pub async fn cancel_job(&mut self, id: &JobId, note: Option<&str>) -> Result<Job> {
+    /// and did" apart from "gave up on its own". Also refuses a caller that
+    /// does not currently hold the claim, via the same `ensure_claim_held`
+    /// check `complete_job`/`fail_job` use: this finalizes a job exactly like
+    /// they do, and a stale holder confirming a stop on a job someone else
+    /// has since reclaimed would corrupt that reclaimer's work the same way
+    /// an unchecked `complete_job` would.
+    pub async fn cancel_job(
+        &mut self,
+        id: &JobId,
+        caller: UserId,
+        note: Option<&str>,
+    ) -> Result<Job> {
+        self.ensure_claim_held(id, caller).await?;
         let org = self.org();
-        let row: Option<(Status, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(
-            "SELECT status, cancel_requested_at FROM jobs \
-             WHERE org_id = $1 AND id = $2 FOR UPDATE",
+        let cancel_requested_at: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+            "SELECT cancel_requested_at FROM jobs WHERE org_id = $1 AND id = $2",
         )
         .bind(org)
         .bind(id)
-        .fetch_optional(self.conn())
+        .fetch_one(self.conn())
         .await?;
-
-        let (current, cancel_requested_at) = row.ok_or_else(|| Error::JobNotFound(id.clone()))?;
-        if !matches!(current, Status::InProgress | Status::Active) {
-            return Err(Error::WrongStatus {
-                job: id.clone(),
-                actual: current.as_str().to_string(),
-                expected: "in-progress or active".into(),
-            });
-        }
         if cancel_requested_at.is_none() {
             return Err(Error::Invalid(format!(
                 "job {id} has no cancellation request on file — call fail_job if you are \
@@ -1071,7 +1212,8 @@ impl Tx<'_> {
         }
 
         let job = sqlx::query_as(&format!(
-            "UPDATE jobs SET status = 'cancelled', completed_at = now(), error = $3 \
+            "UPDATE jobs SET status = 'cancelled', completed_at = now(), error = $3, \
+                    claim_expires_at = NULL \
              WHERE org_id = $1 AND id = $2 RETURNING {JOB_COLS}"
         ))
         .bind(org)
@@ -1123,9 +1265,15 @@ impl Tx<'_> {
         // follow-up `set_remote_revision` call, so a ticket close and its
         // revision stamp can never drift apart into two partially-applied
         // writes.
+        // No claimer check here, unlike finalize: this is driven by an
+        // inbound tracker webhook, not an MCP caller, so there is no
+        // `UserId` to check against — a human closing the linked ticket is
+        // not "someone claiming to be the holder", it's a separate,
+        // trusted-by-construction signal. `claim_expires_at` is still
+        // cleared for the same hygiene reason `finalize`/`cancel_job` do.
         let job = sqlx::query_as(&format!(
             "UPDATE jobs SET status = $3, completed_at = now(), result = $4, error = $5, \
-                    remote_revision = COALESCE($6, remote_revision) \
+                    remote_revision = COALESCE($6, remote_revision), claim_expires_at = NULL \
              WHERE org_id = $1 AND id = $2 RETURNING {JOB_COLS}"
         ))
         .bind(org)
@@ -1163,6 +1311,7 @@ impl Tx<'_> {
         let job = sqlx::query_as(&format!(
             "UPDATE jobs SET status = 'pending', started_at = NULL, completed_at = NULL, \
                     result = NULL, error = NULL, claimed_by = NULL, claimed_by_label = NULL, \
+                    claim_expires_at = NULL, \
                     cancel_requested_at = NULL, cancel_requested_by = NULL, cancel_reason = NULL \
              WHERE org_id = $1 AND id = $2 RETURNING {JOB_COLS}"
         ))
@@ -1342,11 +1491,16 @@ impl Tx<'_> {
     }
 
     /// Pending jobs whose dependencies are all completed — i.e. claimable now.
+    /// Also includes a job stuck `in-progress`/`active` whose claim has
+    /// lapsed: nobody is actually working it, and there is no background
+    /// sweeper to reap it proactively, so `ready()` itself has to say so.
     pub async fn ready(&mut self, repo_id: Option<RepoId>) -> Result<Vec<Job>> {
         let org = self.org();
         let jobs = sqlx::query_as(&format!(
             "SELECT {JOB_COLS} FROM jobs j \
-             WHERE j.org_id = $1 AND j.status = 'pending' \
+             WHERE j.org_id = $1 \
+               AND (j.status = 'pending' \
+                    OR (j.status IN ('in-progress', 'active') AND j.claim_expires_at <= now())) \
                AND ($2::uuid IS NULL OR j.repo_id = $2) \
                AND NOT EXISTS ( \
                  SELECT 1 FROM job_dependencies d \

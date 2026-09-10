@@ -3,10 +3,11 @@
 
 mod common;
 
-use common::{db, job, tenant};
+use common::{db, job, tenant, Tenant};
 use of_core::ids::JobId;
-use of_core::jobs::{JobFilter, Status};
+use of_core::jobs::{JobFilter, Status, DEFAULT_CLAIM_TTL_SECS, MAX_CLAIM_TTL_SECS};
 use of_core::messages::{InboxQuery, NewMessage};
+use of_core::orgs::Role;
 use of_core::repos::{NewRepo, RepoPatch, RepoRef};
 use sqlx::PgPool;
 
@@ -47,6 +48,7 @@ async fn lifecycle_pending_to_completed(pool: PgPool) {
             std::slice::from_ref(&j.id),
             t.user,
             Some("claude-code@laptop"),
+            None,
         )
         .await
         .unwrap();
@@ -57,7 +59,10 @@ async fn lifecycle_pending_to_completed(pool: PgPool) {
         Some("claude-code@laptop")
     );
 
-    let done = tx.complete_job(&j.id, Some("merged in #12")).await.unwrap();
+    let done = tx
+        .complete_job(&j.id, t.user, Some("merged in #12"))
+        .await
+        .unwrap();
     assert_eq!(done.status, Status::Completed);
     assert_eq!(done.result.as_deref(), Some("merged in #12"));
     assert!(done.completed_at.is_some());
@@ -71,7 +76,10 @@ async fn completing_an_unclaimed_job_is_refused(pool: PgPool) {
 
     let mut tx = db.begin(t.org).await.unwrap();
     let j = tx.add_job(job(&t, "not started")).await.unwrap();
-    let err = tx.complete_job(&j.id, Some("lying")).await.unwrap_err();
+    let err = tx
+        .complete_job(&j.id, t.user, Some("lying"))
+        .await
+        .unwrap_err();
     tx.rollback().await.unwrap();
     assert_eq!(err.code(), "wrong_status");
 }
@@ -83,21 +91,25 @@ async fn repend_preserves_attempts(pool: PgPool) {
 
     let mut tx = db.begin(t.org).await.unwrap();
     let j = tx.add_job(job(&t, "flaky")).await.unwrap();
-    tx.claim_jobs(std::slice::from_ref(&j.id), t.user, None)
+    tx.claim_jobs(std::slice::from_ref(&j.id), t.user, None, None)
         .await
         .unwrap();
-    tx.fail_job(&j.id, Some("CI red")).await.unwrap();
+    tx.fail_job(&j.id, t.user, Some("CI red")).await.unwrap();
 
     let again = tx.repend_job(&j.id).await.unwrap();
     assert_eq!(again.status, Status::Pending);
     assert_eq!(again.attempts, 1, "attempts must survive a repend");
     assert!(again.error.is_none());
     assert!(again.claimed_by.is_none());
+    assert!(
+        again.claim_expires_at.is_none(),
+        "a repended job must not carry its previous claim's expiry forward"
+    );
 
     // The second claim increments to 2, so a job that keeps coming back is
     // visible as such rather than looking fresh every time.
     let reclaimed = tx
-        .claim_jobs(std::slice::from_ref(&j.id), t.user, None)
+        .claim_jobs(std::slice::from_ref(&j.id), t.user, None, None)
         .await
         .unwrap();
     assert_eq!(reclaimed[0].attempts, 2);
@@ -118,7 +130,7 @@ async fn claim_is_all_or_nothing(pool: PgPool) {
 
     // Someone else takes `b` first.
     let mut tx = db.begin(t.org).await.unwrap();
-    tx.claim_jobs(std::slice::from_ref(&b.id), t.user, Some("other"))
+    tx.claim_jobs(std::slice::from_ref(&b.id), t.user, Some("other"), None)
         .await
         .unwrap();
     tx.commit().await.unwrap();
@@ -126,7 +138,7 @@ async fn claim_is_all_or_nothing(pool: PgPool) {
     // The batch containing it must fail entirely, leaving `a` claimable.
     let mut tx = db.begin(t.org).await.unwrap();
     let err = tx
-        .claim_jobs(&[a.id.clone(), b.id.clone()], t.user, Some("me"))
+        .claim_jobs(&[a.id.clone(), b.id.clone()], t.user, Some("me"), None)
         .await
         .unwrap_err();
     assert_eq!(err.code(), "wrong_status");
@@ -150,7 +162,7 @@ async fn claiming_a_missing_job_names_it(pool: PgPool) {
     let mut tx = db.begin(t.org).await.unwrap();
     let a = tx.add_job(job(&t, "a")).await.unwrap();
     let err = tx
-        .claim_jobs(&[a.id.clone(), JobId::from("job-999")], t.user, None)
+        .claim_jobs(&[a.id.clone(), JobId::from("job-999")], t.user, None, None)
         .await
         .unwrap_err();
     tx.rollback().await.unwrap();
@@ -197,7 +209,7 @@ async fn dependencies_gate_ready_and_claim(pool: PgPool) {
     // discarded.
     let mut tx = db.begin(t.org).await.unwrap();
     let err = tx
-        .claim_jobs(std::slice::from_ref(&second.id), t.user, None)
+        .claim_jobs(std::slice::from_ref(&second.id), t.user, None, None)
         .await
         .unwrap_err();
     assert_eq!(err.code(), "wrong_status");
@@ -205,10 +217,12 @@ async fn dependencies_gate_ready_and_claim(pool: PgPool) {
 
     // Once the dependency completes, the dependent becomes ready.
     let mut tx = db.begin(t.org).await.unwrap();
-    tx.claim_jobs(std::slice::from_ref(&first.id), t.user, None)
+    tx.claim_jobs(std::slice::from_ref(&first.id), t.user, None, None)
         .await
         .unwrap();
-    tx.complete_job(&first.id, Some("done")).await.unwrap();
+    tx.complete_job(&first.id, t.user, Some("done"))
+        .await
+        .unwrap();
     let ready: Vec<String> = tx
         .ready(None)
         .await
@@ -266,7 +280,7 @@ async fn stats_counts_blocked_separately(pool: PgPool) {
         .await
         .unwrap();
     let c = tx.add_job(job(&t, "c")).await.unwrap();
-    tx.claim_jobs(std::slice::from_ref(&c.id), t.user, None)
+    tx.claim_jobs(std::slice::from_ref(&c.id), t.user, None, None)
         .await
         .unwrap();
 
@@ -292,6 +306,7 @@ async fn stats_counts_active_separately_from_in_progress(pool: PgPool) {
         &[claimed_only.id.clone(), claimed_and_active.id.clone()],
         t.user,
         None,
+        None,
     )
     .await
     .unwrap();
@@ -312,7 +327,7 @@ async fn activating_a_claimed_job_moves_it_to_active(pool: PgPool) {
 
     let mut tx = db.begin(t.org).await.unwrap();
     let j = tx.add_job(job(&t, "ship it")).await.unwrap();
-    tx.claim_jobs(std::slice::from_ref(&j.id), t.user, None)
+    tx.claim_jobs(std::slice::from_ref(&j.id), t.user, None, None)
         .await
         .unwrap();
 
@@ -344,31 +359,37 @@ async fn completing_or_failing_an_active_job_still_works(pool: PgPool) {
     let mut tx = db.begin(t.org).await.unwrap();
 
     let will_complete = tx.add_job(job(&t, "will complete")).await.unwrap();
-    tx.claim_jobs(std::slice::from_ref(&will_complete.id), t.user, None)
+    tx.claim_jobs(std::slice::from_ref(&will_complete.id), t.user, None, None)
         .await
         .unwrap();
     tx.activate_job(&will_complete.id).await.unwrap();
     let completed = tx
-        .complete_job(&will_complete.id, Some("done"))
+        .complete_job(&will_complete.id, t.user, Some("done"))
         .await
         .unwrap();
     assert_eq!(completed.status, Status::Completed);
 
     let will_fail = tx.add_job(job(&t, "will fail")).await.unwrap();
-    tx.claim_jobs(std::slice::from_ref(&will_fail.id), t.user, None)
+    tx.claim_jobs(std::slice::from_ref(&will_fail.id), t.user, None, None)
         .await
         .unwrap();
     tx.activate_job(&will_fail.id).await.unwrap();
-    let failed = tx.fail_job(&will_fail.id, Some("nope")).await.unwrap();
+    let failed = tx
+        .fail_job(&will_fail.id, t.user, Some("nope"))
+        .await
+        .unwrap();
     assert_eq!(failed.status, Status::Failed);
 
     // The direct in-progress -> completed path (no activate_job call) is
     // unchanged — activation is optional, never a mandatory gate.
     let direct = tx.add_job(job(&t, "direct")).await.unwrap();
-    tx.claim_jobs(std::slice::from_ref(&direct.id), t.user, None)
+    tx.claim_jobs(std::slice::from_ref(&direct.id), t.user, None, None)
         .await
         .unwrap();
-    let direct_done = tx.complete_job(&direct.id, Some("done")).await.unwrap();
+    let direct_done = tx
+        .complete_job(&direct.id, t.user, Some("done"))
+        .await
+        .unwrap();
     assert_eq!(direct_done.status, Status::Completed);
 
     tx.commit().await.unwrap();
@@ -411,7 +432,7 @@ async fn request_cancel_on_in_progress_only_sets_the_flag(pool: PgPool) {
 
     let mut tx = db.begin(t.org).await.unwrap();
     let j = tx.add_job(job(&t, "long running")).await.unwrap();
-    tx.claim_jobs(std::slice::from_ref(&j.id), t.user, None)
+    tx.claim_jobs(std::slice::from_ref(&j.id), t.user, None, None)
         .await
         .unwrap();
 
@@ -444,7 +465,7 @@ async fn request_cancel_on_active_only_sets_the_flag(pool: PgPool) {
 
     let mut tx = db.begin(t.org).await.unwrap();
     let j = tx.add_job(job(&t, "actively working")).await.unwrap();
-    tx.claim_jobs(std::slice::from_ref(&j.id), t.user, None)
+    tx.claim_jobs(std::slice::from_ref(&j.id), t.user, None, None)
         .await
         .unwrap();
     tx.activate_job(&j.id).await.unwrap();
@@ -464,10 +485,12 @@ async fn request_cancel_on_a_terminal_job_is_refused(pool: PgPool) {
     let mut tx = db.begin(t.org).await.unwrap();
 
     let completed = tx.add_job(job(&t, "will complete")).await.unwrap();
-    tx.claim_jobs(std::slice::from_ref(&completed.id), t.user, None)
+    tx.claim_jobs(std::slice::from_ref(&completed.id), t.user, None, None)
         .await
         .unwrap();
-    tx.complete_job(&completed.id, Some("done")).await.unwrap();
+    tx.complete_job(&completed.id, t.user, Some("done"))
+        .await
+        .unwrap();
     let err = tx
         .request_cancel(&completed.id, t.user, None)
         .await
@@ -479,10 +502,10 @@ async fn request_cancel_on_a_terminal_job_is_refused(pool: PgPool) {
     );
 
     let failed = tx.add_job(job(&t, "will fail")).await.unwrap();
-    tx.claim_jobs(std::slice::from_ref(&failed.id), t.user, None)
+    tx.claim_jobs(std::slice::from_ref(&failed.id), t.user, None, None)
         .await
         .unwrap();
-    tx.fail_job(&failed.id, Some("nope")).await.unwrap();
+    tx.fail_job(&failed.id, t.user, Some("nope")).await.unwrap();
     let err = tx
         .request_cancel(&failed.id, t.user, None)
         .await
@@ -511,7 +534,7 @@ async fn cancel_job_after_request_cancel_succeeds(pool: PgPool) {
 
     let mut tx = db.begin(t.org).await.unwrap();
     let j = tx.add_job(job(&t, "long running")).await.unwrap();
-    tx.claim_jobs(std::slice::from_ref(&j.id), t.user, None)
+    tx.claim_jobs(std::slice::from_ref(&j.id), t.user, None, None)
         .await
         .unwrap();
     tx.request_cancel(&j.id, t.user, Some("stop please"))
@@ -519,7 +542,7 @@ async fn cancel_job_after_request_cancel_succeeds(pool: PgPool) {
         .unwrap();
 
     let cancelled = tx
-        .cancel_job(&j.id, Some("stopped as requested"))
+        .cancel_job(&j.id, t.user, Some("stopped as requested"))
         .await
         .unwrap();
     tx.commit().await.unwrap();
@@ -539,11 +562,14 @@ async fn cancel_job_with_no_request_on_file_is_invalid(pool: PgPool) {
 
     let mut tx = db.begin(t.org).await.unwrap();
     let j = tx.add_job(job(&t, "long running")).await.unwrap();
-    tx.claim_jobs(std::slice::from_ref(&j.id), t.user, None)
+    tx.claim_jobs(std::slice::from_ref(&j.id), t.user, None, None)
         .await
         .unwrap();
 
-    let err = tx.cancel_job(&j.id, Some("giving up")).await.unwrap_err();
+    let err = tx
+        .cancel_job(&j.id, t.user, Some("giving up"))
+        .await
+        .unwrap_err();
     tx.rollback().await.unwrap();
 
     assert_eq!(err.code(), "invalid_argument");
@@ -559,7 +585,7 @@ async fn cancel_job_on_a_pending_job_is_refused(pool: PgPool) {
 
     let mut tx = db.begin(t.org).await.unwrap();
     let j = tx.add_job(job(&t, "still pending")).await.unwrap();
-    let err = tx.cancel_job(&j.id, None).await.unwrap_err();
+    let err = tx.cancel_job(&j.id, t.user, None).await.unwrap_err();
     tx.rollback().await.unwrap();
 
     assert_eq!(err.code(), "wrong_status");
@@ -579,14 +605,14 @@ async fn cancel_job_with_no_note_leaves_error_unset(pool: PgPool) {
 
     let mut tx = db.begin(t.org).await.unwrap();
     let j = tx.add_job(job(&t, "long running")).await.unwrap();
-    tx.claim_jobs(std::slice::from_ref(&j.id), t.user, None)
+    tx.claim_jobs(std::slice::from_ref(&j.id), t.user, None, None)
         .await
         .unwrap();
     tx.request_cancel(&j.id, t.user, Some("stop please"))
         .await
         .unwrap();
 
-    let cancelled = tx.cancel_job(&j.id, None).await.unwrap();
+    let cancelled = tx.cancel_job(&j.id, t.user, None).await.unwrap();
     tx.commit().await.unwrap();
 
     assert_eq!(cancelled.status, Status::Cancelled);
@@ -636,6 +662,43 @@ async fn request_cancel_on_pending_leaves_dependents_blocked(pool: PgPool) {
     assert!(!ready.contains(&dependent.id.0));
 }
 
+/// `cancel_job` finalizes a claim exactly like `complete_job`/`fail_job` do,
+/// so it gets the identical claimer fence: a stale holder confirming a stop
+/// on a job someone else has since reclaimed must not be able to terminate
+/// the reclaimer's live attempt out from under it.
+#[sqlx::test]
+async fn a_stale_holder_cannot_cancel_after_someone_else_reclaims(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+    let user_b = second_user(&db, &t, "second@acme.test").await;
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let j = tx.add_job(job(&t, "stranded")).await.unwrap();
+    tx.claim_jobs(std::slice::from_ref(&j.id), t.user, Some("agent-a"), None)
+        .await
+        .unwrap();
+    expire_claim(&mut tx, t.org, &j.id).await;
+    tx.claim_jobs(std::slice::from_ref(&j.id), user_b, Some("agent-b"), None)
+        .await
+        .unwrap();
+    tx.request_cancel(&j.id, user_b, Some("stop"))
+        .await
+        .unwrap();
+
+    let err = tx
+        .cancel_job(&j.id, t.user, Some("stale confirmation"))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "already_claimed");
+
+    let cancelled = tx
+        .cancel_job(&j.id, user_b, Some("stopped as requested"))
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(cancelled.status, Status::Cancelled);
+}
+
 /// A repended cancelled job gets a clean slate: no stale cancellation request
 /// should follow it into its next attempt.
 #[sqlx::test]
@@ -648,13 +711,13 @@ async fn repend_clears_cancellation_fields(pool: PgPool) {
         .add_job(job(&t, "will be cancelled and retried"))
         .await
         .unwrap();
-    tx.claim_jobs(std::slice::from_ref(&j.id), t.user, None)
+    tx.claim_jobs(std::slice::from_ref(&j.id), t.user, None, None)
         .await
         .unwrap();
     tx.request_cancel(&j.id, t.user, Some("stop"))
         .await
         .unwrap();
-    tx.cancel_job(&j.id, Some("stopped")).await.unwrap();
+    tx.cancel_job(&j.id, t.user, Some("stopped")).await.unwrap();
 
     let repended = tx.repend_job(&j.id).await.unwrap();
     assert_eq!(repended.status, Status::Pending);
@@ -664,10 +727,10 @@ async fn repend_clears_cancellation_fields(pool: PgPool) {
 
     // The fresh attempt has no request on file, so a stop now must go
     // through fail_job, not cancel_job.
-    tx.claim_jobs(std::slice::from_ref(&j.id), t.user, None)
+    tx.claim_jobs(std::slice::from_ref(&j.id), t.user, None, None)
         .await
         .unwrap();
-    let err = tx.cancel_job(&j.id, None).await.unwrap_err();
+    let err = tx.cancel_job(&j.id, t.user, None).await.unwrap_err();
     assert_eq!(err.code(), "invalid_argument");
     tx.commit().await.unwrap();
 }
@@ -683,27 +746,29 @@ async fn stats_reports_cancelled_and_the_total_reconciles(pool: PgPool) {
     let _ = pending;
 
     let in_progress = tx.add_job(job(&t, "in progress")).await.unwrap();
-    tx.claim_jobs(std::slice::from_ref(&in_progress.id), t.user, None)
+    tx.claim_jobs(std::slice::from_ref(&in_progress.id), t.user, None, None)
         .await
         .unwrap();
 
     let active = tx.add_job(job(&t, "active")).await.unwrap();
-    tx.claim_jobs(std::slice::from_ref(&active.id), t.user, None)
+    tx.claim_jobs(std::slice::from_ref(&active.id), t.user, None, None)
         .await
         .unwrap();
     tx.activate_job(&active.id).await.unwrap();
 
     let completed = tx.add_job(job(&t, "completed")).await.unwrap();
-    tx.claim_jobs(std::slice::from_ref(&completed.id), t.user, None)
+    tx.claim_jobs(std::slice::from_ref(&completed.id), t.user, None, None)
         .await
         .unwrap();
-    tx.complete_job(&completed.id, Some("done")).await.unwrap();
+    tx.complete_job(&completed.id, t.user, Some("done"))
+        .await
+        .unwrap();
 
     let failed = tx.add_job(job(&t, "failed")).await.unwrap();
-    tx.claim_jobs(std::slice::from_ref(&failed.id), t.user, None)
+    tx.claim_jobs(std::slice::from_ref(&failed.id), t.user, None, None)
         .await
         .unwrap();
-    tx.fail_job(&failed.id, Some("nope")).await.unwrap();
+    tx.fail_job(&failed.id, t.user, Some("nope")).await.unwrap();
 
     let cancelled = tx.add_job(job(&t, "cancelled")).await.unwrap();
     tx.request_cancel(&cancelled.id, t.user, None)
@@ -720,6 +785,471 @@ async fn stats_reports_cancelled_and_the_total_reconciles(pool: PgPool) {
         s.total
     );
 }
+
+// ------------------------------------------------------------- claim expiry
+//
+// savvagent/otto-factory#65: a claimed job never expired, and complete_job
+// never checked the claimer. These tests exercise the fix — reaping a
+// stranded claim, TTL clamping, and the fencing that stops a stale holder
+// from finalizing work someone else has since reclaimed.
+
+/// Add a second member to `t`'s org, for the fencing tests below that need two
+/// distinct claimants.
+async fn second_user(db: &of_core::Db, t: &Tenant, email: &str) -> of_core::ids::UserId {
+    let user = db.upsert_user(email, Some("Second")).await.unwrap();
+    db.add_member(t.org, user.id, Role::Member).await.unwrap();
+    user.id
+}
+
+/// Force a job's claim into the past, bypassing the public API — there is no
+/// legitimate way to create this state quickly, so the test reaches past `Tx`
+/// with a raw statement on the same connection/transaction.
+async fn expire_claim(tx: &mut of_core::db::Tx<'_>, org: of_core::ids::OrgId, id: &JobId) {
+    sqlx::query(
+        "UPDATE jobs SET claim_expires_at = now() - interval '1 second' \
+         WHERE org_id = $1 AND id = $2",
+    )
+    .bind(org)
+    .bind(id)
+    .execute(tx.conn())
+    .await
+    .unwrap();
+}
+
+#[sqlx::test]
+async fn claim_jobs_defaults_ttl_to_the_default_constant(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let j = tx.add_job(job(&t, "default ttl")).await.unwrap();
+    let before = chrono::Utc::now();
+    let claimed = tx
+        .claim_jobs(std::slice::from_ref(&j.id), t.user, None, None)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let expires_at = claimed[0]
+        .claim_expires_at
+        .expect("a freshly claimed job must carry a claim expiry");
+    let expected = before + chrono::Duration::seconds(DEFAULT_CLAIM_TTL_SECS);
+    let delta = (expires_at - expected).num_seconds().abs();
+    assert!(
+        delta < 5,
+        "expected claim_expires_at near {expected}, got {expires_at}"
+    );
+}
+
+#[sqlx::test]
+async fn claim_jobs_honors_an_explicit_ttl(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let j = tx.add_job(job(&t, "explicit ttl")).await.unwrap();
+    let before = chrono::Utc::now();
+    let claimed = tx
+        .claim_jobs(std::slice::from_ref(&j.id), t.user, None, Some(120))
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let expires_at = claimed[0].claim_expires_at.expect("must set an expiry");
+    let expected = before + chrono::Duration::seconds(120);
+    let delta = (expires_at - expected).num_seconds().abs();
+    assert!(
+        delta < 5,
+        "expected claim_expires_at near {expected}, got {expires_at}"
+    );
+}
+
+#[sqlx::test]
+async fn claim_jobs_clamps_an_out_of_range_ttl(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let too_low = tx.add_job(job(&t, "too low")).await.unwrap();
+    let too_high = tx.add_job(job(&t, "too high")).await.unwrap();
+
+    let before = chrono::Utc::now();
+    let low = tx
+        .claim_jobs(std::slice::from_ref(&too_low.id), t.user, None, Some(1))
+        .await
+        .unwrap();
+    let high = tx
+        .claim_jobs(
+            std::slice::from_ref(&too_high.id),
+            t.user,
+            None,
+            Some(MAX_CLAIM_TTL_SECS * 10),
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    // Clamped, not rejected: a below-minimum or above-maximum TTL still
+    // succeeds, just at the boundary value.
+    let low_expected = before + chrono::Duration::seconds(60);
+    let low_delta = (low[0].claim_expires_at.unwrap() - low_expected)
+        .num_seconds()
+        .abs();
+    assert!(low_delta < 5, "TTL below 60s must clamp up to 60s");
+
+    let high_expected = before + chrono::Duration::seconds(MAX_CLAIM_TTL_SECS);
+    let high_delta = (high[0].claim_expires_at.unwrap() - high_expected)
+        .num_seconds()
+        .abs();
+    assert!(
+        high_delta < 5,
+        "TTL above MAX_CLAIM_TTL_SECS must clamp down to it"
+    );
+}
+
+/// The core of GH#65: an expired claim makes the job claimable again through
+/// the normal `ready()` view, with no sweeper and no admin action needed.
+#[sqlx::test]
+async fn an_expired_claim_reappears_in_ready(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let j = tx.add_job(job(&t, "stranded")).await.unwrap();
+    tx.claim_jobs(std::slice::from_ref(&j.id), t.user, None, None)
+        .await
+        .unwrap();
+
+    let ready_before: Vec<String> = tx
+        .ready(None)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|j| j.id.0)
+        .collect();
+    assert!(
+        !ready_before.contains(&j.id.0),
+        "a live claim must not be claimable"
+    );
+
+    expire_claim(&mut tx, t.org, &j.id).await;
+
+    let ready_after: Vec<String> = tx
+        .ready(None)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|j| j.id.0)
+        .collect();
+    assert!(
+        ready_after.contains(&j.id.0),
+        "an expired claim must reappear in ready()"
+    );
+
+    // §1 of the design spec's central claim: ready() *reinterprets*, it never
+    // *mutates*. The row itself must still say in-progress, still under its
+    // original holder, until something actually calls claim_jobs on it.
+    let untouched = tx.get_job(&j.id).await.unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(untouched.status, Status::InProgress);
+    assert_eq!(untouched.claimed_by, Some(t.user));
+}
+
+/// The fencing half of GH#65 as it plays out through `claim_jobs` itself: once
+/// a claim has lapsed, a *different* user can take it, and the reclaim is
+/// visible as a new attempt, not a silent continuation of the old one.
+#[sqlx::test]
+async fn an_expired_claim_can_be_reclaimed_by_someone_else(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+    let user_b = second_user(&db, &t, "second@acme.test").await;
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let j = tx.add_job(job(&t, "stranded")).await.unwrap();
+    tx.claim_jobs(std::slice::from_ref(&j.id), t.user, Some("agent-a"), None)
+        .await
+        .unwrap();
+    expire_claim(&mut tx, t.org, &j.id).await;
+
+    let reclaimed = tx
+        .claim_jobs(std::slice::from_ref(&j.id), user_b, Some("agent-b"), None)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    assert_eq!(reclaimed[0].claimed_by, Some(user_b));
+    assert_eq!(reclaimed[0].claimed_by_label.as_deref(), Some("agent-b"));
+    assert_eq!(
+        reclaimed[0].attempts, 2,
+        "one attempt from the original claim, one from the reclaim"
+    );
+}
+
+/// Every test above claims a job and leaves it `in-progress`, but the reap
+/// UPDATE, `ready()`'s widened predicate, and `ensure_claim_held` all
+/// explicitly branch on `status IN ('in-progress', 'active')` — a long task
+/// that got as far as `activate_job` before its agent died is exactly the
+/// realistic case this covers, and it must reap, reappear, and fence
+/// identically to the `in-progress` case.
+#[sqlx::test]
+async fn an_expired_active_claim_reaps_reappears_and_fences_like_in_progress(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+    let user_b = second_user(&db, &t, "second@acme.test").await;
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let j = tx
+        .add_job(job(&t, "long task, actually started"))
+        .await
+        .unwrap();
+    tx.claim_jobs(std::slice::from_ref(&j.id), t.user, Some("agent-a"), None)
+        .await
+        .unwrap();
+    let active = tx.activate_job(&j.id).await.unwrap();
+    assert_eq!(active.status, Status::Active);
+    expire_claim(&mut tx, t.org, &j.id).await;
+
+    let ready: Vec<String> = tx
+        .ready(None)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|j| j.id.0)
+        .collect();
+    assert!(
+        ready.contains(&j.id.0),
+        "an expired active claim must reappear in ready() exactly like an expired in-progress one"
+    );
+
+    let reclaimed = tx
+        .claim_jobs(std::slice::from_ref(&j.id), user_b, Some("agent-b"), None)
+        .await
+        .unwrap();
+    assert_eq!(reclaimed[0].claimed_by, Some(user_b));
+    assert_eq!(reclaimed[0].status, Status::InProgress);
+
+    let err = tx
+        .complete_job(&j.id, t.user, Some("stale"))
+        .await
+        .unwrap_err();
+    tx.commit().await.unwrap();
+    assert_eq!(err.code(), "already_claimed");
+}
+
+/// A reap is an involuntary repend, and must clear the same fields
+/// `repend_job` does: a cancellation request aimed at the agent that died
+/// must not follow the job to whoever reclaims it, or the new holder inherits
+/// someone else's "please stop" and any org member can immediately
+/// `cancel_job` an attempt nobody asked to stop.
+#[sqlx::test]
+async fn reaping_an_expired_claim_clears_its_cancellation_request(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+    let user_b = second_user(&db, &t, "second@acme.test").await;
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let j = tx
+        .add_job(job(&t, "stranded, cancel requested"))
+        .await
+        .unwrap();
+    tx.claim_jobs(std::slice::from_ref(&j.id), t.user, None, None)
+        .await
+        .unwrap();
+    tx.request_cancel(&j.id, t.user, Some("no longer needed"))
+        .await
+        .unwrap();
+    expire_claim(&mut tx, t.org, &j.id).await;
+
+    let reclaimed = tx
+        .claim_jobs(std::slice::from_ref(&j.id), user_b, None, None)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    assert!(
+        reclaimed[0].cancel_requested_at.is_none(),
+        "a stale cancellation request must not survive a reap onto a new holder"
+    );
+    assert!(reclaimed[0].cancel_requested_by.is_none());
+    assert!(reclaimed[0].cancel_reason.is_none());
+}
+
+#[sqlx::test]
+async fn renew_claim_by_the_holder_extends_the_expiry(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let j = tx.add_job(job(&t, "long task")).await.unwrap();
+    let claimed = tx
+        .claim_jobs(std::slice::from_ref(&j.id), t.user, None, Some(60))
+        .await
+        .unwrap();
+    let before = claimed[0].claim_expires_at.unwrap();
+
+    let renewed = tx.renew_claim(&j.id, t.user, Some(3600)).await.unwrap();
+    tx.commit().await.unwrap();
+
+    assert!(
+        renewed.claim_expires_at.unwrap() > before,
+        "renew_claim must push the expiry forward"
+    );
+}
+
+#[sqlx::test]
+async fn renew_claim_by_someone_else_is_refused(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+    let user_b = second_user(&db, &t, "second@acme.test").await;
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let j = tx.add_job(job(&t, "long task")).await.unwrap();
+    tx.claim_jobs(
+        std::slice::from_ref(&j.id),
+        t.user,
+        Some("holder-label"),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let err = tx.renew_claim(&j.id, user_b, None).await.unwrap_err();
+    tx.rollback().await.unwrap();
+
+    assert_eq!(err.code(), "already_claimed");
+    assert!(
+        err.to_string().contains("holder-label"),
+        "must name the actual holder: {err}"
+    );
+}
+
+#[sqlx::test]
+async fn renew_claim_on_a_pending_job_is_wrong_status(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let j = tx.add_job(job(&t, "still pending")).await.unwrap();
+    let err = tx.renew_claim(&j.id, t.user, None).await.unwrap_err();
+    tx.rollback().await.unwrap();
+
+    assert_eq!(err.code(), "wrong_status");
+    assert!(
+        err.to_string().contains("in-progress or active"),
+        "must name the valid starting states: {err}"
+    );
+}
+
+#[sqlx::test]
+async fn renew_claim_on_a_terminal_job_is_wrong_status(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+
+    let mut tx = db.begin(t.org).await.unwrap();
+
+    let completed = tx.add_job(job(&t, "will complete")).await.unwrap();
+    tx.claim_jobs(std::slice::from_ref(&completed.id), t.user, None, None)
+        .await
+        .unwrap();
+    tx.complete_job(&completed.id, t.user, Some("done"))
+        .await
+        .unwrap();
+    let err = tx
+        .renew_claim(&completed.id, t.user, None)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "wrong_status");
+    assert!(err.to_string().contains("in-progress or active"));
+
+    let failed = tx.add_job(job(&t, "will fail")).await.unwrap();
+    tx.claim_jobs(std::slice::from_ref(&failed.id), t.user, None, None)
+        .await
+        .unwrap();
+    tx.fail_job(&failed.id, t.user, Some("nope")).await.unwrap();
+    let err = tx.renew_claim(&failed.id, t.user, None).await.unwrap_err();
+    assert_eq!(err.code(), "wrong_status");
+
+    let cancelled = tx.add_job(job(&t, "will be cancelled")).await.unwrap();
+    tx.request_cancel(&cancelled.id, t.user, None)
+        .await
+        .unwrap();
+    let err = tx
+        .renew_claim(&cancelled.id, t.user, None)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "wrong_status");
+
+    tx.rollback().await.unwrap();
+}
+
+/// The key GH#65 scenario: A claims a job, its claim lapses, B reclaims it —
+/// A's finalize call must now fail naming B, and B's own finalize call must
+/// still succeed. Proving both halves in one test is what shows the
+/// interleaving is actually closed, not just that each half works in
+/// isolation.
+#[sqlx::test]
+async fn a_stale_holder_cannot_finalize_after_someone_else_reclaims(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+    let user_b = second_user(&db, &t, "second@acme.test").await;
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let j = tx.add_job(job(&t, "contested")).await.unwrap();
+    tx.claim_jobs(std::slice::from_ref(&j.id), t.user, Some("agent-a"), None)
+        .await
+        .unwrap();
+    expire_claim(&mut tx, t.org, &j.id).await;
+    tx.claim_jobs(std::slice::from_ref(&j.id), user_b, Some("agent-b"), None)
+        .await
+        .unwrap();
+
+    let err = tx
+        .complete_job(&j.id, t.user, Some("i finished, honest"))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "already_claimed");
+    assert!(
+        err.to_string().contains("agent-b"),
+        "must name the actual current holder: {err}"
+    );
+
+    let done = tx
+        .complete_job(&j.id, user_b, Some("actually finished"))
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    assert_eq!(done.status, Status::Completed);
+    assert_eq!(done.result.as_deref(), Some("actually finished"));
+}
+
+/// A caller with no claim at all on a job that was never claimed hits the
+/// status check first — `Error::WrongStatus`, not `Error::AlreadyClaimed`.
+/// `ensure_claim_held` checks status before ownership, and a pending job
+/// fails on status regardless of who is asking.
+#[sqlx::test]
+async fn finalizing_a_never_claimed_job_is_wrong_status_not_already_claimed(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let j = tx.add_job(job(&t, "never touched")).await.unwrap();
+    let err = tx
+        .complete_job(&j.id, t.user, Some("nice try"))
+        .await
+        .unwrap_err();
+    tx.rollback().await.unwrap();
+
+    assert_eq!(err.code(), "wrong_status");
+}
+
+// NOTE: `ensure_claim_held`'s `unwrap_or_else(|| "nobody".into())` fallback —
+// reached only if a row were `in-progress`/`active` with *both*
+// `claimed_by` and `claimed_by_label` absent — is deliberately left
+// uncovered. A job only ever reaches `in-progress`/`active` through
+// `claim_jobs`, which always sets both columns in the same statement, so
+// there is no call sequence that reaches that branch. This is a documented
+// gap, not an oversight.
 
 // --------------------------------------------------------------------- repos
 
@@ -1296,10 +1826,10 @@ async fn add_job_replay_is_insensitive_to_depends_on_order(pool: PgPool) {
         vec![first_job.id.0.clone()],
         "the replayed job must still be gated on both dependencies"
     );
-    tx.claim_jobs(std::slice::from_ref(&dep_a.id), t.user, None)
+    tx.claim_jobs(std::slice::from_ref(&dep_a.id), t.user, None, None)
         .await
         .unwrap();
-    tx.complete_job(&dep_a.id, None).await.unwrap();
+    tx.complete_job(&dep_a.id, t.user, None).await.unwrap();
     tx.commit().await.unwrap();
 
     let mut tx = db.begin(t.org).await.unwrap();
@@ -1312,10 +1842,10 @@ async fn add_job_replay_is_insensitive_to_depends_on_order(pool: PgPool) {
     );
 
     let mut tx = db.begin(t.org).await.unwrap();
-    tx.claim_jobs(std::slice::from_ref(&dep_b.id), t.user, None)
+    tx.claim_jobs(std::slice::from_ref(&dep_b.id), t.user, None, None)
         .await
         .unwrap();
-    tx.complete_job(&dep_b.id, None).await.unwrap();
+    tx.complete_job(&dep_b.id, t.user, None).await.unwrap();
     let ready: Vec<String> = tx
         .ready(None)
         .await
