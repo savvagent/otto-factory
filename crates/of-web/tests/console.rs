@@ -1385,6 +1385,37 @@ async fn an_admin_can_reset_a_members_authenticator_but_gains_nothing_by_it(pool
     .await;
     reset.expect(StatusCode::CREATED);
 
+    let audit = Call::get("/api/orgs/acme/audit?actionPrefix=org.member.passkeys_reset")
+        .with_session(&rob.session)
+        .send(&h.router)
+        .await;
+    audit.expect(StatusCode::OK);
+    let rows = audit
+        .body
+        .as_array()
+        .expect("audit response must be an array");
+    assert_eq!(
+        rows.len(),
+        1,
+        "the reset must write exactly one org.member.passkeys_reset row"
+    );
+    assert_eq!(
+        rows[0]["actorUserId"].as_str().unwrap(),
+        rob.user.to_string()
+    );
+    assert_eq!(rows[0]["targetId"].as_str().unwrap(), bob.user.to_string());
+
+    let stale_action = Call::get("/api/orgs/acme/audit?actionPrefix=auth.totp")
+        .with_session(&rob.session)
+        .send(&h.router)
+        .await;
+    stale_action.expect(StatusCode::OK);
+    assert_eq!(
+        stale_action.body.as_array().unwrap().len(),
+        0,
+        "the reset must not write the historical auth.totp.reset action"
+    );
+
     // Bob's old passkey is gone...
     let stale = sign_in(&h, &mut bob).await;
     assert_ne!(stale.status, StatusCode::OK, "the old passkey still works");

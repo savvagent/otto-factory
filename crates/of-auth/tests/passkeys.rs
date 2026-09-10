@@ -364,6 +364,86 @@ async fn login_failures(db: &Db, user: UserId) -> i64 {
         .unwrap()
 }
 
+/// How many rows this account has under a given action. Parameterized so both
+/// the registration and clear paths can share one helper (#76).
+async fn action_count(db: &Db, action: &str, user: UserId) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM audit_events WHERE action = $1 AND actor_user_id = $2")
+        .bind(action)
+        .bind(user)
+        .fetch_one(db.pool())
+        .await
+        .unwrap()
+}
+
+// --------------------------------------- passkey.* audit actions, not totp.* (#76)
+
+/// Registration writes the new `auth.passkey.registered` action, never the old
+/// `auth.totp.enrolled` one TOTP left behind.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn registration_writes_the_passkey_registered_action(pool: PgPool) {
+    let db = Db::from_pool(pool);
+    let mut auth = authenticator();
+    let user = register_new(&db, &mut auth).await;
+
+    assert_eq!(
+        action_count(&db, of_core::audit::action::PASSKEY_REGISTERED, user).await,
+        1,
+        "registration must write auth.passkey.registered"
+    );
+    assert_eq!(
+        action_count(&db, of_core::audit::action::TOTP_ENROLLED, user).await,
+        0,
+        "registration must not write the historical TOTP action"
+    );
+}
+
+/// Clearing writes the new `auth.passkey.cleared` action, never the old
+/// `auth.totp.reset` one TOTP left behind.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn clearing_writes_the_passkey_cleared_action(pool: PgPool) {
+    let db = Db::from_pool(pool);
+    let mut auth = authenticator();
+    let user = register_new(&db, &mut auth).await;
+
+    passkeys::clear(&db, user, None).await.unwrap();
+
+    assert_eq!(
+        action_count(&db, of_core::audit::action::PASSKEY_CLEARED, user).await,
+        1,
+        "clearing must write auth.passkey.cleared"
+    );
+    assert_eq!(
+        action_count(&db, of_core::audit::action::TOTP_RESET, user).await,
+        0,
+        "clearing must not write the historical TOTP action"
+    );
+}
+
+/// A corrupted stored credential must not change `finish_authentication`'s
+/// outcome — it is dropped and logged, and the account still falls through to
+/// `InvalidCredentials` via the existing `keys.is_empty()` branch rather than a
+/// panic or a different error. This is the regression the deserialize-logging
+/// rewrite is most likely to introduce if the match arms are transposed.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_corrupted_stored_credential_is_dropped_not_fatal(pool: PgPool) {
+    let db = Db::from_pool(pool);
+    let mut auth = authenticator();
+    let user = register_new(&db, &mut auth).await;
+    let ids = credential_ids(&db, user).await;
+
+    sqlx::query("UPDATE passkeys SET credential = $1 WHERE user_id = $2")
+        .bind(serde_json::json!({"garbage": true}))
+        .bind(user)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+    match sign_in(&db, &mut auth, &ids[0]).await {
+        Err(AuthError::InvalidCredentials) => {}
+        other => panic!("a corrupted stored credential answered {other:?}"),
+    }
+}
+
 /// A credential this server has never stored answers `unknown_credential`, and
 /// the assertion is a genuine one — the signature verifies, so the refusal can
 /// only be the lookup. That is what lets the console tell a vault to forget a
