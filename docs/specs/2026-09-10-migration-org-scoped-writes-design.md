@@ -183,8 +183,8 @@ async fn rls_scopes_a_migration_style_update_with_no_org_context(pool: PgPool) {
         "INSERT INTO tracker_bindings (org_id, repo_id, provider, external_ref, trigger_label) \
          VALUES ($1, $2, 'github', 'acme/api', 'dark-factory')",
     )
-    .bind(a.org.to_string())
-    .bind(a.repo.to_string())
+    .bind(a.org)
+    .bind(a.repo)
     .execute(db.pool())
     .await
     .unwrap();
