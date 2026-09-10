@@ -16,7 +16,7 @@ concurrent winner found" failure at four `of-core` sites from `Error::Invalid`
 
 ## Status — 2026-09-10
 
-Not started. Three tasks, sequential.
+Four tasks, sequential (Task 3 was added mid-implementation — see below).
 
 ## Global Constraints
 
@@ -41,15 +41,18 @@ Not started. Three tasks, sequential.
 | `crates/of-core/src/error.rs` | **Modify.** New `RaceLost(String)` variant, `code()` arm, `retriable()` inclusion, doc-comment update. |
 | `crates/of-core/src/jobs.rs` | **Modify.** Three `Error::Invalid(format!(...))` sites become `Error::RaceLost(format!(...))`. |
 | `crates/of-core/src/messages.rs` | **Modify.** One `Error::Invalid(format!(...))` site becomes `Error::RaceLost(format!(...))`. |
+| `crates/of-web/src/error.rs` | **Modify.** Discovered mid-implementation: `impl From<CoreError> for ApiError`'s exhaustive `status` match gains a `RaceLost` arm, or the workspace fails to compile. |
 | `crates/of-mcp/src/error.rs` | **Modify.** `from_core`'s JSON-RPC code match gains `RaceLost` in the `INTERNAL_ERROR` arm; test coverage extended. |
 
 ## Task Order & Rationale
 
 Task 1 introduces the variant and proves its `code()`/`retriable()` behavior in isolation —
 nothing downstream can compile against it correctly without this landing first. Task 2 swaps
-the four call sites, which only typechecks once Task 1 exists. Task 3 is the `of-mcp` wire
-mapping, independent of Task 2's internals but meaningless to test without a `RaceLost`
-value to convert, so it lands last.
+the four call sites, which only typechecks once Task 1 exists. Task 3 (added mid-implementation,
+once Task 1 alone was found to break `of-web`'s compile) fixes `of-web`'s exhaustive match — it
+must land before `cargo test --workspace` can pass again, but has no dependency on Task 2. Task 4
+is the `of-mcp` wire mapping, independent of both Task 2 and Task 3's internals but meaningless to
+test without a `RaceLost` value to convert, so it lands last.
 
 ## Task 1 — Add the `RaceLost` error variant ⬜
 
