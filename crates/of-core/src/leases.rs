@@ -1,8 +1,8 @@
-//! Repo leases — the primitive that stops two agents colliding in one worktree.
+//! Repo leases — the primitive that stops two agents colliding on one resource.
 //!
 //! A lease is **advisory and time-bounded**. otto-factory cannot see git
 //! operations, so it cannot prevent a determined agent from working on a leased
-//! branch; what it can do is make the collision visible before it happens and
+//! resource; what it can do is make the collision visible before it happens and
 //! give a well-behaved agent somewhere else to go. That limitation is deliberate
 //! and is documented to customers rather than hidden — a lease is a coordination
 //! signal, not a mutex.
@@ -32,7 +32,7 @@ pub struct Lease {
     pub id: uuid::Uuid,
     pub org_id: OrgId,
     pub repo_id: RepoId,
-    pub branch: String,
+    pub resource: String,
     pub holder_user_id: UserId,
     pub holder_label: Option<String>,
     pub job_id: Option<String>,
@@ -42,16 +42,16 @@ pub struct Lease {
     pub released_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-const LEASE_COLS: &str = "id, org_id, repo_id, branch, holder_user_id, holder_label, job_id, \
+const LEASE_COLS: &str = "id, org_id, repo_id, resource, holder_user_id, holder_label, job_id, \
                           acquired_at, renewed_at, expires_at, released_at";
 
 impl Tx<'_> {
-    /// Take a lease on `(repo, branch)`.
+    /// Take a lease on `(repo, resource)`.
     ///
-    /// Reaps expired leases for this branch first, then inserts. If a live lease
-    /// is already held the error names the holder and the expiry, so the caller
-    /// can decide between waiting, picking different work, or messaging the
-    /// holder — all three are reasonable, and only the agent knows which.
+    /// Reaps expired leases for this resource first, then inserts. If a live
+    /// lease is already held the error names the holder and the expiry, so the
+    /// caller can decide between waiting, picking different work, or messaging
+    /// the holder — all three are reasonable, and only the agent knows which.
     ///
     /// Re-acquiring a lease you already hold renews it instead of failing, so an
     /// agent that lost track of its own state converges rather than deadlocking
@@ -59,41 +59,41 @@ impl Tx<'_> {
     pub async fn acquire_lease(
         &mut self,
         repo_id: RepoId,
-        branch: &str,
+        resource: &str,
         holder: UserId,
         label: Option<&str>,
         job_id: Option<&JobId>,
         ttl_secs: Option<i64>,
     ) -> Result<Lease> {
-        let branch = branch.trim();
-        if branch.is_empty() {
-            return Err(Error::Invalid("lease branch must not be empty".into()));
+        let resource = resource.trim();
+        if resource.is_empty() {
+            return Err(Error::Invalid("lease resource must not be empty".into()));
         }
         let ttl = ttl_secs.unwrap_or(DEFAULT_TTL_SECS).clamp(60, MAX_TTL_SECS);
         let org = self.org();
 
-        // Reap expired leases on this branch. Marking them released (rather than
-        // deleting) keeps the history readable in the console — "who had this
-        // branch when the build broke?" is a question people actually ask.
+        // Reap expired leases on this resource. Marking them released (rather
+        // than deleting) keeps the history readable in the console — "who had
+        // this resource when the build broke?" is a question people actually ask.
         sqlx::query(
             "UPDATE repo_leases SET released_at = now() \
-             WHERE org_id = $1 AND repo_id = $2 AND branch = $3 \
+             WHERE org_id = $1 AND repo_id = $2 AND resource = $3 \
                AND released_at IS NULL AND expires_at <= now()",
         )
         .bind(org)
         .bind(repo_id)
-        .bind(branch)
+        .bind(resource)
         .execute(self.conn())
         .await?;
 
         let existing: Option<Lease> = sqlx::query_as(&format!(
             "SELECT {LEASE_COLS} FROM repo_leases \
-             WHERE org_id = $1 AND repo_id = $2 AND branch = $3 AND released_at IS NULL \
+             WHERE org_id = $1 AND repo_id = $2 AND resource = $3 AND released_at IS NULL \
              FOR UPDATE"
         ))
         .bind(org)
         .bind(repo_id)
-        .bind(branch)
+        .bind(resource)
         .fetch_optional(self.conn())
         .await?;
 
@@ -102,7 +102,7 @@ impl Tx<'_> {
                 return self.renew_lease(live.id, holder, Some(ttl)).await;
             }
             return Err(Error::LeaseHeld {
-                branch: branch.to_string(),
+                resource: resource.to_string(),
                 holder: live
                     .holder_label
                     .clone()
@@ -112,14 +112,14 @@ impl Tx<'_> {
         }
 
         let lease = sqlx::query_as(&format!(
-            "INSERT INTO repo_leases (org_id, repo_id, branch, holder_user_id, holder_label, \
+            "INSERT INTO repo_leases (org_id, repo_id, resource, holder_user_id, holder_label, \
                                       job_id, expires_at) \
              VALUES ($1,$2,$3,$4,$5,$6, now() + make_interval(secs => $7)) \
              RETURNING {LEASE_COLS}"
         ))
         .bind(org)
         .bind(repo_id)
-        .bind(branch)
+        .bind(resource)
         .bind(holder)
         .bind(label)
         .bind(job_id.map(|j| j.0.as_str()))

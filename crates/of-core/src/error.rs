@@ -57,9 +57,9 @@ pub enum Error {
     #[error("dependency cycle: {0} would depend on itself through {1}")]
     DependencyCycle(JobId, JobId),
 
-    #[error("{branch} of this repo is leased by {holder} until {expires_at}")]
+    #[error("{resource} of this repo is leased by {holder} until {expires_at}")]
     LeaseHeld {
-        branch: String,
+        resource: String,
         holder: String,
         expires_at: chrono::DateTime<chrono::Utc>,
     },
