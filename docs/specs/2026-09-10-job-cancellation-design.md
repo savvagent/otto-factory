@@ -162,6 +162,14 @@ If a future change wants a console button for this, that is the moment to revisi
 test's reasoning explicitly — not now, when the simpler answer already satisfies the
 issue's stated acceptance criteria.
 
+The issue's separate AC bullet — "the MCP tool description tells an LLM caller what it is
+expected to do when it sees the flag" — is satisfied by the doc comment on
+`Job::cancel_requested_by` in §3, not by prose in `get_job`'s own tool description: `Job`
+derives `schemars::JsonSchema`, so that field-level doc comment becomes the property
+description in every schema a caller reads it through (`get_job`'s, `list_jobs`'s, and
+both new tools' output schemas), which is the more precise place for "here is what to do
+about this field" to live than a paragraph on `get_job` that would have to repeat it.
+
 ## §2 — Migrations
 
 `crates/of-core/migrations/0023_job_cancelled_status.sql`:
