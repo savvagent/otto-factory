@@ -811,20 +811,25 @@ async fn rls_scopes_tracker_bindings(pool: PgPool) {
 /// That migration relabels `tracker_bindings.trigger_label` with a bare
 /// `UPDATE ... WHERE trigger_label = 'dark-factory'`. `Db::migrate` runs every
 /// migration on the raw pool (`db.rs`) — never `Db::begin`, so never `SET
-/// LOCAL ROLE of_app` and never `set_config('app.org_id', …)`. On this test's
-/// connecting superuser that is invisible: RLS does not constrain a superuser
-/// regardless of `FORCE`. On the FORCE-RLS-fallback deployment shape (managed
-/// Postgres, no `CREATEROLE` — see CLAUDE.md), migrations run under the very
-/// role `FORCE ROW LEVEL SECURITY` applies to, with no org context ever set,
-/// so `current_org()` is NULL for the statement's entire lifetime and
-/// `org_id = current_org()` is never true: the UPDATE silently matches zero
-/// rows, for every tenant, forever.
+/// LOCAL ROLE of_app` and never `set_config('app.org_id', …)`. On this
+/// deployment's actual connecting role (a superuser, confirmed against
+/// `docs/deploy/fly.md`), that is invisible in the opposite direction from
+/// what this test demonstrates: a superuser bypasses RLS outright, `FORCE`
+/// included, so the statement would touch *every* org's matching rows, not
+/// none. The `SET LOCAL ROLE of_app` below stands in for the FORCE-RLS
+/// fallback deployment shape's connecting role instead — non-superuser,
+/// non-`BYPASSRLS`, and (per `CLAUDE.md`) the owner `FORCE` exists to bind —
+/// where `current_org()` stays NULL for the statement's entire lifetime, so
+/// `org_id = current_org()` is never true and the UPDATE silently matches
+/// zero rows, for every tenant, forever.
 ///
 /// `savvagent/otto-factory#70`. No corrective data migration accompanies this
-/// test — production `tracker_bindings` was confirmed empty at the time of
-/// investigation, and this deployment's migrations currently run as a
-/// superuser that bypasses RLS outright (`docs/deploy/fly.md`). This test is
-/// the guard for the deployment shape where that stops being true.
+/// test — `docs/specs/2026-09-10-migration-org-scoped-writes-design.md`
+/// (Premise corrections, dated 2026-09-10) records that this deployment's own
+/// `tracker_bindings` was empty at investigation time, and that migrations
+/// there currently run as the superuser described above. Neither fact is
+/// re-verified by this test; it guards the deployment shape where the second
+/// one stops being true.
 #[sqlx::test]
 async fn rls_scopes_a_migration_style_update_with_no_org_context(pool: PgPool) {
     let db = db(pool);
@@ -843,8 +848,10 @@ async fn rls_scopes_a_migration_style_update_with_no_org_context(pool: PgPool) {
     .await
     .unwrap();
 
-    // The exact shape `Db::migrate` runs a statement under: `of_app`, and no
-    // `app.org_id` ever set — a schema migration has no tenant to set it to.
+    // The FORCE-RLS-fallback deployment shape's connecting role: owns the
+    // table (like every role that has ever run this database's migrations),
+    // neither superuser nor BYPASSRLS, and no `app.org_id` ever set — a
+    // schema migration has no tenant to set it to.
     let mut tx = db.begin_unpinned().await.unwrap();
     sqlx::query("SET LOCAL ROLE of_app")
         .execute(&mut *tx)
@@ -869,6 +876,39 @@ async fn rls_scopes_a_migration_style_update_with_no_org_context(pool: PgPool) {
          starts affecting rows, something about the deployment's isolation \
          shape changed and every migration written under the old assumption \
          needs re-auditing"
+    );
+
+    // Positive control: the row is still there, still stale. The zero above
+    // is the missing org context, not a missing or already-touched row —
+    // the distinction CLAUDE.md's own guard-1/guard-2 split insists a test
+    // in this family has to make.
+    let mut tx = db.begin(a.org).await.unwrap();
+    let label: String = sqlx::query_scalar("SELECT trigger_label FROM tracker_bindings")
+        .fetch_one(tx.conn())
+        .await
+        .unwrap();
+    assert_eq!(
+        label, "dark-factory",
+        "the row 0020 should have relabelled must still be there, untouched, \
+         for the zero above to mean what this test claims it means"
+    );
+
+    // And the same statement, with org context supplied, does relabel it —
+    // proving the statement is capable of matching at all, so the zero above
+    // is attributable to the missing `app.org_id`, not to a typo in the seed
+    // or the UPDATE's own WHERE clause.
+    let updated = sqlx::query(
+        "UPDATE tracker_bindings SET trigger_label = 'otto-factory' \
+         WHERE trigger_label = 'dark-factory'",
+    )
+    .execute(tx.conn())
+    .await
+    .unwrap()
+    .rows_affected();
+    tx.commit().await.unwrap();
+    assert_eq!(
+        updated, 1,
+        "the same statement, org-scoped, should have matched the seeded row"
     );
 }
 

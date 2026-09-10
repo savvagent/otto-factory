@@ -124,25 +124,53 @@ immediately after the existing "A privilege granted to `of_app` is not a protect
 managed-Postgres shape; this one is about migrations not carrying any org context through it at
 all):
 
-> **A migration that rewrites tenant-table data cannot rely on a bare `UPDATE`/`DELETE`.**
-> `Db::migrate` runs every migration statement on the connection pool directly — never through
-> `Db::begin`, so `app.org_id` is never set and `of_app` is never assumed. On a single-role
-> deployment (`SET LOCAL ROLE of_app` succeeds at request time) this is invisible: migrations run as
-> a superuser or the table owner, and RLS does not constrain either regardless of `FORCE`. On the
-> managed-Postgres fallback shape — the one guard 2 exists to keep honest — a migration statement
-> runs under the very role `FORCE ROW LEVEL SECURITY` applies to, with `current_org()` NULL for the
-> statement's entire lifetime, so `org_id = current_org()` is never true and the statement silently
-> matches zero rows, for every tenant, forever. `savvagent/otto-factory#70` found this in
-> `0020_rename_trigger_label_default.sql`'s relabeling `UPDATE`; `rls_scopes_a_migration_style_update_with_no_org_context`
-> in `tests/isolation.rs` reproduces it. A migration that must rewrite existing tenant-table data has
-> two correct shapes: wrap the statement in `ALTER TABLE <table> NO FORCE ROW LEVEL SECURITY` /
-> `ALTER TABLE <table> FORCE ROW LEVEL SECURITY` (mirroring the table's own definition in
-> `0007_rls.sql`/`0011_trackers.sql`, restored before the migration transaction commits — a migration
-> that leaves a tenant table un-forced is a worse bug than the one it fixes), or loop over every org
-> and `SELECT set_config('app.org_id', ..., true)` before each org's statement, the same way
-> `Db::begin` does at request time. A schema-only change (`ALTER TABLE ... ADD COLUMN`, a new
+> **A migration that touches a tenant table's data needs its own `org_id` predicate — RLS is
+> not available to supply one.** `Db::migrate` runs every migration statement on the connection
+> pool directly, never through `Db::begin`: `app.org_id` is never set and `of_app` is never
+> assumed. What that means depends on which side of guard 2 the connecting role is on, and the
+> two outcomes are opposites, not variations on a theme. If the connecting role is a superuser
+> or has `BYPASSRLS` — this deployment's actual shape today, per `docs/deploy/fly.md` — RLS does
+> not apply at all, `FORCE` included, because that exemption has nothing to do with `of_app`
+> being assumable; every tenant table gets `FORCE ROW LEVEL SECURITY` unconditionally
+> (`0007_rls.sql`/`0011_trackers.sql`), so an unscoped `UPDATE`/`DELETE` against one silently
+> rewrites **every org's matching rows in one statement** — a cross-tenant write, not a no-op.
+> If the connecting role is neither superuser nor `BYPASSRLS` (the managed-Postgres fallback
+> shape, where that role is also the table's owner — the exemption `FORCE` exists to remove),
+> `current_org()` is NULL for the statement's entire lifetime, so `org_id = current_org()` is
+> never true and the statement silently matches **zero rows, for every tenant**, forever.
+> `savvagent/otto-factory#70` found the second outcome in
+> `0020_rename_trigger_label_default.sql`'s relabeling `UPDATE` — safe there only because that
+> rewrite was genuinely meant to apply the same way to every org, so "zero rows" was the one
+> failure mode actually in play;
+> `rls_scopes_a_migration_style_update_with_no_org_context` in `tests/isolation.rs` reproduces
+> it. A migration whose rewrite is *not* meant to apply uniformly across orgs (a per-org
+> counter, a conditional backfill) is exposed to the first, worse outcome instead — silently,
+> on whichever deployment happens to be running it. Two correct shapes, and they answer
+> different needs: for a rewrite that must vary by org, loop over every org and bind
+> `org_id = $<n>` **explicitly in the statement itself** (`set_config('app.org_id', ..., true)`
+> alongside it is consistent with request-time code but does not do the scoping on its own — it
+> does nothing when RLS is bypassed, which is exactly the case that most needs the predicate);
+> for a rewrite that is genuinely org-agnostic, wrap the statement in
+> `ALTER TABLE <table> NO FORCE ROW LEVEL SECURITY` / `ALTER TABLE <table> FORCE ROW LEVEL
+> SECURITY`, restored before the migration transaction commits (this needs the migrating role to
+> own the table, true of both of this codebase's documented deployment shapes; a migration that
+> leaves a tenant table un-forced is caught at the next boot, not silently — `Db::verify_tenant_isolation`
+> reads `relforcerowsecurity` back from the catalog and refuses to bind a port on an un-forced
+> tenant table). `TRUNCATE` and `COPY ... FROM` are covered by neither pattern — RLS policies
+> never apply to `TRUNCATE` at all, and a migration must never use it against a tenant table; use
+> a per-org `DELETE`/`INSERT` instead. A schema-only change (`ALTER TABLE ... ADD COLUMN`, a new
 > `DEFAULT`, an index) is unaffected — RLS only constrains `SELECT`/`INSERT`/`UPDATE`/`DELETE`
 > against existing rows, never DDL.
+
+**Revision note.** An earlier draft of this paragraph claimed the table owner is exempt from RLS
+"regardless of `FORCE`" — backwards: `FORCE` exists specifically to remove that exemption, as the
+existing "A privilege granted to `of_app` is not a protection" paragraph three lines above already
+says. It also prescribed the per-org loop pattern with `set_config` alone and no explicit `org_id`
+predicate in the statement — which does not scope anything when RLS is bypassed (the superuser
+case), so it would have shipped a "safe pattern" that silently writes every org's rows under this
+deployment's actual connecting role. Both were caught in PR review before merge; the text above is
+the corrected version, and this note stays so a reader diffing against an earlier read of this spec
+can see what changed and why.
 
 ## §2 The regression test
 
@@ -157,20 +185,25 @@ LOCAL ROLE of_app`, no `app.org_id`):
 /// That migration relabels `tracker_bindings.trigger_label` with a bare
 /// `UPDATE ... WHERE trigger_label = 'dark-factory'`. `Db::migrate` runs every
 /// migration on the raw pool (`db.rs`) — never `Db::begin`, so never `SET
-/// LOCAL ROLE of_app` and never `set_config('app.org_id', …)`. On this test's
-/// connecting superuser that is invisible: RLS does not constrain a superuser
-/// regardless of `FORCE`. On the FORCE-RLS-fallback deployment shape (managed
-/// Postgres, no `CREATEROLE` — see CLAUDE.md), migrations run under the very
-/// role `FORCE ROW LEVEL SECURITY` applies to, with no org context ever set,
-/// so `current_org()` is NULL for the statement's entire lifetime and
-/// `org_id = current_org()` is never true: the UPDATE silently matches zero
-/// rows, for every tenant, forever.
+/// LOCAL ROLE of_app` and never `set_config('app.org_id', …)`. On this
+/// deployment's actual connecting role (a superuser, confirmed against
+/// `docs/deploy/fly.md`), that is invisible in the opposite direction from
+/// what this test demonstrates: a superuser bypasses RLS outright, `FORCE`
+/// included, so the statement would touch *every* org's matching rows, not
+/// none. The `SET LOCAL ROLE of_app` below stands in for the FORCE-RLS
+/// fallback deployment shape's connecting role instead — non-superuser,
+/// non-`BYPASSRLS`, and (per `CLAUDE.md`) the owner `FORCE` exists to bind —
+/// where `current_org()` stays NULL for the statement's entire lifetime, so
+/// `org_id = current_org()` is never true and the UPDATE silently matches
+/// zero rows, for every tenant, forever.
 ///
 /// `savvagent/otto-factory#70`. No corrective data migration accompanies this
-/// test — production `tracker_bindings` was confirmed empty at the time of
-/// investigation, and this deployment's migrations currently run as a
-/// superuser that bypasses RLS outright (`docs/deploy/fly.md`). This test is
-/// the guard for the deployment shape where that stops being true.
+/// test — `docs/specs/2026-09-10-migration-org-scoped-writes-design.md`
+/// (Premise corrections, dated 2026-09-10) records that this deployment's own
+/// `tracker_bindings` was empty at investigation time, and that migrations
+/// there currently run as the superuser described above. Neither fact is
+/// re-verified by this test; it guards the deployment shape where the second
+/// one stops being true.
 #[sqlx::test]
 async fn rls_scopes_a_migration_style_update_with_no_org_context(pool: PgPool) {
     let db = db(pool);
@@ -189,8 +222,10 @@ async fn rls_scopes_a_migration_style_update_with_no_org_context(pool: PgPool) {
     .await
     .unwrap();
 
-    // The exact shape `Db::migrate` runs a statement under: `of_app`, and no
-    // `app.org_id` ever set — a schema migration has no tenant to set it to.
+    // The FORCE-RLS-fallback deployment shape's connecting role: owns the
+    // table (like every role that has ever run this database's migrations),
+    // neither superuser nor BYPASSRLS, and no `app.org_id` ever set — a
+    // schema migration has no tenant to set it to.
     let mut tx = db.begin_unpinned().await.unwrap();
     sqlx::query("SET LOCAL ROLE of_app")
         .execute(&mut *tx)
@@ -216,14 +251,51 @@ async fn rls_scopes_a_migration_style_update_with_no_org_context(pool: PgPool) {
          shape changed and every migration written under the old assumption \
          needs re-auditing"
     );
+
+    // Positive control: the row is still there, still stale. The zero above
+    // is the missing org context, not a missing or already-touched row —
+    // the distinction CLAUDE.md's own guard-1/guard-2 split insists a test
+    // in this family has to make.
+    let mut tx = db.begin(a.org).await.unwrap();
+    let label: String = sqlx::query_scalar("SELECT trigger_label FROM tracker_bindings")
+        .fetch_one(tx.conn())
+        .await
+        .unwrap();
+    assert_eq!(
+        label, "dark-factory",
+        "the row 0020 should have relabelled must still be there, untouched, \
+         for the zero above to mean what this test claims it means"
+    );
+
+    // And the same statement, with org context supplied, does relabel it —
+    // proving the statement is capable of matching at all, so the zero above
+    // is attributable to the missing `app.org_id`, not to a typo in the seed
+    // or the UPDATE's own WHERE clause.
+    let updated = sqlx::query(
+        "UPDATE tracker_bindings SET trigger_label = 'otto-factory' \
+         WHERE trigger_label = 'dark-factory'",
+    )
+    .execute(tx.conn())
+    .await
+    .unwrap()
+    .rows_affected();
+    tx.commit().await.unwrap();
+    assert_eq!(
+        updated, 1,
+        "the same statement, org-scoped, should have matched the seeded row"
+    );
 }
 ```
 
-The assertion is deliberately `== 0`, not a `!=` guard that would only fire once the bug is fixed —
-there is nothing to fix in 0020 (it cannot be edited) and nothing to fix in `Db::migrate` (see
-Scope/Out). The test's job is to keep the failure mode itself visible and named, as the worked
+The negative assertion is deliberately `== 0`, not a `!=` guard that would only fire once the bug is
+fixed — there is nothing to fix in 0020 (it cannot be edited) and nothing to fix in `Db::migrate`
+(see Scope/Out). The test's job is to keep the failure mode itself visible and named, as the worked
 example `CLAUDE.md`'s new paragraph (§1) points to, and as the thing the next contributor writing a
-migration-time `UPDATE` against a tenant table should go read before assuming it works.
+migration-time `UPDATE` against a tenant table should go read before assuming it works. The
+read-back and the positive control at the end exist because `== 0` alone is indistinguishable from
+several unrelated breakages (a seed that never landed, a dropped policy, a lost grant) — they
+attribute the zero specifically to the missing `app.org_id`, which is the one claim the test exists
+to prove.
 
 ## §3 Audit of applied migrations
 
@@ -251,6 +323,17 @@ crates/of-core/migrations/0022_user_label.sql
 No other applied migration needs remediation or a note; this section is the record of having
 checked, so the next contributor with the same question does not have to re-run the same `grep`.
 
+**On the grep's own limits.** The pattern above is anchored to line start and case-sensitive, so it
+would miss DML written in lowercase or indented inside a `DO $$ ... $$` block — the idiom
+`0007_rls.sql`, `0011_trackers.sql`, and `0018_rename_tenant_role.sql` all use for their `GRANT`/
+`REVOKE` bodies. Re-run with a broader, case-insensitive, unanchored pattern
+(`grep -linE '\b(update|delete[[:space:]]+from|insert[[:space:]]+into|merge|truncate|copy)\b'`)
+during PR review turned up four more hits — `0003_jobs.sql`, `0007_rls.sql`, `0008_audit.sql`,
+`0018_rename_tenant_role.sql` — all confirmed to be `GRANT`/`REVOKE` text or
+`AFTER INSERT OR UPDATE OR DELETE` trigger clauses, not row-rewriting DML. The audit's conclusion
+(0020 is the only affected migration) holds under the broader check too; a `DO $$` body still needs
+a human read, not just a grep, if a future audit needs to redo this.
+
 ## Testing
 
 - `cargo test -p of-core --test isolation` — the new test plus the full existing suite.
@@ -274,10 +357,31 @@ checked, so the next contributor with the same question does not have to re-run 
 
 - **The guard is documentation plus one worked example, not an automated check.** A lint that parses
   migration SQL for unscoped `UPDATE`/`DELETE` against tables in the `tenant_tables` arrays was
-  considered and rejected as disproportionate: two occurrences of the risky shape in 26 migrations,
-  both now accounted for, and a hand-written SQL parser is itself a maintenance liability. If this
+  considered and rejected as disproportionate: one occurrence of the risky shape found across 26
+  migrations (§3), and a hand-written SQL parser is itself a maintenance liability. PR review raised
+  this same point independently — this repository otherwise converts exactly this kind of rule into
+  a failing test (`every_tool_has_a_price`, `exhaustive_over`, `the_queue_is_read_only_over_the_console`)
+  — and the counter-argument is the one above: a single confirmed occurrence does not yet justify a
+  parser, particularly one that would need to read `DO $$` bodies (see §3) to be trustworthy. If this
   shape recurs after this spec ships, that is evidence the documentation-only guard was insufficient
   and a follow-up should build the lint — not evidence this spec should have built it pre-emptively.
 - **The follow-up issue for the `fly.toml`/`docs/deploy/fly.md` drift is filed, not fixed, in this
   PR.** Low severity (a stale comment, not a stale credential or a wrong deployed value) but real —
   tracked so it does not get lost.
+- **"Production `tracker_bindings` is empty" is a claim about one specific database, not every
+  database that has ever applied 0020.** A long-lived developer database, a staging instance, or a
+  restore from a pre-0020 backup could still carry a stale `'dark-factory'` row — 0020 is already
+  applied everywhere it has run and will never re-run, so such a row (if one exists anywhere) stays
+  mislabeled permanently. Impact is cosmetic (a tracker comment reads the old product name), and
+  Premise correction 1's reasoning for skipping a corrective migration is unaffected — there would
+  still be nothing for this repository's own migrations to fix, since the row's home database is not
+  one this repository controls or re-migrates. Noted so the "production is empty" claim is not read
+  as "every database that ever ran 0020 is empty."
+- **`crates/of-core/src/db.rs`'s `begin_unpinned` doc comment asserts a safety property that is false
+  on this deployment's actual (superuser) connecting role** — "runs as the connecting role with no
+  `app.org_id`, so tenant tables return zero rows rather than everything" is the FORCE-RLS-fallback
+  outcome only; on a superuser it returns everything, which is exactly the distinction §1's revised
+  paragraph now draws. Pre-existing, not introduced by this change, and out of this PR's file list
+  (`CLAUDE.md` + `crates/of-core/tests/isolation.rs` only) — flagged during PR review and filed as
+  `savvagent/otto-factory#112` rather than fixed here, for the same reason `fly.toml`'s drift was
+  filed as `#106` instead of folded in.
