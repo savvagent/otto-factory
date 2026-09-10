@@ -1270,13 +1270,64 @@ async fn add_job_replay_is_insensitive_to_depends_on_order(pool: PgPool) {
 
     let mut second = job(&t, "depends on both");
     second.idempotency_key = Some("k1".into());
-    second.depends_on = vec![dep_b.id, dep_a.id];
+    second.depends_on = vec![dep_b.id.clone(), dep_a.id.clone()];
     let second_job = tx.add_job(second).await.unwrap();
     tx.commit().await.unwrap();
 
     assert_eq!(
         first_job.id, second_job.id,
         "dependency order carries no meaning and must not defeat a replay"
+    );
+
+    // Not just the same id — the dependency rows themselves must be exactly
+    // the intended set, proving the second (converged, `created = false`)
+    // call correctly skipped `set_dependencies` rather than silently
+    // dropping or duplicating the relationship.
+    let mut tx = db.begin(t.org).await.unwrap();
+    let blocked: Vec<String> = tx
+        .blocked(None)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|j| j.id.0)
+        .collect();
+    assert_eq!(
+        blocked,
+        vec![first_job.id.0.clone()],
+        "the replayed job must still be gated on both dependencies"
+    );
+    tx.claim_jobs(std::slice::from_ref(&dep_a.id), t.user, None)
+        .await
+        .unwrap();
+    tx.complete_job(&dep_a.id, None).await.unwrap();
+    tx.commit().await.unwrap();
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let still_blocked = tx.blocked(None).await.unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(
+        still_blocked.len(),
+        1,
+        "one dependency completing must not free a job that needs both"
+    );
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    tx.claim_jobs(std::slice::from_ref(&dep_b.id), t.user, None)
+        .await
+        .unwrap();
+    tx.complete_job(&dep_b.id, None).await.unwrap();
+    let ready: Vec<String> = tx
+        .ready(None)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|j| j.id.0)
+        .collect();
+    tx.commit().await.unwrap();
+    assert_eq!(
+        ready,
+        vec![first_job.id.0.clone()],
+        "both dependencies completing must free the replayed job exactly once"
     );
 }
 
@@ -1411,4 +1462,31 @@ async fn send_message_without_a_key_always_creates_a_new_message(pool: PgPool) {
         a.id, b.id,
         "omitting the key must reproduce today's behavior"
     );
+}
+
+/// The same literal key string used once for `add_job` and once for
+/// `send_message` does not conflict: `jobs_org_idempotency_key_idx` and
+/// `messages_org_idempotency_key_idx` are independent indexes on
+/// independent tables, so there is nothing to collide with.
+#[sqlx::test]
+async fn the_same_key_reused_across_add_job_and_send_message_does_not_conflict(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let mut new_job = job(&t, "wire up the health endpoint");
+    new_job.idempotency_key = Some("shared-key".into());
+    tx.add_job(new_job).await.unwrap();
+
+    tx.send_message(
+        t.user,
+        NewMessage {
+            body: "hand-off note".into(),
+            idempotency_key: Some("shared-key".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
 }

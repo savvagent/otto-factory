@@ -160,14 +160,15 @@ async fn cross_org_mutation_is_refused(pool: PgPool) {
 /// produce `job-1` in their own org — an id match here is expected and
 /// proves nothing about isolation either way. The actual proof is that
 /// **both `add_job` calls succeed** despite differing payloads under the
-/// same key: if the index (or `find_replayed_job`'s `SELECT`) were missing
-/// its `org_id` predicate, org B's call would either wrongly converge onto
-/// org A's row (via the SAVEPOINT unique-violation recovery path) and, since
-/// the payloads differ, fail with `idempotency_key_conflict` instead of
-/// succeeding — or a global-uniqueness constraint would reject the insert
-/// outright. Either failure mode is what this test would catch. The
-/// `find_replayed_job` follow-up calls additionally prove each org resolves
-/// its *own* content back, not the other org's, for the identical key.
+/// same key. If the index (or `find_replayed_job`'s `SELECT`) were missing
+/// its `org_id` predicate, one of two things would happen instead, and this
+/// test would catch either: org B's insert could hit a global-uniqueness
+/// constraint and be rejected outright, or it could wrongly converge onto
+/// org A's row via the SAVEPOINT unique-violation recovery path — and since
+/// the payloads differ, that convergence would fail with
+/// `idempotency_key_conflict` rather than succeeding. The `find_replayed_job`
+/// follow-up calls additionally prove each org resolves its *own* content
+/// back, not the other org's, for the identical key.
 #[sqlx::test]
 async fn idempotency_keys_do_not_cross_org_boundaries(pool: PgPool) {
     let db = db(pool);
