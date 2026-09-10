@@ -36,7 +36,7 @@ use of_billing::Meter;
 use of_core::watch::Watcher;
 use of_core::{Db, Tx};
 use rmcp::handler::server::tool::ToolRouter;
-use rmcp::model::{ErrorData, ServerCapabilities, ServerInfo};
+use rmcp::model::{ErrorData, Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{tool_handler, ServerHandler};
 
 use crate::error;
@@ -240,6 +240,11 @@ impl ServerHandler for Factory {
         // `ServerInfo` is #[non_exhaustive], so this is built by mutation
         // rather than a struct literal with `..`.
         let mut info = ServerInfo::new(ServerCapabilities::builder().enable_tools().build());
+        // Left unset, this defaults to `Implementation::from_build_env()`,
+        // which expands `CARGO_CRATE_NAME`/`CARGO_PKG_VERSION` in `rmcp`'s
+        // own build context — every client would see "rmcp" 2.0.0 at
+        // `initialize`, not otto-factory.
+        info.server_info = Implementation::new("otto-factory", env!("CARGO_PKG_VERSION"));
         info.instructions = Some(INSTRUCTIONS.to_string());
         info
     }

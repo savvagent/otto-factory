@@ -409,3 +409,30 @@ Three rules hold, and the first is what makes the other two true:
   `Db::begin`, `normalize_remote`, `Watcher::wait`). Do not narrate what the code says.
 - No `unwrap()` outside tests. No silent fallbacks on a resolution failure — errors that
   guess are worse than errors that stop.
+
+## Releases & versioning
+
+otto-factory is one product — a single deployed binary plus the console it serves — not a set of
+independently published crates, so it carries one SemVer version, not seven. The workspace's
+`[workspace.package] version` (every crate inherits it via `version.workspace = true`) and
+`web/package.json`'s `version` move together.
+
+The version, `CHANGELOG.md`, and the git tag + GitHub Release are computed automatically by
+[release-please](https://github.com/googleapis/release-please) from commit history — nobody
+hand-edits a version number or writes a changelog entry. Because that computation reads a commit's
+*type*, not just its scope, the PR title (which becomes the squash-merge commit, per this repo's
+merge convention) must be `<type>(<scope>): <subject>` — e.g. `fix(of-core): reap expired job
+claims`, `feat(of-mcp): add a repo-scoped watch filter` — where `<type>` is one of `feat`, `fix`,
+`perf`, `refactor`, `docs`, `test`, `build`, `ci`, `chore`, `revert`, and `<scope>` is the existing
+crate/area vocabulary (a crate directory name, or `web`/`docs`/`ci`/`release`), omittable for a
+change with no single honest scope. A `pr-title` CI check enforces this on every PR.
+
+**A breaking change to a public interface gets its version bump from the same signal the
+otto-factory-development skill's Non-Negotiable Rule 6 already requires you to raise there.**
+Write `<type>(<scope>)!: <subject>` or add a `BREAKING CHANGE: …` footer, and release-please cuts
+a major version from it — the same marker that tells the architect reviewer to look hard is what
+tells the release automation to treat it as one.
+
+`deploy` in `.github/workflows/ci.yml` runs only when release-please has just cut a release (i.e.
+its auto-maintained "chore: release X.Y.Z" PR was just merged), not on every push to `master` —
+see `docs/specs/2026-09-10-semver-release-design.md` §4.

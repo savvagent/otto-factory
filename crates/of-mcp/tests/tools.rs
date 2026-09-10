@@ -20,6 +20,7 @@ use of_mcp::tools;
 use rmcp::handler::server::tool::Extension;
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::model::ErrorData;
+use rmcp::ServerHandler;
 use sqlx::PgPool;
 
 const RESOURCE: &str = "https://mcp.otto-factory.test/mcp";
@@ -225,6 +226,21 @@ async fn a_handler_without_a_principal_blames_the_server(pool: PgPool) {
 
     assert_eq!(code_of(&e), "unauthenticated");
     assert!(e.message.contains("misconfiguration"));
+}
+
+/// `get_info` is answered from `ServerInfo::default()` if nobody sets
+/// `server_info` explicitly, and that default is `rmcp`'s own crate name and
+/// version — expanded in `rmcp`'s build context, not otto-factory's. Every
+/// client that completes `initialize` should see otto-factory identify
+/// itself, not the library it is built on.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn get_info_reports_otto_factorys_own_name_and_version(pool: PgPool) {
+    let (env, _caller) = env(pool).await;
+
+    let info = env.factory.get_info();
+
+    assert_eq!(info.server_info.name, "otto-factory");
+    assert_eq!(info.server_info.version, env!("CARGO_PKG_VERSION"));
 }
 
 // ------------------------------------------------------------------- scopes

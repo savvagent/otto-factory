@@ -1385,6 +1385,23 @@ async fn the_openapi_document_is_public_and_describes_the_surface(pool: PgPool) 
     );
 }
 
+/// The OpenAPI document's version matches the workspace version. This pins
+/// existing-correct behavior: `openapi.rs` uses `env!("CARGO_PKG_VERSION")`,
+/// which in turn resolves to the `of-web` Cargo.toml's version field — set to
+/// `version.workspace = true`, so it reads from the workspace root.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn the_openapi_document_version_matches_workspace_version(pool: PgPool) {
+    let h = harness(pool);
+    let doc = Call::get("/api/openapi.json").send(&h.router).await;
+    doc.expect(StatusCode::OK);
+
+    assert_eq!(
+        doc.body["info"]["version"],
+        env!("CARGO_PKG_VERSION"),
+        "OpenAPI document version must match the workspace version"
+    );
+}
+
 /// Routes are mounted from the same list the document is rendered from, so
 /// anything described has to actually answer. This catches the failure the
 /// catalog exists to prevent — a documented endpoint that is not mounted.
