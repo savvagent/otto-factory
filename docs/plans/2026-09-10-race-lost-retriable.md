@@ -182,7 +182,52 @@ value to convert, so it lands last.
 - [ ] Format and commit: `cargo fmt --all` then
       `git commit -m "of-core: return RaceLost, not Invalid, when a unique-violation race is lost with no winner"`.
 
-## Task 3 — Map `RaceLost` to `INTERNAL_ERROR` in the MCP envelope ⬜
+## Task 3 — Fix `of-web`'s exhaustive match (compile-blocking) ⬜
+
+**Discovered mid-implementation:** Task 1 alone leaves the workspace non-compiling —
+`crates/of-web/src/error.rs`'s `impl From<CoreError> for ApiError` matches exhaustively over
+`of_core::Error`, and `RaceLost` has no arm. This must land before Task 4 (or in either order,
+but both before Final Verification's `cargo test --workspace`).
+
+**Files:** `crates/of-web/src/error.rs`
+**Interfaces:** consumes `Error::RaceLost` from Task 1. No `ApiError` struct change, no route
+change — only a new arm in an existing exhaustive match plus a test.
+
+- [ ] Add a failing test first, in `crates/of-web/src/error.rs`'s existing `#[cfg(test)] mod
+      tests` block (create one following this crate's usual test-module convention if none
+      exists yet in this file — check first):
+      ```rust
+      #[test]
+      fn race_lost_maps_to_service_unavailable_with_its_own_message() {
+          let e = CoreError::RaceLost("add_job lost a race".into());
+          let api_err: ApiError = e.into();
+          assert_eq!(api_err.status, StatusCode::SERVICE_UNAVAILABLE);
+          assert_eq!(api_err.code, "race_lost");
+          // Must NOT be the generic redacted internal() message — RaceLost's
+          // Display text is already written to be read by whoever hit it.
+          assert_eq!(api_err.message, "add_job lost a race");
+      }
+      ```
+- [ ] Run `cargo test -p of-web` (or the specific test path) — confirm it currently fails to
+      compile with `E0004: non-exhaustive patterns: &of_core::Error::RaceLost(_) not covered`.
+- [ ] In `crates/of-web/src/error.rs`'s `status` match (current lines ~137-168), add a new arm.
+      `RaceLost` must NOT join the early-return redaction branch (lines ~129-135) — its message
+      is caller-facing by design, unlike `Db`/`IsolationNotEnforced`/`Config`/`Crypto`. Add it
+      to the `status` match instead, in its own group:
+      ```rust
+      // Retriable, not the caller's fault — the same distinction retriable()
+      // already draws at the MCP layer. 503, not 500: this is specifically a
+      // "try again" condition, and its message (unlike Db's) is already safe
+      // to show as-is.
+      RaceLost(_) => StatusCode::SERVICE_UNAVAILABLE,
+      ```
+- [ ] Run the test again — confirm it passes.
+- [ ] Run `cargo test -p of-web` (full crate) and `cargo clippy -p of-web --all-targets -- -D
+      warnings` — confirm clean.
+- [ ] Format and commit: `cargo fmt --all` then
+      `git commit -m "of-web: map RaceLost to a 503 in the console API's error envelope"`.
+
+## Task 4 — Map `RaceLost` to `INTERNAL_ERROR` in the MCP envelope ⬜
 
 **Files:** `crates/of-mcp/src/error.rs`
 **Interfaces:** consumes `Error::RaceLost` from Task 1/2. No MCP tool schema or result
@@ -230,13 +275,15 @@ variant, exactly like the existing `Db` arm.
 - [ ] Format and commit: `cargo fmt --all` then
       `git commit -m "of-mcp: map RaceLost to INTERNAL_ERROR, not INVALID_PARAMS"`.
 
-## Final Verification (after Task 3)
+## Final Verification (after Task 4)
 
 - [ ] `cargo test --workspace` — full green.
 - [ ] `cargo clippy --all-targets -- -D warnings` — full green.
 - [ ] `cargo fmt --all --check` — clean.
-- [ ] `git log --oneline` on the branch shows exactly three commits (plus the two spec-doc
-      commits already on the branch), none carrying AI attribution.
-- [ ] No `web/` change — `npm run check`/`lint`/`test`/`build` are vacuously satisfied (no
-      console surface touched).
+- [ ] `git log --oneline` on the branch shows the doc commits plus one commit per task (Task 2
+      may carry an extra follow-up commit if its own review found something to fix), none
+      carrying AI attribution.
+- [ ] No `web/` (SvelteKit console) change — `npm run check`/`lint`/`test`/`build` are
+      vacuously satisfied (no frontend surface touched; `crates/of-web` is the Rust console
+      API crate, a different thing from `web/`, and Task 3 touches only the former).
 - [ ] No migration, no out-of-band artifact touched — vacuously satisfied.
