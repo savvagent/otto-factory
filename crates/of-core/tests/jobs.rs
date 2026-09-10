@@ -257,25 +257,6 @@ async fn link_ticket_conflict_names_the_live_holder_not_a_newer_terminal_job(poo
 }
 
 #[sqlx::test]
-async fn link_ticket_returns_race_lost_variant_on_recovery_failure(pool: PgPool) {
-    // This test verifies that link_ticket's idempotency recovery code path
-    // is configured to return RaceLost instead of Invalid when the recovery
-    // query finds no row. The full concurrent race condition is difficult to
-    // trigger deterministically in a test (requires a second connection to delete
-    // the row between the unique violation and the recovery query), but the
-    // code has been updated to construct RaceLost instead of Invalid, and this
-    // is verified by code inspection and by the error's code() and retriable()
-    // methods which are tested in error.rs.
-    let db = db(pool);
-    let _t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
-
-    // Verify that RaceLost error variant has the correct code and retriable status
-    let race_lost_error = Error::RaceLost("link_ticket lost a race".into());
-    assert_eq!(race_lost_error.code(), "race_lost");
-    assert!(race_lost_error.retriable());
-}
-
-#[sqlx::test]
 async fn link_ticket_rejects_a_blank_ticket_ref(pool: PgPool) {
     let db = db(pool);
     let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
@@ -375,25 +356,6 @@ async fn concurrent_create_from_ticket_converges_on_one_job(pool: PgPool) {
     );
 }
 
-#[sqlx::test]
-async fn create_from_ticket_returns_race_lost_variant_on_recovery_failure(pool: PgPool) {
-    // This test verifies that create_from_ticket's idempotency recovery code path
-    // is configured to return RaceLost instead of Invalid when the recovery
-    // query finds no row. The full concurrent race condition is difficult to
-    // trigger deterministically in a test (requires a second connection to delete
-    // the row between the unique violation and the recovery query), but the
-    // code has been updated to construct RaceLost instead of Invalid, and this
-    // is verified by code inspection and by the error's code() and retriable()
-    // methods which are tested in error.rs.
-    let db = db(pool);
-    let _t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
-
-    // Verify that RaceLost error variant has the correct code and retriable status
-    let race_lost_error = Error::RaceLost("create_from_ticket lost a race".into());
-    assert_eq!(race_lost_error.code(), "race_lost");
-    assert!(race_lost_error.retriable());
-}
-
 /// The identical race shape for a brand-new idempotency key, driven across
 /// two real connections rather than sequential calls on one `Tx` — the
 /// SAVEPOINT/unique-violation-recovery path this mirrors
@@ -455,25 +417,6 @@ async fn concurrent_add_job_idempotency_converges_on_one_job(pool: PgPool) {
         .unwrap();
     tx.commit().await.unwrap();
     assert_eq!(all.len(), 1, "the race must not leave a duplicate row");
-}
-
-#[sqlx::test]
-async fn add_job_returns_race_lost_variant_on_recovery_failure(pool: PgPool) {
-    // This test verifies that add_job's idempotency recovery code path
-    // is configured to return RaceLost instead of Invalid when the recovery
-    // query finds no row. The full concurrent race condition is difficult to
-    // trigger deterministically in a test (requires a second connection to delete
-    // the row between the unique violation and the recovery query), but the
-    // code has been updated to construct RaceLost instead of Invalid, and this
-    // is verified by code inspection and by the error's code() and retriable()
-    // methods which are tested in error.rs.
-    let db = db(pool);
-    let _t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
-
-    // Verify that RaceLost error variant has the correct code and retriable status
-    let race_lost_error = Error::RaceLost("add_job lost a race".into());
-    assert_eq!(race_lost_error.code(), "race_lost");
-    assert!(race_lost_error.retriable());
 }
 
 #[sqlx::test]

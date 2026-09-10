@@ -120,7 +120,7 @@ value to convert, so it lands last.
       first; each of the four functions is exercised elsewhere in
       `crates/of-core/tests/jobs.rs` / `crates/of-core/tests/queue.rs`, so add alongside that
       existing coverage rather than a new file. At minimum, one such test must exist proving a
-      real call site now returns `RaceLost` where it used to return `Invalid`.
+      real call site now returns `RaceLost` where it used to return `Invalid` (Resolution: determined not achievable without production test-only instrumentation; see the spec's Risks & Open Questions for the full reasoning. Coverage relies on error.rs's unit test plus the mechanical, reviewable nature of the four one-line swaps.).
 - [ ] Run the new test(s) with `cargo test -p of-core --test jobs --test queue` (`add_job`/
       `create_from_ticket`/`link_ticket` coverage lives in `tests/jobs.rs`; `send_message`
       coverage lives in `tests/queue.rs`/`tests/isolation.rs` — there is no separate

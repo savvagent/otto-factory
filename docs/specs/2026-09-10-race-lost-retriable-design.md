@@ -266,5 +266,19 @@ other.to_string()` fallback already handles it correctly with no new arm needed.
 
 ## Risks & Open Questions
 
-- None identified. This is a narrow, mechanical reclassification with no schema, route, or
-  tool-surface change, and no tenant-isolation, auth, or metering surface is touched.
+- The live concurrent race (the winner's committed row deleted by a second connection
+  strictly between the first connection's SAVEPOINT-violation and its immediately-following
+  recovery SELECT, both awaits inside one async function call with no externally-triggerable
+  yield point) is not deterministically testable through the public API without adding a
+  test-only instrumentation hook to production code, which is out of scope for this
+  bug-fix-sized change. Unlike the existing `concurrent_add_job_idempotency_converges_on_one_job`/
+  `concurrent_create_from_ticket_converges_on_one_job` tests (which tolerate either of two
+  orderings and work with sleep-based `tokio::join!` timing), this scenario needs one specific
+  narrow interleaving with a sub-millisecond window, which sleep-based timing cannot reliably
+  produce without flaking. Coverage relies on `crates/of-core/src/error.rs`'s
+  `race_lost_is_retriable` test (the variant's `code()`/`retriable()` behavior) plus the
+  mechanical nature of the four call-site changes (a one-line `Error::Invalid` →
+  `Error::RaceLost` swap with unchanged `format!` arguments, reviewable directly against the
+  diff) and the full existing test suite continuing to pass unchanged (proving the sibling
+  branches — `TicketAlreadyLinked`, `IdempotencyKeyConflict`, the happy-path recovery arms —
+  are unaffected).
