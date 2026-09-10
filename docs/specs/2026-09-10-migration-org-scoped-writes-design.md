@@ -204,8 +204,9 @@ all):
   of `ALTER TABLE ... FORCE ROW LEVEL SECURITY` is "caught at the next boot" by
   `Db::verify_tenant_isolation`, stated unconditionally. Empirically false on this deployment's
   actual shape: `verify_tenant_isolation`'s own check runs as `of_app` (`Db::begin`'s effective
-  role), which owns nothing in either shape (confirmed: `pg_has_role('of_app', tracker_bindings'
-  owner, 'USAGE')` → `f`), so `FORCE` is never load-bearing for *that check* — the safety net
+  role), which owns nothing in either shape — confirmed with
+  `SELECT pg_has_role('of_app', (SELECT relowner FROM pg_class WHERE relname = 'tracker_bindings'), 'USAGE')`,
+  which returns `f` — so `FORCE` is never load-bearing for *that check* — the safety net
   only exists on the fallback shape, where the effective role is the connecting role itself. The
   round-1 fix also left the `$<n>` bind-parameter syntax in a context (`Db::migrate` runs raw
   SQL) where no such binding is possible, and the test's own comments still credited `FORCE` for

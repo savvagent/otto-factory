@@ -853,8 +853,9 @@ async fn rls_scopes_a_migration_style_update_with_no_org_context(pool: PgPool) {
 
     // `of_app` owns nothing here, so it needs no `FORCE` to be bound by RLS —
     // a non-owner grantee role is never exempt. Neither superuser nor
-    // BYPASSRLS, and no `app.org_id` ever set — a schema migration has no
-    // tenant to set it to.
+    // BYPASSRLS, and no `app.org_id` ever set — `Db::migrate` pins no org
+    // automatically; a migration that needs one sets it itself (CLAUDE.md's
+    // per-org loop), which this bare `UPDATE` never did.
     let mut tx = db.begin_unpinned().await.unwrap();
     sqlx::query("SET LOCAL ROLE of_app")
         .execute(&mut *tx)
