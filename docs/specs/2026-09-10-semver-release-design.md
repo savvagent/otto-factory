@@ -8,6 +8,16 @@
 > master push is never queued behind (and so never cancellable by) another, and a `bootstrap-sha`
 > added to `release-please-config.json` so the first changelog doesn't backfill this repo's
 > pre-convention history. See PR #114 for the full review discussion.
+>
+> **Not yet exercised live, as of this record.** `rust`/`web`/`docker-build`/`pr-title` all ran
+> green on `670860e`'s own merge, and the MCP identity fix and OpenAPI regression test are
+> covered by that run — but `release-please` itself has not run to completion yet (both `#114`
+> and this record are non-bumping `ci:`/`docs:` commits, so the first release PR only appears on
+> the next `feat`/`fix`/`perf`/breaking merge), and its first attempt depends on the repo setting
+> "Allow GitHub Actions to create and approve pull requests" being enabled — flagged in #114,
+> unverified from any diff. Three lower-priority CI-hardening findings #114 left unfixed
+> (job timeouts, `deploy`'s remaining unpinned checkout step, the repo's PR-self-approval
+> setting) are tracked in savvagent/otto-factory#117.
 
 ## Goal & Success Criteria
 
@@ -194,7 +204,7 @@ bump).
       "release-type": "simple",
       "changelog-path": "CHANGELOG.md",
       "pull-request-title-pattern": "chore: release ${version}",
-      "bootstrap-sha": "<origin/master's tip immediately before this PR opened — see Risks>",
+      "bootstrap-sha": "797b9964c7b8da6dbca4b403aeebb19cf5626ec7",
       "extra-files": [
         { "type": "toml", "path": "Cargo.toml", "jsonpath": "$.workspace.package.version" },
         { "type": "json", "path": "web/package.json", "jsonpath": "$.version" }
