@@ -186,6 +186,12 @@ const JOB_COLS: &str = "id, org_id, repo_id, team_id, title, description, status
 /// `idempotency` module doc. Named-field destructure with no `..`: adding a
 /// field to `NewJob` without deciding whether it belongs here fails to
 /// *compile*, not just to be missed on review.
+///
+/// `team_id` here is `new.team_id` as the caller supplied it, deliberately
+/// *not* `add_job`'s locally-inherited `new.team_id.or(repo.team_id)` — the
+/// fingerprint describes the request, not a value `add_job` derives from it,
+/// so a repo whose default team changes between the original call and a
+/// replay does not turn an otherwise-identical retry into a false conflict.
 fn job_idempotency_fingerprint(new: &NewJob) -> Vec<u8> {
     let NewJob {
         repo_id,
@@ -207,8 +213,13 @@ fn job_idempotency_fingerprint(new: &NewJob) -> Vec<u8> {
     // a sequence), so it is sorted before hashing — otherwise the same
     // dependency set supplied in a different order would look like a
     // different payload and turn a genuine replay into a false conflict.
-    let mut depends_on: Vec<&str> = depends_on.iter().map(|j| j.0.as_str()).collect();
-    depends_on.sort_unstable();
+    let mut dep_ids: Vec<&str> = depends_on.iter().map(|j| j.0.as_str()).collect();
+    dep_ids.sort_unstable();
+
+    // Normalized the same way the insert normalizes it (`None` becomes
+    // `{}`), so a caller who spells the omitted field as `{}` on a retry
+    // still replays cleanly instead of hitting a false conflict.
+    let metadata = metadata.clone().unwrap_or_else(|| serde_json::json!({}));
 
     crate::idempotency::fingerprint(&serde_json::json!({
         "repoId": repo_id,
@@ -219,7 +230,7 @@ fn job_idempotency_fingerprint(new: &NewJob) -> Vec<u8> {
         "tracker": tracker,
         "agentType": agent_type,
         "metadata": metadata,
-        "dependsOn": depends_on,
+        "dependsOn": dep_ids,
         "createdBy": created_by,
     }))
 }
@@ -329,11 +340,10 @@ impl Tx<'_> {
             .bind(new.tracker)
             .bind(Option::<&str>::None)
             .bind(new.agent_type.as_deref())
-            .bind(
-                new.metadata
-                    .clone()
-                    .unwrap_or_else(|| serde_json::json!({})),
-            )
+            // Moved, not cloned: `new.metadata` is not read again (only the
+            // disjoint `new.depends_on` is, below), and `hash` (computed
+            // just above) already captured its content.
+            .bind(new.metadata.unwrap_or_else(|| serde_json::json!({})))
             .bind(new.created_by)
             .bind(key)
             .bind(&hash)
@@ -353,6 +363,14 @@ impl Tx<'_> {
                 // ticket_ref's winner, rather than failing a request that,
                 // semantically, already succeeded — the seq number burned
                 // above is simply unused, same as that precedent.
+                //
+                // The literal index name here must match 0025's
+                // `CREATE UNIQUE INDEX jobs_org_idempotency_key_idx` exactly:
+                // if that index is ever renamed without updating this match,
+                // the guard below silently stops matching and this whole
+                // recovery path falls through to the generic `Err(Error::Db)`
+                // arm instead — a correctness regression with no compiler
+                // error to catch it.
                 Err(sqlx::Error::Database(db))
                     if db.is_unique_violation()
                         && db.constraint() == Some("jobs_org_idempotency_key_idx") =>
@@ -383,6 +401,20 @@ impl Tx<'_> {
                             tool: "add_job",
                         });
                     }
+                    // The MCP layer (tools::jobs::add_job) always calls
+                    // Factory::charge before reaching this insert once
+                    // find_replayed_job has returned None, so this branch
+                    // means the *loser* of the race was already billed for
+                    // a call that created nothing — an accepted, narrow
+                    // exception documented in the idempotency-key design
+                    // spec §8, not a bug. Logged so the anomaly is at least
+                    // observable rather than silent.
+                    tracing::warn!(
+                        org = %org,
+                        key,
+                        "add_job lost a concurrent idempotency-key race; the caller was \
+                         billed for a call that converged onto an existing job"
+                    );
                     (self.get_job(&winner.0).await?, false)
                 }
                 Err(error) => return Err(Error::Db(error)),

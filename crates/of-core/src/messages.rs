@@ -178,6 +178,20 @@ impl Tx<'_> {
             return Ok(None);
         };
         crate::idempotency::validate(key)?;
+        // Bound the body before it is ever hashed, not just before it is
+        // ever stored: without this, a caller replaying an already-used key
+        // with an oversized body would pay for a full SHA-256 over it on
+        // every retry, on a path that runs before metering.
+        let body = new.body.trim();
+        if body.is_empty() {
+            return Err(Error::Invalid("message body must not be empty".into()));
+        }
+        if body.len() > MAX_BODY_LEN {
+            return Err(Error::Invalid(format!(
+                "message body is {} bytes; the limit is {MAX_BODY_LEN}",
+                body.len()
+            )));
+        }
 
         let org = self.org();
         let existing: Option<(i64, Vec<u8>)> = sqlx::query_as(
@@ -268,7 +282,10 @@ impl Tx<'_> {
                 }
                 // A concurrent caller won the race on this brand-new key
                 // between find_replayed_message's read and this insert —
-                // converge on its row exactly like jobs::add_job does.
+                // converge on its row exactly like jobs::add_job does. See
+                // that function's identical comment on why the literal
+                // index name below must stay in sync with 0025's
+                // `CREATE UNIQUE INDEX messages_org_idempotency_key_idx`.
                 Err(sqlx::Error::Database(db))
                     if db.is_unique_violation()
                         && db.constraint() == Some("messages_org_idempotency_key_idx") =>
@@ -299,6 +316,18 @@ impl Tx<'_> {
                             tool: "send_message",
                         });
                     }
+                    // See jobs::add_job's identical comment: the MCP layer
+                    // always charges before reaching this insert once
+                    // find_replayed_message has returned None, so the
+                    // loser of this race was already billed for a call
+                    // that created nothing — accepted and documented in
+                    // the design spec §8, logged so it is observable.
+                    tracing::warn!(
+                        org = %org,
+                        key,
+                        "send_message lost a concurrent idempotency-key race; the caller \
+                         was billed for a call that converged onto an existing message"
+                    );
                     sqlx::query_as(&format!(
                         "SELECT {MSG_COLS} FROM messages WHERE org_id = $1 AND id = $2"
                     ))
