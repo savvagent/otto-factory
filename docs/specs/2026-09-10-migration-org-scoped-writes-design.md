@@ -131,19 +131,25 @@ all):
 > superuser or has `BYPASSRLS` — this deployment's actual shape today, per `docs/deploy/fly.md`
 > — RLS does not apply at all, `FORCE` included; an unscoped `UPDATE`/`DELETE` against a tenant
 > table silently rewrites **every org's matching rows in one statement**, a cross-tenant write,
-> not a no-op. Otherwise RLS does apply — every tenant table is `ENABLE`/`FORCE ROW LEVEL
-> SECURITY` unconditionally (`0007_rls.sql`, `0008_audit.sql`, `0011_trackers.sql`), which holds
-> whether the migrating role happens to own the table (where `FORCE` is what removes its
-> exemption) or not (where a non-owner has no exemption to begin with) — and `current_org()` is
-> NULL for the statement's entire lifetime, so `org_id = current_org()` is never true and the
-> statement silently matches **zero rows, for every tenant**, forever. `savvagent/otto-factory#70`
-> is the second outcome: it would have hit exactly this had
-> `0020_rename_trigger_label_default.sql` run under a non-bypassing role; under this deployment's
-> actual (bypassing) role it hit the first outcome instead, harmlessly, because that rewrite was
+> not a no-op. Otherwise RLS does apply — every table carrying a `<table>_tenant_isolation` policy
+> is `ENABLE`/`FORCE ROW LEVEL SECURITY` unconditionally (`0007_rls.sql`, `0008_audit.sql`,
+> `0011_trackers.sql`), which holds whether the migrating role happens to own the table (where
+> `FORCE` is what removes its exemption) or not (where a non-owner has no exemption to begin
+> with) — and `current_org()` is NULL for the statement's entire lifetime, so
+> `org_id = current_org()` is never true and the statement silently matches **zero rows, for
+> every tenant**, forever. (A handful of `org_id NOT NULL` tables — `org_members`,
+> `access_tokens`, `refresh_tokens`, `authorization_codes`, `idp_connections`, `claimed_domains`,
+> `tracker_connection_index` — carry no `*_tenant_isolation` policy at all, deliberately (auth has
+> to resolve a principal before an org is known; see `0007_rls.sql`'s own note on this). Those have
+> no second branch: an unscoped rewrite of one of them always hits the first outcome, on every
+> deployment shape.)
+> `savvagent/otto-factory#70` is what the fallback shape would have produced for
+> `0020_rename_trigger_label_default.sql`'s relabeling `UPDATE`; under this deployment's actual
+> (bypassing) role it produced the first outcome instead, harmlessly, because that rewrite was
 > genuinely meant to apply the same way to every org.
 > `rls_scopes_a_migration_style_update_with_no_org_context` in `tests/isolation.rs` reproduces the
-> zero-rows outcome directly, as a non-owner role — which needs no `FORCE` to be bound, and is the
-> only path a superuser-connected `#[sqlx::test]` can exercise; both paths produce the same zero.
+> zero-rows outcome directly, as a non-owner role — which needs no `FORCE` to be bound — using the
+> real tenant tables, whose owner is this deployment's own connecting role.
 >
 > The one pattern that is safe under every shape, for any migration that must rewrite existing
 > tenant-table data — org-agnostic or not: loop over every org and give the statement **both** an
@@ -162,21 +168,29 @@ all):
 >     UPDATE tracker_bindings SET trigger_label = 'otto-factory'
 >       WHERE org_id = o AND trigger_label = 'dark-factory';
 >   END LOOP;
+>   -- Leaving `app.org_id` set past the loop would apply it to any later
+>   -- statement in this same migration file on an RLS-applying shape —
+>   -- restore it to unset, the same as a schema migration always starts.
+>   PERFORM set_config('app.org_id', '', true);
 > END $$;
 > ```
 >
 > Temporarily toggling `ALTER TABLE <table> NO FORCE ROW LEVEL SECURITY` / `... FORCE ROW LEVEL
 > SECURITY` around an unscoped statement is not recommended: it only helps when the migrating role
 > owns the table, and a forgotten restore is caught by `Db::verify_tenant_isolation` at the next
-> boot only on the fallback shape — on the `of_app`-assumable shape (this deployment's actual
-> shape today) the startup check itself runs as `of_app`, which owns nothing, so `FORCE` is not
-> load-bearing for that check either and a forgotten restore is not caught there at all. The loop
-> above has no such gap. `TRUNCATE` against a tenant table must never appear in a migration —
-> Postgres has no RLS policy class for `TRUNCATE` at all, so neither guard covers it, ever.
-> `COPY ... FROM` is refused outright when RLS applies ("`COPY FROM not supported with row-level
-> security`"), but runs exactly like an unscoped `INSERT` when RLS is bypassed — it needs the same
-> per-org treatment as the loop above, not `TRUNCATE`'s blanket ban. A schema-only change
-> (`ALTER TABLE ... ADD COLUMN`, a new `DEFAULT`, an index) is unaffected — none of this
+> boot only on the fallback shape. `of_app` being assumable (also true of this deployment today,
+> per `docs/deploy/fly.md`) is a separate fact from whether the connecting role bypasses RLS, and
+> it is the one that matters here: the startup check itself runs as `of_app`, which owns nothing,
+> so `FORCE` is not load-bearing for that check either, and a forgotten restore is not caught
+> there at all. The loop above has no such gap. `TRUNCATE` and `COPY ... FROM` against a tenant
+> table must never appear in a migration, for related but distinct reasons: Postgres has no RLS
+> policy class for `TRUNCATE` at all, so neither guard ever covers it, and it silently wipes every
+> org's rows whenever RLS is bypassed; `COPY ... FROM` is refused outright whenever RLS applies,
+> **even with the correct `app.org_id` already set** ("`COPY FROM not supported with row-level
+> security`" — confirmed, the per-org loop above does not rescue it), so a migration cannot be
+> written to run it safely under every shape at all. Use per-org `INSERT`s (the loop above, with
+> `INSERT` in place of the `UPDATE`) for anything `COPY` would otherwise have done. A schema-only
+> change (`ALTER TABLE ... ADD COLUMN`, a new `DEFAULT`, an index) is unaffected — none of this
 > constrains a table's own schema, only what its rows may be read, written, or matched against.
 
 **Revision notes.** Two rounds of PR review, both caught before merge:
@@ -204,6 +218,25 @@ all):
   transcript-equivalent checks summarized in the paragraph itself (ownership queries, a `COPY
   FROM` run under both a bypassing and a non-bypassing role, the loop pattern executed end to
   end).
+- **Round 3** — a skeptical third-pass review, dispatched specifically because two rounds of the
+  same class of error warranted one, confirmed every mechanical claim above (re-derived
+  independently: FORCE's unconditional application, `Db::migrate`'s raw-pool shape,
+  `verify_tenant_isolation`'s `of_app`-as-effective-role, `TRUNCATE`'s missing policy class, the
+  loop pattern run end to end) but found the `COPY ... FROM` sentence was itself unverified and
+  wrong: it claimed "the same per-org treatment as the loop above" would let `COPY` run safely,
+  but `COPY FROM` is refused whenever RLS applies **regardless of whether `app.org_id` is
+  correctly set** — confirmed by running it under `of_app` with the correct org context pinned,
+  which still errors `COPY FROM not supported with row-level security`. It also found the loop
+  example left `app.org_id` set past its own end, which would silently misscope any later
+  statement in the same migration file on an RLS-applying shape — confirmed by running the loop
+  and checking `current_setting('app.org_id')` afterward. Both are fixed above (a `set_config`
+  reset closing the loop; `COPY` reclassified alongside `TRUNCATE` as never safe against a tenant
+  table, with per-org `INSERT` as the replacement). Two smaller precision fixes rode along: the
+  "every tenant table" claim now names the seven `org_id NOT NULL` tables genuinely outside RLS
+  (`org_members`, `access_tokens`, `refresh_tokens`, `authorization_codes`, `idp_connections`,
+  `claimed_domains`, `tracker_connection_index` — confirmed via `pg_class.relrowsecurity` for all
+  seven), and the test's doc comment no longer claims the owner-plus-`FORCE` path is impossible
+  to exercise from a superuser connection (it is possible, just not what this test does).
 
 ## §2 The regression test
 
