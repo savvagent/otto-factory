@@ -6,15 +6,18 @@ on:
   pull_request:
 
 # A second push to the same PR should cancel the run already in flight rather than queue
-# behind it — nobody wants CI results for a commit they've already superseded. Pushes to
-# master must NOT cancel each other: every push to master shares one group (github.ref is
-# refs/heads/master for all of them), and under the release-gated deploy below a cancelled
-# push is no longer self-healing the way it was when every push deployed -- if the push that
-# merges release-please's release PR is cancelled after the tag/Release already exist but
-# before `deploy` runs, no later push re-triggers it (release_created only flips true once,
-# on the commit that actually created the release). See docs/specs/2026-09-10-semver-release-design.md.
+# behind it — nobody wants CI results for a commit they've already superseded. Master pushes
+# get their own group per run (github.run_id), not shared by ref: under the release-gated
+# deploy below, a cancelled -- or merely queued-then-superseded -- master run is no longer
+# self-healing the way it was when every push deployed. GitHub cancels a run that's still
+# *pending* in an occupied group the moment a new one queues into it, not only one already
+# running, so cancel-in-progress: false alone still lets a second superseding push strand a
+# push that already turned into a tagged release (release_created only flips true once, on
+# the commit that actually created it). Keying master's group on run_id makes every master
+# push its own group -- never queued, never cancelled. See
+# docs/specs/2026-09-10-semver-release-design.md.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Read-only by default; only the jobs below that name their own broader `permissions:` block
@@ -202,7 +205,10 @@ jobs:
   release-please:
     runs-on: ubuntu-latest
     needs: [rust, web, docker-build]
-    if: github.event_name == 'push'
+    # Its own explicit guard, not just on.push.branches -- this job holds contents:write +
+    # pull-requests:write, more than deploy's own contents:read + one app-scoped Fly token, so
+    # it earns the same "don't lean on the trigger block" treatment deploy's if: gets below.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     timeout-minutes: 10
     permissions:
       contents: write
