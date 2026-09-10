@@ -259,7 +259,7 @@
               <td class="px-4 py-2">
                 <StatusPill status={job.status} />
                 {#if isClaimStranded(job)}
-                  <div class="text-xs text-bad">{m.job_claim_stranded()}</div>
+                  <div class="text-xs font-medium text-bad">{m.job_claim_stranded()}</div>
                 {/if}
               </td>
               <td class="px-4 py-2 text-muted">
