@@ -162,6 +162,12 @@ impl From<CoreError> for ApiError {
                 StatusCode::BAD_REQUEST
             }
 
+            // Retriable, not the caller's fault — the same distinction
+            // retriable() already draws at the MCP layer. 503, not 500: this
+            // is specifically a "try again" condition, and its message
+            // (unlike Db's) is already safe to show as-is.
+            RaceLost(_) => StatusCode::SERVICE_UNAVAILABLE,
+
             Db(_) | IsolationNotEnforced { .. } | Config(_) | Crypto(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
@@ -286,6 +292,20 @@ mod tests {
             "the schema leaked into the response: {}",
             api.message
         );
+    }
+
+    /// Unlike `Db`, `RaceLost`'s message is already written to be read by
+    /// whoever hit it — it must reach the caller intact, not the redacted
+    /// generic string `internal()` produces, and its status is 503 (retry),
+    /// not 500, matching the distinction `retriable()` already draws.
+    #[test]
+    fn race_lost_maps_to_service_unavailable_with_its_own_message() {
+        let e = CoreError::RaceLost("add_job lost a race".into());
+        let api = ApiError::from(e);
+
+        assert_eq!(api.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(api.code, "race_lost");
+        assert_eq!(api.message, "add_job lost a race");
     }
 
     /// Every credential failure that names an account must be
