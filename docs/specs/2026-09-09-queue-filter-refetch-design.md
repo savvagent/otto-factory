@@ -93,6 +93,11 @@ one. `keepFocus: true` avoids moving focus away from the control the reader just
 or the checkbox), and `noScroll: true` avoids SvelteKit's default post-navigation scroll-to-top,
 since this is a same-page, same-scroll-position update.
 
+Both call sites get this identical transformation: `setFilter` (line 109) and the "Clear filters"
+button's `onclick` (line 192), which currently builds its own bare `replaceState(new URL(...),
+page.state)` call. Neither is the fix on its own — leaving either as `replaceState` leaves that path
+silently broken while the other appears to work.
+
 ## Assumptions
 
 - **No other page in `web/` shares this bug.** `grep -rn "replaceState(" web/src` (excluding this
