@@ -44,13 +44,13 @@ implements it exactly.
 Single task. Both call sites are in the same file, the same import line, and the same fix; there is
 no useful intermediate checkpoint between them.
 
-## Task 1 — Replace `replaceState` with `goto` in the queue filters 🚧
+## Task 1 — Replace `replaceState` with `goto` in the queue filters ✅
 
 **Files:** `web/src/routes/o/[org]/queue/+page.svelte` (modify)
 **Interfaces:** Consumes `goto` from `$app/navigation` (replacing the `replaceState` import from the
 same module). Produces no new interface — internal event-handler behavior only.
 
-- [ ] **Reproduce the defect first, manually, and record the before-state.** This bug has no
+- [x] **Reproduce the defect first, manually, and record the before-state.** This bug has no
       automated seam (see spec Assumptions), so the "failing test" for this task is a scripted manual
       browser check, run once before the fix and once after, not a new test file:
       1. `podman compose up -d` (Postgres 16 on host port 15433); confirm `.env` has `DATABASE_URL`,
@@ -65,9 +65,9 @@ same module). Produces no new interface — internal event-handler behavior only
       5. On the Queue page, select a Status value. Confirm (pre-fix) the URL changes to `?status=...`
          and the `<select>` shows the new value, but the table keeps every job and the "Clear
          filters" link never appears. This is the failing state the task fixes.
-- [ ] In `web/src/routes/o/[org]/queue/+page.svelte`, change the import on line 3 from
+- [x] In `web/src/routes/o/[org]/queue/+page.svelte`, change the import on line 3 from
       `import { replaceState } from '$app/navigation';` to `import { goto } from '$app/navigation';`.
-- [ ] **Update the file's top-of-component doc comment (lines 27-29)**, which currently reads:
+- [x] **Update the file's top-of-component doc comment (lines 27-29)**, which currently reads:
       ```
       * Filters live in the URL so a view can be linked to. `replaceState` rather
       * than `goto`: changing a filter is not a place in history to go back to, and
@@ -79,7 +79,7 @@ same module). Produces no new interface — internal event-handler behavior only
       in the URL so a view can be linked to, and `goto(..., { replaceState: true })` (not bare
       `replaceState` from `$app/navigation`, which never updates the reactive `page.url` this page's
       filters read) is what applies a filter without adding a history entry per change.
-- [ ] Replace the body of `setFilter` (around line 105-110):
+- [x] Replace the body of `setFilter` (around line 105-110):
       ```js
       function setFilter(key: string, value: string | undefined) {
         const url = new URL(page.url);
@@ -92,7 +92,7 @@ same module). Produces no new interface — internal event-handler behavior only
       ```
       (`void` on the call: `goto` returns a `Promise<void>`; the handler doesn't need to await it,
       and an un-awaited promise expression must not read as an accidental omission.)
-- [ ] Replace the "Clear filters" button's `onclick` (around line 190-195):
+- [x] Replace the "Clear filters" button's `onclick` (around line 190-195):
       ```svelte
       onclick={() =>
         void goto(new URL(page.url.pathname, location.origin), {
@@ -104,20 +104,30 @@ same module). Produces no new interface — internal event-handler behavior only
       (Same `void` prefix as `setFilter`, for consistency between the two call sites this task
       touches — the codebase uses both `await goto(...)` and `void goto(...)` elsewhere, so either
       is acceptable, but the two sites in this file should match each other.)
-- [ ] Repeat the manual browser check from the first step (Status, then Repo, then "only what I
+- [x] Repeat the manual browser check from the first step (Status, then Repo, then "only what I
       queued", then "Clear filters") against the same seeded data. Confirm each change narrows or
       restores the table immediately with no reload, and that repeated filter changes do not grow
       `window.history.length` (check via the browser devtools console:
       `history.length` before and after several filter changes should differ by at most 1, not one
       per change).
-- [ ] Stop the local `of-server` and leave `.env`/local Postgres state as found (do not commit
+- [x] Stop the local `of-server` and leave `.env`/local Postgres state as found (do not commit
       `.env` or any seeded data — both are local-only).
-- [ ] Run `cd web && npm run check` — must pass.
-- [ ] Run `cd web && npm run lint` — must pass (run `npm run lint -- --write` first if formatting
+- [x] Run `cd web && npm run check` — must pass.
+- [x] Run `cd web && npm run lint` — must pass (run `npm run lint -- --write` first if formatting
       drifted, then re-run `npm run lint` to confirm clean).
-- [ ] Run `cd web && npm test` — must pass unchanged (vitest over `web/worker/` and existing render
+- [x] Run `cd web && npm test` — must pass unchanged (vitest over `web/worker/` and existing render
       tests; this task adds no new automated test, per the spec's Assumptions and Risks).
-- [ ] Run `cd web && npm run build` — must succeed.
-- [ ] Format and commit: from the repo root,
+- [x] Run `cd web && npm run build` — must succeed.
+- [x] Format and commit: from the repo root,
       `git add web/src/routes/o/\[org\]/queue/+page.svelte` and
       `git commit -m "web: refetch the queue when a filter changes"`.
+
+**Manual verification record.** Performed via a local `of-server` (Postgres on `:15433`, `web/`
+built) and a real browser (a resident-key CDP virtual WebAuthn authenticator for the passkey
+ceremony), with 4 jobs seeded across 2 repos and 4 statuses. Pre-fix: selecting Status="Pending"
+updated the URL to `?status=pending` and the `<select>`, but the table kept all 4 jobs and no "Clear
+filters" link appeared — the exact documented defect. Post-fix: Status="Pending" narrowed the table
+to 1 row immediately; adding Repo further narrowed it (including to "No jobs match these filters");
+toggling "only what I queued" updated correctly; "Clear filters" restored all 4 rows and the clean
+URL. `window.history.length` stayed constant across all 4 filter changes, confirming no history-entry
+growth. Seeded data and the test account were removed from the shared dev database afterward.
