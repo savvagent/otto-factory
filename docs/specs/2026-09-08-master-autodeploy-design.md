@@ -6,6 +6,9 @@
 > commit's own `push` CI run executed the `deploy` job (not skipped) and
 > `fly releases -a otto-factory-mcp` shows release `v4` for that deploy, with the resulting
 > machine passing its `/readyz` health check.
+> **Superseded in part:** docs/specs/2026-09-10-semver-release-design.md §4 changes `deploy`'s
+> trigger from "every push to master" to "release-please just cut a release." The job definition
+> and failure semantics described below are otherwise unchanged.
 
 ## Goal & Success Criteria
 

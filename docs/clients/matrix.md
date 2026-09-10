@@ -119,6 +119,11 @@ and reads `WWW-Authenticate` needs nothing else.
 
 ## Fixed by this run
 
+**`server_info` now reports otto-factory's own name/version at `initialize`.** Previously every client
+saw `name: "rmcp"`, `version: "2.0.0"` regardless of what otto-factory was running — the MCP
+transport layer's own identity was leaked instead of the server's. Fixed in this change, not
+re-verified against a live client as part of this run.
+
 **`http://localhost:<port>` redirect URIs were refused, which meant Claude Code had no
 OAuth path at all.** Registration answered
 `redirect_uri must use https, except for http on 127.0.0.1 or [::1]`, and Claude Code
