@@ -60,16 +60,13 @@ autocommitted `INSERT` followed by a best-effort audit write, is unchanged by it
   Every other caller of either (`login.rs`'s failed-login audit, org invitation flows, etc.) keeps
   today's pool-based, best-effort semantics; this change adds a new method beside them rather than
   changing what they do.
-- **No fault-injection test proving the rollback under a genuine mid-transaction failure.** This
-  repository's own convention is real-Postgres integration tests with no database mocks
-  (`CLAUDE.md`'s "Integration tests" section) and no fault-injection scaffolding exists anywhere in
-  the test suite to force a `PgConnection` to fail deterministically on its second statement without
-  first failing on its first. Coverage here is: (a) code inspection — both statements execute on the
-  same `Transaction` and `commit()` is the only path that persists either, so a failure on either
-  statement necessarily aborts both by Postgres's own transaction semantics, the identical guarantee
-  `Tx::audit`'s doc comment already claims for org-scoped writes in this same codebase; (b) the
-  existing happy-path tests, which continue to assert that a successful registration leaves both
-  rows in place. Recorded here as a deliberate scope boundary, not an oversight.
+- ~~**No fault-injection test proving the rollback under a genuine mid-transaction failure.**~~
+  **Superseded during PR review** (see Risks & Open Questions below) — this claim was wrong. A
+  `BEFORE INSERT` trigger on `audit_events` forces the second statement to fail deterministically,
+  with no mock, and `a_forced_audit_failure_rolls_back_the_credential`
+  (`crates/of-auth/tests/passkeys.rs`) does exactly that. The original reasoning here (no
+  fault-injection scaffolding exists elsewhere in the suite) was true and irrelevant — a trigger is
+  real Postgres behavior, not scaffolding.
 - **No change to `finish_registration`'s public parameter list.** `via`/`ip`/`nickname` etc. are
   unchanged; only the internal write strategy changes.
 
@@ -306,7 +303,35 @@ scope.
 
 ## Risks & Open Questions
 
-- **None outstanding.** This is a narrow, mechanical change to one function's internal write
-  strategy plus one small additive helper in `of-core::audit`; the two items it deliberately leaves
-  untouched (`#109`'s ordering concern, `#110`'s IP-validation concern) are already tracked
-  separately and referenced, not silently folded in.
+Three findings from PR #131's mandatory review trio (architect-reviewer and security-auditor,
+independently convergent), triaged rather than silently absorbed or dismissed:
+
+- **`claim_finish`'s claim code and ceremony are consumed outside this transaction.**
+  `consume_account_claim` (autocommitted) and `take_ceremony`'s ceremony `DELETE` (on `db.pool()`,
+  before this function's transaction opens) both run before the now-atomic credential+audit write.
+  A failure inside that write — newly possible for an audit-write failure, previously only possible
+  for the credential `INSERT` itself — can leave a member with no passkey and no outstanding claim.
+  This hazard predates this PR (a raw `INSERT` failure already hit it); this PR widens its
+  probability surface without introducing a new bug class. Fixing it fully means giving
+  `consume_account_claim` a connection-taking form and running it on the same transaction, a
+  signature change to `finish_registration` (three callers) this spec did not scope and which
+  overlaps with `#109`'s already-tracked ordering concern on the same function. Filed as
+  `savvagent/otto-factory#132` rather than folded in here.
+- **`Db::audit_global_on` compiles against a pinned `Tx` connection.** Doc-warned in this PR
+  (`crates/of-core/src/audit.rs`) and covered by a new regression test
+  (`audit_global_on_refuses_a_pinned_connection` in `crates/of-core/tests/isolation.rs`, proving the
+  misuse is rejected under RLS enforcement rather than merely documented). The stronger fix —
+  making the misuse unrepresentable at the type level, e.g. a newtype around `begin_unpinned`'s
+  `Transaction` — is filed as `savvagent/otto-factory#133`; the blast radius is small today (one
+  caller) and grows with every future one, so it is worth doing, just not urgently.
+- **`passkeys::remove`/`clear`'s own audit writes stay best-effort**, unaffected by this PR's fix —
+  `#108`'s scope was `finish_registration` only. A destroyed credential with no audit row is at
+  least as attacker-interesting as a created one with no audit row. Filed as
+  `savvagent/otto-factory#134`.
+
+This PR's own fix is verified, not merely argued: `a_forced_audit_failure_rolls_back_the_credential`
+(`crates/of-auth/tests/passkeys.rs`) installs a `BEFORE INSERT` trigger that forces the audit write
+to fail and asserts the credential insert rolls back with it — real Postgres behavior, not a mock,
+superseding this spec's original claim (Scope/Out, above) that no deterministic fault-injection test
+was possible in this codebase. That claim was wrong; the security-auditor's review supplied the
+technique.
