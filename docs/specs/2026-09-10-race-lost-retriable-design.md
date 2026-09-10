@@ -1,7 +1,21 @@
 # Retriable `RaceLost` error for the lost-unique-violation-race-with-no-winner path design
 
-> **Status:** APPROVED — closes savvagent/otto-factory#100. Spec critique approved on first
+> **Status:** IMPLEMENTED — closes savvagent/otto-factory#100. Spec critique approved on first
 > pass with only a trivial line-number-citation correction (applied below).
+>
+> Shipped in `savvagent/otto-factory#138`, merged as `a86a8079aa44a7452df2c881d36d7af37a6f842f`.
+> CI run `34512947287` (`rust`/`web`/`docker-build`/`pr-title`/`release-please`) succeeded on the
+> merge commit; `deploy` skipped, correctly, since it only runs when release-please's own
+> release-cutting PR merges. Mid-implementation the `of-web` conversion site was found to be
+> missing from this spec's original scope (its exhaustive match over `of_core::Error` blocked
+> the whole workspace's compile) and was added as its own task before merge — see the Scope
+> section and §4 below, both updated in place rather than left describing the pre-discovery
+> plan. The PR's mandatory review trio plus three `pr-review-toolkit` passes found eight
+> Important issues (an unpinned constraint check in two of the four call sites, a missing
+> backoff signal on the new retriable path, an undemonstrated retriable claim for
+> `send_message`, a test gap, a genuinely achievable deterministic test this draft had
+> wrongly ruled out, two line-length regressions, and a stale version fact in this document) —
+> all fixed before merge; see the PR's aggregated review comment for detail.
 
 ## Goal & Success Criteria
 

@@ -16,7 +16,12 @@ concurrent winner found" failure at four `of-core` sites from `Error::Invalid`
 
 ## Status — 2026-09-10
 
-Four tasks, sequential (Task 3 was added mid-implementation — see below).
+Done. All four tasks shipped in `savvagent/otto-factory#138`
+(`a86a8079aa44a7452df2c881d36d7af37a6f842f`), plus a follow-up commit fixing eight review
+findings (constraint pinning in Task 2's two ticket-lookup sites, a backoff signal on the
+new retriable path, a test gap, a genuinely achievable deterministic test this plan had
+wrongly ruled out, two line-length regressions, and this document's own stale task
+count/file list — see the PR's aggregated review comment for the full list) before merge.
 
 ## Global Constraints
 
@@ -54,7 +59,7 @@ must land before `cargo test --workspace` can pass again, but has no dependency 
 is the `of-mcp` wire mapping, independent of both Task 2 and Task 3's internals but meaningless to
 test without a `RaceLost` value to convert, so it lands last.
 
-## Task 1 — Add the `RaceLost` error variant ⬜
+## Task 1 — Add the `RaceLost` error variant ✅
 
 **Files:** `crates/of-core/src/error.rs`
 **Interfaces:** produces `Error::RaceLost(String)`, `Error::code() -> "race_lost"` for it,
@@ -107,7 +112,7 @@ test without a `RaceLost` value to convert, so it lands last.
 - [ ] Format and commit: `cargo fmt --all` then
       `git commit -m "of-core: add a retriable RaceLost error variant"`.
 
-## Task 2 — Swap the four lost-race sites to `RaceLost` ⬜
+## Task 2 — Swap the four lost-race sites to `RaceLost` ✅
 
 **Files:** `crates/of-core/src/jobs.rs`, `crates/of-core/src/messages.rs`
 **Interfaces:** consumes `Error::RaceLost` from Task 1. No signature of any function changes
@@ -185,7 +190,7 @@ test without a `RaceLost` value to convert, so it lands last.
 - [ ] Format and commit: `cargo fmt --all` then
       `git commit -m "of-core: return RaceLost, not Invalid, when a unique-violation race is lost with no winner"`.
 
-## Task 3 — Fix `of-web`'s exhaustive match (compile-blocking) ⬜
+## Task 3 — Fix `of-web`'s exhaustive match (compile-blocking) ✅
 
 **Discovered mid-implementation:** Task 1 alone leaves the workspace non-compiling —
 `crates/of-web/src/error.rs`'s `impl From<CoreError> for ApiError` matches exhaustively over
@@ -230,7 +235,7 @@ change — only a new arm in an existing exhaustive match plus a test.
 - [ ] Format and commit: `cargo fmt --all` then
       `git commit -m "of-web: map RaceLost to a 503 in the console API's error envelope"`.
 
-## Task 4 — Map `RaceLost` to `INTERNAL_ERROR` in the MCP envelope ⬜
+## Task 4 — Map `RaceLost` to `INTERNAL_ERROR` in the MCP envelope ✅
 
 **Files:** `crates/of-mcp/src/error.rs`
 **Interfaces:** consumes `Error::RaceLost` from Task 1/2. No MCP tool schema or result
