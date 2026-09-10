@@ -34,7 +34,7 @@ pub struct Team {
 #[serde(rename_all = "camelCase")]
 pub struct TeamMember {
     pub user_id: UserId,
-    pub email: String,
+    pub email: Option<String>,
     pub name: Option<String>,
     /// See [`crate::orgs::User::label`]. Carried here too because the console
     /// renders one person row for both the org-members and the teams page.
