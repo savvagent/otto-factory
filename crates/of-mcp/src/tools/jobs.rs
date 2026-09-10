@@ -623,6 +623,7 @@ impl Factory {
         // before calling charge, not after. The no-key path returns None
         // immediately and pays no extra query for it.
         if let Some(existing) = tx.find_replayed_job(&new_job).await.mcp()? {
+            self.record_replay(&mut tx, &caller, "add_job").await?;
             tx.commit().await.mcp()?;
             return Ok(Json(out::JobOut { job: existing }));
         }

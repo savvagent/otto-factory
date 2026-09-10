@@ -112,8 +112,9 @@ pub struct SendMessageArgs {
     /// same arguments returns the original message unchanged instead of
     /// posting a second one — call this every time if your connection to
     /// the server can drop between the call committing and its response
-    /// arriving. Reusing a key with different arguments is an error. Omit
-    /// it and every call posts a new message, as today.
+    /// arriving, which is the situation a retry cannot otherwise tell apart
+    /// from "never happened". Reusing a key with different arguments is an
+    /// error. Omit it and every call posts a new message, as today.
     #[serde(default)]
     pub idempotency_key: Option<String>,
 }
@@ -331,6 +332,7 @@ impl Factory {
             .await
             .mcp()?
         {
+            self.record_replay(&mut tx, &caller, "send_message").await?;
             tx.commit().await.mcp()?;
             return Ok(Json(out::MessageOut { message: existing }));
         }

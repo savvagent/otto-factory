@@ -162,11 +162,20 @@ impl Factory {
     /// has no unrollbackable external effect to protect — it is a plain
     /// read (`Tx::find_replayed_job`/`find_replayed_message`) inside the
     /// same transaction `charge` would use. It still has to run before
-    /// `charge`, because the only way to guarantee a replay is never billed
-    /// is to know it is a replay before billing anything; there is no way
-    /// to refund a charge already recorded. See `tools::jobs::add_job` /
-    /// `tools::coord::send_message` and the idempotency-key design spec's
-    /// §5/§8.
+    /// `charge`: charging first and un-charging afterward on a replay would
+    /// need either a second transaction (the same fragility `sync_ticket`'s
+    /// two-transaction shape above exists to avoid) or a savepoint wrapped
+    /// around `charge` itself, which buys nothing over simply not calling it
+    /// in the first place. A replay is still recorded, just never billed —
+    /// see [`Self::record_replay`], `tools::jobs::add_job` /
+    /// `tools::coord::send_message`, and the idempotency-key design spec's
+    /// §5/§8. This guarantee is for a *replay* — a caller finding a
+    /// key that already resolved to a row. It does not cover two concurrent
+    /// callers racing the *same brand-new* key: both can reach `charge`
+    /// before either has inserted, so both are billed even though only one
+    /// row is ever created. §8 names that gap and the reasoning for
+    /// accepting it rather than making every `add_job`/`send_message` call
+    /// pay the cost of charging after its insert to close it.
     pub async fn charge(
         &self,
         tx: &mut Tx<'_>,
@@ -175,6 +184,25 @@ impl Factory {
     ) -> Result<of_billing::Charge, ErrorData> {
         self.meter
             .charge(tx, caller.user_id, tool)
+            .await
+            .map_err(|e| error::from_billing(&e))
+    }
+
+    /// Record an idempotent replay of `tool` as `Free`, never billed and
+    /// never refused — see [`Self::charge`]'s doc comment for why this has
+    /// to run instead of, not before, `charge` on a replay. Called by
+    /// `add_job`/`send_message` once `Tx::find_replayed_job`/
+    /// `find_replayed_message` finds an existing match, so "record every
+    /// call regardless of class" (`of_billing::classify`'s module doc)
+    /// still holds even though nothing new was created.
+    pub async fn record_replay(
+        &self,
+        tx: &mut Tx<'_>,
+        caller: &Principal,
+        tool: &str,
+    ) -> Result<(), ErrorData> {
+        self.meter
+            .record_replay(tx, caller.user_id, tool)
             .await
             .map_err(|e| error::from_billing(&e))
     }

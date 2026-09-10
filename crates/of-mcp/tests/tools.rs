@@ -282,7 +282,9 @@ async fn add_job_with_an_idempotency_key_replays_instead_of_duplicating(pool: Pg
     let (env, caller) = env(pool).await;
     env.register(&caller).await;
 
-    let billable_before = env.usage(&caller).await["billableUsed"].as_i64().unwrap();
+    let before = env.usage(&caller).await;
+    let billable_before = before["billableUsed"].as_i64().unwrap();
+    let total_before = before["totalCalls"].as_i64().unwrap();
 
     let args = || tools::jobs::AddJobArgs {
         title: "wire up the health endpoint".into(),
@@ -307,11 +309,18 @@ async fn add_job_with_an_idempotency_key_replays_instead_of_duplicating(pool: Pg
 
     assert_eq!(first["job"]["id"], second["job"]["id"]);
 
-    let billable_after = env.usage(&caller).await["billableUsed"].as_i64().unwrap();
+    let after = env.usage(&caller).await;
     assert_eq!(
-        billable_after - billable_before,
+        after["billableUsed"].as_i64().unwrap() - billable_before,
         1,
         "a replay must not be billed a second time"
+    );
+    // 2 add_job calls (one billable, one recorded-but-free) + this `usage`
+    // read itself, which is also Free-but-recorded (of_billing::classify).
+    assert_eq!(
+        after["totalCalls"].as_i64().unwrap() - total_before,
+        3,
+        "a replay is still recorded in history, just not billed"
     );
 }
 
@@ -1201,7 +1210,9 @@ async fn messages_reach_the_inbox_and_the_cursor_clears_them(pool: PgPool) {
 async fn send_message_with_an_idempotency_key_replays_instead_of_duplicating(pool: PgPool) {
     let (env, caller) = env(pool).await;
 
-    let billable_before = env.usage(&caller).await["billableUsed"].as_i64().unwrap();
+    let before = env.usage(&caller).await;
+    let billable_before = before["billableUsed"].as_i64().unwrap();
+    let total_before = before["totalCalls"].as_i64().unwrap();
 
     let args = || tools::coord::SendMessageArgs {
         body: "hand-off note".into(),
@@ -1226,11 +1237,18 @@ async fn send_message_with_an_idempotency_key_replays_instead_of_duplicating(poo
 
     assert_eq!(first["message"]["id"], second["message"]["id"]);
 
-    let billable_after = env.usage(&caller).await["billableUsed"].as_i64().unwrap();
+    let after = env.usage(&caller).await;
     assert_eq!(
-        billable_after - billable_before,
+        after["billableUsed"].as_i64().unwrap() - billable_before,
         1,
         "a replay must not be billed a second time"
+    );
+    // 2 send_message calls (one billable, one recorded-but-free) + this
+    // `usage` read itself, which is also Free-but-recorded.
+    assert_eq!(
+        after["totalCalls"].as_i64().unwrap() - total_before,
+        3,
+        "a replay is still recorded in history, just not billed"
     );
 }
 
