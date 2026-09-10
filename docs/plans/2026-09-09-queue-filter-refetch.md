@@ -9,7 +9,7 @@ re-fetches, because `setFilter` and the "Clear filters" button use SvelteKit's `
 
 ## Status — 2026-09-09
 
-🚧 In progress.
+Implementation complete — PR #85 open for review.
 
 **Spec:** `docs/specs/2026-09-09-queue-filter-refetch-design.md` — read it first. This plan
 implements it exactly.
@@ -21,10 +21,11 @@ implements it exactly.
 - No AI self-attribution anywhere (commits, comments, docs, PR body).
 - Run `cd web && npm run lint -- --write` (prettier) before committing, then re-run `npm run lint`
   to confirm clean.
-- This change touches exactly one source file (`web/src/routes/o/[org]/queue/+page.svelte`) — no
-  SQL, no MCP tool, no console route, no migration, no config surface. Tenant isolation, metering,
-  and public-interface rules do not apply; no cross-org test and no `of-billing::classify` step
-  needed.
+- This change touches the production queue page (`web/src/routes/o/[org]/queue/+page.svelte`) plus
+  two new test-support files added after review (`web/src/routes/o/[org]/queue/QueueHarness.svelte`,
+  `web/src/routes/o/[org]/queue/page.render.test.ts`) — no SQL, no MCP tool, no console route, no
+  migration, no config surface. Tenant isolation, metering, and public-interface rules do not apply;
+  no cross-org test and no `of-billing::classify` step needed.
 - Gates: `cd web && npm run check` (svelte-check + tsc), `npm run lint` (prettier), `npm test`
   (vitest — exercises `web/worker/`, the existing render tests, and (after review) a new
   `o/[org]/queue/page.render.test.ts` that mocks `$app/navigation` to assert `goto`, not
@@ -38,6 +39,8 @@ implements it exactly.
 | File                                                    | Responsibility                                                                                     |
 | -------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
 | `web/src/routes/o/[org]/queue/+page.svelte`              | **Modify.** Swap `replaceState` for `goto(..., { replaceState: true, keepFocus: true, noScroll: true })` at both call sites; swap the `$app/navigation` import accordingly. |
+| `web/src/routes/o/[org]/queue/QueueHarness.svelte`        | **Add** (post-review). Test harness for rendering the queue page in isolation. |
+| `web/src/routes/o/[org]/queue/page.render.test.ts`        | **Add** (post-review). Asserts `goto`, not `replaceState`, is called by the filter controls. |
 
 ## Task Order & Rationale
 

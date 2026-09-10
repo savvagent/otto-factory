@@ -113,7 +113,7 @@
    * same `error`/`Alert` path the job-fetching effect already uses.
    */
   function applyFilters(url: URL | string) {
-    goto(url, { replaceState: true, keepFocus: true, noScroll: true }).catch((e: unknown) => {
+    void goto(url, { replaceState: true, keepFocus: true, noScroll: true }).catch((e: unknown) => {
       error = messageFor(e, m.queue_load_failed());
     });
   }
