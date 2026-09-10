@@ -9,7 +9,7 @@ implements it exactly.
 
 ## Status — 2026-09-10
 
-Not started.
+Approved for implementation. No blocking issues from plan review; advisory note: the `add_passkey_finish` (the "add" path) is the one call site gaining a genuinely new `parts: Parts` extractor rather than just a new trailing argument, and no test asserts its specific via/ip values -- the implementer should double-check argument order there with extra care since a transposed via/ip would only be caught by review, not by any test in this plan.
 
 ## Global Constraints
 
