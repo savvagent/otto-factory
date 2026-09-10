@@ -33,6 +33,7 @@ pub enum JobTransition {
     Claimed,
     Completed,
     Failed,
+    Cancelled,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,6 +136,9 @@ pub fn outbound_decision(
         JobTransition::Failed => detail
             .map(str::to_string)
             .unwrap_or_else(|| "Failed.".into()),
+        JobTransition::Cancelled => detail
+            .map(str::to_string)
+            .unwrap_or_else(|| "Cancelled.".into()),
     };
 
     let github_close = matches!(

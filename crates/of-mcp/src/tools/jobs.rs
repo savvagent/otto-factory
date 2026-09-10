@@ -832,7 +832,8 @@ impl Factory {
                        holder sees the request the next time it calls get_job or wakes from \
                        watch, and is expected to call cancel_job once it actually stops (or \
                        fail_job, if it disagrees and finishes anyway). Fails if the job is \
-                       already completed, failed, or cancelled."
+                       already completed, failed, or cancelled. Anything that depends on this \
+                       job stays blocked — use repend_job or set_dependencies to unblock it."
     )]
     pub async fn request_cancel(
         &self,
@@ -867,7 +868,8 @@ impl Factory {
             tx.audit(
                 Entry::new(action::JOB_CANCELLED)
                     .actor(caller.user_id)
-                    .target("job", job.id.to_string()),
+                    .target("job", job.id.to_string())
+                    .detail(serde_json::json!({ "reason": args.reason })),
             )
             .await
             .mcp()?;
@@ -882,7 +884,7 @@ impl Factory {
                 .unwrap_or_else(|| "Cancelled before being claimed.".to_string());
             self.sync_jobs_after_transition(
                 std::slice::from_ref(&job),
-                JobTransition::Failed,
+                JobTransition::Cancelled,
                 Some(&detail),
             )
             .await;
@@ -896,7 +898,9 @@ impl Factory {
                        asked to stop via request_cancel and are complying. Fails if this job \
                        never had a cancellation requested — if you are stopping for your own \
                        reasons, call fail_job instead, so the audit trail keeps distinguishing \
-                       'asked to stop, and did' from an ordinary failure."
+                       'asked to stop, and did' from an ordinary failure. Also fails if the \
+                       job is not currently in-progress or active — still pending, or already \
+                       completed, failed, or cancelled."
     )]
     pub async fn cancel_job(
         &self,
@@ -915,7 +919,8 @@ impl Factory {
         tx.audit(
             Entry::new(action::JOB_CANCELLED)
                 .actor(caller.user_id)
-                .target("job", job.id.to_string()),
+                .target("job", job.id.to_string())
+                .detail(serde_json::json!({ "note": args.note })),
         )
         .await
         .mcp()?;
@@ -929,7 +934,7 @@ impl Factory {
             .unwrap_or_else(|| "Cancelled.".to_string());
         self.sync_jobs_after_transition(
             std::slice::from_ref(&job),
-            JobTransition::Failed,
+            JobTransition::Cancelled,
             Some(&detail),
         )
         .await;
@@ -962,9 +967,9 @@ impl Factory {
 
     #[tool(
         name = "repend_job",
-        description = "Return a completed, failed, or cancelled job to pending so it can be \
-                       claimed again. The attempt count is preserved, so repeated failures \
-                       stay visible."
+        description = "Return a completed, failed, cancelled, in-progress, or active job to \
+                       pending so it can be claimed again. The attempt count is preserved, so \
+                       repeated failures stay visible."
     )]
     pub async fn repend_job(
         &self,
@@ -1116,8 +1121,9 @@ impl Factory {
                        Use this after link_ticket, when nothing has been posted yet because no \
                        transition has fired since the link was made, or to retry after a \
                        tracker outage — unlike the automatic write-back after claim_jobs, \
-                       complete_job and fail_job, this call surfaces a tracker failure as its \
-                       own error rather than swallowing it, because talking to the tracker is \
+                       complete_job, fail_job, request_cancel and cancel_job, this call \
+                       surfaces a tracker failure as its own error rather than swallowing it, \
+                       because talking to the tracker is \
                        the entire point of calling it. Requires the job to already be linked \
                        via link_ticket and to be in-progress, active, completed, failed, or \
                        cancelled."
@@ -1175,15 +1181,18 @@ impl Factory {
             Status::Failed => (JobTransition::Failed, job.error.clone()),
             // No dedicated outbound "cancelled" signal exists for either tracker (no
             // `not_planned` GitHub close reason, no distinct JIRA status category), so
-            // this reuses the existing `Failed` outbound plumbing — symmetric with how
-            // `of_trackers::sync::close_status` already collapses an inbound "won't
-            // do"/"cancelled"/"rejected" ticket state into `Status::Failed`. The detail
-            // falls back through `error` (in case a cancelled job somehow also carries
-            // one) to `cancel_reason` to a fixed string, so the tracker comment is never
-            // `outbound_decision`'s misleading literal "Failed." default for a job that
-            // was actually cancelled.
+            // `JobTransition::Cancelled` gets the same comment-only, no-close,
+            // no-transition shape as `Failed` — but its own variant, not a reuse of
+            // `Failed` itself, because that arm's JIRA handling transitions a ticket to
+            // the "new" status category, which would announce "still needs doing" about
+            // work someone just asked to stop. The detail prefers `error`, which is
+            // populated whenever `cancel_job` (as opposed to `request_cancel`'s
+            // immediate-finalize path) produced the cancellation, then falls back to
+            // `cancel_reason` and finally a fixed string, so the tracker comment is
+            // never `outbound_decision`'s literal "Cancelled." default when a more
+            // specific one is available.
             Status::Cancelled => (
-                JobTransition::Failed,
+                JobTransition::Cancelled,
                 Some(
                     job.error
                         .clone()

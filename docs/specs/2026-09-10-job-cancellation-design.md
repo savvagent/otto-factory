@@ -95,13 +95,15 @@ changes — `request_cancel` and `cancel_job` both return the existing `{"job": 
 - Actually terminating a process. The server has no channel into an agent's runtime; it
   can only record and surface intent, exactly like `repo_leases`.
 - A dedicated tracker-side (GitHub/JIRA) outbound signal for cancellation — no
-  `not_planned` GitHub close reason, no distinct JIRA status category. §4 reuses the
-  existing `JobTransition::Failed` outbound plumbing with an explicit "Cancelled" comment
-  override, which is symmetric with how `of_trackers::sync::close_status` already
-  collapses an inbound tracker-side "won't do"/"cancelled"/"rejected" state into
-  `Status::Failed` (`crates/of-trackers/src/sync.rs:234`). Zero changes to
-  `of-trackers::sync` are needed. A bespoke external signal is a larger, separate change
-  with no concrete requirement in the issue.
+  `not_planned` GitHub close reason, no distinct JIRA status category. §4 originally
+  planned to reuse the existing `JobTransition::Failed` outbound plumbing for this; PR
+  review found that wrong, since `outbound_decision`'s `(Failed, Jira)` arm transitions a
+  ticket to the "new" status category, announcing "still needs doing" about work someone
+  asked to stop. A `JobTransition::Cancelled` variant was added specifically to avoid that
+  wrong signal, so — corrected from the original claim below — `of_trackers::sync` was
+  not left untouched. A bespoke external signal is still out of scope: `Cancelled` gets
+  a comment only, no GitHub close and no JIRA transition, matching `Failed`'s own
+  no-op-beyond-a-comment shape on both.
 - Inbound recognition of an externally-cancelled ticket (e.g. a human closing a GitHub
   issue as "not planned" flowing back to a local `Cancelled` job). Out for the same
   reason: not required by the issue, and the existing inbound mapping to `Failed` already
@@ -448,7 +450,7 @@ pub async fn request_cancel(
             .reason
             .clone()
             .unwrap_or_else(|| "Cancelled before being claimed.".to_string());
-        self.sync_jobs_after_transition(std::slice::from_ref(&job), JobTransition::Failed, Some(&detail))
+        self.sync_jobs_after_transition(std::slice::from_ref(&job), JobTransition::Cancelled, Some(&detail))
             .await;
     }
     Ok(out)
@@ -491,7 +493,7 @@ pub async fn cancel_job(
         .clone()
         .or_else(|| job.cancel_reason.clone())
         .unwrap_or_else(|| "Cancelled.".to_string());
-    self.sync_jobs_after_transition(std::slice::from_ref(&job), JobTransition::Failed, Some(&detail))
+    self.sync_jobs_after_transition(std::slice::from_ref(&job), JobTransition::Cancelled, Some(&detail))
         .await;
     Ok(out)
 }
@@ -507,7 +509,7 @@ which crate happens to call it first).
 
 ```rust
 Status::Cancelled => (
-    JobTransition::Failed,
+    JobTransition::Cancelled,
     Some(
         job.error
             .clone()
@@ -517,11 +519,14 @@ Status::Cancelled => (
 ),
 ```
 
-placed after the `Status::Failed` arm. This reuses `JobTransition::Failed`'s existing
-outbound behavior (a comment, no GitHub close, no JIRA transition) rather than adding a
-`JobTransition::Cancelled` variant — see Scope/Out. The `Some(...)` always carries a
-non-empty, accurate string, so the tracker comment never falls back to `outbound_decision`'s
-literal `"Failed."` default for a job that was actually cancelled.
+placed after the `Status::Failed` arm, and the transition it pairs with is
+`JobTransition::Cancelled` — **not** `Failed` as originally planned here (see Scope/Out):
+reusing `Failed` fires `outbound_decision`'s `(Failed, Jira)` arm, which transitions a
+cancelled ticket back to the "new" status category. `Cancelled` gets its own arm instead —
+a comment only, no GitHub close, no JIRA transition — added to `of_trackers::sync` for
+this reason. The `Some(...)` always carries a non-empty, accurate string, so the tracker
+comment never falls back to `outbound_decision`'s literal `"Cancelled."` default when a
+better one (the job's `error` or `cancel_reason`) is available.
 
 `ListJobsArgs.status`'s doc comment, `list_jobs`'s description, `stats`'s description, and
 `request_cancel`'s own description above already list every valid state including
@@ -642,11 +647,13 @@ Deliberately **not** touched: the org overview page's stat tiles (see Scope/Out)
   general-purpose "I quit, mark me cancelled" tool. *Rationale: keeps `job.cancelled` in
   the audit trail meaning what its name says; an agent stopping unprompted already has
   `fail_job`.*
-- No `JobTransition::Cancelled` is added to `of_trackers::sync` — cancellation reuses
-  `JobTransition::Failed`'s outbound plumbing with an explicit detail string. *Rationale:
-  the issue's AC does not ask for a distinct external signal, `close_status` already
-  collapses inbound "cancelled"-shaped tracker states into `Failed`, and this keeps the
-  change entirely inside `of-core`/`of-mcp`.*
+- A `JobTransition::Cancelled` variant *is* added to `of_trackers::sync` — this reverses
+  the original plan to reuse `JobTransition::Failed`'s outbound plumbing, corrected during
+  PR review once reuse was found to fire `outbound_decision`'s `(Failed, Jira)` arm and
+  transition a cancelled ticket back to "new". *Rationale: the issue's AC still does not
+  ask for a distinct external signal, so `Cancelled` gets the same comment-only, no-close,
+  no-transition shape `Failed` has — the variant exists only to keep the wrong JIRA signal
+  from firing, not to add a new outbound capability.*
 - No ownership/claimant check on either new tool, matching `complete_job`/`fail_job`'s
   existing lack of one. *Rationale: consistency over incidental hardening for two tools
   only; a real ownership model is a larger, separate change.*
