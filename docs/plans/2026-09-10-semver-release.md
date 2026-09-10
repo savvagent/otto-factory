@@ -82,6 +82,11 @@ These hold for every task below:
       both files and note the discrepancy in the PR body).
 - [ ] Create `CHANGELOG.md` at the repo root, content exactly `# Changelog\n`.
 - [ ] Validate all three parse: `python3 -c "import json; json.load(open('release-please-config.json')); json.load(open('.release-please-manifest.json'))"`.
+- [ ] Note in the PR body: `web/package-lock.json`'s own root `"version"` field is not covered by
+      `extra-files` and will lag `web/package.json`'s version by one `npm install` after a release —
+      the same accepted, cosmetic drift the spec's Risks section already names for `Cargo.lock`.
+      `npm ci` in the `web` CI job does not fail on this drift (it installs from the lockfile's
+      dependency tree, not its root version field), so no action is needed beyond naming it.
 - [ ] Format and commit: `git add release-please-config.json .release-please-manifest.json CHANGELOG.md && git commit -m "ci: add release-please config"`.
 
 ## Task 2 — CI: release automation jobs
