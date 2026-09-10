@@ -28,7 +28,7 @@
 > savvagent/otto-factory#121 (`chore: release 0.2.0`) — confirming the repo setting flagged
 > above as unverified does in fact allow it. That resolves the release-PR-creation half of
 > the "not yet exercised live" caveat above. **What remains unexercised**: cutting an actual
-> release (the tag + GitHub Release release-please creates when #121 itself merges) and the
+> release (the tag + GitHub Release that release-please creates when #121 itself merges) and the
 > `deploy` job that gates on it — `deploy` correctly skipped again on #115's own push, since
 > #121 has not yet merged. See #115's design spec Status blockquote for the full account.
 
