@@ -1,6 +1,6 @@
 # `finish_registration`'s credential insert and audit write become atomic
 
-> **Status:** DRAFT — closes `savvagent/otto-factory#108`, filed during the review of `#107`
+> **Status:** APPROVED — closes `savvagent/otto-factory#108`, filed during the review of `#107`
 > (`docs/specs/2026-09-10-passkey-registration-audit-via-design.md`, which added `via`/`ip` to the
 > same function without changing its transactional shape). Related: `#109` tracks a different
 > ordering concern in the same function (audit write vs. the ceremony-ownership check), left
@@ -167,11 +167,15 @@ impl Db {
 ```
 
 `sqlx::PgExecutor<'e>` (re-exported from `sqlx-postgres`, `sqlx` 0.8.6 — confirmed present in this
-workspace's locked version) is implemented for `&PgPool`, `&mut PgConnection`, and
-`&mut Transaction<'_, Postgres>` alike, so `Tx::audit`, `Db::audit_global`, `Db::audit_for_org`, and
-the new `Db::audit_global_on` all resolve to the same one INSERT site instead of four independent
-copies of it. This is a refactor of existing private machinery; no other crate calls `Entry::write`
-directly, and the three existing public methods keep their exact signatures.
+workspace's locked version) is implemented for `&PgPool` and `&mut PgConnection`. It is *not*
+implemented directly for `&mut Transaction<'_, Postgres>` — sqlx-core 0.8.6 comments that blanket
+impl out ("fails to compile due to lack of lazy normalization") — so a caller reaches it through
+`Transaction`'s `DerefMut` instead, exactly as `&mut *tx` does in §2 below and already does in this
+crate's own `Db::begin`/`Db::verify_tenant_isolation`. `Tx::audit`, `Db::audit_global`,
+`Db::audit_for_org`, and the new `Db::audit_global_on` all resolve to the same one INSERT site
+instead of four independent copies of it. This is a refactor of existing private machinery; no
+other crate calls `Entry::write` directly, and the three existing public methods keep their exact
+signatures.
 
 ## §2 `finish_registration`
 
