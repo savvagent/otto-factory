@@ -925,38 +925,44 @@ async fn rls_scopes_a_migration_style_update_with_no_org_context(pool: PgPool) {
 async fn rls_scopes_the_lease_resource_backfills_per_org_loop(pool: PgPool) {
     let db = db(pool);
     let a = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+    let b = tenant(&db, "globex", "git@github.com:globex/api.git").await;
 
-    // Row 1: the way a row would have looked before 0027 ever ran -- an unprefixed
-    // branch name, `acquired_at` before 0027 was installed. 0030's provenance bound
-    // must catch this one.
-    sqlx::query(
-        "INSERT INTO repo_leases (org_id, repo_id, resource, holder_user_id, expires_at, \
-                                   acquired_at, renewed_at) \
-         VALUES ($1, $2, 'main', $3, now() + interval '1 hour', \
-                 (SELECT installed_on FROM _sqlx_migrations WHERE version = 27) - interval '1 hour', \
-                 (SELECT installed_on FROM _sqlx_migrations WHERE version = 27) - interval '1 hour')",
-    )
-    .bind(a.org)
-    .bind(a.repo)
-    .bind(a.user)
-    .execute(db.pool())
-    .await
-    .unwrap();
+    // Two rows per org: one the way it would have looked before 0027 ever ran (an
+    // unprefixed branch name, `acquired_at` before 0027 was installed -- 0030's
+    // provenance bound must catch this one), and one a genuinely free-form, non-branch
+    // resource taken *after* 0027 shipped the generalized `resource` column -- exactly
+    // the kind of row an earlier, shape-based guard (`resource NOT LIKE 'branch:%'` with
+    // no provenance bound) would have wrongly rewritten. 0030 must leave this alone.
+    // Seeded for both orgs so the assertion below can tell "the loop's explicit
+    // `org_id = o` predicate reaches every org" apart from "the loop happened to touch
+    // the one org it was seeded with" -- the guard this deployment's actual shape
+    // (RLS bypassed) actually relies on.
+    for tenant_ in [&a, &b] {
+        sqlx::query(
+            "INSERT INTO repo_leases (org_id, repo_id, resource, holder_user_id, expires_at, \
+                                       acquired_at, renewed_at) \
+             VALUES ($1, $2, 'main', $3, now() + interval '1 hour', \
+                     (SELECT installed_on FROM _sqlx_migrations WHERE version = 27) - interval '1 hour', \
+                     (SELECT installed_on FROM _sqlx_migrations WHERE version = 27) - interval '1 hour')",
+        )
+        .bind(tenant_.org)
+        .bind(tenant_.repo)
+        .bind(tenant_.user)
+        .execute(db.pool())
+        .await
+        .unwrap();
 
-    // Row 2: a genuinely free-form, non-branch resource taken *after* 0027 shipped the
-    // generalized `resource` column -- exactly the kind of row an earlier, shape-based
-    // guard (`resource NOT LIKE 'branch:%'` with no provenance bound) would have
-    // wrongly rewritten. 0030 must leave this alone.
-    sqlx::query(
-        "INSERT INTO repo_leases (org_id, repo_id, resource, holder_user_id, expires_at) \
-         VALUES ($1, $2, 'deploy:staging', $3, now() + interval '1 hour')",
-    )
-    .bind(a.org)
-    .bind(a.repo)
-    .bind(a.user)
-    .execute(db.pool())
-    .await
-    .unwrap();
+        sqlx::query(
+            "INSERT INTO repo_leases (org_id, repo_id, resource, holder_user_id, expires_at) \
+             VALUES ($1, $2, 'deploy:staging', $3, now() + interval '1 hour')",
+        )
+        .bind(tenant_.org)
+        .bind(tenant_.repo)
+        .bind(tenant_.user)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    }
 
     let mut tx = db.begin_unpinned().await.unwrap();
     sqlx::query("SET LOCAL ROLE of_app")
@@ -975,21 +981,27 @@ async fn rls_scopes_the_lease_resource_backfills_per_org_loop(pool: PgPool) {
     .unwrap();
     tx.commit().await.unwrap();
 
-    let mut tx = db.begin(a.org).await.unwrap();
-    let resources: Vec<String> =
-        sqlx::query_scalar("SELECT resource FROM repo_leases ORDER BY resource")
-            .fetch_all(tx.conn())
-            .await
-            .unwrap();
-    tx.commit().await.unwrap();
-    assert_eq!(
-        resources,
-        vec!["branch:main".to_string(), "deploy:staging".to_string()],
-        "the pre-0027 branch row should have been prefixed by the provenance-bounded \
-         loop, and the post-0027 free-form resource must be left exactly as it was -- \
-         rewriting it would silently break the exact-string match acquire_lease/\
-         renew_lease/release_lease key on"
-    );
+    // Read each org back through its own pinned Tx -- both orgs must show the same
+    // outcome, proving the loop reached org B and not only the org it happened to be
+    // seeded alongside first.
+    for tenant_ in [&a, &b] {
+        let mut tx = db.begin(tenant_.org).await.unwrap();
+        let resources: Vec<String> =
+            sqlx::query_scalar("SELECT resource FROM repo_leases ORDER BY resource")
+                .fetch_all(tx.conn())
+                .await
+                .unwrap();
+        tx.commit().await.unwrap();
+        assert_eq!(
+            resources,
+            vec!["branch:main".to_string(), "deploy:staging".to_string()],
+            "the pre-0027 branch row should have been prefixed by the provenance-bounded \
+             loop, and the post-0027 free-form resource must be left exactly as it was -- \
+             rewriting it would silently break the exact-string match acquire_lease/\
+             renew_lease/release_lease key on, for org {:?}",
+            tenant_.org
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
