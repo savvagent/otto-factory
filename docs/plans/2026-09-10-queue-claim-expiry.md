@@ -44,8 +44,9 @@ These hold for every task in this plan:
   before every caller is updated fails to compile on code the current task hasn't
   touched yet. Run `cargo test --workspace` + `cargo clippy --all-targets -- -D warnings`
   unscoped only after Task 3 (the last Rust task) completes, as that task's final gate.
-- A migration is a new file, never an edit to one already applied. `0025` is the next free
-  number (`0024` is the current head).
+- A migration is a new file, never an edit to one already applied. `0026` is the next free
+  number (`0025_idempotency_keys.sql`, merged to master after this plan was written, is
+  the current head).
 - A new MCP tool is not done until it is classified in `of-billing::classify` —
   `every_tool_has_a_price`/`exhaustive_over` enforce this.
 - A tenant-scoped function is not done without a cross-org negative test — no *new* RLS
@@ -62,7 +63,7 @@ These hold for every task in this plan:
 
 | File | Responsibility |
 |---|---|
-| **Create.** `crates/of-core/migrations/0025_job_claim_expiry.sql` | Adds nullable `claim_expires_at` to `jobs`. |
+| **Create.** `crates/of-core/migrations/0026_job_claim_expiry.sql` | Adds nullable `claim_expires_at` to `jobs`. |
 | **Modify.** `crates/of-core/src/jobs.rs` | `DEFAULT_CLAIM_TTL_SECS`/`MAX_CLAIM_TTL_SECS`, `Job.claim_expires_at`, `claim_jobs`'s reap step + `ttl_secs` param, `ready()`'s widened claimable predicate, `ensure_claim_held`, `finalize`/`complete_job`/`fail_job` taking `caller: UserId`, `renew_claim`, `repend_job` clearing the new column. |
 | **Modify.** `crates/of-core/src/error.rs` | `AlreadyClaimed` gains `holder: String`. |
 | **Modify.** `crates/of-core/tests/queue.rs` | New-behavior tests (see Task 1). |
@@ -95,7 +96,7 @@ message-catalog gate.
 
 ## Task 1 — `of-core`: claim expiry, reap, and the claimer check
 
-**Files:** `crates/of-core/migrations/0025_job_claim_expiry.sql` (create),
+**Files:** `crates/of-core/migrations/0026_job_claim_expiry.sql` (create),
 `crates/of-core/src/jobs.rs`, `crates/of-core/src/error.rs`, `crates/of-core/tests/queue.rs`,
 `crates/of-core/tests/isolation.rs`.
 
@@ -104,7 +105,7 @@ message-catalog gate.
 `Tx::renew_claim`, `Tx::complete_job`/`Tx::fail_job`'s new `caller: UserId` parameter,
 `Error::AlreadyClaimed { job, holder }`. Consumed by Task 2.
 
-- [ ] Write `crates/of-core/migrations/0025_job_claim_expiry.sql` exactly as spec §2: one
+- [ ] Write `crates/of-core/migrations/0026_job_claim_expiry.sql` exactly as spec §2: one
       nullable `timestamptz` column, no backfill, with the comment explaining why NULL
       rows are never reaped.
 - [ ] Run `cargo test -p of-core` once with no other code changes, purely to confirm a

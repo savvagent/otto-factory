@@ -542,7 +542,7 @@ async fn cancel_job_after_request_cancel_succeeds(pool: PgPool) {
         .unwrap();
 
     let cancelled = tx
-        .cancel_job(&j.id, Some("stopped as requested"))
+        .cancel_job(&j.id, t.user, Some("stopped as requested"))
         .await
         .unwrap();
     tx.commit().await.unwrap();
@@ -566,7 +566,10 @@ async fn cancel_job_with_no_request_on_file_is_invalid(pool: PgPool) {
         .await
         .unwrap();
 
-    let err = tx.cancel_job(&j.id, Some("giving up")).await.unwrap_err();
+    let err = tx
+        .cancel_job(&j.id, t.user, Some("giving up"))
+        .await
+        .unwrap_err();
     tx.rollback().await.unwrap();
 
     assert_eq!(err.code(), "invalid_argument");
@@ -582,7 +585,7 @@ async fn cancel_job_on_a_pending_job_is_refused(pool: PgPool) {
 
     let mut tx = db.begin(t.org).await.unwrap();
     let j = tx.add_job(job(&t, "still pending")).await.unwrap();
-    let err = tx.cancel_job(&j.id, None).await.unwrap_err();
+    let err = tx.cancel_job(&j.id, t.user, None).await.unwrap_err();
     tx.rollback().await.unwrap();
 
     assert_eq!(err.code(), "wrong_status");
@@ -609,7 +612,7 @@ async fn cancel_job_with_no_note_leaves_error_unset(pool: PgPool) {
         .await
         .unwrap();
 
-    let cancelled = tx.cancel_job(&j.id, None).await.unwrap();
+    let cancelled = tx.cancel_job(&j.id, t.user, None).await.unwrap();
     tx.commit().await.unwrap();
 
     assert_eq!(cancelled.status, Status::Cancelled);
@@ -659,6 +662,43 @@ async fn request_cancel_on_pending_leaves_dependents_blocked(pool: PgPool) {
     assert!(!ready.contains(&dependent.id.0));
 }
 
+/// `cancel_job` finalizes a claim exactly like `complete_job`/`fail_job` do,
+/// so it gets the identical claimer fence: a stale holder confirming a stop
+/// on a job someone else has since reclaimed must not be able to terminate
+/// the reclaimer's live attempt out from under it.
+#[sqlx::test]
+async fn a_stale_holder_cannot_cancel_after_someone_else_reclaims(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+    let user_b = second_user(&db, &t, "second@acme.test").await;
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let j = tx.add_job(job(&t, "stranded")).await.unwrap();
+    tx.claim_jobs(std::slice::from_ref(&j.id), t.user, Some("agent-a"), None)
+        .await
+        .unwrap();
+    expire_claim(&mut tx, t.org, &j.id).await;
+    tx.claim_jobs(std::slice::from_ref(&j.id), user_b, Some("agent-b"), None)
+        .await
+        .unwrap();
+    tx.request_cancel(&j.id, user_b, Some("stop"))
+        .await
+        .unwrap();
+
+    let err = tx
+        .cancel_job(&j.id, t.user, Some("stale confirmation"))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "already_claimed");
+
+    let cancelled = tx
+        .cancel_job(&j.id, user_b, Some("stopped as requested"))
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(cancelled.status, Status::Cancelled);
+}
+
 /// A repended cancelled job gets a clean slate: no stale cancellation request
 /// should follow it into its next attempt.
 #[sqlx::test]
@@ -677,7 +717,7 @@ async fn repend_clears_cancellation_fields(pool: PgPool) {
     tx.request_cancel(&j.id, t.user, Some("stop"))
         .await
         .unwrap();
-    tx.cancel_job(&j.id, Some("stopped")).await.unwrap();
+    tx.cancel_job(&j.id, t.user, Some("stopped")).await.unwrap();
 
     let repended = tx.repend_job(&j.id).await.unwrap();
     assert_eq!(repended.status, Status::Pending);
@@ -690,7 +730,7 @@ async fn repend_clears_cancellation_fields(pool: PgPool) {
     tx.claim_jobs(std::slice::from_ref(&j.id), t.user, None, None)
         .await
         .unwrap();
-    let err = tx.cancel_job(&j.id, None).await.unwrap_err();
+    let err = tx.cancel_job(&j.id, t.user, None).await.unwrap_err();
     assert_eq!(err.code(), "invalid_argument");
     tx.commit().await.unwrap();
 }
@@ -901,11 +941,18 @@ async fn an_expired_claim_reappears_in_ready(pool: PgPool) {
         .into_iter()
         .map(|j| j.id.0)
         .collect();
-    tx.commit().await.unwrap();
     assert!(
         ready_after.contains(&j.id.0),
         "an expired claim must reappear in ready()"
     );
+
+    // §1 of the design spec's central claim: ready() *reinterprets*, it never
+    // *mutates*. The row itself must still say in-progress, still under its
+    // original holder, until something actually calls claim_jobs on it.
+    let untouched = tx.get_job(&j.id).await.unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(untouched.status, Status::InProgress);
+    assert_eq!(untouched.claimed_by, Some(t.user));
 }
 
 /// The fencing half of GH#65 as it plays out through `claim_jobs` itself: once
@@ -936,6 +983,95 @@ async fn an_expired_claim_can_be_reclaimed_by_someone_else(pool: PgPool) {
         reclaimed[0].attempts, 2,
         "one attempt from the original claim, one from the reclaim"
     );
+}
+
+/// Every test above claims a job and leaves it `in-progress`, but the reap
+/// UPDATE, `ready()`'s widened predicate, and `ensure_claim_held` all
+/// explicitly branch on `status IN ('in-progress', 'active')` — a long task
+/// that got as far as `activate_job` before its agent died is exactly the
+/// realistic case this covers, and it must reap, reappear, and fence
+/// identically to the `in-progress` case.
+#[sqlx::test]
+async fn an_expired_active_claim_reaps_reappears_and_fences_like_in_progress(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+    let user_b = second_user(&db, &t, "second@acme.test").await;
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let j = tx
+        .add_job(job(&t, "long task, actually started"))
+        .await
+        .unwrap();
+    tx.claim_jobs(std::slice::from_ref(&j.id), t.user, Some("agent-a"), None)
+        .await
+        .unwrap();
+    let active = tx.activate_job(&j.id).await.unwrap();
+    assert_eq!(active.status, Status::Active);
+    expire_claim(&mut tx, t.org, &j.id).await;
+
+    let ready: Vec<String> = tx
+        .ready(None)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|j| j.id.0)
+        .collect();
+    assert!(
+        ready.contains(&j.id.0),
+        "an expired active claim must reappear in ready() exactly like an expired in-progress one"
+    );
+
+    let reclaimed = tx
+        .claim_jobs(std::slice::from_ref(&j.id), user_b, Some("agent-b"), None)
+        .await
+        .unwrap();
+    assert_eq!(reclaimed[0].claimed_by, Some(user_b));
+    assert_eq!(reclaimed[0].status, Status::InProgress);
+
+    let err = tx
+        .complete_job(&j.id, t.user, Some("stale"))
+        .await
+        .unwrap_err();
+    tx.commit().await.unwrap();
+    assert_eq!(err.code(), "already_claimed");
+}
+
+/// A reap is an involuntary repend, and must clear the same fields
+/// `repend_job` does: a cancellation request aimed at the agent that died
+/// must not follow the job to whoever reclaims it, or the new holder inherits
+/// someone else's "please stop" and any org member can immediately
+/// `cancel_job` an attempt nobody asked to stop.
+#[sqlx::test]
+async fn reaping_an_expired_claim_clears_its_cancellation_request(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+    let user_b = second_user(&db, &t, "second@acme.test").await;
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let j = tx
+        .add_job(job(&t, "stranded, cancel requested"))
+        .await
+        .unwrap();
+    tx.claim_jobs(std::slice::from_ref(&j.id), t.user, None, None)
+        .await
+        .unwrap();
+    tx.request_cancel(&j.id, t.user, Some("no longer needed"))
+        .await
+        .unwrap();
+    expire_claim(&mut tx, t.org, &j.id).await;
+
+    let reclaimed = tx
+        .claim_jobs(std::slice::from_ref(&j.id), user_b, None, None)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    assert!(
+        reclaimed[0].cancel_requested_at.is_none(),
+        "a stale cancellation request must not survive a reap onto a new holder"
+    );
+    assert!(reclaimed[0].cancel_requested_by.is_none());
+    assert!(reclaimed[0].cancel_reason.is_none());
 }
 
 #[sqlx::test]
@@ -1690,10 +1826,10 @@ async fn add_job_replay_is_insensitive_to_depends_on_order(pool: PgPool) {
         vec![first_job.id.0.clone()],
         "the replayed job must still be gated on both dependencies"
     );
-    tx.claim_jobs(std::slice::from_ref(&dep_a.id), t.user, None)
+    tx.claim_jobs(std::slice::from_ref(&dep_a.id), t.user, None, None)
         .await
         .unwrap();
-    tx.complete_job(&dep_a.id, None).await.unwrap();
+    tx.complete_job(&dep_a.id, t.user, None).await.unwrap();
     tx.commit().await.unwrap();
 
     let mut tx = db.begin(t.org).await.unwrap();
@@ -1706,10 +1842,10 @@ async fn add_job_replay_is_insensitive_to_depends_on_order(pool: PgPool) {
     );
 
     let mut tx = db.begin(t.org).await.unwrap();
-    tx.claim_jobs(std::slice::from_ref(&dep_b.id), t.user, None)
+    tx.claim_jobs(std::slice::from_ref(&dep_b.id), t.user, None, None)
         .await
         .unwrap();
-    tx.complete_job(&dep_b.id, None).await.unwrap();
+    tx.complete_job(&dep_b.id, t.user, None).await.unwrap();
     let ready: Vec<String> = tx
         .ready(None)
         .await

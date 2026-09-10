@@ -1,9 +1,26 @@
 # Queue claim expiry and claimer-checked finalize design
 
-> **Status:** APPROVED — closes savvagent/otto-factory#65. Spec critique approved this
+> **Status:** IMPLEMENTED — closes savvagent/otto-factory#65. Spec critique approved this
 > design with two minor non-blocking corrections (both applied): §3's `JOB_COLS` ordering
 > comment no longer implies positional `sqlx::FromRow` decoding, and §8 no longer claims a
 > queue-list placement precedent that does not exist.
+>
+> **PR review round found six further corrections, all applied before merge** (see the
+> `Post-review correction:` notes inline in §2–§4 and Risks & Open Questions for detail):
+> the migration was renumbered `0025` → `0026` after `savvagent/otto-factory#99` merged
+> `0025_idempotency_keys.sql` to master while this branch was in flight; `claim_jobs`'s
+> reap step now runs *after* the deterministic sorted `FOR UPDATE` lock, not before, so it
+> acquires no lock ordering of its own; the reap now also clears the same cancellation
+> fields `repend_job` clears; `finalize`, `cancel_job`, and `close_from_ticket` now all
+> clear `claim_expires_at`, making §3's `Job.claim_expires_at` doc comment true rather
+> than aspirational; `cancel_job` now takes a `caller: UserId` and is fenced by
+> `ensure_claim_held` exactly like `complete_job`/`fail_job` (Scope/Out's original
+> characterization of `cancel_job` as having "no result to clobber" was wrong — it is a
+> third finalizer, not a `activate_job`-shaped no-op); and `Error::AlreadyClaimed` is no
+> longer `retriable()`, since every real caller of it (via `ensure_claim_held`) is a
+> refusal that retrying cannot fix. A known, documented, not-fixed-in-this-PR limitation
+> — fencing by account (`claimed_by: UserId`) rather than by agent instance — is recorded
+> in Risks & Open Questions.
 
 ## Goal & Success Criteria
 
@@ -66,23 +83,39 @@ Per Non-Negotiable Rule 6, this is **additive, not breaking**:
   definition and the two match arms that read it), so widening its shape breaks no wire
   contract: every caller sees it only through `Error::code()` (`"already_claimed"`,
   unchanged) and its `Display` message, both of which are allowed to gain detail.
-- `complete_job`/`fail_job`'s **behavior** changes for a caller that is not the current
-  holder — today that call silently succeeds; after this change it is refused. This is a
-  bug fix matching the tool's own published description, not a schema or route change, and
-  is called out explicitly here per the architect reviewer's remit.
+- `complete_job`/`fail_job`/`cancel_job`'s **behavior** changes for a caller that is not
+  the current holder — today that call silently succeeds; after this change it is
+  refused. This is a bug fix matching each tool's own published description, not a schema
+  or route change (no MCP input/output shape changes for any of the three), and is called
+  out explicitly here per the architect reviewer's remit. **Post-review correction:**
+  `cancel_job` was originally scoped out of this list (see Scope/Out) on the mistaken
+  premise that it "has no result to clobber" the way `activate_job` doesn't — it does
+  (`status = 'cancelled'`, `completed_at`, `error`), so it is now fenced identically to
+  `complete_job`/`fail_job`.
+- `ready()`'s **result set** changes: a row it returns no longer implies `status ==
+  'pending'` — an `in-progress`/`active` job with a lapsed claim now appears too. A caller
+  that branched on `status` after `ready()` assuming it was always `'pending'` sees a
+  behavior change, though not a schema change (the field was always there). Named here
+  per the architect reviewer's finding that the original draft of this note covered only
+  `complete_job`/`fail_job` and missed this.
 - No version bump is required; every crate stays at the workspace `0.1.0`.
 
 ## Scope
 
 **In:**
 
-- `crates/of-core/migrations/0025_job_claim_expiry.sql`: the new nullable column.
-- `crates/of-core/src/jobs.rs`: `DEFAULT_CLAIM_TTL_SECS`/`MAX_CLAIM_TTL_SECS` constants,
-  `Job.claim_expires_at`, `JOB_COLS`, `claim_jobs`'s reap-then-claim step and new `ttl_secs`
-  parameter, the shared `ensure_claim_held` holder check, `finalize`/`complete_job`/
-  `fail_job` taking a `caller: UserId` and using it, the new `renew_claim` function, and
-  `ready()`'s query treating an expired claim as claimable.
-- `crates/of-core/src/error.rs`: `AlreadyClaimed` gains `holder: String`.
+- `crates/of-core/migrations/0026_job_claim_expiry.sql`: the new nullable column.
+- `crates/of-core/src/jobs.rs`: `DEFAULT_CLAIM_TTL_SECS`/`MIN_CLAIM_TTL_SECS`/
+  `MAX_CLAIM_TTL_SECS` constants and a shared `clamp_claim_ttl` helper, `Job.claim_expires_at`,
+  `JOB_COLS`, `claim_jobs`'s lock-then-reap-then-claim step (locking first, in the
+  existing deterministic sorted order, so the reap acquires no new locks) and new
+  `ttl_secs` parameter, the shared `ensure_claim_held` holder check, `finalize`/
+  `complete_job`/`fail_job`/`cancel_job` taking a `caller: UserId` and clearing
+  `claim_expires_at` on finalize, the new `renew_claim` function, `close_from_ticket`
+  also clearing `claim_expires_at` (no caller check — see §3), and `ready()`'s query
+  treating an expired claim as claimable.
+- `crates/of-core/src/error.rs`: `AlreadyClaimed` gains `holder: String` and a more
+  actionable message; `retriable()` no longer includes `AlreadyClaimed` (see §4).
 - `crates/of-mcp/src/tools/jobs.rs`: `ClaimJobsArgs.ttl`, `complete_job`/`fail_job` passing
   `caller.user_id` through, the new `RenewClaimArgs`/`renew_claim` tool, and description
   updates for `claim_jobs`/`ready`/`complete_job`/`fail_job` naming the new behavior.
@@ -105,15 +138,19 @@ Per Non-Negotiable Rule 6, this is **additive, not breaking**:
 
 - A background sweeper process. Explicitly rejected by the issue's AC ("no background
   sweeper, no new failure mode") and by precedent — `repo_leases` has never had one either.
-- Applying the same claimer check to `activate_job`, `cancel_job`, or `request_cancel`.
-  The issue's AC names only `complete_job`/`fail_job`. `activate_job` is a one-shot status
-  refinement with no result to clobber; `cancel_job`/`request_cancel` are a separate,
-  existing design decision (see `2026-09-10-job-cancellation-design.md`'s Scope/Out:
-  "matches the existing, deliberate lack of a claimant check on `complete_job`/`fail_job`
-  today... introducing asymmetric enforcement... would be a new, separate policy
-  decision"). That prior spec's premise is exactly what this one revises for two tools —
-  extending the same revision to three more tools *silently*, in a spec about a different
-  pair of tools, would be scope creep. Flagged as a follow-up in Risks & Open Questions.
+- Applying the same claimer check to `activate_job` or `request_cancel`. `activate_job` is
+  a one-shot status refinement with no result to clobber, so leaving it unfenced cannot
+  corrupt a reclaimer's outcome the way an unfenced finalizer could — a stale holder can
+  flip a job it no longer holds to `active`, which is a cosmetic/audit annoyance, not the
+  clobbering bug this PR fixes (flagged as a follow-up below regardless).
+  `request_cancel` is deliberately open to any org member by existing, separate design
+  (`2026-09-10-job-cancellation-design.md`'s Scope/Out) — it only sets a flag, never
+  finalizes anything, so it was never a candidate for this fence. **Post-review
+  correction:** `cancel_job` was originally grouped with these two on the premise that it
+  "has no result to clobber" — that premise was wrong (see the Public interface note
+  above); `cancel_job` **is** now fenced identically to `complete_job`/`fail_job`,
+  matching the exact clobbering risk the issue's Goal section describes. Only
+  `activate_job`/`request_cancel` remain intentionally unfenced.
 - An epoch/fencing-token column distinct from `claimed_by`. `claimed_by` already changes
   on every successful (re)claim and is already compared by identity in the new checks
   below, so it already provides fencing — a dedicated token would duplicate that guarantee
@@ -162,9 +199,15 @@ happens: inside the call that is actually trying to *act* on the resource, scope
 specific id(s) requested, in the same transaction as the claim it grants. `claim_jobs`
 already takes a row lock on every requested id; extending its status check from "is this
 row `pending`?" to "is this row `pending`, or an expired claim I'm allowed to take over?"
-and running one extra `UPDATE` before that check is the direct analog of `acquire_lease`'s
-"reap this branch's expired lease, then insert." Until an agent actually calls
-`claim_jobs` on the stale id, the row's `status` column still honestly says
+and running one extra `UPDATE` is the direct analog of `acquire_lease`'s "reap this
+branch's expired lease, then insert." **Post-review correction:** the reap `UPDATE` must
+run *after* the existing `SELECT ... ORDER BY id FOR UPDATE` locks every requested row in
+deterministic order, not before it — `acquire_lease`'s reap is safe running first only
+because it targets a single `(repo_id, branch)` row, a property that does not carry over
+to `claim_jobs`'s multi-row batch. Running the reap first would take locks in
+planner-chosen (not sorted) order and could deadlock two concurrent batch claims; see §3
+for the corrected sequencing. Until an agent actually calls `claim_jobs` on the stale id,
+the row's `status` column still honestly says
 `in-progress`/`active` — which is exactly the state the console's stranded indicator
 needs: a human looking at the job detail page sees "in-progress" and a `claim_expires_at`
 in the past, and the console renders "stranded," not "pending" (an outcome that would look
@@ -176,7 +219,7 @@ each other.
 
 ## §2 — Migration
 
-`crates/of-core/migrations/0025_job_claim_expiry.sql`:
+`crates/of-core/migrations/0026_job_claim_expiry.sql`:
 
 ```sql
 -- A claim needs an expiry so a crashed agent's job becomes claimable again
@@ -469,19 +512,71 @@ Its `UPDATE` gains `, claim_expires_at = NULL` alongside the fields it already c
 stale timestamp in place would be inert today (status is `pending`, so nothing reads it)
 but confusing to a future reader of the row.
 
+### Post-review corrections to this section
+
+Six real issues surfaced by the mandatory review trio plus the automated pr-review-toolkit
+passes, all fixed in the shipped code (the blocks above are the original design; this is
+what changed):
+
+1. **`claim_jobs`'s lock/reap ordering.** The code above runs the reap `UPDATE` before the
+   `SELECT ... ORDER BY id FOR UPDATE`. Shipped order is reversed: the sorted `SELECT ...
+   FOR UPDATE` runs first (locking every requested row in the deterministic order the
+   function's own doc comment already promises), *then* the reap `UPDATE` runs scoped to
+   that same id array — since every row it touches is already locked by this transaction,
+   it acquires no new locks and cannot invert the sort order. The reap's `RETURNING id`
+   is collected into a set, and the subsequent per-row status check treats a row in that
+   set as `Pending` regardless of what the initial `SELECT` saw, rather than re-querying.
+2. **The reap now also clears `cancel_requested_at`, `cancel_requested_by`, and
+   `cancel_reason`** — the same three fields `repend_job` clears, for the identical
+   reason: a reap is an involuntary repend, and a stale "please stop" aimed at the agent
+   that died must not follow the job to whoever reclaims it.
+3. **`finalize`'s `UPDATE` now also sets `claim_expires_at = NULL`**, and so does
+   `cancel_job`'s and `close_from_ticket`'s (see below) — making §3's `Job.claim_expires_at`
+   doc comment ("only a live claim has this set") actually true instead of aspirational.
+4. **`ensure_claim_held`'s `AlreadyClaimed` fallback string** changed from `"nobody"` to
+   `"no recorded holder (data inconsistency)"` — the branch is unreachable today (every
+   path to `in-progress`/`active` sets `claimed_by`), and the new wording reads as a bug
+   report rather than a plausible normal state if that invariant is ever broken by a
+   future change.
+5. **`cancel_job` gains a `caller: UserId` parameter** and calls `ensure_claim_held`
+   first, exactly like `finalize` — see the Public interface note and Scope corrections
+   above for why. Its internal `SELECT` for `cancel_requested_at` no longer needs its own
+   `FOR UPDATE` (`ensure_claim_held` already holds the row lock) and no longer duplicates
+   the status check.
+6. **`close_from_ticket`'s `UPDATE`** (unchanged in every other respect — this is a
+   tracker-webhook-driven finalize path with no `UserId` to fence against, and stays
+   that way) **now also clears `claim_expires_at`**, for the hygiene reason in point 3,
+   with no claimer check added: a human closing the linked ticket is a separate,
+   trusted-by-construction signal, not "someone claiming to be the holder."
+
 ## §4 — `crates/of-core/src/error.rs`
 
 ```rust
-#[error("job {job} is currently claimed by {holder}")]
+#[error(
+    "job {job} is currently claimed by {holder}, not you — your claim likely expired \
+     and was taken over. Call get_job to see its current state, or claim_jobs if it \
+     becomes available again; do not retry this call as-is."
+)]
 AlreadyClaimed { job: JobId, holder: String },
 ```
 
 (was `#[error("job {job} was claimed by someone else")] AlreadyClaimed { job: JobId }`).
-`code()`'s existing `Error::AlreadyClaimed { .. } => "already_claimed"` arm and
-`retriable()`'s existing `Error::AlreadyClaimed { .. }` arm both already use `{ .. }` and
-need no change — `AlreadyClaimed` was already correctly marked retriable (a claim that is
-held now may expire and become available, or its holder may complete it and unblock
-dependents), which is exactly right for this repurposed meaning too.
+`code()`'s existing `Error::AlreadyClaimed { .. } => "already_claimed"` arm needs no
+change. **Post-review correction, superseding the paragraph originally here:** three
+independent reviewers (rust-pro, the blind security review, and the automated
+silent-failure pass) converged on the same finding — the original claim that
+`AlreadyClaimed` "was already correctly marked retriable... which is exactly right for
+this repurposed meaning too" does not hold. Before this PR the variant had zero
+construction sites, so its `retriable() == true` was vacuous; this PR is the first thing
+that ever raises it, exclusively from `ensure_claim_held`'s fencing check. Unlike
+`LeaseHeld` (retriable because the lease's *holder* can let it lapse without acting, so
+waiting and retrying the identical call can succeed), a caller fenced out of
+`complete_job`/`fail_job`/`cancel_job`/`renew_claim` cannot make that call succeed by
+retrying it — the claim is gone for good, and the only forward path is a different call
+(`claim_jobs`, or `get_job` to see the state). `retriable()` is shipped as
+`matches!(self, Error::LeaseHeld { .. } | Error::Db(_))` — `AlreadyClaimed` removed
+entirely, rather than split into two variants, since it now has exactly one call site
+(`ensure_claim_held`) and that call site is never retriable.
 
 ## §5 — `crates/of-mcp/src/tools/jobs.rs`
 
@@ -554,6 +649,17 @@ pub async fn renew_claim(
 
 `ready`'s tool description gains a clause noting it also lists jobs whose claim has
 expired.
+
+**Post-review corrections:** `RenewClaimArgs.ttl`'s doc comment shipped as *"Seconds from
+now until the claim expires — not added to whatever time was left on it. Same default
+(900s) and clamp range (60 seconds to 4 hours) as claim_jobs's ttl if omitted"* — the
+original "extend... by" wording was found to read as additive when the actual behavior
+recomputes the expiry outright from `now()`, which could pull expiry *closer* if a
+caller passed a shorter `ttl` than the time remaining on their current claim.
+`cancel_job`'s existing handler (predating this feature — not shown above) now forwards
+`caller.user_id` as `Tx::cancel_job`'s new second argument, and its description gains the
+same *"or if you are not its current claim holder"* clause `complete_job`/`fail_job`
+carry — see §3's post-review corrections for why.
 
 ## §6 — `crates/of-billing/src/classify.rs`
 
@@ -634,10 +740,21 @@ counter is introduced, per Scope/Out).
     (regression coverage for every existing test in this file that calls them).
   - `repend_job` on a claimed job clears `claim_expires_at` (extend the existing
     `repend_job` test coverage rather than adding a new test).
+  - **Added during PR review**, closing gaps the pr-test-analyzer pass found: an
+    `active` (not just `in-progress`) expired claim reaps, reappears in `ready()`, and
+    fences identically — every prior test in this file happened to leave the job in
+    `in-progress`, even though the reap/`ready()`/`ensure_claim_held` predicates all
+    explicitly branch on `in-progress OR active`; `ready()` leaves the row itself
+    untouched (`status`/`claimed_by` unchanged) after an expired claim appears in its
+    result, proving §1's "reinterprets, never mutates" claim directly rather than only
+    asserting the query's output; a reap clears a stale `cancel_requested_at`/
+    `cancel_requested_by`/`cancel_reason` inherited from the original holder (proving the
+    §3 post-review correction); and the same stale-holder-vs-reclaimer fencing test as
+    `complete_job`/`fail_job`, now also for `cancel_job`.
 - `crates/of-core/tests/isolation.rs`: extend `cross_org_mutation_is_refused` (or add a
   sibling following its exact pattern) with `renew_claim` called from the wrong org, and
-  with `complete_job`/`fail_job` called from the wrong org against a job claimed in the
-  right org — guard 1's proof for every new/changed statement.
+  with `complete_job`/`fail_job`/`cancel_job` called from the wrong org against a job
+  claimed in the right org — guard 1's proof for every new/changed statement.
 - `crates/of-mcp/tests/tools.rs`:
   - End-to-end: `add_job` → `claim_jobs` (with an explicit `ttl`) → `renew_claim` extends
     it → `complete_job` succeeds.
@@ -720,12 +837,34 @@ counter is introduced, per Scope/Out).
 
 ## Risks & Open Questions
 
-- **Follow-up worth its own ticket, not in this scope:** whether `activate_job`,
-  `cancel_job`, and `request_cancel` should eventually get the same claimer check
-  `complete_job`/`fail_job` get here. Filing a new issue for this after this ships is the
-  right move if the spec critique or PR review agrees it is desirable — bundling it into
-  this PR would revise `2026-09-10-job-cancellation-design.md`'s explicit "no asymmetric
-  enforcement" call without that spec's own reasoning being re-examined on its own terms.
+- **Follow-up worth its own ticket, not in this scope:** whether `activate_job` should
+  eventually get the same claimer check `complete_job`/`fail_job`/`cancel_job` get here.
+  **Post-review update:** `cancel_job` was originally grouped in this note alongside
+  `activate_job`/`request_cancel`; PR review found that grouping wrong (`cancel_job` is a
+  third finalizer, not a `activate_job`-shaped no-op) and it is now fenced in this PR —
+  see §3's post-review corrections. Only `activate_job` remains a real open question;
+  `request_cancel` is excluded on its own, separate, already-settled design (it never
+  finalizes anything).
+- **Known limitation, not fixed in this PR:** the claimer fence (`ensure_claim_held`)
+  checks `claimed_by: UserId` — the authenticated account — not a per-agent-instance
+  identity. In a deployment where one token/account runs multiple concurrent agent
+  processes (the org's own onboarding already anticipates this: `claim_jobs`'s `agent`
+  label exists precisely so teammates can tell such instances apart in the queue view),
+  the exact race this PR closes for two *different* accounts is **not** closed for two
+  *instances under the same account*: agent A claims, crashes, its claim expires, agent
+  A′ (same account) reclaims and starts real work, and A wakes up and calls
+  `complete_job` — `claimed_by == Some(same account)` still holds, so the call succeeds
+  and clobbers A′'s in-flight attempt exactly as GH#65 describes, just with the "someone
+  else" being a different process under the same identity rather than a different
+  identity. This is not a regression this PR introduces: `repo_leases::renew_lease`/
+  `release_lease` have the identical shape today (`holder_user_id = $x`, no per-process
+  token), and this PR's fencing is deliberately consistent with that existing, accepted
+  trust model rather than inventing a stronger one unilaterally mid-review. Closing it
+  properly needs a fencing token distinct from account identity (e.g. surfacing
+  `attempts`, which already increments as a de facto claim generation counter, as a
+  value `complete_job`/`fail_job`/`cancel_job`/`renew_claim` could optionally require to
+  match) — a real design decision affecting three tool signatures, appropriately scoped
+  to its own issue rather than expanded into this one during a review round.
 - Reusing `repo_leases`'s exact TTL constants is a judgment call, not something the issue
   specifies numerically — flagged for the spec critique to weigh in on directly, since a
   coding job and a branch lease are similar but not identical in typical duration (a
@@ -733,6 +872,16 @@ counter is introduced, per Scope/Out).
   long this specific unit of work takes," and the two could reasonably diverge). If 15
   minutes proves too short in practice once `renew_claim` ships, the fix is a config
   change to the constant, not a design change.
+- **Process note, not a design risk:** this branch's migration collided with
+  `0025_idempotency_keys.sql` (savvagent/otto-factory#99), which merged to master while
+  this feature was in review — different filename, same leading version number, so `git`
+  merged the branch cleanly with no conflict marker and the collision surfaced only when
+  the architect and rust-pro reviews actually ran the CI-equivalent commands against a
+  rebased branch. Renumbered to `0026`; no schema or design change resulted. Recorded here
+  because it is the kind of gap a purely textual review (reading the diff without running
+  it against current `origin/master`) cannot catch — the fix, in both this PR and as
+  a general practice, is confirming the next free migration number against `origin/master`
+  at merge time, not at branch-creation time.
 - The reap step in `claim_jobs` is scoped to only the ids in the current request, matching
   `acquire_lease`'s per-branch scoping. This means a stale claim on a job nobody has
   listed via `ready()` and then explicitly named in a `claim_jobs` call stays visibly

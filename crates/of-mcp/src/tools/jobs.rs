@@ -206,8 +206,9 @@ pub struct FailJobArgs {
 pub struct RenewClaimArgs {
     /// The job you are still working on.
     pub job: String,
-    /// Seconds to extend the claim by, from now. Same default (900s) and
-    /// clamp range (60 seconds to 4 hours) as claim_jobs's ttl if omitted.
+    /// Seconds from now until the claim expires — not added to whatever
+    /// time was left on it. Same default (900s) and clamp range (60 seconds
+    /// to 4 hours) as claim_jobs's ttl if omitted.
     #[serde(default)]
     pub ttl: Option<i64>,
 }
@@ -1012,7 +1013,8 @@ impl Factory {
                        reasons, call fail_job instead, so the audit trail keeps distinguishing \
                        'asked to stop, and did' from an ordinary failure. Also fails if the \
                        job is not currently in-progress or active — still pending, or already \
-                       completed, failed, or cancelled."
+                       completed, failed, or cancelled — or if you are not its current claim \
+                       holder."
     )]
     pub async fn cancel_job(
         &self,
@@ -1025,7 +1027,7 @@ impl Factory {
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "cancel_job").await?;
         let job = tx
-            .cancel_job(&JobId::from(args.job), args.note.as_deref())
+            .cancel_job(&JobId::from(args.job), caller.user_id, args.note.as_deref())
             .await
             .mcp()?;
         tx.audit(
