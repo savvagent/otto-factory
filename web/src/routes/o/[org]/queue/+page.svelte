@@ -8,6 +8,7 @@
   import { useOrg } from '$lib/org.svelte';
   import { relative } from '$lib/format';
   import { statusLabel } from '$lib/labels';
+  import { isClaimStranded } from '$lib/jobs';
   import type { Job, JobStatus, Repo, Team } from '$lib/types';
   import Alert from '$lib/components/Alert.svelte';
   import Empty from '$lib/components/Empty.svelte';
@@ -255,7 +256,12 @@
                 </a>
                 <div class="of-mono text-xs text-faint">{job.id}</div>
               </td>
-              <td class="px-4 py-2"><StatusPill status={job.status} /></td>
+              <td class="px-4 py-2">
+                <StatusPill status={job.status} />
+                {#if isClaimStranded(job)}
+                  <div class="text-xs text-bad">{m.job_claim_stranded()}</div>
+                {/if}
+              </td>
               <td class="px-4 py-2 text-muted">
                 {job.claimedByLabel ?? job.agentType ?? '—'}
               </td>

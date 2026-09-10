@@ -286,6 +286,7 @@ export interface Job {
   createdBy: string | null;
   claimedBy: string | null;
   claimedByLabel: string | null;
+  claimExpiresAt: string | null;
   cancelRequestedAt: string | null;
   cancelRequestedBy: string | null;
   cancelReason: string | null;
