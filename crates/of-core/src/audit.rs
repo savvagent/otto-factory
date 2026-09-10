@@ -56,6 +56,7 @@ pub mod action {
     pub const MEMBER_JOINED: &str = "org.member.joined";
     pub const MEMBER_ROLE_CHANGED: &str = "org.member.role_changed";
     pub const MEMBER_REMOVED: &str = "org.member.removed";
+    pub const MEMBER_PASSKEYS_RESET: &str = "org.member.passkeys_reset";
     pub const IDP_CONNECTED: &str = "org.idp.connected";
     pub const IDP_DISCONNECTED: &str = "org.idp.disconnected";
     pub const DOMAIN_CLAIMED: &str = "org.domain.claimed";

@@ -370,7 +370,7 @@ pub async fn reset_member_passkeys(
 
     let mut tx = state.db.begin(ctx.org.id).await?;
     tx.audit(
-        Entry::new(action::TOTP_RESET)
+        Entry::new(action::MEMBER_PASSKEYS_RESET)
             .actor(ctx.user.id)
             .target("user", target.to_string()),
     )
