@@ -143,7 +143,7 @@ pub struct Job {
     pub claimed_by_label: Option<String>,
     /// When the current claim lapses and the job becomes claimable again via
     /// `ready()`/`claim_jobs`, the way an expired `repo_leases` row frees its
-    /// branch. `None` for a job that has never been claimed, or whose claim
+    /// resource. `None` for a job that has never been claimed, or whose claim
     /// was finalized (`complete_job`/`fail_job`/`cancel_job`/
     /// `close_from_ticket`), reaped, or reset (`repend_job`) — every one of
     /// those write paths clears this column, so only a live
@@ -895,7 +895,7 @@ impl Tx<'_> {
         }
 
         // Reap any of the *requested* jobs whose claim has lapsed, exactly the
-        // way acquire_lease reaps an expired lease on the specific branch
+        // way acquire_lease reaps an expired lease on the specific resource
         // being acquired before checking availability — scoped to these ids,
         // not organization-wide, because there is no background sweeper: a
         // stale claim on a job nobody is trying to (re)claim simply sits
