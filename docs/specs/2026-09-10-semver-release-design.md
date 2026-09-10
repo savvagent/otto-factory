@@ -134,6 +134,10 @@ bump).
   breaking-change signal, and the deploy-gating change.
 - `docs/deploy/fly.md`: updated to describe the new trigger.
 - A one-line pointer added to `docs/specs/2026-09-08-master-autodeploy-design.md`'s status block.
+- A one-line note in `docs/clients/matrix.md` recording the MCP `server_info` identity fix (§3) —
+  it changes a field every client observes at `initialize`, and Rule 6 asks for exactly that kind
+  of client-visible change to be recorded there, even though correcting a wrong value to a right
+  one is a bug fix rather than a compatibility break.
 
 **Out:**
 - Publishing any crate to crates.io, or any per-crate (rather than per-product) versioning. Nothing
@@ -169,6 +173,7 @@ bump).
     ".": {
       "release-type": "simple",
       "changelog-path": "CHANGELOG.md",
+      "pull-request-title-pattern": "chore: release ${version}",
       "extra-files": [
         { "type": "toml", "path": "Cargo.toml", "jsonpath": "$.workspace.package.version" },
         { "type": "json", "path": "web/package.json", "jsonpath": "$.version" }
@@ -213,8 +218,13 @@ Appended to `.github/workflows/ci.yml`, after `docker-build`:
 ```
 
 On an ordinary push to `master` (a feature/fix PR merging), this job opens or updates a
-release-please-maintained PR ("chore(main): release X.Y.Z") that accumulates the pending
-`CHANGELOG.md` entry and the version bump — `release_created` is `false`, nothing deploys.
+release-please-maintained PR titled `chore: release X.Y.Z` (the default pattern is
+`chore${scope}: release${component} ${version}`, where `${scope}` is the *target branch name* —
+`master` here — which would fail this repo's own `pr-title` scope allowlist below and permanently
+red-flag release-please's own PR; `pull-request-title-pattern` above drops the scope and the
+per-package component entirely, since a single `"."` package has no meaningful component name)
+that accumulates the pending `CHANGELOG.md` entry and the version bump — `release_created` is
+`false`, nothing deploys.
 When *that* PR is merged, the resulting push IS the trigger: release-please recognizes its own
 commit, creates the git tag and GitHub Release, and `release_created` is `true` — the signal `deploy`
 below gates on.
@@ -366,7 +376,7 @@ CHANGE: …` footer, and release-please cuts a major version from it — the sam
 architect reviewer to look hard is what tells the release automation to treat it as one.
 
 `deploy` in `.github/workflows/ci.yml` runs only when release-please has just cut a release (i.e.
-its auto-maintained "chore(main): release X.Y.Z" PR was just merged), not on every push to `master` —
+its auto-maintained "chore: release X.Y.Z" PR was just merged), not on every push to `master` —
 see `docs/specs/2026-09-10-semver-release-design.md` §4.
 ```
 
