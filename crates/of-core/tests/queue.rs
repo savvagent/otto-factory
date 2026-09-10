@@ -1209,3 +1209,109 @@ async fn update_repo_adds_remotes_and_refuses_stolen_ones(pool: PgPool) {
     );
     let _ = tx.rollback().await;
 }
+
+// ------------------------------------------------------------ idempotency
+
+#[sqlx::test]
+async fn add_job_replays_with_the_same_idempotency_key(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let mut new = job(&t, "wire up health endpoint");
+    new.idempotency_key = Some("k1".into());
+    let first = tx.add_job(new.clone()).await.unwrap();
+    let second = tx.add_job(new).await.unwrap();
+    tx.commit().await.unwrap();
+
+    assert_eq!(first.id, second.id);
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let jobs = tx
+        .list_jobs(&JobFilter {
+            repo_id: Some(t.repo),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(jobs.len(), 1, "a replay must not create a second row");
+}
+
+#[sqlx::test]
+async fn add_job_with_a_reused_key_and_a_different_payload_conflicts(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let mut first = job(&t, "wire up health endpoint");
+    first.idempotency_key = Some("k1".into());
+    tx.add_job(first).await.unwrap();
+
+    let mut second = job(&t, "a totally different job");
+    second.idempotency_key = Some("k1".into());
+    let err = tx.add_job(second).await.unwrap_err();
+    tx.rollback().await.unwrap();
+    assert_eq!(err.code(), "idempotency_key_conflict");
+}
+
+#[sqlx::test]
+async fn add_job_replay_is_insensitive_to_depends_on_order(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let dep_a = tx.add_job(job(&t, "dep a")).await.unwrap();
+    let dep_b = tx.add_job(job(&t, "dep b")).await.unwrap();
+
+    let mut first = job(&t, "depends on both");
+    first.idempotency_key = Some("k1".into());
+    first.depends_on = vec![dep_a.id.clone(), dep_b.id.clone()];
+    let first_job = tx.add_job(first).await.unwrap();
+
+    let mut second = job(&t, "depends on both");
+    second.idempotency_key = Some("k1".into());
+    second.depends_on = vec![dep_b.id, dep_a.id];
+    let second_job = tx.add_job(second).await.unwrap();
+    tx.commit().await.unwrap();
+
+    assert_eq!(
+        first_job.id, second_job.id,
+        "dependency order carries no meaning and must not defeat a replay"
+    );
+}
+
+#[sqlx::test]
+async fn add_job_without_a_key_always_creates_a_new_job(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let a = tx.add_job(job(&t, "same title")).await.unwrap();
+    let b = tx.add_job(job(&t, "same title")).await.unwrap();
+    tx.commit().await.unwrap();
+
+    assert_ne!(
+        a.id, b.id,
+        "omitting the key must reproduce today's behavior"
+    );
+}
+
+#[sqlx::test]
+async fn add_job_rejects_an_empty_or_over_length_idempotency_key(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let mut empty = job(&t, "x");
+    empty.idempotency_key = Some("   ".into());
+    let err = tx.add_job(empty).await.unwrap_err();
+    assert_eq!(err.code(), "invalid_argument");
+    tx.rollback().await.unwrap();
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let mut too_long = job(&t, "x");
+    too_long.idempotency_key = Some("k".repeat(of_core::idempotency::MAX_KEY_LEN + 1));
+    let err = tx.add_job(too_long).await.unwrap_err();
+    assert_eq!(err.code(), "invalid_argument");
+    tx.rollback().await.unwrap();
+}
