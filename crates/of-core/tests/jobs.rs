@@ -419,6 +419,127 @@ async fn concurrent_add_job_idempotency_converges_on_one_job(pool: PgPool) {
     assert_eq!(all.len(), 1, "the race must not leave a duplicate row");
 }
 
+/// Proves the database-level premise every `RaceLost` `ok_or_else` site
+/// depends on: once a concurrently-inserted winner row has been deleted and
+/// committed by a second connection, a `SAVEPOINT` / unique-violation /
+/// `ROLLBACK TO SAVEPOINT` / recovery-`SELECT` sequence shaped exactly like
+/// `add_job`'s own really does find no row afterward — Postgres does not
+/// resurrect it for a re-query in the same transaction, and MVCC visibility
+/// is not somehow racing the rollback.
+///
+/// **This does not call `add_job` itself**, and that is a deliberate,
+/// documented gap, not an oversight: the real lost-race branch needs the
+/// winner row deleted-and-committed strictly between `add_job`'s own
+/// SAVEPOINT-violation and its immediately-following recovery `SELECT` —
+/// two `await`s inside one async function call with no externally
+/// triggerable yield point in between. Nothing outside `add_job` can
+/// reliably signal "delete now" at that exact point without adding a
+/// test-only instrumentation hook to production code, which the design
+/// spec's Risks section rules out as disproportionate for a bug-fix-sized
+/// change. So instead of driving `add_job` as a black box, this test
+/// reproduces its identical SQL sequence by hand, via `Tx::conn()`, on a
+/// `Tx` the test itself fully controls — which lets it inject the delete at
+/// the exact point that matters, deterministically, with no timing
+/// dependency at all.
+///
+/// What this proves: the one fact all four `RaceLost` sites' correctness
+/// rests on, which no existing test exercises. What it does *not* prove:
+/// that `add_job` (or `link_ticket`/`create_from_ticket`/`send_message`)
+/// itself actually reaches that `ok_or_else` arm under real concurrency —
+/// only that, if one of them does, the recovery `SELECT` behaves the way
+/// the `RaceLost` construction assumes it does.
+#[sqlx::test]
+async fn a_deleted_and_committed_winner_row_is_invisible_to_the_recovery_select(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+    let key = "race-lost-db-proof";
+
+    // The "winner": a real, committed job holding the idempotency key the
+    // manual insert below will collide on — created through `add_job`
+    // itself, so its row is shaped exactly the way the real race's winner
+    // would be.
+    let mut tx = db.begin(t.org).await.unwrap();
+    let winner = tx
+        .add_job(of_core::jobs::NewJob {
+            idempotency_key: Some(key.into()),
+            ..job(&t, "winner")
+        })
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    // Reproduce add_job's own SAVEPOINT / insert / violation / rollback /
+    // recovery shape by hand, on a fresh Tx this test fully controls.
+    let mut tx2 = db.begin(t.org).await.unwrap();
+    sqlx::query("SAVEPOINT race_probe")
+        .execute(tx2.conn())
+        .await
+        .unwrap();
+
+    let colliding_insert = sqlx::query(
+        "INSERT INTO jobs (id, org_id, repo_id, title, idempotency_key, \
+         idempotency_payload_hash) VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    .bind(of_core::ids::JobId::from_seq(999_999))
+    .bind(t.org)
+    .bind(t.repo)
+    .bind("loser")
+    .bind(key)
+    .bind(vec![0u8; 32])
+    .execute(tx2.conn())
+    .await;
+
+    match colliding_insert {
+        Err(sqlx::Error::Database(ref db_err)) if db_err.is_unique_violation() => {}
+        other => {
+            panic!("expected the colliding insert to hit a unique violation, got {other:?}")
+        }
+    }
+
+    sqlx::query("ROLLBACK TO SAVEPOINT race_probe")
+        .execute(tx2.conn())
+        .await
+        .unwrap();
+    sqlx::query("RELEASE SAVEPOINT race_probe")
+        .execute(tx2.conn())
+        .await
+        .unwrap();
+
+    // Delete-and-commit the winner from an independent third connection —
+    // exactly the "concurrent delete" add_job's own doc comment names as
+    // the scenario the RaceLost sites exist for. A third Tx, not tx2 or the
+    // first tx, because the delete must actually commit for tx2's later
+    // read to see it gone; deleting inside tx2 itself would prove nothing
+    // about a *concurrent* delete.
+    let mut tx3 = db.begin(t.org).await.unwrap();
+    sqlx::query("DELETE FROM jobs WHERE org_id = $1 AND id = $2")
+        .bind(t.org)
+        .bind(&winner.id)
+        .execute(tx3.conn())
+        .await
+        .unwrap();
+    tx3.commit().await.unwrap();
+
+    // The exact recovery SELECT add_job runs after its own rollback. With
+    // the winner now deleted and committed, this must find nothing — the
+    // precondition every `RaceLost` construction site assumes.
+    let recovered: Option<(of_core::ids::JobId, Vec<u8>)> = sqlx::query_as(
+        "SELECT id, idempotency_payload_hash FROM jobs WHERE org_id = $1 AND idempotency_key = $2",
+    )
+    .bind(t.org)
+    .bind(key)
+    .fetch_optional(tx2.conn())
+    .await
+    .unwrap();
+
+    assert!(
+        recovered.is_none(),
+        "the deleted-and-committed winner row was still visible to the recovery SELECT"
+    );
+
+    tx2.commit().await.unwrap();
+}
+
 #[sqlx::test]
 async fn close_from_ticket_allows_pending_and_in_progress(pool: PgPool) {
     let db = db(pool);
