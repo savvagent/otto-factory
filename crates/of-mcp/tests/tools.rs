@@ -179,6 +179,7 @@ impl Env {
                     agent_type: None,
                     metadata: None,
                     depends_on: vec![],
+                    idempotency_key: None,
                 }),
             )
             .await)["job"]
@@ -265,12 +266,106 @@ async fn a_read_only_token_can_look_but_not_touch(pool: PgPool) {
                 agent_type: None,
                 metadata: None,
                 depends_on: vec![],
+                idempotency_key: None,
             }),
         )
         .await);
 
     assert_eq!(code_of(&e), "insufficient_scope");
     assert!(e.message.contains("jobs:write"), "{}", e.message);
+}
+
+// ------------------------------------------------------------ idempotency
+
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn add_job_with_an_idempotency_key_replays_instead_of_duplicating(pool: PgPool) {
+    let (env, caller) = env(pool).await;
+    env.register(&caller).await;
+
+    let before = env.usage(&caller).await;
+    let billable_before = before["billableUsed"].as_i64().unwrap();
+    let total_before = before["totalCalls"].as_i64().unwrap();
+
+    let args = || tools::jobs::AddJobArgs {
+        title: "wire up the health endpoint".into(),
+        description: None,
+        repo: Some("api".into()),
+        remote: None,
+        ticket_ref: None,
+        agent_type: None,
+        metadata: None,
+        depends_on: vec![],
+        idempotency_key: Some("retry-1".into()),
+    };
+
+    let first = ok(env
+        .factory
+        .add_job(Extension(parts(&caller)), Parameters(args()))
+        .await);
+    let second = ok(env
+        .factory
+        .add_job(Extension(parts(&caller)), Parameters(args()))
+        .await);
+
+    assert_eq!(first["job"]["id"], second["job"]["id"]);
+
+    let after = env.usage(&caller).await;
+    assert_eq!(
+        after["billableUsed"].as_i64().unwrap() - billable_before,
+        1,
+        "a replay must not be billed a second time"
+    );
+    // 2 add_job calls (one billable, one recorded-but-free) + this `usage`
+    // read itself, which is also Free-but-recorded (of_billing::classify).
+    assert_eq!(
+        after["totalCalls"].as_i64().unwrap() - total_before,
+        3,
+        "a replay is still recorded in history, just not billed"
+    );
+}
+
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn add_job_with_a_reused_idempotency_key_and_a_different_title_errors(pool: PgPool) {
+    let (env, caller) = env(pool).await;
+    env.register(&caller).await;
+
+    ok(env
+        .factory
+        .add_job(
+            Extension(parts(&caller)),
+            Parameters(tools::jobs::AddJobArgs {
+                title: "first title".into(),
+                description: None,
+                repo: Some("api".into()),
+                remote: None,
+                ticket_ref: None,
+                agent_type: None,
+                metadata: None,
+                depends_on: vec![],
+                idempotency_key: Some("retry-1".into()),
+            }),
+        )
+        .await);
+
+    let e = err(env
+        .factory
+        .add_job(
+            Extension(parts(&caller)),
+            Parameters(tools::jobs::AddJobArgs {
+                title: "a different title".into(),
+                description: None,
+                repo: Some("api".into()),
+                remote: None,
+                ticket_ref: None,
+                agent_type: None,
+                metadata: None,
+                depends_on: vec![],
+                idempotency_key: Some("retry-1".into()),
+            }),
+        )
+        .await);
+
+    assert_eq!(code_of(&e), "idempotency_key_conflict");
 }
 
 // --------------------------------------------------------------- repo anchor
@@ -797,6 +892,7 @@ async fn an_unresolvable_repo_says_what_is_registered_and_what_to_call(pool: PgP
                 agent_type: None,
                 metadata: None,
                 depends_on: vec![],
+                idempotency_key: None,
             }),
         )
         .await);
@@ -920,6 +1016,7 @@ async fn a_message_cannot_be_addressed_to_someone_in_another_org(pool: PgPool) {
         job: None,
         in_reply_to: None,
         agent: None,
+        idempotency_key: None,
     };
 
     let existing = err(env
@@ -1052,6 +1149,7 @@ async fn messages_reach_the_inbox_and_the_cursor_clears_them(pool: PgPool) {
                 job: None,
                 in_reply_to: None,
                 agent: Some("agent-one".into()),
+                idempotency_key: None,
             }),
         )
         .await);
@@ -1104,6 +1202,97 @@ async fn messages_reach_the_inbox_and_the_cursor_clears_them(pool: PgPool) {
         .unread_count(Extension(parts(&mate)), Parameters(tools::coord::NoArgs {}))
         .await);
     assert_eq!(unread["unread"], 0);
+}
+
+// ------------------------------------------------------------ idempotency
+
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn send_message_with_an_idempotency_key_replays_instead_of_duplicating(pool: PgPool) {
+    let (env, caller) = env(pool).await;
+
+    let before = env.usage(&caller).await;
+    let billable_before = before["billableUsed"].as_i64().unwrap();
+    let total_before = before["totalCalls"].as_i64().unwrap();
+
+    let args = || tools::coord::SendMessageArgs {
+        body: "hand-off note".into(),
+        to: None,
+        kind: None,
+        repo: None,
+        remote: None,
+        job: None,
+        in_reply_to: None,
+        agent: None,
+        idempotency_key: Some("retry-1".into()),
+    };
+
+    let first = ok(env
+        .factory
+        .send_message(Extension(parts(&caller)), Parameters(args()))
+        .await);
+    let second = ok(env
+        .factory
+        .send_message(Extension(parts(&caller)), Parameters(args()))
+        .await);
+
+    assert_eq!(first["message"]["id"], second["message"]["id"]);
+
+    let after = env.usage(&caller).await;
+    assert_eq!(
+        after["billableUsed"].as_i64().unwrap() - billable_before,
+        1,
+        "a replay must not be billed a second time"
+    );
+    // 2 send_message calls (one billable, one recorded-but-free) + this
+    // `usage` read itself, which is also Free-but-recorded.
+    assert_eq!(
+        after["totalCalls"].as_i64().unwrap() - total_before,
+        3,
+        "a replay is still recorded in history, just not billed"
+    );
+}
+
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn send_message_with_a_reused_idempotency_key_and_a_different_body_errors(pool: PgPool) {
+    let (env, caller) = env(pool).await;
+
+    ok(env
+        .factory
+        .send_message(
+            Extension(parts(&caller)),
+            Parameters(tools::coord::SendMessageArgs {
+                body: "first note".into(),
+                to: None,
+                kind: None,
+                repo: None,
+                remote: None,
+                job: None,
+                in_reply_to: None,
+                agent: None,
+                idempotency_key: Some("retry-1".into()),
+            }),
+        )
+        .await);
+
+    let e = err(env
+        .factory
+        .send_message(
+            Extension(parts(&caller)),
+            Parameters(tools::coord::SendMessageArgs {
+                body: "a totally different note".into(),
+                to: None,
+                kind: None,
+                repo: None,
+                remote: None,
+                job: None,
+                in_reply_to: None,
+                agent: None,
+                idempotency_key: Some("retry-1".into()),
+            }),
+        )
+        .await);
+
+    assert_eq!(code_of(&e), "idempotency_key_conflict");
 }
 
 /// `watch` has to return rather than hang when nothing happens, or an agent's
@@ -1447,6 +1636,7 @@ async fn a_failed_call_is_not_billed(pool: PgPool) {
                 agent_type: None,
                 metadata: None,
                 depends_on: vec![],
+                idempotency_key: None,
             }),
         )
         .await);
@@ -1517,6 +1707,7 @@ async fn enforcement_stops_work_but_never_reads(pool: PgPool) {
                 agent_type: None,
                 metadata: None,
                 depends_on: vec![],
+                idempotency_key: None,
             }),
         )
         .await);

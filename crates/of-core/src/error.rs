@@ -111,6 +111,13 @@ pub enum Error {
     #[error("{0}")]
     Invalid(String),
 
+    #[error(
+        "idempotency_key {key:?} was already used for a different {tool} call in this \
+         organization. Use a new key for a different request, or omit idempotency_key to \
+         always create a new one."
+    )]
+    IdempotencyKeyConflict { key: String, tool: &'static str },
+
     /// The database cannot enforce tenant isolation as configured. Raised only
     /// by `Db::verify_tenant_isolation` at startup, never by a request: by the
     /// time a tool call is in flight it is far too late to discover that one
@@ -154,6 +161,7 @@ impl Error {
             Error::Config(_) => "internal_error",
             Error::Crypto(_) => "internal_error",
             Error::Invalid(_) => "invalid_argument",
+            Error::IdempotencyKeyConflict { .. } => "idempotency_key_conflict",
             Error::IsolationNotEnforced { .. } => "isolation_not_enforced",
             Error::Db(_) => "internal_error",
         }
@@ -167,5 +175,23 @@ impl Error {
             self,
             Error::LeaseHeld { .. } | Error::AlreadyClaimed { .. } | Error::Db(_)
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Retrying the identical call with the identical key will fail
+    /// identically every time — the caller must change the key or the
+    /// payload, not back off and try again.
+    #[test]
+    fn idempotency_key_conflict_is_not_retriable() {
+        let e = Error::IdempotencyKeyConflict {
+            key: "k".into(),
+            tool: "add_job",
+        };
+        assert!(!e.retriable());
+        assert_eq!(e.code(), "idempotency_key_conflict");
     }
 }

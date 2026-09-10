@@ -149,7 +149,8 @@ impl From<CoreError> for ApiError {
             | LeaseHeld { .. }
             | LeaseNotHeld(_)
             | AlreadyClaimed { .. }
-            | TicketAlreadyLinked { .. } => StatusCode::CONFLICT,
+            | TicketAlreadyLinked { .. }
+            | IdempotencyKeyConflict { .. } => StatusCode::CONFLICT,
 
             // Gone, not Not Found: the link was real, and saying so is what
             // tells the holder to ask for a new one rather than re-check the URL.

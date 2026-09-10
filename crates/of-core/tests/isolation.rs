@@ -150,6 +150,119 @@ async fn cross_org_mutation_is_refused(pool: PgPool) {
     assert_eq!(after_claimed.cancel_reason.as_deref(), Some("stop"));
 }
 
+/// The idempotency-key unique index is `(org_id, idempotency_key)`, not a
+/// bare `idempotency_key` — the same literal key string reused by two
+/// different orgs, for two genuinely different jobs, must not collide.
+///
+/// This deliberately does **not** compare the two returned job ids for
+/// inequality: `JobId` is a per-org sequential counter (`job_ids_are_dense_
+/// and_per_org` in `tests/queue.rs`), so both of these calls legitimately
+/// produce `job-1` in their own org — an id match here is expected and
+/// proves nothing about isolation either way. The actual proof is that
+/// **both `add_job` calls succeed** despite differing payloads under the
+/// same key. If the index (or `find_replayed_job`'s `SELECT`) were missing
+/// its `org_id` predicate, one of two things would happen instead, and this
+/// test would catch either: org B's insert could hit a global-uniqueness
+/// constraint and be rejected outright, or it could wrongly converge onto
+/// org A's row via the SAVEPOINT unique-violation recovery path — and since
+/// the payloads differ, that convergence would fail with
+/// `idempotency_key_conflict` rather than succeeding. The `find_replayed_job`
+/// follow-up calls additionally prove each org resolves its *own* content
+/// back, not the other org's, for the identical key.
+#[sqlx::test]
+async fn idempotency_keys_do_not_cross_org_boundaries(pool: PgPool) {
+    let db = db(pool);
+    let a = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+    let b = tenant(&db, "globex", "git@github.com:globex/api.git").await;
+
+    let mut a_new = job(&a, "acme work");
+    a_new.idempotency_key = Some("shared-key".into());
+    let mut tx = db.begin(a.org).await.unwrap();
+    let a_job = tx.add_job(a_new.clone()).await.unwrap();
+    tx.commit().await.unwrap();
+
+    let mut b_new = job(&b, "globex work");
+    b_new.idempotency_key = Some("shared-key".into());
+    let mut tx = db.begin(b.org).await.unwrap();
+    let b_job = tx.add_job(b_new.clone()).await.unwrap();
+    tx.commit().await.unwrap();
+
+    assert_eq!(a_job.title, "acme work");
+    assert_eq!(b_job.title, "globex work");
+
+    // Each org resolves the shared key back to its own content, not the
+    // other org's — the find_replayed_job fast path, not the insert path
+    // exercised above.
+    let mut tx = db.begin(a.org).await.unwrap();
+    let replayed = tx.find_replayed_job(&a_new).await.unwrap().unwrap();
+    tx.rollback().await.unwrap();
+    assert_eq!(replayed.id, a_job.id);
+    assert_eq!(replayed.title, "acme work");
+
+    let mut tx = db.begin(b.org).await.unwrap();
+    let replayed = tx.find_replayed_job(&b_new).await.unwrap().unwrap();
+    tx.rollback().await.unwrap();
+    assert_eq!(replayed.id, b_job.id);
+    assert_eq!(replayed.title, "globex work");
+}
+
+/// The identical proof for `send_message`'s idempotency key. `Message::id`
+/// is a plain `i64` (not per-org sequential the way `JobId` is), so unlike
+/// the job version above an id comparison is meaningful here too — but the
+/// `find_replayed_message` round trip is kept for the same reason: it is the
+/// part that would actually catch a missing `org_id` predicate in the
+/// SELECT, not the insert succeeding twice with different payloads.
+#[sqlx::test]
+async fn message_idempotency_keys_do_not_cross_org_boundaries(pool: PgPool) {
+    use of_core::messages::NewMessage;
+
+    let db = db(pool);
+    let a = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+    let b = tenant(&db, "globex", "git@github.com:globex/api.git").await;
+
+    let a_new = NewMessage {
+        body: "acme note".into(),
+        idempotency_key: Some("shared-key".into()),
+        ..Default::default()
+    };
+    let mut tx = db.begin(a.org).await.unwrap();
+    let a_msg = tx.send_message(a.user, a_new.clone()).await.unwrap();
+    tx.commit().await.unwrap();
+
+    let b_new = NewMessage {
+        body: "globex note".into(),
+        idempotency_key: Some("shared-key".into()),
+        ..Default::default()
+    };
+    let mut tx = db.begin(b.org).await.unwrap();
+    let b_msg = tx.send_message(b.user, b_new.clone()).await.unwrap();
+    tx.commit().await.unwrap();
+
+    assert_ne!(a_msg.id, b_msg.id);
+    assert_eq!(a_msg.body, "acme note");
+    assert_eq!(b_msg.body, "globex note");
+
+    let mut tx = db.begin(a.org).await.unwrap();
+    let replayed = tx
+        .find_replayed_message(a.user, &a_new)
+        .await
+        .unwrap()
+        .unwrap();
+    tx.rollback().await.unwrap();
+    assert_eq!(replayed.id, a_msg.id);
+    assert_eq!(replayed.body, "acme note");
+
+    let mut tx = db.begin(b.org).await.unwrap();
+    let replayed = tx
+        .find_replayed_message(b.user, &b_new)
+        .await
+        .unwrap()
+        .unwrap();
+    tx.rollback().await.unwrap();
+    assert_eq!(replayed.id, b_msg.id);
+    assert_eq!(replayed.body, "globex note");
+}
+
 /// The tracker-sync accessors added for the two-way sync engine (Task 4) are
 /// fresh SQL entry points on `jobs`, so guard 1 (the explicit `org_id`
 /// predicate) needs its own proof here — the happy-path tests next to these

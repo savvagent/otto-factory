@@ -108,6 +108,15 @@ pub struct SendMessageArgs {
     /// How you want to be identified, for example "api-agent@ci-7".
     #[serde(default)]
     pub agent: Option<String>,
+    /// A caller-chosen key. Replaying send_message with the same key and the
+    /// same arguments returns the original message unchanged instead of
+    /// posting a second one — call this every time if your connection to
+    /// the server can drop between the call committing and its response
+    /// arriving, which is the situation a retry cannot otherwise tell apart
+    /// from "never happened". Reusing a key with different arguments is an
+    /// error. Omit it and every call posts a new message, as today.
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -278,7 +287,9 @@ impl Factory {
         description = "Post a note to the team's shared channel, or privately to one teammate \
                        by email address. Use it for hand-offs and questions that do not fit in \
                        a job field — 'I have left the migration half-applied on this branch' is \
-                       exactly the kind of thing that belongs here."
+                       exactly the kind of thing that belongs here. Pass idempotencyKey if your \
+                       connection can drop before you see the response, so a retry returns the \
+                       original message instead of posting a duplicate."
     )]
     pub async fn send_message(
         &self,
@@ -295,30 +306,67 @@ impl Factory {
         };
 
         let mut tx = self.tx(&caller).await?;
-        self.charge(&mut tx, &caller, "send_message").await?;
+
+        // No key: reproduce today's behavior exactly, charging as the
+        // literal first thing after the transaction opens — see add_job's
+        // identical comment (tools::jobs) and Factory::charge's doc comment.
+        let Some(key) = args.idempotency_key else {
+            self.charge(&mut tx, &caller, "send_message").await?;
+            let repo_id = maybe_repo_of(&mut tx, args.repo, args.remote).await?;
+            let message = tx
+                .send_message(
+                    caller.user_id,
+                    NewMessage {
+                        body: args.body,
+                        recipient_user_id: recipient,
+                        kind,
+                        // Always `Agent` from this surface. A human writing
+                        // in the console is the same user authenticating the
+                        // same way, so this is a rendering hint and never an
+                        // authorization claim — which is why it is set here
+                        // rather than accepted from the caller.
+                        sender_kind: SenderKind::Agent,
+                        sender_label: args.agent,
+                        repo_id,
+                        job_id: args.job.map(JobId::from),
+                        in_reply_to: args.in_reply_to,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .mcp()?;
+            tx.commit().await.mcp()?;
+            return Ok(Json(out::MessageOut { message }));
+        };
+
+        // A key was supplied: replay-vs-new must be resolved before
+        // charging, which needs `repo_id` to build the payload to check.
         let repo_id = maybe_repo_of(&mut tx, args.repo, args.remote).await?;
-        let message = tx
-            .send_message(
-                caller.user_id,
-                NewMessage {
-                    body: args.body,
-                    recipient_user_id: recipient,
-                    kind,
-                    // Always `Agent` from this surface. A human writing in the
-                    // console is the same user authenticating the same way, so
-                    // this is a rendering hint and never an authorization
-                    // claim — which is why it is set here rather than accepted
-                    // from the caller.
-                    sender_kind: SenderKind::Agent,
-                    sender_label: args.agent,
-                    repo_id,
-                    job_id: args.job.map(JobId::from),
-                    in_reply_to: args.in_reply_to,
-                    ..Default::default()
-                },
-            )
+        let new_message = NewMessage {
+            body: args.body,
+            recipient_user_id: recipient,
+            kind,
+            sender_kind: SenderKind::Agent,
+            sender_label: args.agent,
+            repo_id,
+            job_id: args.job.map(JobId::from),
+            in_reply_to: args.in_reply_to,
+            idempotency_key: Some(key),
+            ..Default::default()
+        };
+
+        if let Some(existing) = tx
+            .find_replayed_message(caller.user_id, &new_message)
             .await
-            .mcp()?;
+            .mcp()?
+        {
+            self.record_replay(&mut tx, &caller, "send_message").await?;
+            tx.commit().await.mcp()?;
+            return Ok(Json(out::MessageOut { message: existing }));
+        }
+
+        self.charge(&mut tx, &caller, "send_message").await?;
+        let message = tx.send_message(caller.user_id, new_message).await.mcp()?;
         tx.commit().await.mcp()?;
 
         Ok(Json(out::MessageOut { message }))

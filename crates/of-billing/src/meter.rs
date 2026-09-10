@@ -73,6 +73,23 @@ impl Meter {
         Ok(Charge::new(class, usage, limits))
     }
 
+    /// Record an idempotent replay of `tool` — always as `Free`, regardless
+    /// of `tool`'s own classification, and with no quota check.
+    ///
+    /// "Both classes are recorded regardless" (see this module's doc
+    /// comment) still has to hold for a replay: it is a real call that
+    /// reached the server and was served, just not new work. Charging it
+    /// again would double-bill the caller for one logical job/message; not
+    /// recording it at all would leave a gap in the history a future
+    /// repricing decision needs. Never enforced — a replay creates nothing,
+    /// so refusing it on a hard-stop plan would refuse a call that is, from
+    /// the bucket's perspective, free to serve (metering rule 3: enforcement
+    /// never blocks a read-shaped call).
+    pub async fn record_replay(&self, tx: &mut Tx<'_>, user: UserId, tool: &str) -> Result<()> {
+        tx.record_usage(Some(user), tool, false).await?;
+        Ok(())
+    }
+
     /// Check whether a call would be refused, without recording any usage.
     ///
     /// Used by `sync_ticket` (`of_mcp::tools::jobs`), whose "work" is an

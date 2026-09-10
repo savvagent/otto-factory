@@ -146,6 +146,11 @@ pub struct NewJob {
     /// Job ids that must reach `completed` before this one is claimable.
     pub depends_on: Vec<JobId>,
     pub created_by: Option<UserId>,
+    /// Caller-supplied replay key. `None` (the default) reproduces today's
+    /// behavior exactly — no lookup, no extra column write beyond NULL. See
+    /// the `idempotency` module doc and the idempotency-key design spec's §1
+    /// for the correctness argument.
+    pub idempotency_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -177,7 +182,97 @@ const JOB_COLS: &str = "id, org_id, repo_id, team_id, title, description, status
                         claimed_by_label, cancel_requested_at, cancel_requested_by, \
                         cancel_reason";
 
+/// Fingerprint the fields that define "the same `add_job` call" — see the
+/// `idempotency` module doc. Named-field destructure with no `..`: adding a
+/// field to `NewJob` without deciding whether it belongs here fails to
+/// *compile*, not just to be missed on review.
+///
+/// `team_id` here is `new.team_id` as the caller supplied it, deliberately
+/// *not* `add_job`'s locally-inherited `new.team_id.or(repo.team_id)` — the
+/// fingerprint describes the request, not a value `add_job` derives from it,
+/// so a repo whose default team changes between the original call and a
+/// replay does not turn an otherwise-identical retry into a false conflict.
+fn job_idempotency_fingerprint(new: &NewJob) -> Vec<u8> {
+    let NewJob {
+        repo_id,
+        team_id,
+        title,
+        description,
+        ticket_ref,
+        tracker,
+        agent_type,
+        metadata,
+        depends_on,
+        created_by,
+        // The key names the replay lookup; it is never part of what makes
+        // two calls "the same call".
+        idempotency_key: _,
+    } = new;
+
+    // Dependency order carries no meaning (set_dependencies takes a set, not
+    // a sequence), so it is sorted before hashing — otherwise the same
+    // dependency set supplied in a different order would look like a
+    // different payload and turn a genuine replay into a false conflict.
+    let mut dep_ids: Vec<&str> = depends_on.iter().map(|j| j.0.as_str()).collect();
+    dep_ids.sort_unstable();
+
+    // Normalized the same way the insert normalizes it (`None` becomes
+    // `{}`), so a caller who spells the omitted field as `{}` on a retry
+    // still replays cleanly instead of hitting a false conflict.
+    let metadata = metadata.clone().unwrap_or_else(|| serde_json::json!({}));
+
+    crate::idempotency::fingerprint(&serde_json::json!({
+        "repoId": repo_id,
+        "teamId": team_id,
+        "title": title.trim(),
+        "description": description,
+        "ticketRef": ticket_ref,
+        "tracker": tracker,
+        "agentType": agent_type,
+        "metadata": metadata,
+        "dependsOn": dep_ids,
+        "createdBy": created_by,
+    }))
+}
+
 impl Tx<'_> {
+    /// Resolve `new.idempotency_key` against an already-completed `add_job`
+    /// call, doing no writes and touching no meter. `Ok(None)` covers both
+    /// "no key was supplied" (the common case, at zero extra query cost) and
+    /// "the key has not been used before" — either way the caller should
+    /// proceed to `add_job`. `add_job` repeats this check race-safely via a
+    /// unique index + SAVEPOINT retry for the rare case of two concurrent
+    /// callers racing a brand-new key; this method exists separately so the
+    /// MCP layer can skip metering a replay *before* calling `add_job`,
+    /// which has no way to un-charge after the fact.
+    pub async fn find_replayed_job(&mut self, new: &NewJob) -> Result<Option<Job>> {
+        let Some(key) = new.idempotency_key.as_deref() else {
+            return Ok(None);
+        };
+        crate::idempotency::validate(key)?;
+
+        let org = self.org();
+        let existing: Option<(JobId, Vec<u8>)> = sqlx::query_as(
+            "SELECT id, idempotency_payload_hash FROM jobs \
+             WHERE org_id = $1 AND idempotency_key = $2",
+        )
+        .bind(org)
+        .bind(key)
+        .fetch_optional(self.conn())
+        .await?;
+        let Some((id, stored_hash)) = existing else {
+            return Ok(None);
+        };
+
+        if stored_hash != job_idempotency_fingerprint(new) {
+            return Err(Error::IdempotencyKeyConflict {
+                key: key.to_string(),
+                tool: "add_job",
+            });
+        }
+        Ok(Some(self.get_job(&id).await?))
+    }
+
     /// Enqueue a job.
     ///
     /// The id comes from the org's own counter, bumped under that org's row lock
@@ -187,6 +282,9 @@ impl Tx<'_> {
     pub async fn add_job(&mut self, new: NewJob) -> Result<Job> {
         if new.title.trim().is_empty() {
             return Err(Error::Invalid("job title must not be empty".into()));
+        }
+        if let Some(key) = new.idempotency_key.as_deref() {
+            crate::idempotency::validate(key)?;
         }
 
         let org = self.org();
@@ -213,28 +311,154 @@ impl Tx<'_> {
         // reads work without the caller having to know about teams at all.
         let team_id = new.team_id.or(repo.team_id);
 
-        let job: Job = sqlx::query_as(&format!(
-            "INSERT INTO jobs (id, org_id, repo_id, team_id, title, description, ticket_ref, \
-                               tracker, remote_revision, agent_type, metadata, created_by) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING {JOB_COLS}"
-        ))
-        .bind(&id)
-        .bind(org)
-        .bind(new.repo_id)
-        .bind(team_id)
-        .bind(new.title.trim())
-        .bind(new.description.as_deref())
-        .bind(new.ticket_ref.as_deref())
-        .bind(new.tracker)
-        .bind(Option::<&str>::None)
-        .bind(new.agent_type.as_deref())
-        .bind(new.metadata.unwrap_or_else(|| serde_json::json!({})))
-        .bind(new.created_by)
-        .fetch_one(self.conn())
-        .await?;
+        let (job, created): (Job, bool) = if let Some(key) = new.idempotency_key.as_deref() {
+            let hash = job_idempotency_fingerprint(&new);
+            // A savepoint, not a bare INSERT: Postgres aborts the *whole*
+            // enclosing transaction on any statement error, so recovering
+            // from a unique-violation by running another query in the same
+            // Tx would otherwise fail with "current transaction is aborted"
+            // instead of ever reaching the recovery query below — same
+            // reasoning as create_from_ticket's own SAVEPOINT below.
+            sqlx::query("SAVEPOINT add_job_idempotency")
+                .execute(self.conn())
+                .await?;
+            let inserted = sqlx::query_as(&format!(
+                "INSERT INTO jobs (id, org_id, repo_id, team_id, title, description, \
+                                   ticket_ref, tracker, remote_revision, agent_type, \
+                                   metadata, created_by, idempotency_key, \
+                                   idempotency_payload_hash) \
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) \
+                 RETURNING {JOB_COLS}"
+            ))
+            .bind(&id)
+            .bind(org)
+            .bind(new.repo_id)
+            .bind(team_id)
+            .bind(new.title.trim())
+            .bind(new.description.as_deref())
+            .bind(new.ticket_ref.as_deref())
+            .bind(new.tracker)
+            .bind(Option::<&str>::None)
+            .bind(new.agent_type.as_deref())
+            // Moved, not cloned: `new.metadata` is not read again (only the
+            // disjoint `new.depends_on` is, below), and `hash` (computed
+            // just above) already captured its content.
+            .bind(new.metadata.unwrap_or_else(|| serde_json::json!({})))
+            .bind(new.created_by)
+            .bind(key)
+            .bind(&hash)
+            .fetch_one(self.conn())
+            .await;
 
-        if !new.depends_on.is_empty() {
-            self.set_dependencies(&id, &new.depends_on, &[]).await?;
+            match inserted {
+                Ok(job) => {
+                    sqlx::query("RELEASE SAVEPOINT add_job_idempotency")
+                        .execute(self.conn())
+                        .await?;
+                    (job, true)
+                }
+                // A concurrent caller won the race on this brand-new key
+                // between find_replayed_job's read and this insert. Converge
+                // on its row exactly like create_from_ticket converges on
+                // ticket_ref's winner, rather than failing a request that,
+                // semantically, already succeeded — the seq number burned
+                // above is simply unused, same as that precedent.
+                //
+                // The literal index name here must match 0025's
+                // `CREATE UNIQUE INDEX jobs_org_idempotency_key_idx` exactly:
+                // if that index is ever renamed without updating this match,
+                // the guard below silently stops matching and this whole
+                // recovery path falls through to the generic `Err(Error::Db)`
+                // arm instead — a correctness regression with no compiler
+                // error to catch it.
+                Err(sqlx::Error::Database(db))
+                    if db.is_unique_violation()
+                        && db.constraint() == Some("jobs_org_idempotency_key_idx") =>
+                {
+                    sqlx::query("ROLLBACK TO SAVEPOINT add_job_idempotency")
+                        .execute(self.conn())
+                        .await?;
+                    sqlx::query("RELEASE SAVEPOINT add_job_idempotency")
+                        .execute(self.conn())
+                        .await?;
+                    let winner: (JobId, Vec<u8>) = sqlx::query_as(
+                        "SELECT id, idempotency_payload_hash FROM jobs \
+                         WHERE org_id = $1 AND idempotency_key = $2",
+                    )
+                    .bind(org)
+                    .bind(key)
+                    .fetch_optional(self.conn())
+                    .await?
+                    .ok_or_else(|| {
+                        Error::Invalid(format!(
+                            "add_job lost a unique-violation race for idempotency key \
+                             {key:?} but no concurrently-created job was found"
+                        ))
+                    })?;
+                    if winner.1 != hash {
+                        return Err(Error::IdempotencyKeyConflict {
+                            key: key.to_string(),
+                            tool: "add_job",
+                        });
+                    }
+                    // Reachable two ways, and `Tx::add_job` cannot tell
+                    // which: a genuine concurrent race (two callers both saw
+                    // `find_replayed_job` return `None`, one lost the
+                    // insert), or a direct of-core caller that skips the
+                    // find_replayed_job pre-check entirely and relies on
+                    // this fallback alone. Via `tools::jobs::add_job` (the
+                    // production path) only the first is possible, and it
+                    // means the loser was already billed via Factory::charge
+                    // for a call that created nothing — accepted and
+                    // documented in the idempotency-key design spec §8, not
+                    // a bug, logged so it is observable rather than silent.
+                    tracing::warn!(
+                        org = %org,
+                        key,
+                        "add_job's idempotency-key insert hit a unique violation and \
+                         converged onto an existing job instead of failing; expected under \
+                         concurrent replay of the same new key (see design spec §8) — \
+                         unexpected otherwise"
+                    );
+                    (self.get_job(&winner.0).await?, false)
+                }
+                Err(error) => return Err(Error::Db(error)),
+            }
+        } else {
+            // Unchanged from before this feature: no key, no idempotency
+            // columns written, no savepoint.
+            let job = sqlx::query_as(&format!(
+                "INSERT INTO jobs (id, org_id, repo_id, team_id, title, description, \
+                                   ticket_ref, tracker, remote_revision, agent_type, \
+                                   metadata, created_by) \
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING {JOB_COLS}"
+            ))
+            .bind(&id)
+            .bind(org)
+            .bind(new.repo_id)
+            .bind(team_id)
+            .bind(new.title.trim())
+            .bind(new.description.as_deref())
+            .bind(new.ticket_ref.as_deref())
+            .bind(new.tracker)
+            .bind(Option::<&str>::None)
+            .bind(new.agent_type.as_deref())
+            .bind(new.metadata.unwrap_or_else(|| serde_json::json!({})))
+            .bind(new.created_by)
+            .fetch_one(self.conn())
+            .await?;
+            (job, true)
+        };
+
+        // Only for a row this call actually inserted: the race-fallback arm
+        // converged onto a concurrent winner whose own add_job call already
+        // set its dependencies from the identical payload (the hash
+        // comparison above includes dependsOn, so a mismatch there is
+        // already a conflict before this point). Using `job.id` here (not
+        // the locally-burned `id`) matters for the same reason — in the
+        // race-fallback arm they are different jobs.
+        if created && !new.depends_on.is_empty() {
+            self.set_dependencies(&job.id, &new.depends_on, &[]).await?;
         }
 
         Ok(job)

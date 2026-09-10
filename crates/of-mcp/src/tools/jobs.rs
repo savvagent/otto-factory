@@ -103,6 +103,15 @@ pub struct AddJobArgs {
     /// Job ids that must be completed before this one can be claimed.
     #[serde(default)]
     pub depends_on: Vec<String>,
+    /// A caller-chosen key. Replaying add_job with the same key and the same
+    /// arguments returns the original job unchanged instead of creating a
+    /// second one — call this every time if your connection to the server
+    /// can drop between the call committing and its response arriving,
+    /// which is the situation a retry cannot otherwise tell apart from
+    /// "never happened". Reusing a key with different arguments is an
+    /// error. Omit it and every call creates a new job, as today.
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -582,7 +591,9 @@ impl Factory {
         description = "Queue a new job against a repository. Give it a specific title and \
                        enough description that an agent with none of your context can pick it \
                        up. Use dependsOn for work that must wait for other jobs. Returns the \
-                       created job, including its id."
+                       created job, including its id. Pass idempotencyKey if your connection \
+                       can drop before you see the response, so a retry returns the original \
+                       job instead of creating a duplicate."
     )]
     pub async fn add_job(
         &self,
@@ -593,22 +604,58 @@ impl Factory {
         caller.require_scope(scope::JOBS_WRITE).mcp()?;
 
         let mut tx = self.tx(&caller).await?;
-        self.charge(&mut tx, &caller, "add_job").await?;
+
+        // No key: reproduce today's behavior exactly, including charging as
+        // the literal first thing after the transaction opens (see
+        // Factory::charge's doc comment) — there is no replay question to
+        // answer first, so nothing should run ahead of it.
+        let Some(key) = args.idempotency_key else {
+            self.charge(&mut tx, &caller, "add_job").await?;
+            let repo = repo_of(&mut tx, args.repo, args.remote).await?;
+            let job = tx
+                .add_job(NewJob {
+                    repo_id: repo.id,
+                    title: args.title,
+                    description: args.description,
+                    ticket_ref: args.ticket_ref,
+                    agent_type: args.agent_type,
+                    metadata: args.metadata,
+                    depends_on: ids(args.depends_on),
+                    created_by: Some(caller.user_id),
+                    ..Default::default()
+                })
+                .await
+                .mcp()?;
+            tx.commit().await.mcp()?;
+            return Ok(Json(out::JobOut { job }));
+        };
+
+        // A key was supplied: replay-vs-new must be resolved before
+        // charging (a replay must never be billed, and there is no way to
+        // un-charge after the fact — see Factory::charge's third exception),
+        // which needs `repo.id` to build the payload to check.
         let repo = repo_of(&mut tx, args.repo, args.remote).await?;
-        let job = tx
-            .add_job(NewJob {
-                repo_id: repo.id,
-                title: args.title,
-                description: args.description,
-                ticket_ref: args.ticket_ref,
-                agent_type: args.agent_type,
-                metadata: args.metadata,
-                depends_on: ids(args.depends_on),
-                created_by: Some(caller.user_id),
-                ..Default::default()
-            })
-            .await
-            .mcp()?;
+        let new_job = NewJob {
+            repo_id: repo.id,
+            title: args.title,
+            description: args.description,
+            ticket_ref: args.ticket_ref,
+            agent_type: args.agent_type,
+            metadata: args.metadata,
+            depends_on: ids(args.depends_on),
+            created_by: Some(caller.user_id),
+            idempotency_key: Some(key),
+            ..Default::default()
+        };
+
+        if let Some(existing) = tx.find_replayed_job(&new_job).await.mcp()? {
+            self.record_replay(&mut tx, &caller, "add_job").await?;
+            tx.commit().await.mcp()?;
+            return Ok(Json(out::JobOut { job: existing }));
+        }
+
+        self.charge(&mut tx, &caller, "add_job").await?;
+        let job = tx.add_job(new_job).await.mcp()?;
         tx.commit().await.mcp()?;
 
         Ok(Json(out::JobOut { job }))

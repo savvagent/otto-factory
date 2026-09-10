@@ -100,6 +100,10 @@ pub struct NewMessage {
     pub repo_id: Option<RepoId>,
     pub job_id: Option<JobId>,
     pub in_reply_to: Option<i64>,
+    /// Caller-supplied replay key. `None` (the default) reproduces today's
+    /// behavior exactly. See `jobs::NewJob::idempotency_key` — the identical
+    /// shape, applied here.
+    pub idempotency_key: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -125,8 +129,59 @@ impl Default for InboxQuery {
 const MSG_COLS: &str = "id, org_id, created_at, sender_user_id, sender_label, sender_kind, \
                         recipient_user_id, team_id, kind, body, repo_id, job_id, in_reply_to";
 
+/// Fingerprint the fields that define "the same `send_message` call" — see
+/// the `idempotency` module doc and `jobs::job_idempotency_fingerprint`,
+/// which this mirrors. `sender` is threaded through separately (it is a
+/// `send_message` parameter, not a `NewMessage` field) because two different
+/// callers reusing the same key is a materially different request, not a
+/// replay of each other's.
+fn message_idempotency_fingerprint(sender: UserId, new: &NewMessage) -> Vec<u8> {
+    let NewMessage {
+        body,
+        recipient_user_id,
+        team_id,
+        kind,
+        sender_kind,
+        sender_label,
+        repo_id,
+        job_id,
+        in_reply_to,
+        // The key names the replay lookup; it is never part of what makes
+        // two calls "the same call".
+        idempotency_key: _,
+    } = new;
+
+    crate::idempotency::fingerprint(&serde_json::json!({
+        "sender": sender,
+        "body": body.trim(),
+        "recipientUserId": recipient_user_id,
+        "teamId": team_id,
+        "kind": kind,
+        "senderKind": sender_kind,
+        "senderLabel": sender_label,
+        "repoId": repo_id,
+        "jobId": job_id.as_ref().map(|j| j.0.as_str()),
+        "inReplyTo": in_reply_to,
+    }))
+}
+
 impl Tx<'_> {
-    pub async fn send_message(&mut self, sender: UserId, new: NewMessage) -> Result<Message> {
+    /// Resolve `new.idempotency_key` against an already-completed
+    /// `send_message` call, doing no writes and touching no meter. See
+    /// `jobs::Tx::find_replayed_job` — the identical shape.
+    pub async fn find_replayed_message(
+        &mut self,
+        sender: UserId,
+        new: &NewMessage,
+    ) -> Result<Option<Message>> {
+        let Some(key) = new.idempotency_key.as_deref() else {
+            return Ok(None);
+        };
+        crate::idempotency::validate(key)?;
+        // Bound the body before it is ever hashed, not just before it is
+        // ever stored: without this, a caller replaying an already-used key
+        // with an oversized body would pay for a full SHA-256 over it on
+        // every retry, on a path that runs before metering.
         let body = new.body.trim();
         if body.is_empty() {
             return Err(Error::Invalid("message body must not be empty".into()));
@@ -139,25 +194,174 @@ impl Tx<'_> {
         }
 
         let org = self.org();
+        let existing: Option<(i64, Vec<u8>)> = sqlx::query_as(
+            "SELECT id, idempotency_payload_hash FROM messages \
+             WHERE org_id = $1 AND idempotency_key = $2",
+        )
+        .bind(org)
+        .bind(key)
+        .fetch_optional(self.conn())
+        .await?;
+        let Some((id, stored_hash)) = existing else {
+            return Ok(None);
+        };
+
+        if stored_hash != message_idempotency_fingerprint(sender, new) {
+            return Err(Error::IdempotencyKeyConflict {
+                key: key.to_string(),
+                tool: "send_message",
+            });
+        }
+
         let msg = sqlx::query_as(&format!(
-            "INSERT INTO messages (org_id, sender_user_id, sender_label, sender_kind, \
-                                   recipient_user_id, team_id, kind, body, repo_id, job_id, \
-                                   in_reply_to) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING {MSG_COLS}"
+            "SELECT {MSG_COLS} FROM messages WHERE org_id = $1 AND id = $2"
         ))
         .bind(org)
-        .bind(sender)
-        .bind(new.sender_label.as_deref())
-        .bind(new.sender_kind)
-        .bind(new.recipient_user_id)
-        .bind(new.team_id)
-        .bind(new.kind)
-        .bind(body)
-        .bind(new.repo_id)
-        .bind(new.job_id.as_ref().map(|j| j.0.as_str()))
-        .bind(new.in_reply_to)
+        .bind(id)
         .fetch_one(self.conn())
         .await?;
+        Ok(Some(msg))
+    }
+
+    pub async fn send_message(&mut self, sender: UserId, new: NewMessage) -> Result<Message> {
+        let body = new.body.trim();
+        if body.is_empty() {
+            return Err(Error::Invalid("message body must not be empty".into()));
+        }
+        if body.len() > MAX_BODY_LEN {
+            return Err(Error::Invalid(format!(
+                "message body is {} bytes; the limit is {MAX_BODY_LEN}",
+                body.len()
+            )));
+        }
+        if let Some(key) = new.idempotency_key.as_deref() {
+            crate::idempotency::validate(key)?;
+        }
+
+        let org = self.org();
+
+        let msg = if let Some(key) = new.idempotency_key.as_deref() {
+            let hash = message_idempotency_fingerprint(sender, &new);
+            // A savepoint, not a bare INSERT — see jobs::add_job's identical
+            // reasoning: Postgres aborts the whole transaction on a
+            // statement error, so recovering from a unique-violation in the
+            // same Tx needs a savepoint to roll back to.
+            sqlx::query("SAVEPOINT send_message_idempotency")
+                .execute(self.conn())
+                .await?;
+            let inserted = sqlx::query_as(&format!(
+                "INSERT INTO messages (org_id, sender_user_id, sender_label, sender_kind, \
+                                       recipient_user_id, team_id, kind, body, repo_id, \
+                                       job_id, in_reply_to, idempotency_key, \
+                                       idempotency_payload_hash) \
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) \
+                 RETURNING {MSG_COLS}"
+            ))
+            .bind(org)
+            .bind(sender)
+            .bind(new.sender_label.as_deref())
+            .bind(new.sender_kind)
+            .bind(new.recipient_user_id)
+            .bind(new.team_id)
+            .bind(new.kind)
+            .bind(body)
+            .bind(new.repo_id)
+            .bind(new.job_id.as_ref().map(|j| j.0.as_str()))
+            .bind(new.in_reply_to)
+            .bind(key)
+            .bind(&hash)
+            .fetch_one(self.conn())
+            .await;
+
+            match inserted {
+                Ok(msg) => {
+                    sqlx::query("RELEASE SAVEPOINT send_message_idempotency")
+                        .execute(self.conn())
+                        .await?;
+                    msg
+                }
+                // A concurrent caller won the race on this brand-new key
+                // between find_replayed_message's read and this insert —
+                // converge on its row exactly like jobs::add_job does. See
+                // that function's identical comment on why the literal
+                // index name below must stay in sync with 0025's
+                // `CREATE UNIQUE INDEX messages_org_idempotency_key_idx`.
+                Err(sqlx::Error::Database(db))
+                    if db.is_unique_violation()
+                        && db.constraint() == Some("messages_org_idempotency_key_idx") =>
+                {
+                    sqlx::query("ROLLBACK TO SAVEPOINT send_message_idempotency")
+                        .execute(self.conn())
+                        .await?;
+                    sqlx::query("RELEASE SAVEPOINT send_message_idempotency")
+                        .execute(self.conn())
+                        .await?;
+                    let winner: (i64, Vec<u8>) = sqlx::query_as(
+                        "SELECT id, idempotency_payload_hash FROM messages \
+                         WHERE org_id = $1 AND idempotency_key = $2",
+                    )
+                    .bind(org)
+                    .bind(key)
+                    .fetch_optional(self.conn())
+                    .await?
+                    .ok_or_else(|| {
+                        Error::Invalid(format!(
+                            "send_message lost a unique-violation race for idempotency key \
+                             {key:?} but no concurrently-created message was found"
+                        ))
+                    })?;
+                    if winner.1 != hash {
+                        return Err(Error::IdempotencyKeyConflict {
+                            key: key.to_string(),
+                            tool: "send_message",
+                        });
+                    }
+                    // See jobs::add_job's identical comment: this is
+                    // reachable via a genuine concurrent race through the
+                    // production (MCP) path, or via a direct of-core caller
+                    // that skips the find_replayed_message pre-check — this
+                    // function cannot tell which.
+                    tracing::warn!(
+                        org = %org,
+                        key,
+                        "send_message's idempotency-key insert hit a unique violation and \
+                         converged onto an existing message instead of failing; expected \
+                         under concurrent replay of the same new key (see design spec §8) \
+                         — unexpected otherwise"
+                    );
+                    sqlx::query_as(&format!(
+                        "SELECT {MSG_COLS} FROM messages WHERE org_id = $1 AND id = $2"
+                    ))
+                    .bind(org)
+                    .bind(winner.0)
+                    .fetch_one(self.conn())
+                    .await?
+                }
+                Err(error) => return Err(Error::Db(error)),
+            }
+        } else {
+            // Unchanged from before this feature: no key, no idempotency
+            // columns written, no savepoint.
+            sqlx::query_as(&format!(
+                "INSERT INTO messages (org_id, sender_user_id, sender_label, sender_kind, \
+                                       recipient_user_id, team_id, kind, body, repo_id, \
+                                       job_id, in_reply_to) \
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING {MSG_COLS}"
+            ))
+            .bind(org)
+            .bind(sender)
+            .bind(new.sender_label.as_deref())
+            .bind(new.sender_kind)
+            .bind(new.recipient_user_id)
+            .bind(new.team_id)
+            .bind(new.kind)
+            .bind(body)
+            .bind(new.repo_id)
+            .bind(new.job_id.as_ref().map(|j| j.0.as_str()))
+            .bind(new.in_reply_to)
+            .fetch_one(self.conn())
+            .await?
+        };
 
         Ok(msg)
     }
