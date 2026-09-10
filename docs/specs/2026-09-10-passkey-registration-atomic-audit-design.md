@@ -1,6 +1,7 @@
 # `finish_registration`'s credential insert and audit write become atomic
 
-> **Status:** APPROVED — closes `savvagent/otto-factory#108`, filed during the review of `#107`
+> **Status:** IMPLEMENTED — shipped in `savvagent/otto-factory#131`, merged as `692e795`, closing
+> `savvagent/otto-factory#108`, filed during the review of `#107`
 > (`docs/specs/2026-09-10-passkey-registration-audit-via-design.md`, which added `via`/`ip` to the
 > same function without changing its transactional shape). Related: `#109` tracks a different
 > ordering concern in the same function (audit write vs. the ceremony-ownership check), left

@@ -11,7 +11,11 @@ plan implements it exactly.
 
 ## Status — 2026-09-10
 
-Not started. One task.
+Shipped in `savvagent/otto-factory#131`, merged as `692e795`. One task, complete — plus one
+hardening commit added during PR review (a doc warning + regression test on `Db::audit_global_on`,
+and a deterministic rollback test forcing the audit write to fail). Three follow-up issues filed
+from review findings outside this plan's scope: `#132`, `#133`, `#134` — see the spec's Risks &
+Open Questions.
 
 ## Global Constraints
 
@@ -47,7 +51,7 @@ because the second cannot compile without the first (`Db::audit_global_on` does 
 splitting them into two commits would leave an intermediate commit with a private-only refactor that
 compiles but serves no caller — not a meaningful checkpoint to pause at.
 
-## Task 1 — Atomic credential + audit write ✅/🚧/⬜: ⬜
+## Task 1 — Atomic credential + audit write ✅/🚧/⬜: ✅
 
 **Files:** `crates/of-core/src/audit.rs`, `crates/of-auth/src/passkeys.rs`
 
@@ -59,30 +63,30 @@ compiles but serves no caller — not a meaningful checkpoint to pause at.
 
 Steps:
 
-- [ ] **Baseline: run the existing suite to confirm the starting point is green.**
+- [x] **Baseline: run the existing suite to confirm the starting point is green.**
   `podman compose up -d` (skip if already running), `cp .env.example .env` if no `.env` exists yet,
   then `cargo test -p of-auth --test passkeys`. Expected: all tests pass (this establishes the
   before-state; no test changes are made in this task).
 
-- [ ] **Refactor `crates/of-core/src/audit.rs`: extract `Entry::write`.**
+- [x] **Refactor `crates/of-core/src/audit.rs`: extract `Entry::write`.**
   Add a private `async fn write<'e, E>(self, org: Option<OrgId>, conn: E) -> Result<()> where E:
   sqlx::PgExecutor<'e>` on `impl Entry` that runs today's `INSERT_SQL` binding (currently duplicated
   across `Tx::audit`, `Db::audit_global`, `Db::audit_for_org`) against the given `org` and executor.
   Rewrite `Tx::audit`, `Db::audit_global`, and `Db::audit_for_org` to call `e.write(...)` instead of
   each running its own copy of the query. Exact signatures per spec §1.
 
-- [ ] **Add `Db::audit_global_on` in the same file.**
+- [x] **Add `Db::audit_global_on` in the same file.**
   `pub async fn audit_global_on<'e, E>(conn: E, e: Entry) -> Result<()> where E:
   sqlx::PgExecutor<'e>` — calls `e.write(None, conn).await`. Doc comment per spec §1 (contrasts with
   `audit_global`'s best-effort, pool-based semantics).
 
-- [ ] **Compile check the of-core refactor in isolation.**
+- [x] **Compile check the of-core refactor in isolation.**
   `cargo build -p of-core`. Expected: compiles clean — this is a pure refactor of existing private
   machinery plus one additive function, so no caller elsewhere in the workspace should need a
   change. `cargo build --workspace` to confirm no other crate's use of `Tx::audit` /
   `Db::audit_global` / `Db::audit_for_org` broke (none should, since their signatures are unchanged).
 
-- [ ] **Rewrite `finish_registration` in `crates/of-auth/src/passkeys.rs`.**
+- [x] **Rewrite `finish_registration` in `crates/of-auth/src/passkeys.rs`.**
   Replace the `db.pool()`-executed `INSERT INTO passkeys` and the subsequent best-effort
   `db.audit_global(...)` call (wrapped in `if let Err(e) = ... { tracing::error!(...) }`) with: open
   `let mut tx = db.begin_unpinned().await?;`, run the credential insert on `.execute(&mut *tx)`
@@ -91,22 +95,22 @@ Steps:
   `tracing::error!` swallow), then `tx.commit().await?;` before `Ok(user_id)`. Exact code per spec
   §2, including the comment explaining why the two writes are now one transaction.
 
-- [ ] **Run the affected test suite.**
+- [x] **Run the affected test suite.**
   `cargo test -p of-auth --test passkeys`. Expected: same tests pass as the baseline run — in
   particular `registration_writes_the_passkey_registered_action` and
   `registration_records_which_flow_wrote_it`, which assert both rows exist after a successful
   registration, now passing against the transactional write instead of two independent ones.
 
-- [ ] **Run the full workspace suite.**
+- [x] **Run the full workspace suite.**
   `cargo test --workspace`. Expected: green. This is what confirms the `Entry::write` refactor did
   not change behavior for any other caller of `Tx::audit`, `Db::audit_global`, or
   `Db::audit_for_org` (login failures, org invitations, etc.) — none of those call sites change in
   this task, so this is a regression check, not new coverage.
 
-- [ ] **Lint and format.**
+- [x] **Lint and format.**
   `cargo clippy --all-targets -- -D warnings`, then `cargo fmt --all`.
 
-- [ ] **Format and commit.**
+- [x] **Format and commit.**
   `cargo fmt --all` (again, to catch anything the lint step's fixes touched), then:
   ```
   git add crates/of-core/src/audit.rs crates/of-auth/src/passkeys.rs
@@ -118,5 +122,5 @@ migration change in this task. (Vacuously satisfied, not skipped.)
 
 ## Record-as-shipped
 
-After merge, per house style: flip this plan's Task 1 marker to ✅ and the spec's `> **Status:**` to
-IMPLEMENTED, in a follow-up worktree + PR, per `otto-factory-development`'s Phase 4 step 12.
+Done in `savvagent/otto-factory#137`: this plan's Task 1 marker and the spec's `> **Status:**` were
+flipped there, per `otto-factory-development`'s Phase 4 step 12.
