@@ -104,25 +104,30 @@ silently broken while the other appears to work.
   file and the `$app/navigation` import line) returns nothing else — this is the only page in the
   console that builds a filter-in-URL pattern this way, so the fix does not need to be repeated
   elsewhere. Confirmed during Phase 1 investigation.
-- **`goto`'s default `invalidateAll`/`invalidate` behavior is a no-op here and therefore safe.**
-  This route has no `+page.ts`/`+page.server.ts` `load` function (`web/routes/+layout.ts` sets
-  `ssr = false`; this page fetches its own data in an `$effect`, not via `load`), so `goto`'s
-  load-rerunning behavior has nothing to invalidate. The `$effect` re-running because `page.url`
-  changed — not `goto`'s invalidation — is what re-triggers the fetch.
+- **`goto`'s load-rerunning behavior has nothing to invalidate here, which is a more basic fact
+  than "a no-op."** `invalidateAll` defaults to `false` — `goto` does not invalidate anything by
+  default at all, so there is no default invalidation behavior to reason about in the first place.
+  This route also has no `+page.ts`/`+page.server.ts` `load` function to invalidate even if it
+  did (`web/routes/+layout.ts` sets `ssr = false`; this page fetches its own data in an `$effect`,
+  not via `load`). The `$effect` re-running because `page.url` changed — not any `goto` invalidation
+  — is what re-triggers the fetch.
 - **`keepFocus: true` and `noScroll: true` are the right defaults for this interaction**, matching
   how a same-page filter control should behave (the reader stays where they are, with focus where
   they left it) — this is a judgment call the plan critique should confirm rather than a requirement
   from the issue, which only asks that filtering work at all.
-- **No automated test can exercise the actual defect with the test infrastructure this repo has
-  today.** `web/`'s only Svelte-page tests (`o/[org]/page.render.test.ts`, using a
+- **A behavioral test for this defect is feasible, once you stop trying to exercise the real
+  router.** `web/`'s only Svelte-page tests (`o/[org]/page.render.test.ts`, using a
   `*Harness.svelte` that mounts `+page.svelte` directly via `mount()`, bypassing SvelteKit's
-  `app.js`/`start()`) cannot call `goto`, `pushState`, or `replaceState` at all — `@sveltejs/kit`'s
+  `app.js`/`start()`) cannot call the real `goto`, `pushState`, or `replaceState` — `@sveltejs/kit`'s
   client runtime throws `Cannot call goto(...)/replaceState(...) before router is initialized` in
-  that harness, confirmed during Phase 1 investigation (the harness would need a full SvelteKit
-  dev-server-driven navigation, which is an e2e concern this repo has no runner for — `npm test` is
-  vitest over `web/worker/`, not a browser E2E suite). Regression coverage for this specific defect
-  is manual browser verification (Testing, below), not a new automated test; see Risks for the
-  narrower thing this PR *can* still assert.
+  that harness, confirmed during Phase 1 investigation. The seam that unblocks it is `vi.mock`ing
+  `$app/navigation` itself: with `goto`/`replaceState` replaced by spies, the component never
+  touches the real router, and the test can assert on *which* primitive the component calls and
+  with what arguments — the actual defect. The other detail that has to be right: Svelte 5
+  delegates `change` at the mount root, so a synthetic `new Event('change')` with no options never
+  reaches the handler — it must be dispatched with `{ bubbles: true }`. The PR adds this test at
+  `web/src/routes/o/[org]/queue/page.render.test.ts`, using a `QueueHarness.svelte` mirroring the
+  existing pattern.
 
 ## Error Handling & Edge Cases
 
@@ -151,7 +156,13 @@ silently broken while the other appears to work.
 
 ## Risks & Open Questions
 
-- No automated regression test guards this specific defect (see Assumptions) — a future edit that
-  reintroduces `replaceState` here would pass every existing gate. Mitigated partially by a code
-  comment at the call site naming the failure mode explicitly, so a future editor sees the warning
-  inline rather than only in this spec.
+- The regression test added at `web/src/routes/o/[org]/queue/page.render.test.ts` guards the
+  specific "which navigation primitive is called, with what arguments" defect this issue was about
+  — a future edit that reintroduces `replaceState` here now fails that test. It does not, and
+  cannot from this harness, prove the full behavioral path (that a real navigation actually
+  re-renders the table with the new filter applied): that needs a live SvelteKit router, which is
+  an e2e concern this repo has no runner for. The narrower claim is what's tested; the code comment
+  at the call site remains as a second line of defense for the part no test covers.
+- A future adoption of `Poller` (`web/src/lib/poll.svelte.ts`) on this page would need to key its
+  restart on the four filter values (`status`, `repo`, `team`, `mine`), not just the org — a known
+  follow-up concern raised in review, noted here rather than left to be rediscovered.

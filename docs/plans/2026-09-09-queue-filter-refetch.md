@@ -26,9 +26,9 @@ implements it exactly.
   and public-interface rules do not apply; no cross-org test and no `of-billing::classify` step
   needed.
 - Gates: `cd web && npm run check` (svelte-check + tsc), `npm run lint` (prettier), `npm test`
-  (vitest — exercises `web/worker/` and the existing render tests; this file has no unit-testable
-  seam for the actual defect, see the spec's Assumptions, so this is a vacuous-but-real pass, not a
-  skip), `npm run build`.
+  (vitest — exercises `web/worker/`, the existing render tests, and (after review) a new
+  `o/[org]/queue/page.render.test.ts` that mocks `$app/navigation` to assert `goto`, not
+  `replaceState`, is called by the filter controls — see the spec's Assumptions), `npm run build`.
 - No out-of-band artifact beyond the console bundle itself is touched (no `Dockerfile`/`fly.toml`,
   no `web/worker/`, no migration) — state that explicitly in the PR body rather than silently
   omitting the checklist items.
