@@ -16,7 +16,9 @@ gates that would fail mid-plan on code the current task hasn't touched yet; two 
 files — `crates/of-core/tests/jobs.rs` and `crates/of-web/tests/console.rs` — that call
 the changing signatures directly and were missing from the file lists; and
 `ClaimJobsArgs`'s 14 existing test-literal call sites needing a new `ttl: None` field
-each). All four are fixed below.
+each). Round 2 confirmed all four fixes and found one more of the same class —
+`crates/of-core/tests/isolation.rs` has 2 existing `.claim_jobs(...)` call sites also
+missing from the file list. All five are now fixed below.
 
 ---
 
@@ -60,7 +62,7 @@ These hold for every task in this plan:
 | **Modify.** `crates/of-core/src/error.rs` | `AlreadyClaimed` gains `holder: String`. |
 | **Modify.** `crates/of-core/tests/queue.rs` | New-behavior tests (see Task 1). |
 | **Modify.** `crates/of-core/tests/jobs.rs` | 9 existing direct `.claim_jobs(`/`.complete_job(`/`.fail_job(` call sites need updating to the new signatures — a separate test binary from `queue.rs`, so it is not exercised by `cargo test -p of-core --test queue` and needs its own pass. |
-| **Modify.** `crates/of-core/tests/isolation.rs` | Cross-org negative tests for `renew_claim` and for the claimer check on `complete_job`/`fail_job`. |
+| **Modify.** `crates/of-core/tests/isolation.rs` | 2 existing `.claim_jobs(...)` call sites need the new `ttl_secs` argument; plus new cross-org negative tests for `renew_claim` and for the claimer check on `complete_job`/`fail_job`. |
 | **Modify.** `crates/of-mcp/src/tools/jobs.rs` | `ClaimJobsArgs.ttl`, `complete_job`/`fail_job` passing `caller.user_id`, new `RenewClaimArgs`/`renew_claim` tool, description updates. |
 | **Modify.** `crates/of-billing/src/classify.rs` | `renew_claim` added to `FREE`. |
 | **Modify.** `crates/of-mcp/tests/tools.rs` | End-to-end tests, tool-list/billing assertions, `ttl: None` added to the 14 existing `ClaimJobsArgs { ... }` literals. |
@@ -188,8 +190,16 @@ message-catalog gate.
       shifted them) per the failing-test-first bullet above: `None` for `claim_jobs`'s new
       trailing argument, the claiming user's id for `complete_job`/`fail_job`'s new
       argument.
+- [ ] Update `crates/of-core/tests/isolation.rs`'s 2 existing `.claim_jobs(...)` call
+      sites (lines ~112 and ~131 as of this plan's writing — confirm current line numbers)
+      to pass `None` as the new trailing `ttl_secs` argument, before making any other
+      change to this file. This file compiles as part of the same package as `jobs.rs`
+      and `queue.rs`, so the whole-crate test run in the next step fails to compile
+      without this fix too — the same class of gap `jobs.rs` and (in Task 3)
+      `crates/of-web/tests/console.rs` already needed fixing for.
 - [ ] Run `cargo test -p of-core` (whole crate, all test binaries) — expect all pass,
-      including `tests/jobs.rs` and `tests/queue.rs` together.
+      including `tests/jobs.rs`, `tests/queue.rs`, and `tests/isolation.rs`'s existing
+      tests together (its *new* cross-org assertions are added in the next step below).
 - [ ] In `crates/of-core/tests/isolation.rs`, extend `cross_org_mutation_is_refused` (or
       add a sibling following its exact existing pattern) with: `renew_claim` called from
       org b against a job claimed in org a (`.is_err()`); `complete_job`/`fail_job` called
