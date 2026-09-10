@@ -1,6 +1,7 @@
 # Retriable `RaceLost` error for the lost-unique-violation-race-with-no-winner path design
 
-> **Status:** DRAFT — closes savvagent/otto-factory#100.
+> **Status:** APPROVED — closes savvagent/otto-factory#100. Spec critique approved on first
+> pass with only a trivial line-number-citation correction (applied below).
 
 ## Goal & Success Criteria
 
@@ -128,7 +129,7 @@ paragraph, extending its existing "here's why each entry is/isn't here" pattern:
 Three sites. Each changes only the error constructor — the surrounding savepoint
 rollback/release sequence, the re-query itself, and every other branch are unchanged.
 
-`Tx::add_job`'s idempotency-key recovery (current `crates/of-core/src/jobs.rs:436-441`):
+`Tx::add_job`'s idempotency-key recovery (current `crates/of-core/src/jobs.rs:437-441`):
 
 ```rust
 .ok_or_else(|| {
@@ -140,7 +141,7 @@ rollback/release sequence, the re-query itself, and every other branch are uncha
 })?;
 ```
 
-`link_ticket`'s fallback (current `crates/of-core/src/jobs.rs:671-676`) — only the inner
+`link_ticket`'s fallback (current `crates/of-core/src/jobs.rs:672-676`) — only the inner
 `ok_or_else`, not the `TicketAlreadyLinked` it feeds into on the happy path:
 
 ```rust
@@ -152,7 +153,7 @@ rollback/release sequence, the re-query itself, and every other branch are uncha
 })?;
 ```
 
-`create_from_ticket`'s fallback (current `crates/of-core/src/jobs.rs:783-788`):
+`create_from_ticket`'s fallback (current `crates/of-core/src/jobs.rs:784-788`):
 
 ```rust
 .ok_or_else(|| {
