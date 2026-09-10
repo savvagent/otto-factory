@@ -11,7 +11,8 @@ implements it exactly.
 
 ## Status — 2026-09-10
 
-**Done.** Task 1 (✅ below) shipped in `savvagent/otto-factory#129`, closing #127. Plan critique
+**Done.** Task 1 (✅ below) shipped in `savvagent/otto-factory#129`, merged as `d42069c`, closing
+#127. Plan critique
 found one real bug before implementation (the deleted-path negative check originally pointed at a
 pre-#124 commit that still had `.claude/skills` as a real tracked directory, not an absent path —
 fixed to point at the repo's actual root commit `7cbddbb`). The PR review round (mandatory
