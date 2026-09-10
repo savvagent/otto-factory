@@ -115,6 +115,16 @@ pub enum Error {
     #[error("{0}")]
     Invalid(String),
 
+    /// A `SAVEPOINT`-guarded unique-violation recovery re-queried for the
+    /// concurrent winner's row and found nothing — the winner's row vanished
+    /// between the violation and the re-query (e.g. a concurrent delete). This
+    /// is a transient server-side race, not a problem with the caller's
+    /// request: unlike `Invalid`, retrying the identical call can plausibly
+    /// succeed once the row settles. See `create_from_ticket`, `link_ticket`,
+    /// `Tx::add_job`, and `Tx::send_message` for the four sites that raise it.
+    #[error("{0}")]
+    RaceLost(String),
+
     #[error(
         "idempotency_key {key:?} was already used for a different {tool} call in this \
          organization. Use a new key for a different request, or omit idempotency_key to \
@@ -165,6 +175,7 @@ impl Error {
             Error::Config(_) => "internal_error",
             Error::Crypto(_) => "internal_error",
             Error::Invalid(_) => "invalid_argument",
+            Error::RaceLost(_) => "race_lost",
             Error::IdempotencyKeyConflict { .. } => "idempotency_key_conflict",
             Error::IsolationNotEnforced { .. } => "isolation_not_enforced",
             Error::Db(_) => "internal_error",
@@ -185,8 +196,16 @@ impl Error {
     /// the only way forward is a different call (`claim_jobs`, or `get_job`
     /// to see who holds it now). Telling an agent this is retriable would
     /// have it busy-loop a call that is structurally doomed.
+    ///
+    /// `RaceLost` is retriable for the same reason `Db` is: both describe a
+    /// condition of the server's transaction, not the caller's arguments, and
+    /// an identical retry can land in a different, successful outcome once the
+    /// concurrent write that caused it has finished settling.
     pub fn retriable(&self) -> bool {
-        matches!(self, Error::LeaseHeld { .. } | Error::Db(_))
+        matches!(
+            self,
+            Error::LeaseHeld { .. } | Error::Db(_) | Error::RaceLost(_)
+        )
     }
 }
 
@@ -205,5 +224,12 @@ mod tests {
         };
         assert!(!e.retriable());
         assert_eq!(e.code(), "idempotency_key_conflict");
+    }
+
+    #[test]
+    fn race_lost_is_retriable() {
+        let e = Error::RaceLost("x".into());
+        assert!(e.retriable());
+        assert_eq!(e.code(), "race_lost");
     }
 }
