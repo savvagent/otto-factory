@@ -461,6 +461,73 @@ async fn registration_records_which_flow_wrote_it(pool: PgPool) {
     assert_eq!(row.1.as_deref(), Some("203.0.113.7"));
 }
 
+/// The credential and its audit row commit together (#108): a `BEFORE INSERT`
+/// trigger forces the audit write to fail deterministically — real Postgres
+/// behavior, not a stand-in for it, since this workspace has no database
+/// mocks — and the credential insert must roll back with it rather than
+/// leaving a live, unaudited passkey on the account.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_forced_audit_failure_rolls_back_the_credential(pool: PgPool) {
+    let db = Db::from_pool(pool);
+    let webauthn = rp();
+    let mut auth = authenticator();
+
+    sqlx::query(
+        "CREATE FUNCTION reject_registration_audit() RETURNS trigger AS $$ \
+         BEGIN RAISE EXCEPTION 'forced failure for test'; END; \
+         $$ LANGUAGE plpgsql",
+    )
+    .execute(db.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER reject_registration_audit \
+         BEFORE INSERT ON audit_events \
+         FOR EACH ROW WHEN (NEW.action = 'auth.passkey.registered') \
+         EXECUTE FUNCTION reject_registration_audit()",
+    )
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    let ceremony = passkeys::start_registration(&db, &webauthn, None)
+        .await
+        .unwrap();
+    let credential = auth
+        .do_registration(
+            Url::parse(ORIGIN).unwrap(),
+            for_soft_token(ceremony.challenge),
+        )
+        .expect("the authenticator refused the registration challenge");
+
+    let result = passkeys::finish_registration(
+        &db,
+        &webauthn,
+        ceremony.id,
+        &credential,
+        Some("laptop"),
+        passkeys::RegistrationVia::Signup,
+        None,
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "a forced audit-write failure must abort the whole ceremony, not \
+         silently succeed with a lost audit row"
+    );
+
+    let passkey_count: i64 = sqlx::query_scalar("SELECT count(*) FROM passkeys")
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        passkey_count, 0,
+        "the credential insert must roll back with the failed audit write — \
+         a live credential with no audit row is exactly the gap #108 closes"
+    );
+}
+
 /// Clearing writes the new `auth.passkey.cleared` action, never the old
 /// `auth.totp.reset` one TOTP left behind.
 #[sqlx::test(migrations = "../of-core/migrations")]

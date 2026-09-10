@@ -1004,6 +1004,31 @@ async fn rls_scopes_the_lease_resource_backfills_per_org_loop(pool: PgPool) {
     }
 }
 
+/// `Db::audit_global_on` writes a `NULL`-org row and is meant for an unpinned
+/// connection only — its own doc comment says never to pass a pinned `Tx`'s
+/// connection. This is the regression trip-wire for that misuse: on a pinned
+/// connection (`app.org_id` set, `SET LOCAL ROLE of_app` in effect the same
+/// way `rls_scopes_a_query_that_forgets_the_org_predicate` above relies on),
+/// `audit_events_append`'s `WITH CHECK (current_org() IS NULL OR org_id =
+/// current_org())` must reject the write outright rather than silently
+/// accepting a row no tenant's own audit trail will ever show.
+#[sqlx::test]
+async fn audit_global_on_refuses_a_pinned_connection(pool: PgPool) {
+    let db = db(pool);
+    let a = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+
+    let mut tx = db.begin(a.org).await.unwrap();
+    let result =
+        of_core::Db::audit_global_on(tx.conn(), of_core::audit::Entry::new("test.misuse")).await;
+
+    assert!(
+        result.is_err(),
+        "a NULL-org audit_global_on write on a pinned connection (app.org_id \
+         set) must be refused by audit_events_append's WITH CHECK, not \
+         silently accepted — see Db::audit_global_on's own doc comment"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The guard on the guard.
 //
