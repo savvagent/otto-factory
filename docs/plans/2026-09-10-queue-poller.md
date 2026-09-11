@@ -94,81 +94,100 @@ only.
       end of the second `$effect`, per the spec's §1). Add:
       ```ts
       import { Poller } from '$lib/poll.svelte';
-      import { ApiError } from '$lib/api';
-      import { session } from '$lib/session.svelte';
+      import { fatalApiFailure } from '$lib/poll-fatal';
 
       const jobsPoll = new Poller<Job[]>();
+
+      // A rejected `goto` (see `applyFilters` below) is not something `Poller`
+      // knows about, so it renders as its own independent notice rather than being
+      // folded into the poll's own error state — see the render tree below for why
+      // merging the two was wrong.
+      let navError = $state<string | undefined>(undefined);
 
       const filters = $derived({ status, repo, team, mine, limit: 200 });
 
       $effect(() => {
         const slug = org.slug;
         if (!slug) return;
+        // Switching orgs or filters runs this effect's cleanup, which stops the
+        // poll before the next subscription starts — see the generation counter
+        // in `poll.svelte.ts`. That is what keeps a late response for a superseded
+        // filter from repainting the table with rows that do not match the
+        // controls the reader is looking at.
         const active = filters;
-        return jobsPoll.start(() => api.jobs(slug, active), { fatal });
+        // A genuine org/filter change is the only event that supersedes an earlier
+        // navigation failure — clearing `navError` on an unrelated poll tick
+        // succeeding would prove nothing about whether the navigation itself ever
+        // actually applied, and would silently erase a report about a control that
+        // never worked.
+        navError = undefined;
+        return jobsPoll.start(() => api.jobs(slug, active), { fatal: fatalApiFailure });
       });
-
-      function fatal(failure: unknown): boolean {
-        if (!(failure instanceof ApiError)) return false;
-        if (failure.isUnauthenticated) {
-          session.clear();
-          return true;
-        }
-        return failure.isNotFound || failure.status === 403;
-      }
 
       const jobs = $derived(jobsPoll.value ?? []);
       const loading = $derived(!jobsPoll.value);
-      const error = $derived(
+      const pollError = $derived(
         jobsPoll.failed ? messageFor(jobsPoll.error, m.queue_load_failed()) : undefined
       );
       ```
-      Keep the existing `error` variable name and the `loading`/`jobs` names unchanged so the render
-      tree below needs no further edits for its existing branches — only the new `stale`/`parked`
-      branches are additions. Import `relative` is already imported (used elsewhere on the page for
-      `job.createdAt`); reuse it for `jobsPoll.updatedAt`.
-- [x] **Add the `stale`/`parked` status line to the render tree, without collapsing the existing
-      four-way branch.** The page today is `{#if error}<Alert>...{:else if loading &&
-      jobs.length === 0}<Loading>...{:else if jobs.length === 0}<Empty>...{:else}<table>...{/if}`
-      (`+page.svelte:225-238` as of this plan). All four branches stay exactly as they are — this
-      step only (a) appends the retrying note to the `error` branch and (b) inserts the
-      `stale`/`parked` line inside the final `{:else}` branch, above the `<table>` markup, so it is
-      visible only while a table is actually rendered:
+      `navError` and `pollError` are two independent pieces of state, not one combined `error` — a
+      rejected navigation and a failed poll are different failures with different lifetimes (see the
+      render tree step below), and folding them into one variable is exactly what an earlier review
+      round undid. The shared `fatalApiFailure` classifier (401 clears the session and is fatal; a
+      404 or a plain 403 is fatal; everything else is retried) lives in `$lib/poll-fatal.ts`, not as a
+      page-local closure — this page and `o/[org]/+page.svelte` both import it, so there is one
+      definition instead of two copies that could drift. Keep the `loading`/`jobs` names unchanged so
+      the render tree below needs no further edits for its existing branches. `relative` is already
+      imported (used elsewhere on the page for `job.createdAt`); reuse it for `jobsPoll.updatedAt`.
+- [x] **Add the `navError`/`stale`/`parked` notices and the retrying note, without collapsing the
+      existing four-way content branch.** The shipped render tree keeps `navError` as its own
+      unconditional `Alert` — independent of the poll, because a rejected `goto` is not a poll
+      failure — then renders the `parked`/`stale` note unconditionally too (mutually exclusive with
+      each other, and with `navError`, above and independent of the content branching below), and
+      only then branches on `pollError`/`loading`/the empty check/the table (`+page.svelte:220-253`
+      as of this plan):
       ```svelte
-      {#if error}
+      {#if navError}
+        <Alert>{navError}</Alert>
+      {/if}
+
+      {#if jobsPoll.parked}
+        <p role="status" class="text-xs text-faint">{m.queue_paused()}</p>
+      {:else if jobsPoll.stale}
+        <p role="status" class="text-xs text-warn">
+          {m.queue_refresh_failed({
+            reason: messageFor(jobsPoll.error, m.error_network()),
+            age: relative(
+              jobsPoll.updatedAt === undefined ? undefined : new Date(jobsPoll.updatedAt).toISOString()
+            )
+          })}
+        </p>
+      {/if}
+
+      {#if pollError}
         <Alert>
-          {error}
-          {#if !jobsPoll.stopped}{m.queue_retrying()}{/if}
+          {pollError}
+          {#if !jobsPoll.stopped && !jobsPoll.parked}{m.queue_retrying()}{/if}
         </Alert>
-      {:else if loading && jobs.length === 0}
+      {:else if loading}
         <Loading what={m.queue_loading()} />
       {:else if jobs.length === 0}
         <Empty title={filtered ? m.queue_empty_filtered() : m.queue_empty_title()}>
           <!-- existing Empty body, unchanged -->
         </Empty>
       {:else}
-        {#if jobsPoll.parked}
-          <p role="status" class="text-xs text-faint">{m.queue_paused()}</p>
-        {:else if jobsPoll.stale}
-          <p role="status" class="text-xs text-warn">
-            {m.queue_refresh_failed({
-              reason: messageFor(jobsPoll.error, m.error_network()),
-              age: relative(
-                jobsPoll.updatedAt === undefined
-                  ? undefined
-                  : new Date(jobsPoll.updatedAt).toISOString()
-              )
-            })}
-          </p>
-        {/if}
         <!-- existing table markup, unchanged -->
       {/if}
       ```
-      Double-check after editing that the `<Empty>` branch's own body (the "connect a repo" link,
-      etc.) is still present verbatim — it is the one branch easiest to drop by accident when
-      pattern-matching against the overview page's simpler two-way `{#if error}...{:else}` shape,
-      which has no empty-state branch to preserve. Confirm `m.error_network` already exists (it is
-      used by the overview page) rather than adding a new key for it.
+      The `parked`/`stale` note sits **above**, not inside, the content branch — putting it inside
+      the final `{:else}` (table-only) branch was the exact bug two prior review rounds fixed: a
+      stale or parked poll can coincide with `loading`, the empty state, or a `pollError`, and hiding
+      the note behind a table-only branch would make it invisible in those cases. Double-check after
+      editing that the `<Empty>` branch's own body (the "connect a repo" link, etc.) is still present
+      verbatim — it is the one branch easiest to drop by accident when pattern-matching against the
+      overview page's simpler two-way `{#if error}...{:else}` shape, which has no empty-state branch
+      to preserve. Confirm `m.error_network` already exists (it is used by the overview page) rather
+      than adding a new key for it.
 - [x] **Type-check and build the page in isolation**: `cd web && npm run check`. Fix any TS error
       before moving on (in particular: `ApiError`'s exported shape, `session.clear()`'s signature —
       both already used identically in `o/[org]/+page.svelte`, so mirror it exactly rather than
@@ -263,7 +282,8 @@ only.
       cd web && npm run lint -- --write && npm run lint
       cd .. && git add web/src/routes/o/\[org\]/queue/+page.svelte web/messages/*.json \
         web/src/routes/o/\[org\]/queue/QueueHarness.svelte \
-        web/src/routes/o/\[org\]/queue/page.render.test.ts web/README.md
+        web/src/routes/o/\[org\]/queue/page.render.test.ts web/README.md \
+        web/src/lib/poll-fatal.ts web/src/routes/o/\[org\]/+page.svelte
       git commit -m "web: migrate the queue page's job list to Poller, keyed on filters too"
       ```
 - [x] **Full gate, once more, from a clean state**: `cd web && npm run check && npm run lint && npm test && npm run build`.
