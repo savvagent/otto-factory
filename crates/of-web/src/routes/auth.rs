@@ -31,6 +31,8 @@ use axum::response::{IntoResponse, Response};
 use http::request::Parts;
 use of_auth::ratelimit::{self, CapPolicy, LOGIN_CRED_CAP, LOGIN_IP_CAP};
 use of_auth::{login, passkeys, sessions, AuthError};
+use of_core::audit::{action, Entry};
+use of_core::ids::UserId;
 use of_core::orgs::User;
 use serde::{Deserialize, Serialize};
 
@@ -334,7 +336,11 @@ pub async fn claim_start(
 /// `POST /api/auth/claim/finish` — register the new passkey and sign in.
 ///
 /// The code is spent here rather than at `start`, so an interrupted ceremony
-/// does not burn somebody's only way back into their account.
+/// does not burn somebody's only way back into their account. Throttled the
+/// same way `claim_start` is: this endpoint has no secret of its own to
+/// rate-limit a guess against (the rollback below hands a wrong code straight
+/// back rather than spending it), so the per-source cap is the only thing
+/// pricing a script that tries codes against it.
 ///
 /// The claim consumption, the ceremony consumption, the credential insert,
 /// and the audit write all share one transaction (`savvagent/otto-factory#132`):
@@ -346,17 +352,38 @@ pub async fn claim_start(
 /// ceremony-ownership check below — used to leave the account with a burned
 /// claim, a burned ceremony, and no passkey: for an org's last owner, nobody
 /// above them can issue a second claim. Now any such failure rolls back
-/// everything, and the claim and ceremony are both still there for a retry.
+/// everything up to that point, and the claim and ceremony are both still
+/// there for a retry. (This only covers up to `tx.commit()` itself — a
+/// failure in `login::with_passkey` below runs after commit and cannot roll
+/// the credential back; that path already tolerates its own audit-write
+/// failure, logging rather than losing the session, see its doc comment.)
+///
+/// A rejection here — the ownership mismatch, or a failure inside
+/// `finish_registration_tx` — writes a best-effort [`action::CLAIM_REFUSED`]
+/// row once the transaction has rolled back. Without it, nothing durable
+/// records the attempt at all: the row `finish_registration_tx` would have
+/// written (`auth.passkey.registered`, `via = "claim"`) never lands, because
+/// nothing commits. That row is the one event proving who completed an
+/// admin-assisted takeover (see `finish_registration_tx`'s own doc comment),
+/// so a *rejected* substitution attempt against this same, unauthenticated
+/// endpoint deserves a trace for the same reason a successful one does.
 pub async fn claim_finish(
     State(state): State<AppState>,
     parts: Parts,
     Json(req): Json<FinishClaim>,
 ) -> ApiResult<Response> {
+    throttle_by_source(&state, &parts).await?;
+
     let ip = client_ip(&parts, &state.config);
 
+    // Unpinned: `account_claims`, `webauthn_ceremonies`, and `passkeys` carry
+    // no `org_id` and no `<table>_tenant_isolation` policy. Do not write a
+    // tenant table on this connection — it has no `app.org_id` set, so guard
+    // 2 (see `Db::begin`'s doc comment) does not apply to it at all.
     let mut tx = state.db.begin_unpinned().await?;
     let user = of_core::invites::consume_account_claim_tx(&mut tx, &hash_claim(&req.code)).await?;
-    let registered = passkeys::finish_registration_tx(
+
+    let registered = match passkeys::finish_registration_tx(
         &mut tx,
         &state.webauthn,
         req.ceremony_id,
@@ -365,7 +392,19 @@ pub async fn claim_finish(
         passkeys::RegistrationVia::Claim,
         ip.as_deref(),
     )
-    .await?;
+    .await
+    {
+        Ok(registered) => registered,
+        Err(e) => {
+            // `tx` drops here uncommitted, restoring the claim consumed
+            // above — nothing durable happened. Attributed to `user` (the
+            // claimed account), the one identity a code the request held
+            // actually proved.
+            drop(tx);
+            note_claim_refused(&state, user, ip.as_deref(), "registration failed").await;
+            return Err(e.into());
+        }
+    };
 
     // The ceremony was started against the claimed account; if these
     // disagree, something has been substituted and the safe answer is to
@@ -373,15 +412,50 @@ pub async fn claim_finish(
     // consumption and the credential/audit writes together instead of
     // leaving them durable for a request that gets rejected.
     if registered != user {
+        drop(tx);
+        // Attributed to `registered` — the ceremony's actual owner, whose
+        // ownership a real signature just backed — rather than `user`, which
+        // is only a claim the request itself made about which account it
+        // wanted; `user` is still named in the detail for the trail to show
+        // what was attempted.
+        note_claim_refused(
+            &state,
+            registered,
+            ip.as_deref(),
+            &format!("ceremony belongs to a different account than claim code for {user}"),
+        )
+        .await;
         return Err(ApiError::forbidden(
             "that claim code is not for this ceremony",
         ));
     }
 
-    tx.commit().await.map_err(of_core::Error::from)?;
+    if let Err(e) = tx.commit().await {
+        note_claim_refused(&state, user, ip.as_deref(), "commit failed").await;
+        return Err(of_core::Error::from(e).into());
+    }
 
     let opened = login::with_passkey(&state.db, user, ip.as_deref()).await?;
     signed_in_response(&state, opened).await
+}
+
+/// Best-effort audit trace for a `claim/finish` request that rolled back —
+/// see [`claim_finish`]'s own doc comment for why this exists. Mirrors
+/// `passkeys::clear`'s post-commit `audit_global` pattern: logged rather than
+/// propagated, because losing this one row is worse to compound into a second
+/// failure on an already-failed request than it is to simply lose it.
+async fn note_claim_refused(state: &AppState, actor: UserId, ip: Option<&str>, reason: &str) {
+    let entry = Entry::new(action::CLAIM_REFUSED)
+        .actor(actor)
+        .detail(serde_json::json!({ "reason": reason }))
+        .from_request(ip, None);
+    if let Err(e) = state.db.audit_global(entry).await {
+        tracing::error!(
+            error = %e,
+            actor = %actor,
+            "failed to write audit event for a refused claim"
+        );
+    }
 }
 
 /// Limit how many account-creating or claim attempts one source may make.

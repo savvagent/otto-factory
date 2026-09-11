@@ -47,6 +47,13 @@ pub mod action {
     pub const PASSKEY_CLEARED: &str = "auth.passkey.cleared";
     pub const PASSKEY_REMOVED: &str = "auth.passkey.removed";
     pub const PASSKEY_RENAMED: &str = "auth.passkey.renamed";
+    /// A `claim/finish` request that rolled back — a ceremony/claim ownership
+    /// mismatch, or a failure partway through registration. Best-effort,
+    /// written outside the rolled-back transaction (see
+    /// `of_web::routes::auth::claim_finish`), so the admin-assisted-recovery
+    /// path still leaves a trace when a completion attempt is refused, not
+    /// only when one succeeds (`PASSKEY_REGISTERED` with `via = "claim"`).
+    pub const CLAIM_REFUSED: &str = "auth.claim.refused";
 
     // OAuth / tokens (org-scoped: the org is bound at authorization time).
     pub const CLIENT_REGISTERED: &str = "oauth.client.registered";
