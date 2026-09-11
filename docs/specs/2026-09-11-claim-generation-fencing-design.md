@@ -7,6 +7,36 @@
 > savvagent/otto-factory#102) — this spec extends `ensure_claim_held`, the claimer fence
 > that design introduced.
 
+## Addendum: the expiry fence (added during PR review, and non-additive)
+
+The independent `security-auditor` pass on the PR implementing this spec raised a High
+finding this spec did not anticipate: `expected_attempts` closes the race for a caller that
+*learns about it*, but an expired-and-never-reclaimed claim was still finalizable/renewable
+by its original holder with no argument at all — `ready()` and `claim_jobs` already treat
+that claim as available the instant it lapses, so the stale holder finalizing over it is the
+identical #65 race, left open. `ensure_claim_held` was extended, in the same PR, with a
+server-side expiry check ahead of the account and generation checks this spec describes —
+see `ensure_claim_held`'s doc comment in `crates/of-core/src/jobs.rs` for the exact
+mechanics.
+
+**This changes the "Public interface note" below: the overall change is not purely
+additive.** Unlike `expected_attempts` (opt-in, silent for a caller that omits it), the
+expiry check applies to *every* caller unconditionally: a caller that previously renewed or
+finalized a claim after its TTL had quietly lapsed — relying on today's resurrection
+behavior, with no argument to opt out — now gets `Error::AlreadyClaimed` instead. This is a
+genuine behavior change to an existing, unconditional code path, not an addition alongside
+it, and the PR carries a `!`/`BREAKING CHANGE:` marker for it per Non-Negotiable Rule 6. See
+the updated "Public interface note" for the full accounting.
+
+A second, narrower fix landed in the same round: `cancel_job` is exempted from the new
+expiry check specifically when `cancel_requested_at IS NOT NULL` on the row — a human
+already asked the job to stop before the claim lapsed, and letting the holder record
+compliance is strictly more honest than forcing `fail_job`, which erases the "asked to stop,
+and did" distinction `cancel_job` exists to preserve. This exemption is additive relative to
+the expiry check it carves out of (it only ever makes a call succeed that the unqualified
+expiry check would have refused), but the expiry check itself is not, so the PR's breaking
+classification stands regardless.
+
 ## Premise correction
 
 The issue's own writeup (and the spec it follows up on) states: *"`repo_leases::renew_lease`/
@@ -63,10 +93,14 @@ Success:
 
 - `complete_job`, `fail_job`, `cancel_job`, and `renew_claim` each accept a new, optional
   `expected_attempts` (wire name `expectedAttempts`) argument.
-- **Omitted (the default): behavior is bit-for-bit identical to today.** Only
-  `claimed_by == caller` is checked, exactly as `ensure_claim_held` does now. An existing
-  caller that never learns about the new argument is unaffected — this is what makes the
-  change additive under Non-Negotiable Rule 6.
+- **Omitted (the default): `expected_attempts` itself adds nothing new to check.** Only
+  `claimed_by == caller` is checked beyond the (separately added, see the Addendum above)
+  expiry check, exactly as `ensure_claim_held` did before this spec's own argument existed.
+  An existing caller that never learns about `expected_attempts` sees no *additional*
+  refusal from it — but is not otherwise unaffected by this PR, because the Addendum's
+  expiry check applies regardless of whether this argument is ever supplied. This is what
+  makes `expected_attempts` itself additive; it is not what makes the PR as a whole additive
+  — see the Addendum and the Public interface note.
 - **Supplied:** the call additionally refuses (with the existing `Error::AlreadyClaimed`,
   same `code()` — see §3 for why no new error variant is introduced) unless the job's
   current `attempts` equals the supplied value. A caller that captured `attempts` at claim
@@ -359,23 +393,41 @@ tenant-scoped surface, only an additional in-org check on an existing one.
 
 ## Public interface note
 
-Per Non-Negotiable Rule 6, this is **additive, not breaking**, and does not warrant a
-`!`/`BREAKING CHANGE:` marker:
+**Revised per the Addendum above: this PR is a breaking change overall, per Non-Negotiable
+Rule 6, and carries a `!`/`BREAKING CHANGE:` marker.** The `expected_attempts` argument
+itself is additive in isolation; the server-side expiry check added in the same PR is not,
+because it changes behavior on a code path every existing caller already exercises
+unconditionally:
 
 - Four MCP tools (`complete_job`, `fail_job`, `cancel_job`, `renew_claim`) each gain one
   new **optional** input field, `expectedAttempts`. No field is renamed or removed, no
   tool is renamed or removed, and every result envelope is unchanged
-  (`out::JobOut`, i.e. `{"job": …}`).
-- An existing caller that omits the new field observes bit-for-bit the same behavior as
-  before this change — this is asserted directly by a test (§ "Success", third bullet).
+  (`out::JobOut`, i.e. `{"job": …}`). This part is additive on its own.
+- **This part is not additive:** an existing caller that renews or finalizes a claim after
+  it has already expired — with no argument, new or old, that opts out — previously
+  succeeded (the claim was quietly resurrected) and now fails with `Error::AlreadyClaimed`.
+  `expected_attempts` omitted does *not* preserve today's behavior in this case; it only
+  preserves it for the already-reclaimed case (`ensure_claim_held`'s doc comment and
+  `expected_attempts_omitted_preserves_todays_behavior_for_a_reclaimed_claim` in
+  `crates/of-core/tests/queue.rs` are both named for exactly this narrower scope, not for
+  blanket compatibility).
+- `cancel_job` additionally gains a carve-out that is additive *relative to* the expiry
+  check above (it only turns a refusal into a success, never the reverse): when
+  `cancel_requested_at IS NOT NULL` on the row, `cancel_job` still succeeds on an expired,
+  unreclaimed claim. This narrows the breaking surface for `cancel_job` specifically but
+  does not make the overall change additive, since `complete_job`/`fail_job`/`renew_claim`
+  carry the unqualified break.
 - `crates/of-core`'s `complete_job`/`fail_job`/`cancel_job`/`renew_claim`/`finalize`/
-  `ensure_claim_held` Rust function signatures change (a new trailing parameter). This is
-  **not** a customer-facing interface under Rule 6's own list (MCP tool surface, console
-  REST API, OAuth/discovery, config surface, DB schema) — `of-core` has no HTTP and no
-  external callers of its own; every call site inside the workspace is updated in the same
-  PR, and the compiler — not a grep — is what proves none was missed.
+  `ensure_claim_held` Rust function signatures change (new trailing parameters, including
+  `honor_pending_cancel: bool` from the Addendum). This part is **not** a customer-facing
+  interface under Rule 6's own list (MCP tool surface, console REST API, OAuth/discovery,
+  config surface, DB schema) — `of-core` has no HTTP and no external callers of its own;
+  every call site inside the workspace is updated in the same PR, and the compiler — not a
+  grep — is what proves none was missed. (This bullet is about the Rust signatures only; it
+  does not extend to the MCP tool behavior, which is where the actual break lives.)
 - `Error::AlreadyClaimed` gains no new field and no new variant (§3) — its wire shape
-  (`code: "already_claimed"`, a `message` string) is unchanged.
+  (`code: "already_claimed"`, a `message` string) is unchanged. The break is in when this
+  error is returned, not in its shape.
 
 ## Error Handling & Edge Cases
 
@@ -396,6 +448,18 @@ Per Non-Negotiable Rule 6, this is **additive, not breaking**, and does not warr
   file:** unchanged — `ensure_claim_held` (including its new check) runs first inside
   `cancel_job`, then the existing `cancel_requested_at IS NULL` check runs exactly as
   today, independent of `expected_attempts`.
+- **Claim expired, caller is the account that held it, nobody has reclaimed it yet:**
+  refused (`AlreadyClaimed`, "was claimed by you, but that claim has expired…") for
+  `complete_job`/`fail_job`/`renew_claim`. For `cancel_job` specifically, this succeeds
+  instead when `cancel_requested_at IS NOT NULL` on the row (see the Addendum) — the one
+  place the caller's own expired claim does not block it.
+- **Claim expired, caller never held this claim at all (a different account probing an
+  expired job):** the expiry-specific wording is never shown to this caller — it would
+  falsely assert "was claimed by you" — and the call falls straight through to the ordinary
+  account-mismatch refusal ("claimed by X, not you"), whether or not the claim happens to
+  be expired. Covered by
+  `an_account_that_never_held_the_claim_is_not_told_its_own_claim_expired` in
+  `crates/of-core/tests/queue.rs`.
 
 ## Assumptions
 

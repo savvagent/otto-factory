@@ -14,6 +14,18 @@ plan implements it exactly.
 
 Drafted, plan critique pending.
 
+**Update (same day, PR review):** the mandatory review trio's independent `security-auditor`
+pass found the plan as drafted left an unfenced expiry race open for any caller that never
+learns about `expected_attempts` (see the spec's "Addendum: the expiry fence" section, added
+after this plan). `ensure_claim_held` gained a second, unconditional expiry check, plus a
+narrow `cancel_job`-only exemption when a cancellation is already on file. **This makes the
+change as a whole breaking, not additive** — see the Global Constraints correction below.
+The two test names this plan specifies below
+(`expected_attempts_omitted_preserves_todays_behavior`) were renamed during the review
+response to `expected_attempts_omitted_preserves_todays_behavior_for_a_reclaimed_claim`,
+since the un-renamed name overstated what the test proves once the expiry check exists
+alongside it.
+
 ## Global Constraints
 
 - No AI self-attribution anywhere (commits, code comments, docs, PR body).
@@ -25,8 +37,11 @@ Drafted, plan critique pending.
   worktree needs its own `.env` — copy it, `cp .env.example .env` then set `DATABASE_URL`
   to match, or symlink/copy the existing one).
 - `Error::AlreadyClaimed` is reused, not forked — no new error variant, per spec §3.
-- This is additive per Non-Negotiable Rule 6 — no `!`/`BREAKING CHANGE:` marker on the PR
-  title.
+- **Correction (PR review — see Status above and the spec's Addendum): this is NOT purely
+  additive.** `expected_attempts` alone would have been, but the expiry check added during
+  review applies unconditionally to every existing caller. The PR title carries a
+  `!`/`BREAKING CHANGE:` marker per Non-Negotiable Rule 6, superseding this bullet as
+  originally drafted.
 - **Signature-change churn is mechanical and compiler-verified**: once `ensure_claim_held`,
   `finalize`, `complete_job`, `fail_job`, `cancel_job`, and `renew_claim` each gain a
   trailing `expected_attempts: Option<i32>` parameter, `cargo build --workspace --tests`
