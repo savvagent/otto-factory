@@ -1951,9 +1951,12 @@ async fn a_credential_collision_during_claim_finish_leaves_the_claim_code_usable
     retried.expect(StatusCode::OK);
 
     // And the account is actually recoverable end to end, not merely that the
-    // code still "looks" valid: a fresh device, a fresh ceremony (the failed
-    // attempt's ceremony is spent either way, by design — single-use), and a
-    // full reclaim.
+    // code still "looks" valid. A fresh ceremony (via `retried` above) and a
+    // fresh device: the failed attempt's own ceremony is restored by the same
+    // rollback that restored the claim (see `a_forced_audit_failure_also_
+    // restores_the_ceremony` in `of-auth`'s suite), but its only credential
+    // was the colliding one already rejected above, so nothing usable is left
+    // to retry it with — a clean reclaim needs a new ceremony either way.
     let mut recovery_device = common::authenticator();
     let reclaimed = common::finish_registration(
         &h,

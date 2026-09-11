@@ -710,7 +710,7 @@ async fn store_ceremony<T: serde::Serialize>(
 /// reborrowed from a caller-owned transaction for
 /// [`finish_registration_tx`], so a failure later in that same transaction
 /// restores the ceremony instead of leaving it burned for nothing. Mirrors
-/// `crate of_core::audit::Entry::write`'s identical generic-executor shape.
+/// `of_core::audit::Entry::write`'s identical generic-executor shape.
 async fn take_ceremony<'e, T, E>(conn: E, id: Uuid, kind: &str) -> Result<(Option<UserId>, T)>
 where
     T: serde::de::DeserializeOwned,
