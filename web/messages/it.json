@@ -96,6 +96,7 @@
   "client_note_claude_code": "Poi esegui `claude mcp login otto-factory` in un terminale interattivo per dare il consenso: una sessione `-p` non può aprire un browser e segnalerà il server come non autenticato.",
   "client_note_copilot": "Copilot offre il consenso via browser solo dalla sessione interattiva; un'esecuzione `-p` senza credenziali segnala che lo strumento non esiste invece di chiedere. Scriptalo con un token.",
   "client_note_generic": "HTTP in streaming. Un client conforme non ha bisogno di altro che questo URL: il 401 che riceve punta al documento della risorsa protetta, che punta al server di autorizzazione.",
+  "client_note_otto_cli": "Qualunque forma tu usi, esegui `otto` e apri `/mcp` in seguito — per OAuth, premi `o` per autorizzare nel browser e `c` una volta effettuato il reindirizzamento (solo interattivo, come per Claude Code e Copilot CLI sopra); per un token, incollalo quando `/mcp` lo richiede. In entrambi i casi, riavvia otto una volta: un server nuovo o appena autorizzato si connette solo al prossimo avvio.",
   "nav_organizations": "Organizzazioni",
   "nav_create_org": "Crea un'organizzazione",
   "nav_sign_out": "Esci",

@@ -118,6 +118,20 @@ export const CLIENTS: ClientRecipe[] = [
       `[mcp_servers.otto_factory]\nurl = "${url}"\n\n[mcp_servers.otto_factory.http_headers]\nAuthorization = "Bearer ${token || PLACEHOLDER}"`
   },
   {
+    id: 'otto-cli',
+    label: () => 'Otto CLI',
+    kind: 'toml',
+    location: '~/.otto/config.toml',
+    oauth: (url) =>
+      `[[mcp_servers]]\nname = "otto-factory"\ntransport = "http"\nurl = "${url}"\nauth = "oauth"`,
+    // `token` is unused on purpose: Otto never accepts the secret as a config field — it is
+    // handed over through /mcp's own prompt and stored in the OS keyring instead (see the
+    // comment in the rendered snippet below).
+    token: (url, _token) =>
+      `[[mcp_servers]]\nname = "otto-factory"\ntransport = "http"\nurl = "${url}"\nauth = "bearer"\n\n# then run otto, open /mcp, and paste the token when prompted — Otto stores it in the\n# OS keyring under service "otto", account "mcp:otto-factory"; it is never written to this file.\n# Add/remove and a completed OAuth authorization both require restarting otto to take effect.`,
+    note: () => m.client_note_otto_cli()
+  },
+  {
     id: 'generic',
     label: () => m.client_generic_name(),
     kind: 'command',

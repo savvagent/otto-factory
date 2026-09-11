@@ -96,6 +96,7 @@
   "client_note_claude_code": "Exécutez ensuite `claude mcp login otto-factory` dans un terminal interactif pour consentir : une session `-p` ne peut pas ouvrir de navigateur et signalera le serveur comme non authentifié.",
   "client_note_copilot": "Copilot ne propose le consentement navigateur que depuis sa session interactive ; une exécution `-p` sans identifiant signale que l'outil n'existe pas au lieu de demander. Scriptez-le avec un jeton.",
   "client_note_generic": "HTTP en streaming. Un client conforme n'a besoin que de cette URL : le 401 qu'il reçoit pointe vers le document de ressource protégée, qui pointe vers le serveur d'autorisation.",
+  "client_note_otto_cli": "Quelle que soit la forme utilisée, exécutez `otto` puis ouvrez `/mcp` ensuite — pour OAuth, appuyez sur `o` pour autoriser dans votre navigateur puis sur `c` une fois la redirection effectuée (interactif uniquement, comme pour Claude Code et Copilot CLI ci-dessus) ; pour un jeton, collez-le lorsque `/mcp` le demande. Dans tous les cas, redémarrez otto une fois : un serveur nouveau ou nouvellement autorisé ne se connecte qu'au prochain lancement.",
   "nav_organizations": "Organisations",
   "nav_create_org": "Créer une organisation",
   "nav_sign_out": "Se déconnecter",
