@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/savvagent/otto-factory/compare/v0.4.0...v0.5.0) (2026-09-11)
+
+
+### Features
+
+* **web:** migrate the queue page to Poller, keyed on filters too ([#146](https://github.com/savvagent/otto-factory/issues/146)) ([867c10b](https://github.com/savvagent/otto-factory/commit/867c10b637a1d55a32d78c2f5da444e0007ff3e9))
+
 ## [0.4.0](https://github.com/savvagent/otto-factory/compare/v0.3.1...v0.4.0) (2026-09-11)
 
 
