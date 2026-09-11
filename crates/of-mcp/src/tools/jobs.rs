@@ -205,45 +205,49 @@ pub struct ClaimJobsArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CompleteJobArgs {
     pub job: String,
     /// What you did, for whoever reads this later.
     #[serde(default)]
     pub result: Option<String>,
-    /// Optional: the `attempts` value you saw when you claimed this job
-    /// (from claim_jobs's response, or a later get_job) — a generation
-    /// number, not a retry count. If a different process under your own
-    /// account has since reclaimed this job after your claim lapsed,
-    /// `attempts` has moved on; supplying the value you actually hold makes
-    /// this call fail (naming the current holder) instead of silently
-    /// overwriting their in-flight work. Omit it to keep matching by
-    /// account alone, as before.
+    /// Optional: the `attempts` value from your own claim_jobs response when
+    /// you claimed this job, or from your own last successful renew_claim
+    /// response — never a value read from get_job, which shows the job's
+    /// current state for orientation only and may belong to whoever holds
+    /// the claim now, not to you. A generation number, not a retry count. If
+    /// a different process under your own account has since reclaimed this
+    /// job after your claim lapsed, `attempts` has moved on; supplying the
+    /// value you actually hold makes this call fail (naming the current
+    /// holder) instead of silently overwriting their in-flight work. Omit
+    /// it to keep matching by account alone, as before.
     #[serde(default)]
     pub expected_attempts: Option<i32>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FailJobArgs {
     pub job: String,
     /// Why it failed, specifically enough that the next attempt can do better.
     #[serde(default)]
     pub error: Option<String>,
-    /// Optional: the `attempts` value you saw when you claimed this job
-    /// (from claim_jobs's response, or a later get_job) — a generation
-    /// number, not a retry count. If a different process under your own
-    /// account has since reclaimed this job after your claim lapsed,
-    /// `attempts` has moved on; supplying the value you actually hold makes
-    /// this call fail (naming the current holder) instead of silently
-    /// overwriting their in-flight work. Omit it to keep matching by
-    /// account alone, as before.
+    /// Optional: the `attempts` value from your own claim_jobs response when
+    /// you claimed this job, or from your own last successful renew_claim
+    /// response — never a value read from get_job, which shows the job's
+    /// current state for orientation only and may belong to whoever holds
+    /// the claim now, not to you. A generation number, not a retry count. If
+    /// a different process under your own account has since reclaimed this
+    /// job after your claim lapsed, `attempts` has moved on; supplying the
+    /// value you actually hold makes this call fail (naming the current
+    /// holder) instead of silently overwriting their in-flight work. Omit
+    /// it to keep matching by account alone, as before.
     #[serde(default)]
     pub expected_attempts: Option<i32>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RenewClaimArgs {
     /// The job you are still working on.
     pub job: String,
@@ -252,14 +256,17 @@ pub struct RenewClaimArgs {
     /// to 4 hours) as claim_jobs's ttl if omitted.
     #[serde(default)]
     pub ttl: Option<i64>,
-    /// Optional: the `attempts` value you saw when you claimed this job
-    /// (from claim_jobs's response, or a later get_job) — a generation
-    /// number, not a retry count. If a different process under your own
-    /// account has since reclaimed this job after your claim lapsed,
-    /// `attempts` has moved on; supplying the value you actually hold makes
-    /// this call fail (naming the current holder) instead of silently
-    /// renewing an expiry that belongs to their claim, not yours. Omit it
-    /// to keep matching by account alone, as before.
+    /// Optional: the `attempts` value from your own claim_jobs response when
+    /// you claimed this job, or from your own last successful renew_claim
+    /// response — never a value read from get_job, which shows the job's
+    /// current state for orientation only and may belong to whoever holds
+    /// the claim now, not to you. A generation number, not a retry count. If
+    /// a different process under your own account has since reclaimed this
+    /// job after your claim lapsed, `attempts` has moved on; supplying the
+    /// value you actually hold makes this call fail (naming the current
+    /// holder) instead of silently renewing an expiry that belongs to their
+    /// claim, not yours. Omit it to keep matching by account alone, as
+    /// before.
     #[serde(default)]
     pub expected_attempts: Option<i32>,
 }
@@ -275,21 +282,23 @@ pub struct RequestCancelArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CancelJobArgs {
     /// The job you were working on and are stopping.
     pub job: String,
     /// What you were doing when you stopped, for whoever reads this later.
     #[serde(default)]
     pub note: Option<String>,
-    /// Optional: the `attempts` value you saw when you claimed this job
-    /// (from claim_jobs's response, or a later get_job) — a generation
-    /// number, not a retry count. If a different process under your own
-    /// account has since reclaimed this job after your claim lapsed,
-    /// `attempts` has moved on; supplying the value you actually hold makes
-    /// this call fail (naming the current holder) instead of silently
-    /// cancelling their in-flight work. Omit it to keep matching by account
-    /// alone, as before.
+    /// Optional: the `attempts` value from your own claim_jobs response when
+    /// you claimed this job, or from your own last successful renew_claim
+    /// response — never a value read from get_job, which shows the job's
+    /// current state for orientation only and may belong to whoever holds
+    /// the claim now, not to you. A generation number, not a retry count. If
+    /// a different process under your own account has since reclaimed this
+    /// job after your claim lapsed, `attempts` has moved on; supplying the
+    /// value you actually hold makes this call fail (naming the current
+    /// holder) instead of silently cancelling their in-flight work. Omit it
+    /// to keep matching by account alone, as before.
     #[serde(default)]
     pub expected_attempts: Option<i32>,
 }
@@ -868,7 +877,12 @@ impl Factory {
                        already claimed or still blocked by an unfinished dependency. Claim \
                        before you start working. Claims expire (900s by default, or your ttl); \
                        renew_claim pushes a claim you hold forward, and an expired claim \
-                       becomes claimable again — see ready."
+                       becomes claimable again — see ready. Hold onto each returned job's \
+                       `attempts` value yourself if you might later call complete_job, \
+                       fail_job, cancel_job, or renew_claim with expectedAttempts to guard \
+                       against a same-account process having reclaimed the job out from under \
+                       you in the meantime — it is your claim's generation number, and it is \
+                       not repeated anywhere else you would otherwise think to look."
     )]
     pub async fn claim_jobs(
         &self,

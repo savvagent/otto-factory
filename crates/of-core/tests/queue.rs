@@ -1475,6 +1475,108 @@ async fn expected_attempts_omitted_preserves_todays_behavior(pool: PgPool) {
     assert_eq!(done.status, Status::Completed);
 }
 
+/// The server-side half of the #103 security review: `ensure_claim_held`
+/// refuses `complete_job`/`fail_job`/`cancel_job`/`renew_claim` once the
+/// *caller's own* claim has expired and nobody else has reclaimed it yet —
+/// closing GH#65's race for every caller, not just ones that learned to pass
+/// `expected_attempts`. Before this check, an expired-but-unreclaimed claim
+/// (`ready()` and `claim_jobs` already treat it as available; there is no
+/// background reaper) would still finalize or renew successfully for the
+/// original holder. One job per finalizer, since each is terminal, plus a
+/// final `claim_jobs` proving the job is still genuinely reclaimable — the
+/// fence closes finalize/renew against the stale holder, not availability
+/// through the normal path.
+#[sqlx::test]
+async fn a_holder_cannot_act_on_their_own_expired_unreclaimed_claim(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+
+    let mut tx = db.begin(t.org).await.unwrap();
+
+    // complete_job
+    let j = tx
+        .add_job(job(&t, "expired, unreclaimed, complete"))
+        .await
+        .unwrap();
+    tx.claim_jobs(std::slice::from_ref(&j.id), t.user, None, None)
+        .await
+        .unwrap();
+    expire_claim(&mut tx, t.org, &j.id).await;
+    let err = tx
+        .complete_job(&j.id, t.user, Some("late"), None)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "already_claimed");
+    assert!(
+        err.to_string().contains("expired"),
+        "must say the claim expired, not just that someone else holds it: {err}"
+    );
+
+    // fail_job
+    let j = tx
+        .add_job(job(&t, "expired, unreclaimed, fail"))
+        .await
+        .unwrap();
+    tx.claim_jobs(std::slice::from_ref(&j.id), t.user, None, None)
+        .await
+        .unwrap();
+    expire_claim(&mut tx, t.org, &j.id).await;
+    let err = tx
+        .fail_job(&j.id, t.user, Some("late"), None)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "already_claimed");
+
+    // cancel_job — a cancellation request on file first, so this proves the
+    // expiry check runs (and refuses) before cancel_job's own
+    // no-request-on-file check ever gets a chance to fire.
+    let j = tx
+        .add_job(job(&t, "expired, unreclaimed, cancel"))
+        .await
+        .unwrap();
+    tx.claim_jobs(std::slice::from_ref(&j.id), t.user, None, None)
+        .await
+        .unwrap();
+    tx.request_cancel(&j.id, t.user, Some("stop"))
+        .await
+        .unwrap();
+    expire_claim(&mut tx, t.org, &j.id).await;
+    let err = tx
+        .cancel_job(&j.id, t.user, Some("late"), None)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "already_claimed");
+
+    // renew_claim
+    let j = tx
+        .add_job(job(&t, "expired, unreclaimed, renew"))
+        .await
+        .unwrap();
+    tx.claim_jobs(std::slice::from_ref(&j.id), t.user, None, None)
+        .await
+        .unwrap();
+    expire_claim(&mut tx, t.org, &j.id).await;
+    let err = tx.renew_claim(&j.id, t.user, None, None).await.unwrap_err();
+    assert_eq!(err.code(), "already_claimed");
+
+    // The job is still genuinely reclaimable through the normal path — the
+    // fence above blocks the stale holder's finalize/renew, not availability.
+    let reclaimed = tx
+        .claim_jobs(
+            std::slice::from_ref(&j.id),
+            t.user,
+            Some("agent-a-prime"),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        reclaimed[0].attempts, 2,
+        "one attempt from the original claim, one from the reclaim"
+    );
+    tx.commit().await.unwrap();
+}
+
 /// savvagent/otto-factory#103's premise correction: unlike jobs,
 /// `repo_leases::acquire_lease` already mints a **new** lease `id` every
 /// time a resource is reclaimed after its previous lease expired (the reap

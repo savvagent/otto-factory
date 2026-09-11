@@ -41,12 +41,20 @@ pub enum Error {
         expected: String,
     },
 
-    #[error(
-        "job {job} is currently claimed by {holder}, not you — your claim likely expired \
-         and was taken over. Call get_job to see its current state, or claim_jobs if it \
-         becomes available again; do not retry this call as-is."
-    )]
-    AlreadyClaimed { job: JobId, holder: String },
+    /// `reason` is pre-rendered per call site rather than built from a single
+    /// fixed template, because the three cases `ensure_claim_held` raises this
+    /// for are not interchangeable: a different account holds the claim, an
+    /// expired claim has not yet been picked up by anyone, or a different
+    /// *instance* of your own account has reclaimed it (the claim-generation
+    /// fence, savvagent/otto-factory#103) — and "not you" is simply false in
+    /// the last case, since the account genuinely is you. Every branch still
+    /// ends with the same guidance: `get_job` is for the caller's own
+    /// orientation only, never a source for a fresh `expected_attempts` to
+    /// retry with — reading `attempts` back from `get_job` and feeding it into
+    /// a retry is the exact bypass this fence exists to prevent — and
+    /// `claim_jobs` is the only way to actually take the job back.
+    #[error("job {job} {reason}")]
+    AlreadyClaimed { job: JobId, reason: String },
 
     #[error(
         "ticket {ticket_ref} is already linked to job {job} — unlink it there first, \

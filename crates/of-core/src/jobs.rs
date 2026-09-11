@@ -135,6 +135,17 @@ pub struct Job {
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub started_at: Option<chrono::DateTime<chrono::Utc>>,
     pub completed_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Incremented exactly once per successful `claim_jobs` call against this
+    /// job — never by a reap, never by `repend_job`, never by `renew_claim` —
+    /// so it doubles as the job's claim generation: the value you get back
+    /// from claiming it is the generation you hold until you finalize it or
+    /// your claim lapses and someone (possibly you, under a new process)
+    /// reclaims it. Pass the value you saw at claim time (or from your own
+    /// last successful `renew_claim`) as `expectedAttempts` to `complete_job`/
+    /// `fail_job`/`cancel_job`/`renew_claim` to fence your call against a
+    /// same-account process having reclaimed the job in the meantime
+    /// (savvagent/otto-factory#103) — never a value re-read from `get_job`,
+    /// which may already belong to whoever holds the claim now.
     pub attempts: i32,
     pub result: Option<String>,
     pub error: Option<String>,
@@ -1093,40 +1104,84 @@ impl Tx<'_> {
     }
 
     /// Lock the job row, confirm it is claimed (`in-progress` or `active`),
-    /// confirm `caller` is the one who holds it, and — if `expected_attempts`
-    /// is supplied — confirm the caller's own claim generation is still the
-    /// current one. Shared by `finalize`, `renew_claim`, and `cancel_job` —
-    /// all three need the identical fencing check.
+    /// confirm the claim has not expired, confirm `caller` is the one who
+    /// holds it, and — if `expected_attempts` is supplied — confirm the
+    /// caller's own claim generation is still the current one. Shared by
+    /// `finalize`, `renew_claim`, and `cancel_job` — all three need the
+    /// identical fencing check.
     ///
-    /// The account check alone (`claimed_by == Some(caller)`) closes GH#65
-    /// (two *different* accounts racing to finalize a job) but not
-    /// savvagent/otto-factory#103 (two *instances* of the same account
-    /// racing): if this caller's process crashed, its claim lapsed, and a
-    /// second process under the identical account reclaimed the job,
-    /// `claimed_by` still reads as this caller's account, but `attempts` —
-    /// incremented exactly once per actual claim (`claim_jobs`), and never
-    /// touched by a reap — has moved on. A caller that supplies the
-    /// generation it actually holds is refused here instead of silently
-    /// finalizing over the reclaiming instance's in-flight work; a caller
-    /// that omits it (`None`, the default) gets exactly today's
-    /// account-only behavior — this argument is purely additive.
+    /// Three checks, each closing a different shape of the same underlying
+    /// problem — a caller acting on a claim it no longer validly holds:
+    ///
+    /// - **Expired.** `claim_expires_at` is what `ready()` and `claim_jobs`
+    ///   already treat as the line between "yours" and "up for grabs"
+    ///   (savvagent/otto-factory#65); this is that same line enforced here,
+    ///   server-side, for *every* caller, whether or not it ever knew
+    ///   `expected_attempts` existed. Before this check, a claim past its TTL
+    ///   but not yet reclaimed by anyone (there is no background reaper — see
+    ///   `claim_jobs`) would still finalize or renew successfully, which is
+    ///   the account-only race #65 was meant to close, left open for exactly
+    ///   the caller who never renewed. This does change existing behavior:
+    ///   renewing your own claim after it has already lapsed now fails
+    ///   (`claim_jobs` is how you take it back — a fresh claim, a new
+    ///   generation), instead of quietly resurrecting a stale claim `ready()`
+    ///   was already advertising as available. `expected_attempts` plays no
+    ///   part in this check; it applies before the account and generation
+    ///   checks even look at who the caller is, so it is not something an
+    ///   agent can opt out of by omitting the argument.
+    /// - **Account.** `claimed_by == Some(caller)` closes GH#65 (two
+    ///   *different* accounts racing to finalize a job).
+    /// - **Generation.** Closes savvagent/otto-factory#103 (two *instances*
+    ///   of the same account racing): if this caller's process crashed, its
+    ///   claim lapsed, and a second process under the identical account
+    ///   reclaimed the job before this call ever ran, `claimed_by` still
+    ///   reads as this caller's account and the expiry check above sees a
+    ///   fresh (non-expired) claim, but `attempts` — incremented exactly once
+    ///   per actual claim (`claim_jobs`), and never touched by a reap — has
+    ///   moved on. A caller that supplies the generation it actually holds is
+    ///   refused here instead of silently finalizing over the reclaiming
+    ///   instance's in-flight work; a caller that omits it (`None`, the
+    ///   default) gets exactly today's account-only behavior for this
+    ///   specific same-account-different-instance race — this argument is
+    ///   purely additive on top of the account and expiry checks, neither of
+    ///   which it can be used to bypass.
+    ///
+    /// (`activate_job`, by contrast, checks status only — not `claimed_by`,
+    /// expiry, or generation — because it is a refinement signal that cannot
+    /// clobber anyone's work; the claim lifecycle after this change has three
+    /// distinct fencing strengths by design, not by oversight.)
     async fn ensure_claim_held(
         &mut self,
         id: &JobId,
         caller: UserId,
         expected_attempts: Option<i32>,
     ) -> Result<()> {
+        #[derive(sqlx::FromRow)]
+        struct ClaimRow {
+            status: Status,
+            claimed_by: Option<UserId>,
+            claimed_by_label: Option<String>,
+            attempts: i32,
+            expired: bool,
+        }
+
         let org = self.org();
-        let row: Option<(Status, Option<UserId>, Option<String>, i32)> = sqlx::query_as(
-            "SELECT status, claimed_by, claimed_by_label, attempts FROM jobs \
-             WHERE org_id = $1 AND id = $2 FOR UPDATE",
+        let row: Option<ClaimRow> = sqlx::query_as(
+            "SELECT status, claimed_by, claimed_by_label, attempts, \
+                    (claim_expires_at IS NOT NULL AND claim_expires_at <= now()) AS expired \
+             FROM jobs WHERE org_id = $1 AND id = $2 FOR UPDATE",
         )
         .bind(org)
         .bind(id)
         .fetch_optional(self.conn())
         .await?;
-        let (status, claimed_by, claimed_by_label, attempts) =
-            row.ok_or_else(|| Error::JobNotFound(id.clone()))?;
+        let ClaimRow {
+            status,
+            claimed_by,
+            claimed_by_label,
+            attempts,
+            expired,
+        } = row.ok_or_else(|| Error::JobNotFound(id.clone()))?;
 
         if !matches!(status, Status::InProgress | Status::Active) {
             return Err(Error::WrongStatus {
@@ -1146,10 +1201,36 @@ impl Tx<'_> {
             .or_else(|| claimed_by.map(|u| u.to_string()))
             .unwrap_or_else(|| "no recorded holder (data inconsistency)".into());
 
+        // Expiry fence (savvagent/otto-factory#103's High finding on the
+        // original #65 fix): checked before the account check below because a
+        // caller can fail this one while still nominally being `claimed_by`
+        // — nobody has reclaimed the job yet, but `ready()` and `claim_jobs`
+        // already treat it as up for grabs, so finalizing or renewing it here
+        // would race against whoever claims it next. `claimed_by`/`holder`
+        // above still name *this* caller in that case, which is exactly why
+        // the message below does not say "not you".
+        if expired {
+            return Err(Error::AlreadyClaimed {
+                job: id.clone(),
+                reason: "was claimed by you, but that claim has expired and has not been \
+                    picked up by anyone else yet — it is no longer valid to finalize or renew \
+                    against. Retrying this exact call cannot succeed: claim_jobs is how to \
+                    take it back (that starts a new claim generation); get_job shows its \
+                    current state if you only want to look."
+                    .into(),
+            });
+        }
+
         if claimed_by != Some(caller) {
             return Err(Error::AlreadyClaimed {
                 job: id.clone(),
-                holder,
+                reason: format!(
+                    "is currently claimed by {holder}, not you — your claim likely expired \
+                        and was taken over. Retrying this exact call cannot succeed: get_job \
+                        shows its current state for your own orientation only — never read a \
+                        value back from it as expected_attempts for a retry — and claim_jobs \
+                        is how to take the job back once it is available again."
+                ),
             });
         }
 
@@ -1157,15 +1238,24 @@ impl Tx<'_> {
         // the same `Error::AlreadyClaimed` as the identity check above, not a
         // new variant: both describe the identical remedy from the caller's
         // perspective — stop, call get_job to see who holds it now, do not
-        // retry this exact call — and `holder` is exactly as informative
-        // here, since it names the reclaiming *instance's* label
-        // (claim_jobs's `agent` argument), which is precisely what
-        // distinguishes one process from another under the same account.
+        // retry this exact call — but the rendered `reason` names the actual
+        // claim generations involved (unlike the identity branch's message,
+        // this can fire when `holder` is a *different instance of the
+        // caller's own account*, so "not you" would be false here), which is
+        // what lets a caller tell this refusal apart from an ordinary
+        // account mismatch when two instances happen to share a label.
         if let Some(expected) = expected_attempts {
             if attempts != expected {
                 return Err(Error::AlreadyClaimed {
                     job: id.clone(),
-                    holder,
+                    reason: format!(
+                        "is currently claimed by {holder}, on claim generation {attempts} — \
+                            you supplied {expected}. Retrying this exact call cannot succeed: \
+                            get_job shows its current state for your own orientation only — \
+                            never read a value back from it as expected_attempts for a retry \
+                            — and claim_jobs is how to take the job back once it is available \
+                            again."
+                    ),
                 });
             }
         }
