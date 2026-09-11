@@ -1710,15 +1710,9 @@ async fn every_documented_get_is_actually_mounted(pool: PgPool) {
 async fn an_admin_can_reset_a_members_authenticator_but_gains_nothing_by_it(pool: PgPool) {
     let h = harness(pool);
     let rob = onboard(&h, "rob@acme.test").await;
-    org_with_owner(&h, "acme", &rob).await;
+    let acme = org_with_owner(&h, "acme", &rob).await;
     let mut bob = onboard(&h, "bob@acme.test").await;
-    add_member(
-        &h,
-        h.db.get_org_by_slug("acme").await.unwrap().unwrap().id,
-        bob.user,
-        of_core::orgs::Role::Member,
-    )
-    .await;
+    add_member(&h, acme, bob.user, of_core::orgs::Role::Member).await;
 
     let reset = Call::post(format!(
         "/api/orgs/acme/members/{}/reset-passkeys",
@@ -1749,24 +1743,43 @@ async fn an_admin_can_reset_a_members_authenticator_but_gains_nothing_by_it(pool
     );
     assert_eq!(rows[0]["targetId"].as_str().unwrap(), bob.user.to_string());
 
-    // The global auth.passkey.cleared row is attributed to Rob, who performed
-    // the reset, not to Bob, whose account it happened to — Bob did not clear
-    // his own passkeys. See savvagent/otto-factory#87.
+    // The auth.passkey.cleared row is scoped to acme (not NULL — it commits
+    // atomically with the reset transaction, which is pinned to this org; see
+    // savvagent/otto-factory#134) and is attributed to Rob, who performed the
+    // reset, not to Bob, whose account it happened to — Bob did not clear his
+    // own passkeys. See savvagent/otto-factory#87.
     let cleared: (Option<String>, Option<String>) = sqlx::query_as(
         "SELECT actor_user_id::text, target_id FROM audit_events \
-         WHERE action = $1 AND org_id IS NULL",
+         WHERE action = $1 AND org_id = $2",
     )
     .bind(of_core::audit::action::PASSKEY_CLEARED)
+    .bind(acme)
     .fetch_one(h.db.pool())
     .await
     .unwrap();
     assert_eq!(
         cleared.0.as_deref(),
         Some(rob.user.to_string().as_str()),
-        "the admin-assisted clear must attribute the global audit row to the \
-         admin who performed it, not the member it happened to"
+        "the admin-assisted clear must attribute the org-scoped audit row to \
+         the admin who performed it, not the member it happened to"
     );
     assert_eq!(cleared.1.as_deref(), Some(bob.user.to_string().as_str()));
+
+    // And it must actually be visible through the org's own audit read now,
+    // which is the whole point of scoping it (a NULL-org row was invisible
+    // here before this change).
+    let cleared_visible = Call::get("/api/orgs/acme/audit?actionPrefix=auth.passkey.cleared")
+        .with_session(&rob.session)
+        .send(&h.router)
+        .await;
+    cleared_visible.expect(StatusCode::OK);
+    assert_eq!(
+        cleared_visible.body.as_array().unwrap().len(),
+        1,
+        "the admin-assisted clear's auth.passkey.cleared row must be visible \
+         to the org's own audit trail, not just the org.member.passkeys_reset \
+         row"
+    );
 
     let stale_action = Call::get("/api/orgs/acme/audit?actionPrefix=auth.totp")
         .with_session(&rob.session)
@@ -1828,6 +1841,129 @@ async fn an_admin_can_reset_a_members_authenticator_but_gains_nothing_by_it(pool
         .send(&h.router)
         .await;
     assert_ne!(replayed.status, StatusCode::OK, "a claim code was reusable");
+}
+
+/// The auth.passkey.cleared row this endpoint now writes with a real org_id
+/// (#134) is scoped to the org that performed the reset, not visible to a
+/// different org that had nothing to do with it — the point of the fix is
+/// visibility to the org that DID perform it, not global visibility.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn an_admin_assisted_reset_is_invisible_to_a_different_org(pool: PgPool) {
+    let h = harness(pool);
+    let rob = onboard(&h, "rob@acme.test").await;
+    let acme = org_with_owner(&h, "acme", &rob).await;
+    let bob = onboard(&h, "bob@acme.test").await;
+    add_member(&h, acme, bob.user, of_core::orgs::Role::Member).await;
+
+    let carol = onboard(&h, "carol@widgets.test").await;
+    org_with_owner(&h, "widgets", &carol).await;
+
+    Call::post(format!(
+        "/api/orgs/acme/members/{}/reset-passkeys",
+        bob.user
+    ))
+    .with_session(&rob.session)
+    .send(&h.router)
+    .await
+    .expect(StatusCode::CREATED);
+
+    let widgets_view = Call::get("/api/orgs/widgets/audit?actionPrefix=auth.passkey.cleared")
+        .with_session(&carol.session)
+        .send(&h.router)
+        .await;
+    widgets_view.expect(StatusCode::OK);
+    assert_eq!(
+        widgets_view.body.as_array().unwrap().len(),
+        0,
+        "an org-scoped auth.passkey.cleared row from acme's reset must not \
+         leak into a different org's audit trail"
+    );
+}
+
+/// The whole `reset_member_passkeys` transaction — the passkey delete, the
+/// session revoke, the claim-code insert, and both audit writes — is one
+/// atomic unit (#134): a `BEFORE INSERT` trigger forces the second audit
+/// write to fail deterministically, and nothing else in the transaction may
+/// commit either.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_forced_audit_failure_rolls_back_an_admin_assisted_reset(pool: PgPool) {
+    let h = harness(pool);
+    let rob = onboard(&h, "rob@acme.test").await;
+    let acme = org_with_owner(&h, "acme", &rob).await;
+    let mut bob = onboard(&h, "bob@acme.test").await;
+    add_member(&h, acme, bob.user, of_core::orgs::Role::Member).await;
+
+    sqlx::query(
+        "CREATE FUNCTION reject_reset_clear_audit() RETURNS trigger AS $$ \
+         BEGIN RAISE EXCEPTION 'forced failure for test'; END; \
+         $$ LANGUAGE plpgsql",
+    )
+    .execute(h.db.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER reject_reset_clear_audit \
+         BEFORE INSERT ON audit_events \
+         FOR EACH ROW WHEN (NEW.action = 'auth.passkey.cleared') \
+         EXECUTE FUNCTION reject_reset_clear_audit()",
+    )
+    .execute(h.db.pool())
+    .await
+    .unwrap();
+
+    let reset = Call::post(format!(
+        "/api/orgs/acme/members/{}/reset-passkeys",
+        bob.user
+    ))
+    .with_session(&rob.session)
+    .send(&h.router)
+    .await;
+    assert_eq!(
+        reset.status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a forced audit-write failure must fail the whole request, not \
+         silently succeed with a lost audit row"
+    );
+
+    // Nothing committed: Bob's original passkey still works...
+    let still_works = sign_in(&h, &mut bob).await;
+    still_works.expect(StatusCode::OK);
+
+    // ...his session was never revoked...
+    let still_alive = Call::get("/api/me")
+        .with_session(&bob.session)
+        .send(&h.router)
+        .await;
+    assert_eq!(still_alive.status, StatusCode::OK);
+
+    // ...no claim code was minted...
+    let claims: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM account_claims WHERE user_id = $1 AND consumed_at IS NULL",
+    )
+    .bind(bob.user)
+    .fetch_one(h.db.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        claims, 0,
+        "no claim row may exist when the transaction that would have \
+         written it rolled back"
+    );
+
+    // ...and the org.member.passkeys_reset row was not written either —
+    // proving the whole transaction is one atomic unit, not three
+    // independent statements that happen to run in sequence.
+    let reset_rows = Call::get("/api/orgs/acme/audit?actionPrefix=org.member.passkeys_reset")
+        .with_session(&rob.session)
+        .send(&h.router)
+        .await;
+    reset_rows.expect(StatusCode::OK);
+    assert_eq!(
+        reset_rows.body.as_array().unwrap().len(),
+        0,
+        "org.member.passkeys_reset must roll back with the failed \
+         auth.passkey.cleared write — they share one transaction"
+    );
 }
 
 /// Without a claim code, a reset account must not be claimable at all — that

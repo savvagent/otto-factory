@@ -669,6 +669,121 @@ async fn removing_a_passkey_writes_the_passkey_removed_action(pool: PgPool) {
     );
 }
 
+/// The delete and its audit row commit together (#134): a `BEFORE INSERT`
+/// trigger forces the audit write to fail deterministically — real Postgres
+/// behavior, mirroring `a_forced_audit_failure_rolls_back_the_credential`'s
+/// technique for `finish_registration` (#108/#131) — and the `DELETE` must
+/// roll back with it rather than leaving a destroyed credential with no
+/// audit row.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_forced_audit_failure_rolls_back_a_passkey_removal(pool: PgPool) {
+    let db = Db::from_pool(pool);
+    let mut first = authenticator();
+    let user = register_new(&db, &mut first).await;
+
+    let webauthn = rp();
+    let mut second = authenticator();
+    let ceremony = passkeys::start_registration(&db, &webauthn, Some(user))
+        .await
+        .unwrap();
+    let credential = second
+        .do_registration(
+            Url::parse(ORIGIN).unwrap(),
+            for_soft_token(ceremony.challenge),
+        )
+        .unwrap();
+    passkeys::finish_registration(
+        &db,
+        &webauthn,
+        ceremony.id,
+        &credential,
+        Some("phone"),
+        passkeys::RegistrationVia::Add,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let keys = passkeys::list(&db, user).await.unwrap();
+    assert_eq!(keys.len(), 2);
+
+    sqlx::query(
+        "CREATE FUNCTION reject_removal_audit() RETURNS trigger AS $$ \
+         BEGIN RAISE EXCEPTION 'forced failure for test'; END; \
+         $$ LANGUAGE plpgsql",
+    )
+    .execute(db.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER reject_removal_audit \
+         BEFORE INSERT ON audit_events \
+         FOR EACH ROW WHEN (NEW.action = 'auth.passkey.removed') \
+         EXECUTE FUNCTION reject_removal_audit()",
+    )
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    let result = passkeys::remove(&db, user, keys[0].id, Some("203.0.113.9")).await;
+    assert!(
+        result.is_err(),
+        "a forced audit-write failure must abort the whole removal, not \
+         silently succeed with a lost audit row"
+    );
+
+    assert_eq!(
+        passkeys::list(&db, user).await.unwrap().len(),
+        2,
+        "the DELETE must roll back with the failed audit write — a destroyed \
+         credential with no audit row is exactly the gap #134 closes"
+    );
+}
+
+/// The same forced-failure technique as
+/// [`a_forced_audit_failure_rolls_back_a_passkey_removal`], for [`passkeys::clear`]:
+/// the admin-assisted-reset row is the one that names who initiated a
+/// takeover (#88), and it must not be losable independently of the delete it
+/// records.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_forced_audit_failure_rolls_back_a_passkey_clear(pool: PgPool) {
+    let db = Db::from_pool(pool);
+    let mut auth = authenticator();
+    let user = register_new(&db, &mut auth).await;
+
+    sqlx::query(
+        "CREATE FUNCTION reject_clear_audit() RETURNS trigger AS $$ \
+         BEGIN RAISE EXCEPTION 'forced failure for test'; END; \
+         $$ LANGUAGE plpgsql",
+    )
+    .execute(db.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER reject_clear_audit \
+         BEFORE INSERT ON audit_events \
+         FOR EACH ROW WHEN (NEW.action = 'auth.passkey.cleared') \
+         EXECUTE FUNCTION reject_clear_audit()",
+    )
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    let result = passkeys::clear(&db, user, user, None).await;
+    assert!(
+        result.is_err(),
+        "a forced audit-write failure must abort the whole clear, not \
+         silently succeed with a lost audit row"
+    );
+
+    assert!(
+        passkeys::has_credential(&db, user).await.unwrap(),
+        "the clearing DELETE must roll back with the failed audit write — a \
+         cleared account with no audit row is exactly the gap #134 closes, \
+         and it is the row that names who initiated a takeover (#88)"
+    );
+}
+
 /// Renaming a key writes `auth.passkey.renamed`.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn renaming_a_passkey_writes_the_passkey_renamed_action(pool: PgPool) {
