@@ -203,7 +203,7 @@ async fn link_ticket_conflict_names_the_live_holder_not_a_newer_terminal_job(poo
         .into_iter()
         .find(|j| j.id == older.id)
         .expect("older job claimable");
-    tx.complete_job(&claimed.id, t.user, Some("done"))
+    tx.complete_job(&claimed.id, t.user, Some("done"), None)
         .await
         .unwrap();
 
@@ -228,7 +228,7 @@ async fn link_ticket_conflict_names_the_live_holder_not_a_newer_terminal_job(poo
         .into_iter()
         .find(|j| j.id == newer_terminal.id)
         .expect("newer job claimable");
-    tx.fail_job(&claimed_newer.id, t.user, Some("nope"))
+    tx.fail_job(&claimed_newer.id, t.user, Some("nope"), None)
         .await
         .unwrap();
 
@@ -606,7 +606,7 @@ async fn close_from_ticket_rejects_terminal_jobs(pool: PgPool) {
     tx.claim_jobs(std::slice::from_ref(&job.id), t.user, None, None)
         .await
         .unwrap();
-    tx.complete_job(&job.id, t.user, Some("done"))
+    tx.complete_job(&job.id, t.user, Some("done"), None)
         .await
         .unwrap();
 

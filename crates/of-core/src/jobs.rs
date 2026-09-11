@@ -998,25 +998,38 @@ impl Tx<'_> {
         Ok(jobs)
     }
 
-    /// Mark an in-progress (or active) job completed.
+    /// Mark an in-progress (or active) job completed. `expected_attempts`,
+    /// when supplied, must match the job's current `attempts` or the call is
+    /// refused (savvagent/otto-factory#103) — see `ensure_claim_held`.
     pub async fn complete_job(
         &mut self,
         id: &JobId,
         caller: UserId,
         result: Option<&str>,
+        expected_attempts: Option<i32>,
     ) -> Result<Job> {
-        self.finalize(id, caller, Status::Completed, result, None)
-            .await
+        self.finalize(
+            id,
+            caller,
+            Status::Completed,
+            result,
+            None,
+            expected_attempts,
+        )
+        .await
     }
 
-    /// Mark an in-progress (or active) job failed.
+    /// Mark an in-progress (or active) job failed. `expected_attempts` is the
+    /// same claim-generation fence `complete_job` documents.
     pub async fn fail_job(
         &mut self,
         id: &JobId,
         caller: UserId,
         error: Option<&str>,
+        expected_attempts: Option<i32>,
     ) -> Result<Job> {
-        self.finalize(id, caller, Status::Failed, None, error).await
+        self.finalize(id, caller, Status::Failed, None, error, expected_attempts)
+            .await
     }
 
     /// Confirm a claimed job is being actively worked on, not merely claimed.
@@ -1079,20 +1092,40 @@ impl Tx<'_> {
         Ok(())
     }
 
-    /// Lock the job row, confirm it is claimed (`in-progress` or `active`), and
-    /// confirm `caller` is the one who holds it. Shared by `finalize` and
-    /// `renew_claim` — both need the identical fencing check.
-    async fn ensure_claim_held(&mut self, id: &JobId, caller: UserId) -> Result<()> {
+    /// Lock the job row, confirm it is claimed (`in-progress` or `active`),
+    /// confirm `caller` is the one who holds it, and — if `expected_attempts`
+    /// is supplied — confirm the caller's own claim generation is still the
+    /// current one. Shared by `finalize`, `renew_claim`, and `cancel_job` —
+    /// all three need the identical fencing check.
+    ///
+    /// The account check alone (`claimed_by == Some(caller)`) closes GH#65
+    /// (two *different* accounts racing to finalize a job) but not
+    /// savvagent/otto-factory#103 (two *instances* of the same account
+    /// racing): if this caller's process crashed, its claim lapsed, and a
+    /// second process under the identical account reclaimed the job,
+    /// `claimed_by` still reads as this caller's account, but `attempts` —
+    /// incremented exactly once per actual claim (`claim_jobs`), and never
+    /// touched by a reap — has moved on. A caller that supplies the
+    /// generation it actually holds is refused here instead of silently
+    /// finalizing over the reclaiming instance's in-flight work; a caller
+    /// that omits it (`None`, the default) gets exactly today's
+    /// account-only behavior — this argument is purely additive.
+    async fn ensure_claim_held(
+        &mut self,
+        id: &JobId,
+        caller: UserId,
+        expected_attempts: Option<i32>,
+    ) -> Result<()> {
         let org = self.org();
-        let row: Option<(Status, Option<UserId>, Option<String>)> = sqlx::query_as(
-            "SELECT status, claimed_by, claimed_by_label FROM jobs \
+        let row: Option<(Status, Option<UserId>, Option<String>, i32)> = sqlx::query_as(
+            "SELECT status, claimed_by, claimed_by_label, attempts FROM jobs \
              WHERE org_id = $1 AND id = $2 FOR UPDATE",
         )
         .bind(org)
         .bind(id)
         .fetch_optional(self.conn())
         .await?;
-        let (status, claimed_by, claimed_by_label) =
+        let (status, claimed_by, claimed_by_label, attempts) =
             row.ok_or_else(|| Error::JobNotFound(id.clone()))?;
 
         if !matches!(status, Status::InProgress | Status::Active) {
@@ -1102,21 +1135,41 @@ impl Tx<'_> {
                 expected: "in-progress or active".into(),
             });
         }
+
+        // The `unwrap_or_else` arm is unreachable in practice: the only path
+        // to `InProgress`/`Active` is `claim_jobs`, which always sets
+        // `claimed_by`. It is worded as a data-inconsistency report rather
+        // than a plausible-sounding "claimed by nobody" so that if this
+        // invariant is ever broken by a future change, the resulting error
+        // is legible as a bug report rather than a normal business state.
+        let holder = claimed_by_label
+            .or_else(|| claimed_by.map(|u| u.to_string()))
+            .unwrap_or_else(|| "no recorded holder (data inconsistency)".into());
+
         if claimed_by != Some(caller) {
             return Err(Error::AlreadyClaimed {
                 job: id.clone(),
-                // The `unwrap_or_else` arm is unreachable in practice: the
-                // only path to `InProgress`/`Active` is `claim_jobs`, which
-                // always sets `claimed_by`. It is worded as a data-
-                // inconsistency report rather than a plausible-sounding
-                // "claimed by nobody" so that if this invariant is ever
-                // broken by a future change, the resulting error is legible
-                // as a bug report rather than a normal business state.
-                holder: claimed_by_label
-                    .or_else(|| claimed_by.map(|u| u.to_string()))
-                    .unwrap_or_else(|| "no recorded holder (data inconsistency)".into()),
+                holder,
             });
         }
+
+        // Claim-generation fence (savvagent/otto-factory#103). Deliberately
+        // the same `Error::AlreadyClaimed` as the identity check above, not a
+        // new variant: both describe the identical remedy from the caller's
+        // perspective — stop, call get_job to see who holds it now, do not
+        // retry this exact call — and `holder` is exactly as informative
+        // here, since it names the reclaiming *instance's* label
+        // (claim_jobs's `agent` argument), which is precisely what
+        // distinguishes one process from another under the same account.
+        if let Some(expected) = expected_attempts {
+            if attempts != expected {
+                return Err(Error::AlreadyClaimed {
+                    job: id.clone(),
+                    holder,
+                });
+            }
+        }
+
         Ok(())
     }
 
@@ -1127,8 +1180,10 @@ impl Tx<'_> {
         to: Status,
         result: Option<&str>,
         error: Option<&str>,
+        expected_attempts: Option<i32>,
     ) -> Result<Job> {
-        self.ensure_claim_held(id, caller).await?;
+        self.ensure_claim_held(id, caller, expected_attempts)
+            .await?;
         let org = self.org();
         let job = sqlx::query_as(&format!(
             "UPDATE jobs SET status = $3, completed_at = now(), result = $4, error = $5, \
@@ -1149,14 +1204,17 @@ impl Tx<'_> {
 
     /// Push a held claim's expiry forward without completing or failing the
     /// job — the direct analog of `renew_lease`. Only the current holder may
-    /// renew, via the same `ensure_claim_held` check `finalize` uses.
+    /// renew, via the same `ensure_claim_held` check `finalize` uses,
+    /// including its optional claim-generation fence (`expected_attempts`).
     pub async fn renew_claim(
         &mut self,
         id: &JobId,
         caller: UserId,
         ttl_secs: Option<i64>,
+        expected_attempts: Option<i32>,
     ) -> Result<Job> {
-        self.ensure_claim_held(id, caller).await?;
+        self.ensure_claim_held(id, caller, expected_attempts)
+            .await?;
         let ttl = clamp_claim_ttl(ttl_secs);
         let org = self.org();
         let job = sqlx::query_as(&format!(
@@ -1252,8 +1310,10 @@ impl Tx<'_> {
         id: &JobId,
         caller: UserId,
         note: Option<&str>,
+        expected_attempts: Option<i32>,
     ) -> Result<Job> {
-        self.ensure_claim_held(id, caller).await?;
+        self.ensure_claim_held(id, caller, expected_attempts)
+            .await?;
         let org = self.org();
         let cancel_requested_at: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
             "SELECT cancel_requested_at FROM jobs WHERE org_id = $1 AND id = $2",
