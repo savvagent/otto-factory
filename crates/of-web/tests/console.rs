@@ -1953,10 +1953,11 @@ async fn a_credential_collision_during_claim_finish_leaves_the_claim_code_usable
     // And the account is actually recoverable end to end, not merely that the
     // code still "looks" valid. A fresh ceremony (via `retried` above) and a
     // fresh device: the failed attempt's own ceremony is restored by the same
-    // rollback that restored the claim (see `a_forced_audit_failure_also_
-    // restores_the_ceremony` in `of-auth`'s suite), but its only credential
-    // was the colliding one already rejected above, so nothing usable is left
-    // to retry it with — a clean reclaim needs a new ceremony either way.
+    // rollback that restored the claim (see
+    // `a_forced_audit_failure_also_restores_the_ceremony` in `of-auth`'s
+    // suite), but its only credential was the colliding one already rejected
+    // above, so nothing usable is left to retry it with — a clean reclaim
+    // needs a new ceremony either way.
     let mut recovery_device = common::authenticator();
     let reclaimed = common::finish_registration(
         &h,
@@ -1971,6 +1972,137 @@ async fn a_credential_collision_during_claim_finish_leaves_the_claim_code_usable
         reclaimed.body["user"]["id"].as_str().unwrap(),
         bob.user.to_string(),
         "the claim must still land on the account it was issued for"
+    );
+}
+
+/// The one behavior change `#164`'s own doc comment flags for a close look:
+/// the ceremony-ownership check (`registered != user`) now runs *before* the
+/// transaction commits, so a mismatch rolls the claim and ceremony
+/// consumption back rather than leaving them durably spent under a request
+/// that gets rejected. Independently flagged with no existing coverage by
+/// three reviewers on that PR (architect-reviewer, pr-test-analyzer,
+/// type-design-analyzer) and by the automated Copilot reviewer.
+///
+/// Presents a claim code for one account (Bob) against a ceremony — and a
+/// real, signed credential — that was started for a different account
+/// (Carol), the substitution the check exists to catch.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_ceremony_ownership_mismatch_leaves_the_claim_and_ceremony_usable(pool: PgPool) {
+    let h = harness(pool);
+    let rob = onboard(&h, "rob@acme.test").await;
+    let org = org_with_owner(&h, "acme", &rob).await;
+    let bob = onboard(&h, "bob@acme.test").await;
+    let carol = onboard(&h, "carol@acme.test").await;
+    add_member(&h, org, bob.user, of_core::orgs::Role::Member).await;
+    add_member(&h, org, carol.user, of_core::orgs::Role::Member).await;
+
+    let reset_bob = Call::post(format!(
+        "/api/orgs/acme/members/{}/reset-passkeys",
+        bob.user
+    ))
+    .with_session(&rob.session)
+    .send(&h.router)
+    .await;
+    reset_bob.expect(StatusCode::CREATED);
+    let code_bob = reset_bob.body["code"]
+        .as_str()
+        .expect("no claim code")
+        .to_string();
+
+    let reset_carol = Call::post(format!(
+        "/api/orgs/acme/members/{}/reset-passkeys",
+        carol.user
+    ))
+    .with_session(&rob.session)
+    .send(&h.router)
+    .await;
+    reset_carol.expect(StatusCode::CREATED);
+    let code_carol = reset_carol.body["code"]
+        .as_str()
+        .expect("no claim code")
+        .to_string();
+
+    // Carol's own ceremony, started against her own claim code.
+    let started_carol = Call::post("/api/auth/claim/start")
+        .json(serde_json::json!({ "code": code_carol }))
+        .send(&h.router)
+        .await;
+    started_carol.expect(StatusCode::OK);
+
+    let mut carol_device = common::authenticator();
+    let (ceremony_id, credential) =
+        common::register_credential(&mut carol_device, &started_carol.body);
+
+    // Present Carol's ceremony and its real, signed credential — but Bob's
+    // claim code.
+    let mismatched = Call::post("/api/auth/claim/finish")
+        .json(serde_json::json!({
+            "ceremonyId": ceremony_id,
+            "credential": credential,
+            "code": code_bob,
+        }))
+        .send(&h.router)
+        .await;
+    assert_eq!(
+        mismatched.status,
+        StatusCode::FORBIDDEN,
+        "a claim code for one account must not complete a ceremony started for another"
+    );
+
+    // The rejected attempt still left a trace: nothing commits on this path,
+    // so `auth.passkey.registered` never lands, and `auth.claim.refused` is
+    // what proves a substitution attempt against the admin-assisted-recovery
+    // path was made at all.
+    let refused: (Option<String>,) = sqlx::query_as(
+        "SELECT actor_user_id::text FROM audit_events WHERE action = $1 AND org_id IS NULL",
+    )
+    .bind(of_core::audit::action::CLAIM_REFUSED)
+    .fetch_one(h.db.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        refused.0.as_deref(),
+        Some(carol.user.to_string().as_str()),
+        "the refusal must be attributed to the ceremony's actual owner"
+    );
+
+    // Neither secret was spent. Bob's own code still opens a fresh ceremony...
+    let bob_retry = Call::post("/api/auth/claim/start")
+        .json(serde_json::json!({ "code": code_bob }))
+        .send(&h.router)
+        .await;
+    bob_retry.expect(StatusCode::OK);
+
+    // ...and Carol's own ceremony — the one the mismatched request presented
+    // — can still complete a *correct* claim/finish with her own code,
+    // proving the rejected attempt rolled the `DELETE FROM
+    // webauthn_ceremonies` back rather than leaving the row gone for
+    // nothing.
+    let recovered = Call::post("/api/auth/claim/finish")
+        .json(serde_json::json!({
+            "ceremonyId": ceremony_id,
+            "credential": credential,
+            "code": code_carol,
+        }))
+        .send(&h.router)
+        .await;
+    recovered.expect(StatusCode::OK);
+    assert_eq!(
+        recovered.body["user"]["id"].as_str().unwrap(),
+        carol.user.to_string(),
+        "carol's own claim/ceremony pair must still complete correctly after the mismatch was refused"
+    );
+
+    // And the rejected attempt left no passkey behind for Bob, the account
+    // the mismatched request's claim code named.
+    let bob_passkeys: i64 = sqlx::query_scalar("SELECT count(*) FROM passkeys WHERE user_id = $1")
+        .bind(bob.user)
+        .fetch_one(h.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        bob_passkeys, 0,
+        "a rejected ownership mismatch must not leave a passkey for the claim code's account"
     );
 }
 
