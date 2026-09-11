@@ -36,6 +36,6 @@ pub mod trackers;
 pub mod usage;
 pub mod watch;
 
-pub use db::{Db, Tx};
+pub use db::{Db, Tx, Unpinned};
 pub use error::{Error, Result};
 pub use ids::{JobId, OrgId, RepoId, TeamId, UserId};

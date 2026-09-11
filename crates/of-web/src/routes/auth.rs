@@ -381,7 +381,8 @@ pub async fn claim_finish(
     // tenant table on this connection — it has no `app.org_id` set, so guard
     // 2 (see `Db::begin`'s doc comment) does not apply to it at all.
     let mut tx = state.db.begin_unpinned().await?;
-    let user = of_core::invites::consume_account_claim_tx(&mut tx, &hash_claim(&req.code)).await?;
+    let user =
+        of_core::invites::consume_account_claim_tx(tx.conn(), &hash_claim(&req.code)).await?;
 
     let registered = match passkeys::finish_registration_tx(
         &mut tx,
@@ -432,7 +433,7 @@ pub async fn claim_finish(
 
     if let Err(e) = tx.commit().await {
         note_claim_refused(&state, user, ip.as_deref(), "commit failed").await;
-        return Err(of_core::Error::from(e).into());
+        return Err(e.into());
     }
 
     let opened = login::with_passkey(&state.db, user, ip.as_deref()).await?;

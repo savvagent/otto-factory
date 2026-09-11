@@ -3,7 +3,10 @@
 //! [`Tx`] is the only way to reach tenant data, and it cannot be constructed
 //! without an [`OrgId`]. That is the crate's central invariant: "which tenant?"
 //! is answered once, at transaction open, instead of being re-answered (and
-//! occasionally forgotten) in every individual query.
+//! occasionally forgotten) in every individual query. [`Unpinned`] mirrors
+//! that discipline for the opposite case — a transaction that must carry no
+//! org at all — so [`Db::audit_global_on`] can require one specifically
+//! rather than accepting anything that can run a query.
 
 use crate::error::{Error, Result};
 use crate::ids::OrgId;
@@ -185,8 +188,49 @@ impl Db {
     /// deployment's actual shape today, per `docs/deploy/fly.md` — RLS does
     /// not apply at all, `FORCE` included, so an unscoped read or write
     /// against a tenant table returns or affects everything, not nothing.
-    pub async fn begin_unpinned(&self) -> Result<Transaction<'static, Postgres>> {
-        Ok(self.pool.begin().await?)
+    pub async fn begin_unpinned(&self) -> Result<Unpinned> {
+        Ok(Unpinned {
+            tx: self.pool.begin().await?,
+        })
+    }
+}
+
+/// A transaction opened via [`Db::begin_unpinned`] — no [`OrgId`] is attached
+/// and `begin_unpinned` never sets `app.org_id` on it. Exists so
+/// [`Db::audit_global_on`] can require one specifically, the same way [`Tx`]
+/// cannot be constructed without an `OrgId` in the first place: [`Tx::conn`]
+/// hands out a bare `&mut PgConnection`, never an `Unpinned`, and this type's
+/// own field is private, so nothing outside this module can wrap one around a
+/// pinned connection either.
+///
+/// What this type proves is provenance, not current session state: `conn()`
+/// hands out the same bare `&mut PgConnection` a pinned transaction's `conn()`
+/// would, so a caller who runs `set_config('app.org_id', …)` through it by
+/// hand is holding a value that is still an `Unpinned` but is no longer
+/// actually unpinned. That residual gap is why `audit_global_on` itself
+/// re-checks `app.org_id` at call time rather than trusting the type alone —
+/// see its doc comment. Neither this type nor `Tx` implements `Deref` to
+/// `PgConnection` — collapsing either back down to "anything that can run a
+/// query" is exactly what this type exists to rule out.
+pub struct Unpinned {
+    tx: Transaction<'static, Postgres>,
+}
+
+impl Unpinned {
+    /// Borrow the underlying executor for a query. Mirrors [`Tx::conn`]
+    /// exactly.
+    pub fn conn(&mut self) -> &mut sqlx::PgConnection {
+        &mut self.tx
+    }
+
+    pub async fn commit(self) -> Result<()> {
+        self.tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn rollback(self) -> Result<()> {
+        self.tx.rollback().await?;
+        Ok(())
     }
 }
 

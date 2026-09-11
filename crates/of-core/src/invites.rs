@@ -259,7 +259,7 @@ impl Db {
         issued_by: Option<UserId>,
     ) -> Result<()> {
         let mut tx = self.begin_unpinned().await?;
-        create_account_claim_tx(&mut tx, user, token_hash, issued_by).await?;
+        create_account_claim_tx(tx.conn(), user, token_hash, issued_by).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -292,7 +292,7 @@ impl Db {
     /// comment.
     pub async fn consume_account_claim(&self, token_hash: &[u8]) -> Result<UserId> {
         let mut tx = self.begin_unpinned().await?;
-        let user = consume_account_claim_tx(&mut tx, token_hash).await?;
+        let user = consume_account_claim_tx(tx.conn(), token_hash).await?;
         tx.commit().await?;
         Ok(user)
     }

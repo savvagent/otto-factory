@@ -45,7 +45,7 @@ use base64::Engine;
 use of_core::audit::{action, Entry};
 use of_core::ids::UserId;
 use of_core::orgs::User;
-use of_core::Db;
+use of_core::{Db, Unpinned};
 use uuid::Uuid;
 use webauthn_rs::prelude::*;
 
@@ -277,17 +277,13 @@ pub async fn finish_registration(
 /// ceremony's account matches the claim's.
 ///
 /// **The connection must be unpinned** — the same requirement [`clear_tx`]
-/// documents for the same reason. This function ends by calling
-/// [`Db::audit_global_on`] on `conn`, which inserts a `NULL`-org row; handing
-/// it a pinned `Tx`'s connection instead sets `app.org_id`, and
-/// `audit_events`'s row-level-security policy either refuses the insert
-/// outright (wherever RLS is enforced) or silently accepts a row no tenant's
-/// own audit trail will ever show (wherever it is bypassed) — see
-/// `Db::audit_global_on`'s own doc comment. `pub`, and more inviting to reuse
-/// than its sibling, so this is worth restating rather than assuming a caller
-/// finds it there first.
+/// documents for the same reason, and `conn`'s type says so now instead of
+/// only a comment asking nicely: this function ends by calling
+/// [`Db::audit_global_on`] on it, which takes `&mut Unpinned` specifically
+/// and (per its own doc comment) also re-checks at call time that nothing
+/// has pinned the transaction to an org since it was opened.
 pub async fn finish_registration_tx(
-    conn: &mut sqlx::PgConnection,
+    conn: &mut Unpinned,
     webauthn: &Webauthn,
     ceremony: Uuid,
     credential: &RegisterPublicKeyCredential,
@@ -296,7 +292,7 @@ pub async fn finish_registration_tx(
     ip: Option<&str>,
 ) -> Result<UserId> {
     let (user_id, state): (Option<UserId>, PasskeyRegistration) =
-        take_ceremony(&mut *conn, ceremony, "register").await?;
+        take_ceremony(conn.conn(), ceremony, "register").await?;
     let user_id = user_id.ok_or(AuthError::CeremonyExpired)?;
 
     let passkey = webauthn
@@ -318,7 +314,7 @@ pub async fn finish_registration_tx(
     .bind(&credential_id)
     .bind(&encoded)
     .bind(nickname)
-    .execute(&mut *conn)
+    .execute(conn.conn())
     .await
     .map_err(|e| match &e {
         sqlx::Error::Database(db_err) if db_err.is_unique_violation() => {
@@ -630,7 +626,7 @@ pub async fn rename(
 /// admin's action to the person it happened to.
 pub async fn clear(db: &Db, user: UserId, actor: UserId, ip: Option<&str>) -> Result<u64> {
     let mut tx = db.begin_unpinned().await?;
-    let removed = clear_tx(&mut tx, user).await?;
+    let removed = clear_tx(tx.conn(), user).await?;
     tx.commit().await?;
 
     if let Err(e) = db
