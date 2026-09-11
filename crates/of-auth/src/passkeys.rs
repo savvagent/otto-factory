@@ -278,7 +278,7 @@ pub async fn finish_registration(
     .bind(&credential_id)
     .bind(&encoded)
     .bind(nickname)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await
     .map_err(|e| match &e {
         sqlx::Error::Database(db_err) if db_err.is_unique_violation() => {
@@ -288,7 +288,7 @@ pub async fn finish_registration(
     })?;
 
     Db::audit_global_on(
-        &mut *tx,
+        &mut tx,
         Entry::new(action::PASSKEY_REGISTERED)
             .actor(user_id)
             .detail(serde_json::json!({ "via": via.as_str() }))
@@ -588,7 +588,7 @@ pub async fn rename(
 /// admin's action to the person it happened to.
 pub async fn clear(db: &Db, user: UserId, actor: UserId, ip: Option<&str>) -> Result<u64> {
     let mut tx = db.begin_unpinned().await?;
-    let removed = clear_tx(&mut tx, user).await?;
+    let removed = clear_tx(tx.conn(), user).await?;
     tx.commit().await?;
 
     if let Err(e) = db

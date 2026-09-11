@@ -709,27 +709,27 @@ async fn rls_scopes_tracker_connections(pool: PgPool) {
 
     let mut tx = db.begin_unpinned().await.unwrap();
     sqlx::query("SET LOCAL ROLE of_app")
-        .execute(&mut *tx)
+        .execute(tx.conn())
         .await
         .unwrap();
     sqlx::query("SELECT set_config('app.org_id', $1, true)")
         .bind(b.org.to_string())
-        .execute(&mut *tx)
+        .execute(tx.conn())
         .await
         .unwrap();
 
     let seen: i64 =
         sqlx::query_scalar("SELECT count(*) FROM tracker_connections WHERE provider = 'github'")
-            .fetch_one(&mut *tx)
+            .fetch_one(tx.conn())
             .await
             .unwrap();
     let updated = sqlx::query("UPDATE tracker_connections SET external_id = 'pwned'")
-        .execute(&mut *tx)
+        .execute(tx.conn())
         .await
         .unwrap()
         .rows_affected();
     let deleted = sqlx::query("DELETE FROM tracker_connections")
-        .execute(&mut *tx)
+        .execute(tx.conn())
         .await
         .unwrap()
         .rows_affected();
@@ -773,26 +773,26 @@ async fn rls_scopes_tracker_bindings(pool: PgPool) {
 
     let mut tx = db.begin_unpinned().await.unwrap();
     sqlx::query("SET LOCAL ROLE of_app")
-        .execute(&mut *tx)
+        .execute(tx.conn())
         .await
         .unwrap();
     sqlx::query("SELECT set_config('app.org_id', $1, true)")
         .bind(b.org.to_string())
-        .execute(&mut *tx)
+        .execute(tx.conn())
         .await
         .unwrap();
 
     let seen: i64 = sqlx::query_scalar("SELECT count(*) FROM tracker_bindings")
-        .fetch_one(&mut *tx)
+        .fetch_one(tx.conn())
         .await
         .unwrap();
     let updated = sqlx::query("UPDATE tracker_bindings SET external_ref = 'pwned'")
-        .execute(&mut *tx)
+        .execute(tx.conn())
         .await
         .unwrap()
         .rows_affected();
     let deleted = sqlx::query("DELETE FROM tracker_bindings")
-        .execute(&mut *tx)
+        .execute(tx.conn())
         .await
         .unwrap()
         .rows_affected();
@@ -864,7 +864,7 @@ async fn rls_scopes_a_migration_style_update_with_no_org_context(pool: PgPool) {
     // per-org loop), which this bare `UPDATE` never did.
     let mut tx = db.begin_unpinned().await.unwrap();
     sqlx::query("SET LOCAL ROLE of_app")
-        .execute(&mut *tx)
+        .execute(tx.conn())
         .await
         .unwrap();
 
@@ -873,7 +873,7 @@ async fn rls_scopes_a_migration_style_update_with_no_org_context(pool: PgPool) {
         "UPDATE tracker_bindings SET trigger_label = 'otto-factory' \
          WHERE trigger_label = 'dark-factory'",
     )
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await
     .unwrap()
     .rows_affected();
@@ -972,7 +972,7 @@ async fn rls_scopes_the_lease_resource_backfills_per_org_loop(pool: PgPool) {
 
     let mut tx = db.begin_unpinned().await.unwrap();
     sqlx::query("SET LOCAL ROLE of_app")
-        .execute(&mut *tx)
+        .execute(tx.conn())
         .await
         .unwrap();
 
@@ -982,7 +982,7 @@ async fn rls_scopes_the_lease_resource_backfills_per_org_loop(pool: PgPool) {
     sqlx::query(include_str!(
         "../migrations/0030_lease_resource_backfill.sql"
     ))
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await
     .unwrap();
     tx.commit().await.unwrap();
@@ -1010,30 +1010,16 @@ async fn rls_scopes_the_lease_resource_backfills_per_org_loop(pool: PgPool) {
     }
 }
 
-/// `Db::audit_global_on` writes a `NULL`-org row and is meant for an unpinned
-/// connection only — its own doc comment says never to pass a pinned `Tx`'s
-/// connection. This is the regression trip-wire for that misuse: on a pinned
-/// connection (`app.org_id` set, `SET LOCAL ROLE of_app` in effect the same
-/// way `rls_scopes_a_query_that_forgets_the_org_predicate` above relies on),
-/// `audit_events_append`'s `WITH CHECK (current_org() IS NULL OR org_id =
-/// current_org())` must reject the write outright rather than silently
-/// accepting a row no tenant's own audit trail will ever show.
-#[sqlx::test]
-async fn audit_global_on_refuses_a_pinned_connection(pool: PgPool) {
-    let db = db(pool);
-    let a = tenant(&db, "acme", "git@github.com:acme/api.git").await;
-
-    let mut tx = db.begin(a.org).await.unwrap();
-    let result =
-        of_core::Db::audit_global_on(tx.conn(), of_core::audit::Entry::new("test.misuse")).await;
-
-    assert!(
-        result.is_err(),
-        "a NULL-org audit_global_on write on a pinned connection (app.org_id \
-         set) must be refused by audit_events_append's WITH CHECK, not \
-         silently accepted — see Db::audit_global_on's own doc comment"
-    );
-}
+// `audit_global_on_refuses_a_pinned_connection` used to live here: it proved
+// that passing a pinned `Tx`'s connection to `Db::audit_global_on` was
+// rejected at runtime by `audit_events_append`'s `WITH CHECK`. Since
+// `savvagent/otto-factory#133`, `audit_global_on` takes `&mut
+// of_core::db::Unpinned` instead of `E: sqlx::PgExecutor<'e>`, and `Tx::conn()`
+// has no way to produce one — the misuse this test caught is now a compile
+// error, which every `cargo build`/`cargo test` run already proves on every
+// commit. No runtime test can prove a stronger fact than "this does not
+// compile"; keeping a test whose only remaining job would be to demonstrate
+// that a deleted test scenario is a type error is not useful.
 
 // ---------------------------------------------------------------------------
 // The guard on the guard.
@@ -1137,7 +1123,7 @@ async fn verifying_isolation_does_not_poison_the_pool(pool: PgPool) {
 
     let mut tx = db.begin_unpinned().await.unwrap();
     let role: String = sqlx::query_scalar("SELECT current_user::text")
-        .fetch_one(&mut *tx)
+        .fetch_one(tx.conn())
         .await
         .unwrap();
     tx.rollback().await.unwrap();
@@ -1180,13 +1166,13 @@ async fn the_control_plane_can_append_audit_rows_with_no_org(pool: PgPool) {
     let db = db(pool);
     let mut tx = db.begin_unpinned().await.unwrap();
     sqlx::query("SET LOCAL ROLE of_app")
-        .execute(&mut *tx)
+        .execute(tx.conn())
         .await
         .unwrap();
 
     sqlx::query(AUDIT_INSERT)
         .bind(Option::<OrgId>::None)
-        .execute(&mut *tx)
+        .execute(tx.conn())
         .await
         .expect("the control plane must be able to record a login");
     tx.commit().await.unwrap();
@@ -1201,12 +1187,12 @@ async fn the_control_plane_can_append_an_org_scoped_audit_row(pool: PgPool) {
 
     let mut tx = db.begin_unpinned().await.unwrap();
     sqlx::query("SET LOCAL ROLE of_app")
-        .execute(&mut *tx)
+        .execute(tx.conn())
         .await
         .unwrap();
     sqlx::query(AUDIT_INSERT)
         .bind(a.org)
-        .execute(&mut *tx)
+        .execute(tx.conn())
         .await
         .expect("signup must be able to record an org event");
     tx.commit().await.unwrap();
@@ -1242,12 +1228,12 @@ async fn audit_rows_cannot_be_rewritten(pool: PgPool) {
 
     let mut tx = db.begin_unpinned().await.unwrap();
     sqlx::query("SET LOCAL ROLE of_app")
-        .execute(&mut *tx)
+        .execute(tx.conn())
         .await
         .unwrap();
     sqlx::query(AUDIT_INSERT)
         .bind(a.org)
-        .execute(&mut *tx)
+        .execute(tx.conn())
         .await
         .unwrap();
     tx.commit().await.unwrap();
@@ -1284,12 +1270,12 @@ async fn audit_rows_cannot_be_erased_from_a_request(pool: PgPool) {
 
     let mut tx = db.begin_unpinned().await.unwrap();
     sqlx::query("SET LOCAL ROLE of_app")
-        .execute(&mut *tx)
+        .execute(tx.conn())
         .await
         .unwrap();
     sqlx::query(AUDIT_INSERT)
         .bind(a.org)
-        .execute(&mut *tx)
+        .execute(tx.conn())
         .await
         .unwrap();
     tx.commit().await.unwrap();

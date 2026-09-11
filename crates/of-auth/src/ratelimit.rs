@@ -113,9 +113,9 @@ pub fn lockout_secs(failures: i64) -> Option<i64> {
 /// out further just by asking again.
 pub async fn check_and_charge(db: &Db, bucket: &str) -> Result<()> {
     let mut tx = db.begin_unpinned().await?;
-    lock_bucket(&mut tx, bucket).await?;
+    lock_bucket(tx.conn(), bucket).await?;
 
-    let (failures, last_failure) = recent_failures(&mut tx, bucket, WINDOW_SECS).await?;
+    let (failures, last_failure) = recent_failures(tx.conn(), bucket, WINDOW_SECS).await?;
     if let Some(lockout) = lockout_secs(failures) {
         if let Some(last) = last_failure {
             let elapsed = (Utc::now() - last).num_seconds();
@@ -127,7 +127,7 @@ pub async fn check_and_charge(db: &Db, bucket: &str) -> Result<()> {
         }
     }
 
-    insert_attempt(&mut tx, bucket, false).await?;
+    insert_attempt(tx.conn(), bucket, false).await?;
     tx.commit().await?;
     Ok(())
 }
@@ -240,16 +240,16 @@ pub async fn cap_peek(db: &Db, bucket: &str, policy: &CapPolicy) -> Result<i64> 
 /// probing run happened is the one reading the postmortem.
 pub async fn cap_charge(db: &Db, bucket: &str, policy: &CapPolicy) -> Result<()> {
     let mut tx = db.begin_unpinned().await?;
-    lock_bucket(&mut tx, bucket).await?;
+    lock_bucket(tx.conn(), bucket).await?;
 
-    let (failures, _) = count_failures(&mut *tx, bucket, policy.window_secs).await?;
+    let (failures, _) = count_failures(tx.conn(), bucket, policy.window_secs).await?;
     if failures >= policy.hard_cap {
         return Err(AuthError::RateLimited {
             retry_after_secs: policy.window_secs,
         });
     }
 
-    insert_attempt(&mut tx, bucket, false).await?;
+    insert_attempt(tx.conn(), bucket, false).await?;
     tx.commit().await?;
 
     let failures = failures + 1;

@@ -185,8 +185,43 @@ impl Db {
     /// deployment's actual shape today, per `docs/deploy/fly.md` — RLS does
     /// not apply at all, `FORCE` included, so an unscoped read or write
     /// against a tenant table returns or affects everything, not nothing.
-    pub async fn begin_unpinned(&self) -> Result<Transaction<'static, Postgres>> {
-        Ok(self.pool.begin().await?)
+    pub async fn begin_unpinned(&self) -> Result<Unpinned> {
+        Ok(Unpinned {
+            tx: self.pool.begin().await?,
+        })
+    }
+}
+
+/// A transaction opened via [`Db::begin_unpinned`] — no [`OrgId`] is attached
+/// and no `app.org_id` is ever set on it. Exists so [`Db::audit_global_on`]
+/// can require one specifically, the same way [`Tx`] cannot be constructed
+/// without an `OrgId` in the first place: [`Tx::conn`] hands out a bare
+/// `&mut PgConnection`, never an `Unpinned`, and this type's own field is
+/// private, so nothing outside this module can wrap one around a pinned
+/// connection either. This type deliberately does not implement `Deref` to
+/// the same target `Tx` would deref to if it did — collapsing "an unpinned
+/// transaction" back down to "anything that can run a query" is exactly the
+/// shape this type exists to rule out for its one caller that cares about the
+/// distinction.
+pub struct Unpinned {
+    tx: Transaction<'static, Postgres>,
+}
+
+impl Unpinned {
+    /// Borrow the underlying executor for a query. Mirrors [`Tx::conn`]
+    /// exactly.
+    pub fn conn(&mut self) -> &mut sqlx::PgConnection {
+        &mut self.tx
+    }
+
+    pub async fn commit(self) -> Result<()> {
+        self.tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn rollback(self) -> Result<()> {
+        self.tx.rollback().await?;
+        Ok(())
     }
 }
 

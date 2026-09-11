@@ -350,7 +350,7 @@ pub async fn revoke_family(db: &Db, user: UserId, org: OrgId, client_id: &str) -
     .bind(user)
     .bind(org)
     .bind(client_id)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await?
     .rows_affected();
 
@@ -361,7 +361,7 @@ pub async fn revoke_family(db: &Db, user: UserId, org: OrgId, client_id: &str) -
     .bind(user)
     .bind(org)
     .bind(client_id)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await?
     .rows_affected();
 
@@ -478,7 +478,7 @@ pub async fn revoke_all_in_org(db: &Db, user: UserId, org: OrgId) -> Result<u64>
     // member's refresh token would still mint a fresh access token, undoing
     // the revocation this function exists to guarantee.
     let mut tx = db.begin_unpinned().await?;
-    let revoked = revoke_all_in_org_on(&mut tx, user, org).await?;
+    let revoked = revoke_all_in_org_on(tx.conn(), user, org).await?;
     tx.commit().await?;
     Ok(revoked)
 }

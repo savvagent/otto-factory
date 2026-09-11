@@ -200,7 +200,7 @@ impl Db {
         ))
         .bind(&slug)
         .bind(name)
-        .fetch_one(&mut *tx)
+        .fetch_one(tx.conn())
         .await
         .map_err(|e| match &e {
             sqlx::Error::Database(db) if db.is_unique_violation() => {
@@ -212,7 +212,7 @@ impl Db {
         sqlx::query("INSERT INTO org_members (org_id, user_id, role) VALUES ($1, $2, 'owner')")
             .bind(org.id)
             .bind(owner)
-            .execute(&mut *tx)
+            .execute(tx.conn())
             .await?;
 
         tx.commit().await?;

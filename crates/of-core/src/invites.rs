@@ -259,7 +259,7 @@ impl Db {
         issued_by: Option<UserId>,
     ) -> Result<()> {
         let mut tx = self.begin_unpinned().await?;
-        create_account_claim_tx(&mut tx, user, token_hash, issued_by).await?;
+        create_account_claim_tx(tx.conn(), user, token_hash, issued_by).await?;
         tx.commit().await?;
         Ok(())
     }
