@@ -7,9 +7,10 @@ entry, plus its `docs/clients/matrix.md` row and the six-locale i18n key its `no
 
 ## Status — 2026-09-11
 
-✅ Done. `web/src/lib/clients.ts`'s `otto-cli` entry, the six-locale `client_note_otto_cli` key,
-`web/src/lib/clients.test.ts`, and the `docs/clients/matrix.md` row are all in place (PR #153,
-including its review-response round — see the spec's revision notes for what changed there).
+✅ Shipped as `6cb3dd3`. `web/src/lib/clients.ts`'s `otto-cli` entry, the six-locale
+`client_note_otto_cli` key, `web/src/lib/clients.test.ts`, and the `docs/clients/matrix.md` row are
+all in place (PR #153, including its review-response round — see the spec's revision notes for what
+changed there).
 
 **Remaining:** a live conformance run against a real `otto` binary, tracked as
 `savvagent/otto-factory#154` — deliberately out of this task's scope (no PTY-driving harness
