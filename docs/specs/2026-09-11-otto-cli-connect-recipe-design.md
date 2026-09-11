@@ -170,14 +170,19 @@ entries" rule. English source string:
 
 > "Whichever form you use, run `otto` and open `/mcp` afterward. For OAuth, the entry above
 > authorizes from there: press `o` to open your browser and `c` once it redirects back
-> (interactive-only, the same as Claude Code and Copilot CLI above). For a token, don't paste this
-> file directly — `/mcp` only asks for the secret while adding a server: press `a`, enter the same
+> (interactive-only, needing a terminal you can watch). For a token, don't paste this file
+> directly — `/mcp` only asks for the secret while adding a server: press `a`, enter the same
 > name, URL and transport shown above, and paste the token when it prompts you there; it goes
 > straight into the OS keyring and is never written to this file. Either way, restart otto once: a
 > new or newly-authorized server only connects on the next launch."
 
 (Reworded in the PR #153 review-response round from an earlier version that told a token user to
-"paste it when `/mcp` prompts for one" after pasting the file — the bug described above.)
+"paste it when `/mcp` prompts for one" after pasting the file — the bug described above. Also
+dropped the earlier "the same as Claude Code and Copilot CLI above" cross-reference: `+page.svelte`
+renders only the selected recipe's `note`, so those two entries' own notes are never on screen
+beside this one to bear out the claim, and the comparison was hard-coded into six catalogs with
+nothing to catch it going stale if `CLIENTS` is ever reordered — architect-reviewer finding. The
+underlying fact ("this needs an interactive terminal") now stands on its own.)
 
 Covers both auth paths deliberately: `+page.svelte` renders `recipe.note()` under whichever tab
 (OAuth or Token) is selected, so a note describing only the OAuth ceremony would read as wrong
