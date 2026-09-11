@@ -528,6 +528,80 @@ async fn a_forced_audit_failure_rolls_back_the_credential(pool: PgPool) {
     );
 }
 
+/// The same forced failure as [`a_forced_audit_failure_rolls_back_the_credential`],
+/// but checking the other half of `#132`'s fix: the WebAuthn ceremony itself
+/// must also survive the rollback. Before `#132`, `take_ceremony` deleted the
+/// ceremony row on an autocommitted statement *before* this function's
+/// transaction even opened, so it stayed gone regardless of whether anything
+/// downstream committed — a single-use secret burned for nothing on a purely
+/// transient failure. With the ceremony consumption folded into the same
+/// transaction, a forced failure now restores it too.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_forced_audit_failure_also_restores_the_ceremony(pool: PgPool) {
+    let db = Db::from_pool(pool);
+    let webauthn = rp();
+    let mut auth = authenticator();
+
+    sqlx::query(
+        "CREATE FUNCTION reject_registration_audit_2() RETURNS trigger AS $$ \
+         BEGIN RAISE EXCEPTION 'forced failure for test'; END; \
+         $$ LANGUAGE plpgsql",
+    )
+    .execute(db.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER reject_registration_audit_2 \
+         BEFORE INSERT ON audit_events \
+         FOR EACH ROW WHEN (NEW.action = 'auth.passkey.registered') \
+         EXECUTE FUNCTION reject_registration_audit_2()",
+    )
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    let ceremony = passkeys::start_registration(&db, &webauthn, None)
+        .await
+        .unwrap();
+    let ceremony_id = ceremony.id;
+    let credential = auth
+        .do_registration(
+            Url::parse(ORIGIN).unwrap(),
+            for_soft_token(ceremony.challenge),
+        )
+        .expect("the authenticator refused the registration challenge");
+
+    let result = passkeys::finish_registration(
+        &db,
+        &webauthn,
+        ceremony_id,
+        &credential,
+        Some("laptop"),
+        passkeys::RegistrationVia::Signup,
+        None,
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "a forced audit-write failure must abort the whole ceremony"
+    );
+
+    let ceremony_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM webauthn_ceremonies WHERE id = $1")
+            .bind(ceremony_id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        ceremony_count, 1,
+        "the ceremony's own DELETE must roll back with the failed audit write \
+         too, not just the credential insert — a burned ceremony with nothing \
+         committed is the same shape of lost-secret-for-nothing #132 reports \
+         for the claim code"
+    );
+}
+
 /// Clearing writes the new `auth.passkey.cleared` action, never the old
 /// `auth.totp.reset` one TOTP left behind.
 #[sqlx::test(migrations = "../of-core/migrations")]

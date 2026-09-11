@@ -1870,6 +1870,342 @@ async fn a_reset_account_cannot_be_claimed_without_the_code(pool: PgPool) {
     );
 }
 
+/// The exact hazard `savvagent/otto-factory#132` reports: a failure on the
+/// credential insert (a unique-violation, here forced by a colliding row —
+/// the literal pre-`#131` failure mode the issue names) must not leave the
+/// claim code burned with nothing to show for it. Before `#132`'s fix, the
+/// claim was spent by an autocommitted statement before `claim_finish` ever
+/// attempted the credential insert, so this exact sequence left an account
+/// with no passkey and no usable claim — for an org's last owner, nobody
+/// above them could issue a second one.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_credential_collision_during_claim_finish_leaves_the_claim_code_usable(pool: PgPool) {
+    let h = harness(pool);
+    let rob = onboard(&h, "rob@acme.test").await;
+    let org = org_with_owner(&h, "acme", &rob).await;
+    let bob = onboard(&h, "bob@acme.test").await;
+    add_member(&h, org, bob.user, of_core::orgs::Role::Member).await;
+
+    let reset = Call::post(format!(
+        "/api/orgs/acme/members/{}/reset-passkeys",
+        bob.user
+    ))
+    .with_session(&rob.session)
+    .send(&h.router)
+    .await;
+    reset.expect(StatusCode::CREATED);
+    let code = reset.body["code"]
+        .as_str()
+        .expect("no claim code")
+        .to_string();
+
+    let started = Call::post("/api/auth/claim/start")
+        .json(serde_json::json!({ "code": code }))
+        .send(&h.router)
+        .await;
+    started.expect(StatusCode::OK);
+
+    // Drive the ceremony to a real, signed credential — but do not submit it
+    // yet. Its raw id is what the eventual `claim/finish` will try to insert.
+    let mut new_device = common::authenticator();
+    let (ceremony_id, credential) = common::register_credential(&mut new_device, &started.body);
+    let colliding_id = credential.raw_id.as_ref().to_vec();
+
+    // Plant a passkey already using that exact credential id, on a different,
+    // unrelated account — this is what makes `claim_finish`'s own INSERT hit
+    // the unique-violation → `CredentialAlreadyRegistered` path deterministically,
+    // without needing to guess at a database-level fault to inject.
+    sqlx::query(
+        "INSERT INTO passkeys (user_id, credential_id, credential, nickname) \
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(rob.user)
+    .bind(&colliding_id)
+    .bind(serde_json::json!({}))
+    .bind("decoy")
+    .execute(h.db.pool())
+    .await
+    .unwrap();
+
+    let finished = Call::post("/api/auth/claim/finish")
+        .json(serde_json::json!({
+            "ceremonyId": ceremony_id,
+            "credential": credential,
+            "code": code,
+        }))
+        .send(&h.router)
+        .await;
+    assert_ne!(
+        finished.status,
+        StatusCode::OK,
+        "a colliding credential id must be refused, not silently accepted"
+    );
+
+    // The assertion this test exists for: the claim code must still be live.
+    // Under the pre-#132 code this fails — the code was already spent by an
+    // autocommitted `UPDATE` before the credential insert was even attempted.
+    let retried = Call::post("/api/auth/claim/start")
+        .json(serde_json::json!({ "code": code }))
+        .send(&h.router)
+        .await;
+    retried.expect(StatusCode::OK);
+
+    // And the account is actually recoverable end to end, not merely that the
+    // code still "looks" valid. A fresh ceremony (via `retried` above) and a
+    // fresh device: the failed attempt's own ceremony is restored by the same
+    // rollback that restored the claim (see
+    // `a_forced_audit_failure_also_restores_the_ceremony` in `of-auth`'s
+    // suite), but its only credential was the colliding one already rejected
+    // above, so nothing usable is left to retry it with — a clean reclaim
+    // needs a new ceremony either way.
+    let mut recovery_device = common::authenticator();
+    let reclaimed = common::finish_registration(
+        &h,
+        &mut recovery_device,
+        "/api/auth/claim/finish",
+        &retried.body,
+        serde_json::json!({ "code": code }),
+    )
+    .await;
+    reclaimed.expect(StatusCode::OK);
+    assert_eq!(
+        reclaimed.body["user"]["id"].as_str().unwrap(),
+        bob.user.to_string(),
+        "the claim must still land on the account it was issued for"
+    );
+}
+
+/// The one behavior change `#164`'s own doc comment flags for a close look:
+/// the ceremony-ownership check (`registered != user`) now runs *before* the
+/// transaction commits, so a mismatch rolls the claim and ceremony
+/// consumption back rather than leaving them durably spent under a request
+/// that gets rejected. Independently flagged with no existing coverage by
+/// three reviewers on that PR (architect-reviewer, pr-test-analyzer,
+/// type-design-analyzer) and by the automated Copilot reviewer.
+///
+/// Presents a claim code for one account (Bob) against a ceremony — and a
+/// real, signed credential — that was started for a different account
+/// (Carol), the substitution the check exists to catch.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_ceremony_ownership_mismatch_leaves_the_claim_and_ceremony_usable(pool: PgPool) {
+    let h = harness(pool);
+    let rob = onboard(&h, "rob@acme.test").await;
+    let org = org_with_owner(&h, "acme", &rob).await;
+    let bob = onboard(&h, "bob@acme.test").await;
+    let carol = onboard(&h, "carol@acme.test").await;
+    add_member(&h, org, bob.user, of_core::orgs::Role::Member).await;
+    add_member(&h, org, carol.user, of_core::orgs::Role::Member).await;
+
+    let reset_bob = Call::post(format!(
+        "/api/orgs/acme/members/{}/reset-passkeys",
+        bob.user
+    ))
+    .with_session(&rob.session)
+    .send(&h.router)
+    .await;
+    reset_bob.expect(StatusCode::CREATED);
+    let code_bob = reset_bob.body["code"]
+        .as_str()
+        .expect("no claim code")
+        .to_string();
+
+    let reset_carol = Call::post(format!(
+        "/api/orgs/acme/members/{}/reset-passkeys",
+        carol.user
+    ))
+    .with_session(&rob.session)
+    .send(&h.router)
+    .await;
+    reset_carol.expect(StatusCode::CREATED);
+    let code_carol = reset_carol.body["code"]
+        .as_str()
+        .expect("no claim code")
+        .to_string();
+
+    // Carol's own ceremony, started against her own claim code.
+    let started_carol = Call::post("/api/auth/claim/start")
+        .json(serde_json::json!({ "code": code_carol }))
+        .send(&h.router)
+        .await;
+    started_carol.expect(StatusCode::OK);
+
+    let mut carol_device = common::authenticator();
+    let (ceremony_id, credential) =
+        common::register_credential(&mut carol_device, &started_carol.body);
+
+    // Present Carol's ceremony and its real, signed credential — but Bob's
+    // claim code.
+    let mismatched = Call::post("/api/auth/claim/finish")
+        .json(serde_json::json!({
+            "ceremonyId": ceremony_id,
+            "credential": credential,
+            "code": code_bob,
+        }))
+        .send(&h.router)
+        .await;
+    assert_eq!(
+        mismatched.status,
+        StatusCode::FORBIDDEN,
+        "a claim code for one account must not complete a ceremony started for another"
+    );
+
+    // The rejected attempt still left a trace: nothing commits on this path,
+    // so `auth.passkey.registered` never lands, and `auth.claim.refused` is
+    // what proves a substitution attempt against the admin-assisted-recovery
+    // path was made at all.
+    let refused: (Option<String>,) = sqlx::query_as(
+        "SELECT actor_user_id::text FROM audit_events WHERE action = $1 AND org_id IS NULL",
+    )
+    .bind(of_core::audit::action::CLAIM_REFUSED)
+    .fetch_one(h.db.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        refused.0.as_deref(),
+        Some(carol.user.to_string().as_str()),
+        "the refusal must be attributed to the ceremony's actual owner"
+    );
+
+    // Neither secret was spent. Bob's own code still opens a fresh ceremony...
+    let bob_retry = Call::post("/api/auth/claim/start")
+        .json(serde_json::json!({ "code": code_bob }))
+        .send(&h.router)
+        .await;
+    bob_retry.expect(StatusCode::OK);
+
+    // ...and Carol's own ceremony — the one the mismatched request presented
+    // — can still complete a *correct* claim/finish with her own code,
+    // proving the rejected attempt rolled the `DELETE FROM
+    // webauthn_ceremonies` back rather than leaving the row gone for
+    // nothing.
+    let recovered = Call::post("/api/auth/claim/finish")
+        .json(serde_json::json!({
+            "ceremonyId": ceremony_id,
+            "credential": credential,
+            "code": code_carol,
+        }))
+        .send(&h.router)
+        .await;
+    recovered.expect(StatusCode::OK);
+    assert_eq!(
+        recovered.body["user"]["id"].as_str().unwrap(),
+        carol.user.to_string(),
+        "carol's own claim/ceremony pair must still complete correctly after the mismatch was refused"
+    );
+
+    // And the rejected attempt left no passkey behind for Bob, the account
+    // the mismatched request's claim code named.
+    let bob_passkeys: i64 = sqlx::query_scalar("SELECT count(*) FROM passkeys WHERE user_id = $1")
+        .bind(bob.user)
+        .fetch_one(h.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        bob_passkeys, 0,
+        "a rejected ownership mismatch must not leave a passkey for the claim code's account"
+    );
+}
+
+/// `of-auth`'s own `a_forced_audit_failure_also_restores_the_ceremony` proves
+/// a forced audit-write failure rolls back at the `finish_registration_tx`
+/// level. It cannot prove more than that: it calls `finish_registration`
+/// directly and never touches claim consumption at all. This proves the same
+/// failure rolls back through `claim_finish` itself, restoring the claim
+/// code alongside the ceremony — flagged by pr-test-analyzer during `#164`'s
+/// review as unproven end to end through the endpoint the fix actually
+/// changed.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_forced_audit_failure_during_claim_finish_also_restores_the_claim(pool: PgPool) {
+    let h = harness(pool);
+    let rob = onboard(&h, "rob@acme.test").await;
+    let org = org_with_owner(&h, "acme", &rob).await;
+    let bob = onboard(&h, "bob@acme.test").await;
+    add_member(&h, org, bob.user, of_core::orgs::Role::Member).await;
+
+    let reset = Call::post(format!(
+        "/api/orgs/acme/members/{}/reset-passkeys",
+        bob.user
+    ))
+    .with_session(&rob.session)
+    .send(&h.router)
+    .await;
+    reset.expect(StatusCode::CREATED);
+    let code = reset.body["code"]
+        .as_str()
+        .expect("no claim code")
+        .to_string();
+
+    // Same fault-injection technique as `of-auth`'s test: force the audit
+    // write `finish_registration_tx` makes to fail, deterministically.
+    sqlx::query(
+        "CREATE FUNCTION reject_claim_registration_audit() RETURNS trigger AS $$ \
+         BEGIN RAISE EXCEPTION 'forced failure for test'; END; \
+         $$ LANGUAGE plpgsql",
+    )
+    .execute(h.db.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER reject_claim_registration_audit \
+         BEFORE INSERT ON audit_events \
+         FOR EACH ROW WHEN (NEW.action = 'auth.passkey.registered') \
+         EXECUTE FUNCTION reject_claim_registration_audit()",
+    )
+    .execute(h.db.pool())
+    .await
+    .unwrap();
+
+    let started = Call::post("/api/auth/claim/start")
+        .json(serde_json::json!({ "code": code }))
+        .send(&h.router)
+        .await;
+    started.expect(StatusCode::OK);
+    let ceremony_id: uuid::Uuid = started.body["ceremonyId"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    let mut device = common::authenticator();
+    let finished = common::finish_registration(
+        &h,
+        &mut device,
+        "/api/auth/claim/finish",
+        &started.body,
+        serde_json::json!({ "code": code }),
+    )
+    .await;
+    assert_ne!(
+        finished.status,
+        StatusCode::OK,
+        "a forced audit-write failure must abort the whole claim/finish request"
+    );
+
+    // The ceremony's own DELETE rolls back with the failed audit write, the
+    // same fact `of-auth`'s test proves at the lower level...
+    let ceremony_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM webauthn_ceremonies WHERE id = $1")
+            .bind(ceremony_id)
+            .fetch_one(h.db.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        ceremony_count, 1,
+        "the ceremony must survive a rolled-back claim/finish, not just a \
+         rolled-back finish_registration_tx"
+    );
+
+    // ...and so does the claim code, which only a test that goes through
+    // claim_finish itself can show: the code was consumed by
+    // consume_account_claim_tx on the same transaction, and must be restored
+    // by the same rollback.
+    let retried = Call::post("/api/auth/claim/start")
+        .json(serde_json::json!({ "code": code }))
+        .send(&h.router)
+        .await;
+    retried.expect(StatusCode::OK);
+}
+
 /// An admin must not reach through this endpoint what the role check refuses
 /// everywhere else — resetting an owner is an owner's business.
 #[sqlx::test(migrations = "../of-core/migrations")]
