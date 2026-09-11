@@ -24,7 +24,7 @@
 import { mount, unmount } from 'svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { REFRESH_INTERVAL } from '$lib/poll.svelte';
+import { IDLE_AFTER, REFRESH_INTERVAL } from '$lib/poll.svelte';
 
 const { gotoMock, replaceStateMock } = vi.hoisted(() => ({
   gotoMock: vi.fn((_url: URL | string, _opts?: Record<string, unknown>) => Promise.resolve()),
@@ -282,6 +282,59 @@ describe('the queue poller', () => {
     await vi.advanceTimersByTimeAsync(REFRESH_INTERVAL * 6);
     await settle();
     expect(jobsCallCount()).toBe(1);
+
+    unmount(instance);
+  });
+
+  it('shows the paused note (not "Still retrying") when a never-successful poll parks', async () => {
+    // Regression test: `parked` and `failed` are independent flags on `Poller`
+    // (see `#schedule` in `poll.svelte.ts`, which sets `#parked` regardless of
+    // `#failed`) and can both be true at once — an initial load that never
+    // succeeds followed by a long enough idle stretch. The old render tree
+    // checked `pollError` first, so the paused note never rendered at all and
+    // the error alert's "Still retrying in the background" kept claiming a
+    // retry was scheduled even though the poll had parked and armed no timer.
+    const fetchMock = vi.fn((path: string) => {
+      if (path.includes('/repos') || path.includes('/teams')) return emptyPickers();
+      if (path.includes('/jobs')) return Promise.resolve(new Response('', { status: 502 }));
+      return Promise.resolve(new Response('', { status: 404 }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const instance = mount(Harness, { target: container, props: { slug: 'acme' } });
+    await settle();
+
+    // The first load already failed and nothing has ever rendered, so the
+    // error alert is up before any time passes — and, not parked yet, it
+    // still claims to be retrying. The stub's 502 has an empty body (no
+    // `error.code`), so `messageFor` falls through to its unknown-code
+    // sentence, same as the 404 case elsewhere in this file.
+    const errorAlert = () =>
+      Array.from(container.querySelectorAll('[role="alert"]')).find((el) =>
+        el.textContent?.includes('Something went wrong')
+      );
+    expect(errorAlert()).toBeTruthy();
+    expect(errorAlert()?.textContent).toContain('Still retrying');
+    expect(container.querySelector('[role="status"]')).toBeNull();
+
+    // Advance well past the idle threshold. Every retry in between keeps
+    // failing (502 forever), so `Poller` never leaves the loop of scheduling a
+    // backed-off retry — until a scheduling check lands after `IDLE_AFTER` of
+    // inactivity and parks instead of arming another timer.
+    await vi.advanceTimersByTimeAsync(IDLE_AFTER + REFRESH_INTERVAL * 10);
+
+    await vi.waitFor(() => {
+      const status = container.querySelector('[role="status"]');
+      expect(status).not.toBeNull();
+      expect(status?.textContent).toContain('Updates paused while you were away');
+    });
+
+    // The failure never went away (the poll is still `failed`, not `stopped`
+    // — 502 is not `fatal`), so the error alert is still shown alongside the
+    // paused note. But now that it is parked, there is nothing to retry, and
+    // the hint must not claim otherwise.
+    expect(errorAlert()).toBeTruthy();
+    expect(errorAlert()?.textContent).not.toContain('Still retrying');
 
     unmount(instance);
   });

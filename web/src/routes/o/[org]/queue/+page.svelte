@@ -88,7 +88,7 @@
     const slug = org.slug;
     if (!slug) return;
     // Switching orgs or filters runs this effect's cleanup, which stops the
-    // poll before the next subscription's starts — see the generation counter
+    // poll before the next subscription starts — see the generation counter
     // in `poll.svelte.ts`. That is what keeps a late response for a superseded
     // filter from repainting the table with rows that do not match the
     // controls the reader is looking at.
@@ -221,84 +221,81 @@
     <Alert>{navError}</Alert>
   {/if}
 
+  {#if jobsPoll.parked}
+    <p role="status" class="text-xs text-faint">{m.queue_paused()}</p>
+  {:else if jobsPoll.stale}
+    <p role="status" class="text-xs text-warn">
+      {m.queue_refresh_failed({
+        reason: messageFor(jobsPoll.error, m.error_network()),
+        age: relative(
+          jobsPoll.updatedAt === undefined ? undefined : new Date(jobsPoll.updatedAt).toISOString()
+        )
+      })}
+    </p>
+  {/if}
+
   {#if pollError}
     <Alert>
       {pollError}
-      {#if !jobsPoll.stopped}{m.queue_retrying()}{/if}
+      {#if !jobsPoll.stopped && !jobsPoll.parked}{m.queue_retrying()}{/if}
     </Alert>
   {:else if loading}
     <Loading what={m.queue_loading()} />
+  {:else if jobs.length === 0}
+    <Empty title={filtered ? m.queue_empty_filtered() : m.queue_empty_title()}>
+      {#if !filtered}
+        {m.queue_empty_hint()}
+        <a class="text-muted underline hover:text-ink" href="/o/{org.slug}/connect">
+          {m.queue_connect_one()}
+        </a>.
+      {/if}
+    </Empty>
   {:else}
-    {#if jobsPoll.parked}
-      <p role="status" class="text-xs text-faint">{m.queue_paused()}</p>
-    {:else if jobsPoll.stale}
-      <p role="status" class="text-xs text-warn">
-        {m.queue_refresh_failed({
-          reason: messageFor(jobsPoll.error, m.error_network()),
-          age: relative(
-            jobsPoll.updatedAt === undefined
-              ? undefined
-              : new Date(jobsPoll.updatedAt).toISOString()
-          )
-        })}
-      </p>
-    {/if}
-    {#if jobs.length === 0}
-      <Empty title={filtered ? m.queue_empty_filtered() : m.queue_empty_title()}>
-        {#if !filtered}
-          {m.queue_empty_hint()}
-          <a class="text-muted underline hover:text-ink" href="/o/{org.slug}/connect">
-            {m.queue_connect_one()}
-          </a>.
-        {/if}
-      </Empty>
-    {:else}
-      <div class="of-card overflow-x-auto">
-        <table class="w-full text-sm">
-          <thead class="border-b border-edge/60 text-left text-xs text-faint">
-            <tr>
-              <th class="px-4 py-2 font-medium">{m.queue_col_job()}</th>
-              <th class="px-4 py-2 font-medium">{m.queue_col_status()}</th>
-              <th class="px-4 py-2 font-medium">{m.queue_col_agent()}</th>
-              <th class="px-4 py-2 font-medium">{m.queue_col_ticket()}</th>
-              <th class="px-4 py-2 font-medium">{m.queue_col_queued()}</th>
+    <div class="of-card overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead class="border-b border-edge/60 text-left text-xs text-faint">
+          <tr>
+            <th class="px-4 py-2 font-medium">{m.queue_col_job()}</th>
+            <th class="px-4 py-2 font-medium">{m.queue_col_status()}</th>
+            <th class="px-4 py-2 font-medium">{m.queue_col_agent()}</th>
+            <th class="px-4 py-2 font-medium">{m.queue_col_ticket()}</th>
+            <th class="px-4 py-2 font-medium">{m.queue_col_queued()}</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-edge/40">
+          {#each jobs as job (job.id)}
+            <tr class="hover:bg-raised/40">
+              <td class="px-4 py-2">
+                <a class="text-ink hover:underline" href="/o/{org.slug}/queue/{job.id}">
+                  {job.title}
+                </a>
+                <div class="of-mono text-xs text-faint">{job.id}</div>
+              </td>
+              <td class="px-4 py-2">
+                <StatusPill status={job.status} />
+                {#if isClaimStranded(job)}
+                  <div class="text-xs font-medium text-bad">{m.job_claim_stranded()}</div>
+                {/if}
+              </td>
+              <td class="px-4 py-2 text-muted">
+                {job.claimedByLabel ?? job.agentType ?? '—'}
+              </td>
+              <td class="px-4 py-2 text-muted">{job.ticketRef ?? '—'}</td>
+              <td class="px-4 py-2 whitespace-nowrap text-faint">{relative(job.createdAt)}</td>
             </tr>
-          </thead>
-          <tbody class="divide-y divide-edge/40">
-            {#each jobs as job (job.id)}
-              <tr class="hover:bg-raised/40">
-                <td class="px-4 py-2">
-                  <a class="text-ink hover:underline" href="/o/{org.slug}/queue/{job.id}">
-                    {job.title}
-                  </a>
-                  <div class="of-mono text-xs text-faint">{job.id}</div>
-                </td>
-                <td class="px-4 py-2">
-                  <StatusPill status={job.status} />
-                  {#if isClaimStranded(job)}
-                    <div class="text-xs font-medium text-bad">{m.job_claim_stranded()}</div>
-                  {/if}
-                </td>
-                <td class="px-4 py-2 text-muted">
-                  {job.claimedByLabel ?? job.agentType ?? '—'}
-                </td>
-                <td class="px-4 py-2 text-muted">{job.ticketRef ?? '—'}</td>
-                <td class="px-4 py-2 whitespace-nowrap text-faint">{relative(job.createdAt)}</td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
-      </div>
+          {/each}
+        </tbody>
+      </table>
+    </div>
 
-      <!--
-        Two sentences, not one built out of pieces. The count pluralizes and the
-        cap is a separate remark that only sometimes applies; welding them into a
-        single string would need a variant per plural category *and* per branch.
-      -->
-      <p class="text-xs text-faint">
-        {m.queue_showing({ count: jobs.length })}
-        {#if jobs.length === 200}{m.queue_showing_capped({ limit: 200 })}{/if}
-      </p>
-    {/if}
+    <!--
+      Two sentences, not one built out of pieces. The count pluralizes and the
+      cap is a separate remark that only sometimes applies; welding them into a
+      single string would need a variant per plural category *and* per branch.
+    -->
+    <p class="text-xs text-faint">
+      {m.queue_showing({ count: jobs.length })}
+      {#if jobs.length === 200}{m.queue_showing_capped({ limit: 200 })}{/if}
+    </p>
   {/if}
 </div>
