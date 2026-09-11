@@ -360,9 +360,19 @@ pub async fn reset_member_passkeys(
     let token = of_auth::crypto::generate(of_auth::crypto::prefix::INVITE);
 
     // Clearing the passkeys, ending the sessions they opened, minting the
-    // claim code, and recording the org-scoped audit row all share one
-    // transaction: a failure partway through must not leave the account
-    // cleared with no way back in. See savvagent/otto-factory#87.
+    // claim code, and recording the audit row all share one transaction: a
+    // failure partway through must not leave the account cleared with no way
+    // back in (savvagent/otto-factory#87), and must not leave the audit row
+    // losable independently of the destructive change it records
+    // (savvagent/otto-factory#134). This used to also write a second,
+    // best-effort, post-commit `auth.passkey.cleared` row on an unpinned
+    // connection, on the theory that it mirrored what a self-service clear
+    // writes globally (`of_auth::passkeys::clear`) — but there is no
+    // self-service passkey clear in production, so that write had no live
+    // counterpart to mirror and only duplicated this row under a second
+    // action name. Dropped rather than merely re-scoped: this one row,
+    // already atomic and already org-scoped, is `#134`'s actual fix for this
+    // call site. See `of_auth::passkeys::clear`'s doc comment.
     let mut tx = state.db.begin(ctx.org.id).await?;
     of_auth::passkeys::clear_tx(tx.conn(), target).await?;
     of_auth::sessions::revoke_all_tx(tx.conn(), target).await?;
@@ -376,26 +386,6 @@ pub async fn reset_member_passkeys(
     )
     .await?;
     tx.commit().await?;
-
-    // Best-effort global record — see `audit_global`'s own doc comment — and
-    // attributed to the admin who did this, not the member it happened to:
-    // the member did not clear their own passkeys.
-    if let Err(e) = state
-        .db
-        .audit_global(
-            Entry::new(action::PASSKEY_CLEARED)
-                .actor(ctx.user.id)
-                .target("user", target.to_string())
-                .from_request(ip.as_deref(), None),
-        )
-        .await
-    {
-        tracing::error!(
-            error = %e,
-            user = %target,
-            "failed to write the global audit event for an admin-assisted passkey clear"
-        );
-    }
 
     let code = token.into_plaintext();
     let link = state.config.url(&format!("/claim?code={code}"));

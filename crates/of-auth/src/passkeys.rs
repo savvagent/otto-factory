@@ -537,16 +537,45 @@ pub async fn has_credential(db: &Db, user: UserId) -> Result<bool> {
 /// your own account with no email to recover through, and the click that does
 /// it looks exactly like tidying up a stale device. Someone who genuinely wants
 /// out deletes the account.
+///
+/// Opens its own transaction and commits immediately, the same shape
+/// `finish_registration` gives its own credential insert + audit write
+/// (`savvagent/otto-factory#131`): the delete and its `auth.passkey.removed`
+/// audit row commit together, so a failure on either leaves the account
+/// untouched instead of a destroyed credential with no audit row. See
+/// `savvagent/otto-factory#134`.
+///
+/// No `_tx` split here (unlike `finish_registration`/`finish_registration_tx`):
+/// nothing else needs to fold another statement into this same commit, so a
+/// speculative second entry point would be unused indirection. Add one if a
+/// caller actually needs it.
 pub async fn remove(db: &Db, user: UserId, key: Uuid, ip: Option<&str>) -> Result<()> {
-    let remaining = count(db, user).await?;
-    if remaining <= 1 {
+    let mut tx = db.begin_unpinned().await?;
+
+    // `FOR UPDATE` rather than `count(*)`: an aggregate takes no row locks, so
+    // two concurrent `remove` calls naming different keys on a two-key
+    // account could each read `remaining == 2`, each pass the guard, and both
+    // commit — leaving zero passkeys, the exact permanent lockout this check
+    // exists to prevent on a product with no email recovery. Locking the rows
+    // forces the second transaction to block here until the first commits or
+    // rolls back, then re-evaluate against what it left behind — the same
+    // pattern `Tx::count_owners_for_update` already uses for the structurally
+    // identical last-owner invariant (`crates/of-core/src/orgs.rs`). An
+    // aggregate cannot ride `FOR UPDATE`, hence selecting ids and counting in
+    // Rust.
+    let remaining: Vec<Uuid> =
+        sqlx::query_scalar("SELECT id FROM passkeys WHERE user_id = $1 ORDER BY id FOR UPDATE")
+            .bind(user)
+            .fetch_all(tx.conn())
+            .await?;
+    if remaining.len() <= 1 {
         return Err(AuthError::LastPasskey);
     }
 
     let affected = sqlx::query("DELETE FROM passkeys WHERE user_id = $1 AND id = $2")
         .bind(user)
         .bind(key)
-        .execute(db.pool())
+        .execute(tx.conn())
         .await?
         .rows_affected();
 
@@ -554,25 +583,27 @@ pub async fn remove(db: &Db, user: UserId, key: Uuid, ip: Option<&str>) -> Resul
         return Err(AuthError::UnknownCredential);
     }
 
-    if let Err(e) = db
-        .audit_global(
-            Entry::new(action::PASSKEY_REMOVED)
-                .actor(user)
-                .target("passkey", key.to_string())
-                .from_request(ip, None),
-        )
-        .await
-    {
-        tracing::error!(
-            error = %e,
-            user_id = %user,
-            "failed to write audit event for passkey removal"
-        );
-    }
+    // The delete and its audit row commit together: a destroyed credential
+    // with no audit row is at least as attacker-interesting as a created one
+    // with no audit row (#108/#131) — arguably more, since this is the step
+    // that evicts a legitimate owner after a session takeover (#89).
+    Db::audit_global_on(
+        &mut tx,
+        Entry::new(action::PASSKEY_REMOVED)
+            .actor(user)
+            .target("passkey", key.to_string())
+            .from_request(ip, None),
+    )
+    .await?;
 
+    tx.commit().await?;
     Ok(())
 }
 
+/// Rename a key's nickname. Cosmetic — unlike [`remove`] and [`clear`], there
+/// is no destructive statement here for the audit write to be atomic with, so
+/// it stays best-effort on the pool: a lost `auth.passkey.renamed` row loses a
+/// label, not evidence of a credential change.
 pub async fn rename(
     db: &Db,
     user: UserId,
@@ -620,43 +651,74 @@ pub async fn rename(
 /// so a failure partway through cannot leave the account cleared with no way
 /// back in — see `savvagent/otto-factory#87`.
 ///
-/// The audit row is attributed to `actor`, not `user`: this is always called on
-/// somebody else's behalf (there is no self-service passkey clear yet), and a
-/// row that named the affected member as its own actor would misattribute an
-/// admin's action to the person it happened to.
+/// The audit row is attributed to `actor`, not `user`: `actor` is whoever
+/// initiated the clear (an admin for `reset_member_passkeys` today, or the
+/// account holder themselves for a hypothetical self-service caller — this
+/// function's own tests exercise `actor == user`), and `user` is the account
+/// being cleared. Recording both, rather than collapsing to one field, is
+/// what keeps an admin-initiated clear from misattributing to the person it
+/// happened to when the two differ.
+///
+/// The delete and its `auth.passkey.cleared` audit row commit together, the
+/// same reasoning as [`remove`] above and `finish_registration`
+/// (`savvagent/otto-factory#131`): the admin-assisted-reset row is the one
+/// that names who initiated a takeover (`#88`), and it must not be losable
+/// independently of the delete it records. See `savvagent/otto-factory#134`.
+///
+/// **Has no production caller today.** `of_web::routes::orgs::reset_member_passkeys`
+/// — the only place an account gets cleared in production — calls [`clear_tx`]
+/// directly, on a connection already pinned to an org, and records its own
+/// `org.member.passkeys_reset` row via `Tx::audit` rather than going through
+/// this function's global `auth.passkey.cleared` write (there is no
+/// self-service passkey clear to make that write the "real" record of, so a
+/// second, redundant row here would only make the trail noisier — see
+/// `savvagent/otto-factory#134`). This function stays fixed anyway: it is
+/// public crate-workspace API, exercised directly by this file's own tests,
+/// and it is the function `#134` names — leaving it best-effort would fix the
+/// letter of the issue while leaving the bug for whichever direct caller
+/// shows up next (a self-service "clear my own passkeys" flow, say).
+///
+/// **Warning for any future caller, including that hypothetical self-service
+/// flow:** this function has no last-passkey guard (unlike [`remove`]) and
+/// mints no claim code (unlike `reset_member_passkeys`'s use of `clear_tx`).
+/// Calling it directly wipes every credential on the account with no way
+/// back in — a permanent, unrecoverable lockout on a product with no email
+/// recovery. Any new caller must mint a claim code (or an equivalent re-entry
+/// mechanism) in the *same transaction* as the wipe, the way
+/// `reset_member_passkeys` does around [`clear_tx`]; that machinery lives
+/// entirely there today, not in this function. This is the exact class of
+/// mistake `savvagent/otto-factory#87` already produced once by splitting the
+/// clear from the claim-code issuance.
 pub async fn clear(db: &Db, user: UserId, actor: UserId, ip: Option<&str>) -> Result<u64> {
     let mut tx = db.begin_unpinned().await?;
     let removed = clear_tx(tx.conn(), user).await?;
+
+    Db::audit_global_on(
+        &mut tx,
+        Entry::new(action::PASSKEY_CLEARED)
+            .actor(actor)
+            .target("user", user.to_string())
+            .from_request(ip, None),
+    )
+    .await?;
+
     tx.commit().await?;
-
-    if let Err(e) = db
-        .audit_global(
-            Entry::new(action::PASSKEY_CLEARED)
-                .actor(actor)
-                .target("user", user.to_string())
-                .from_request(ip, None),
-        )
-        .await
-    {
-        tracing::error!(
-            error = %e,
-            user_id = %user,
-            "failed to write audit event for passkey clear"
-        );
-    }
-
     Ok(removed)
 }
 
 /// The delete half of [`clear`], against a connection the caller already holds
 /// a transaction on.
 ///
-/// No audit row here: the row [`clear`] writes is global (no org), and the
-/// transaction this runs inside during an admin-assisted reset is pinned to
-/// one org — an insert with a null `org_id` would violate `audit_events`'s
-/// row-level-security policy on that connection. The caller writes it
-/// separately, after commit, as the best-effort record `audit_global` already
-/// documents itself to be.
+/// No audit row here: the row [`clear`] writes is global (no org), and
+/// `of_web::routes::orgs::reset_member_passkeys` — the other caller of this
+/// function — runs it on a transaction pinned to one org, where an insert
+/// with a null `org_id` would violate `audit_events`'s row-level-security
+/// policy. [`clear`] writes its own global row on the `Unpinned` connection
+/// it opens itself, before its own commit; `reset_member_passkeys` records
+/// the reset with its own org-scoped `org.member.passkeys_reset` row instead,
+/// via `Tx::audit`, also before its commit — see [`clear`]'s doc comment for
+/// why that one row is enough and no second, `auth.passkey.cleared`-named row
+/// is written for that path.
 pub async fn clear_tx(conn: &mut sqlx::PgConnection, user: UserId) -> Result<u64> {
     let removed = sqlx::query("DELETE FROM passkeys WHERE user_id = $1")
         .bind(user)

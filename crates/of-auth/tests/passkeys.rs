@@ -102,6 +102,35 @@ async fn register_new(db: &Db, auth: &mut WebauthnAuthenticator<SoftToken>) -> U
     .unwrap()
 }
 
+/// Register a second key on an existing account, the way the console's "add a
+/// passkey" flow does. Returns the authenticator holding the new key, for a
+/// caller that also needs to sign in with it.
+async fn register_additional(db: &Db, user: UserId) -> WebauthnAuthenticator<SoftToken> {
+    let webauthn = rp();
+    let mut second = authenticator();
+    let ceremony = passkeys::start_registration(db, &webauthn, Some(user))
+        .await
+        .unwrap();
+    let credential = second
+        .do_registration(
+            Url::parse(ORIGIN).unwrap(),
+            for_soft_token(ceremony.challenge),
+        )
+        .unwrap();
+    passkeys::finish_registration(
+        db,
+        &webauthn,
+        ceremony.id,
+        &credential,
+        Some("phone"),
+        passkeys::RegistrationVia::Add,
+        None,
+    )
+    .await
+    .unwrap();
+    second
+}
+
 /// The credential IDs an account holds, for `offer`.
 async fn credential_ids(db: &Db, user: UserId) -> Vec<Vec<u8>> {
     sqlx::query_scalar("SELECT credential_id FROM passkeys WHERE user_id = $1 ORDER BY created_at")
@@ -390,6 +419,31 @@ async fn action_count(db: &Db, action: &str, user: UserId) -> i64 {
         .unwrap()
 }
 
+/// Force a write to `action` in `audit_events` to fail, via a real Postgres
+/// `BEFORE INSERT` trigger — not a mock — so a test can assert that whatever
+/// else shares a transaction with the write rolls back too. Each
+/// `#[sqlx::test]` gets its own throwaway database, so a fixed
+/// function/trigger name is safe to reuse across every call site.
+async fn reject_audit_writes(db: &Db, action: &str) {
+    sqlx::query(
+        "CREATE FUNCTION reject_audit_write() RETURNS trigger AS $$ \
+         BEGIN RAISE EXCEPTION 'forced failure for test'; END; \
+         $$ LANGUAGE plpgsql",
+    )
+    .execute(db.pool())
+    .await
+    .unwrap();
+    sqlx::query(&format!(
+        "CREATE TRIGGER reject_audit_write \
+         BEFORE INSERT ON audit_events \
+         FOR EACH ROW WHEN (NEW.action = '{action}') \
+         EXECUTE FUNCTION reject_audit_write()",
+    ))
+    .execute(db.pool())
+    .await
+    .unwrap();
+}
+
 // --------------------------------------- passkey.* audit actions, not totp.* (#76)
 
 /// Registration writes the new `auth.passkey.registered` action, never the old
@@ -472,23 +526,7 @@ async fn a_forced_audit_failure_rolls_back_the_credential(pool: PgPool) {
     let webauthn = rp();
     let mut auth = authenticator();
 
-    sqlx::query(
-        "CREATE FUNCTION reject_registration_audit() RETURNS trigger AS $$ \
-         BEGIN RAISE EXCEPTION 'forced failure for test'; END; \
-         $$ LANGUAGE plpgsql",
-    )
-    .execute(db.pool())
-    .await
-    .unwrap();
-    sqlx::query(
-        "CREATE TRIGGER reject_registration_audit \
-         BEFORE INSERT ON audit_events \
-         FOR EACH ROW WHEN (NEW.action = 'auth.passkey.registered') \
-         EXECUTE FUNCTION reject_registration_audit()",
-    )
-    .execute(db.pool())
-    .await
-    .unwrap();
+    reject_audit_writes(&db, of_core::audit::action::PASSKEY_REGISTERED).await;
 
     let ceremony = passkeys::start_registration(&db, &webauthn, None)
         .await
@@ -542,23 +580,7 @@ async fn a_forced_audit_failure_also_restores_the_ceremony(pool: PgPool) {
     let webauthn = rp();
     let mut auth = authenticator();
 
-    sqlx::query(
-        "CREATE FUNCTION reject_registration_audit_2() RETURNS trigger AS $$ \
-         BEGIN RAISE EXCEPTION 'forced failure for test'; END; \
-         $$ LANGUAGE plpgsql",
-    )
-    .execute(db.pool())
-    .await
-    .unwrap();
-    sqlx::query(
-        "CREATE TRIGGER reject_registration_audit_2 \
-         BEFORE INSERT ON audit_events \
-         FOR EACH ROW WHEN (NEW.action = 'auth.passkey.registered') \
-         EXECUTE FUNCTION reject_registration_audit_2()",
-    )
-    .execute(db.pool())
-    .await
-    .unwrap();
+    reject_audit_writes(&db, of_core::audit::action::PASSKEY_REGISTERED).await;
 
     let ceremony = passkeys::start_registration(&db, &webauthn, None)
         .await
@@ -632,29 +654,7 @@ async fn removing_a_passkey_writes_the_passkey_removed_action(pool: PgPool) {
     let db = Db::from_pool(pool);
     let mut first = authenticator();
     let user = register_new(&db, &mut first).await;
-
-    let webauthn = rp();
-    let mut second = authenticator();
-    let ceremony = passkeys::start_registration(&db, &webauthn, Some(user))
-        .await
-        .unwrap();
-    let credential = second
-        .do_registration(
-            Url::parse(ORIGIN).unwrap(),
-            for_soft_token(ceremony.challenge),
-        )
-        .unwrap();
-    passkeys::finish_registration(
-        &db,
-        &webauthn,
-        ceremony.id,
-        &credential,
-        Some("phone"),
-        passkeys::RegistrationVia::Add,
-        None,
-    )
-    .await
-    .unwrap();
+    register_additional(&db, user).await;
 
     let keys = passkeys::list(&db, user).await.unwrap();
     assert_eq!(keys.len(), 2);
@@ -666,6 +666,114 @@ async fn removing_a_passkey_writes_the_passkey_removed_action(pool: PgPool) {
         action_count(&db, of_core::audit::action::PASSKEY_REMOVED, user).await,
         1,
         "removing a key must write auth.passkey.removed"
+    );
+}
+
+/// The delete and its audit row commit together (#134): a `BEFORE INSERT`
+/// trigger forces the audit write to fail deterministically — real Postgres
+/// behavior, mirroring `a_forced_audit_failure_rolls_back_the_credential`'s
+/// technique for `finish_registration` (#108/#131) — and the `DELETE` must
+/// roll back with it rather than leaving a destroyed credential with no
+/// audit row.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_forced_audit_failure_rolls_back_a_passkey_removal(pool: PgPool) {
+    let db = Db::from_pool(pool);
+    let mut first = authenticator();
+    let user = register_new(&db, &mut first).await;
+    register_additional(&db, user).await;
+
+    let keys = passkeys::list(&db, user).await.unwrap();
+    assert_eq!(keys.len(), 2);
+
+    reject_audit_writes(&db, of_core::audit::action::PASSKEY_REMOVED).await;
+
+    let result = passkeys::remove(&db, user, keys[0].id, Some("203.0.113.9")).await;
+    assert!(
+        result.is_err(),
+        "a forced audit-write failure must abort the whole removal, not \
+         silently succeed with a lost audit row"
+    );
+
+    assert_eq!(
+        passkeys::list(&db, user).await.unwrap().len(),
+        2,
+        "the DELETE must roll back with the failed audit write — a destroyed \
+         credential with no audit row is exactly the gap #134 closes"
+    );
+}
+
+/// The last-passkey guard must not be a check-then-act race: two concurrent
+/// `remove` calls naming *different* keys on a two-key account must not both
+/// succeed and leave zero passkeys — the exact permanent lockout the guard
+/// exists to prevent on a product with no email recovery
+/// (`savvagent/otto-factory#134`). `remove`'s `SELECT ... FOR UPDATE` closes
+/// this: without it, both transactions can read `remaining == 2` under
+/// `READ COMMITTED`, both pass the guard, and both commit — with it, the
+/// second transaction's lock request blocks until the first commits or rolls
+/// back, then re-evaluates against what that transaction left behind, so the
+/// invariant holds regardless of how the two race.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn concurrent_removes_leave_exactly_one_key(pool: PgPool) {
+    let db = Db::from_pool(pool);
+    let mut first = authenticator();
+    let user = register_new(&db, &mut first).await;
+    register_additional(&db, user).await;
+
+    let keys = passkeys::list(&db, user).await.unwrap();
+    assert_eq!(keys.len(), 2);
+    let (key_a, key_b) = (keys[0].id, keys[1].id);
+
+    let db_a = db.clone();
+    let db_b = db.clone();
+    let (result_a, result_b) = tokio::join!(
+        passkeys::remove(&db_a, user, key_a, None),
+        passkeys::remove(&db_b, user, key_b, None),
+    );
+
+    let succeeded = [result_a.is_ok(), result_b.is_ok()];
+    assert_eq!(
+        succeeded.iter().filter(|ok| **ok).count(),
+        1,
+        "exactly one of two concurrent removes on a two-key account must \
+         succeed, the other must be refused as the last passkey — got \
+         {result_a:?} and {result_b:?}"
+    );
+
+    let remaining = passkeys::list(&db, user).await.unwrap();
+    assert_eq!(
+        remaining.len(),
+        1,
+        "the account must be left with exactly one passkey, never zero — \
+         zero passkeys is a permanent lockout with no email to recover \
+         through"
+    );
+}
+
+/// The same forced-failure technique as
+/// [`a_forced_audit_failure_rolls_back_a_passkey_removal`], for [`passkeys::clear`]:
+/// the admin-assisted-reset row is the one that names who initiated a
+/// takeover (#88), and it must not be losable independently of the delete it
+/// records.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_forced_audit_failure_rolls_back_a_passkey_clear(pool: PgPool) {
+    let db = Db::from_pool(pool);
+    let mut auth = authenticator();
+    let user = register_new(&db, &mut auth).await;
+
+    reject_audit_writes(&db, of_core::audit::action::PASSKEY_CLEARED).await;
+
+    let result = passkeys::clear(&db, user, user, None).await;
+    assert!(
+        result.is_err(),
+        "a forced audit-write failure must abort the whole clear, not \
+         silently succeed with a lost audit row"
+    );
+
+    assert!(
+        passkeys::has_credential(&db, user).await.unwrap(),
+        "the clearing DELETE must roll back with the failed audit write — a \
+         cleared account with no audit row is exactly the gap #134 closes, \
+         and it is the row that names who initiated a takeover (#88)"
     );
 }
 

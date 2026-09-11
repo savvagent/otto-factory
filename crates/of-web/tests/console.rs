@@ -1710,15 +1710,9 @@ async fn every_documented_get_is_actually_mounted(pool: PgPool) {
 async fn an_admin_can_reset_a_members_authenticator_but_gains_nothing_by_it(pool: PgPool) {
     let h = harness(pool);
     let rob = onboard(&h, "rob@acme.test").await;
-    org_with_owner(&h, "acme", &rob).await;
+    let acme = org_with_owner(&h, "acme", &rob).await;
     let mut bob = onboard(&h, "bob@acme.test").await;
-    add_member(
-        &h,
-        h.db.get_org_by_slug("acme").await.unwrap().unwrap().id,
-        bob.user,
-        of_core::orgs::Role::Member,
-    )
-    .await;
+    add_member(&h, acme, bob.user, of_core::orgs::Role::Member).await;
 
     let reset = Call::post(format!(
         "/api/orgs/acme/members/{}/reset-passkeys",
@@ -1749,24 +1743,25 @@ async fn an_admin_can_reset_a_members_authenticator_but_gains_nothing_by_it(pool
     );
     assert_eq!(rows[0]["targetId"].as_str().unwrap(), bob.user.to_string());
 
-    // The global auth.passkey.cleared row is attributed to Rob, who performed
-    // the reset, not to Bob, whose account it happened to — Bob did not clear
-    // his own passkeys. See savvagent/otto-factory#87.
-    let cleared: (Option<String>, Option<String>) = sqlx::query_as(
-        "SELECT actor_user_id::text, target_id FROM audit_events \
-         WHERE action = $1 AND org_id IS NULL",
+    // This path writes only org.member.passkeys_reset, not a second
+    // auth.passkey.cleared row — that second write existed once, best-effort
+    // and NULL-org, on the theory it mirrored a self-service clear (which
+    // does not exist in production), and was dropped rather than merely
+    // re-scoped when #134 made this call site atomic. See
+    // `of_auth::passkeys::clear`'s doc comment.
+    let cleared: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_events WHERE action = $1 AND target_id = $2",
     )
     .bind(of_core::audit::action::PASSKEY_CLEARED)
+    .bind(bob.user.to_string())
     .fetch_one(h.db.pool())
     .await
     .unwrap();
     assert_eq!(
-        cleared.0.as_deref(),
-        Some(rob.user.to_string().as_str()),
-        "the admin-assisted clear must attribute the global audit row to the \
-         admin who performed it, not the member it happened to"
+        cleared, 0,
+        "reset_member_passkeys must not write a redundant auth.passkey.cleared \
+         row alongside org.member.passkeys_reset"
     );
-    assert_eq!(cleared.1.as_deref(), Some(bob.user.to_string().as_str()));
 
     let stale_action = Call::get("/api/orgs/acme/audit?actionPrefix=auth.totp")
         .with_session(&rob.session)
@@ -1828,6 +1823,94 @@ async fn an_admin_can_reset_a_members_authenticator_but_gains_nothing_by_it(pool
         .send(&h.router)
         .await;
     assert_ne!(replayed.status, StatusCode::OK, "a claim code was reusable");
+}
+
+/// The whole `reset_member_passkeys` transaction — the passkey delete, the
+/// session revoke, the claim-code insert, and the audit write — is one
+/// atomic unit (#134): a `BEFORE INSERT` trigger forces the audit write to
+/// fail deterministically, and nothing else in the transaction may commit
+/// either.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_forced_audit_failure_rolls_back_an_admin_assisted_reset(pool: PgPool) {
+    let h = harness(pool);
+    let rob = onboard(&h, "rob@acme.test").await;
+    let acme = org_with_owner(&h, "acme", &rob).await;
+    let mut bob = onboard(&h, "bob@acme.test").await;
+    add_member(&h, acme, bob.user, of_core::orgs::Role::Member).await;
+
+    sqlx::query(
+        "CREATE FUNCTION reject_reset_audit() RETURNS trigger AS $$ \
+         BEGIN RAISE EXCEPTION 'forced failure for test'; END; \
+         $$ LANGUAGE plpgsql",
+    )
+    .execute(h.db.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER reject_reset_audit \
+         BEFORE INSERT ON audit_events \
+         FOR EACH ROW WHEN (NEW.action = 'org.member.passkeys_reset') \
+         EXECUTE FUNCTION reject_reset_audit()",
+    )
+    .execute(h.db.pool())
+    .await
+    .unwrap();
+
+    let reset = Call::post(format!(
+        "/api/orgs/acme/members/{}/reset-passkeys",
+        bob.user
+    ))
+    .with_session(&rob.session)
+    .send(&h.router)
+    .await;
+    assert_eq!(
+        reset.status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a forced audit-write failure must fail the whole request, not \
+         silently succeed with a lost audit row"
+    );
+
+    // Nothing committed: Bob's original passkey still works...
+    let still_works = sign_in(&h, &mut bob).await;
+    still_works.expect(StatusCode::OK);
+
+    // ...his session was never revoked...
+    let still_alive = Call::get("/api/me")
+        .with_session(&bob.session)
+        .send(&h.router)
+        .await;
+    assert_eq!(still_alive.status, StatusCode::OK);
+
+    // ...no claim code was minted...
+    let claims: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM account_claims WHERE user_id = $1 AND consumed_at IS NULL",
+    )
+    .bind(bob.user)
+    .fetch_one(h.db.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        claims, 0,
+        "no claim row may exist when the transaction that would have \
+         written it rolled back"
+    );
+
+    // ...and the org.member.passkeys_reset row itself was not written either
+    // — the forced failure is on its own insert, and the assertions above
+    // prove the delete, the session revoke, and the claim insert that
+    // preceded it in the same transaction rolled back too, not just the
+    // audit write.
+    let reset_rows = Call::get("/api/orgs/acme/audit?actionPrefix=org.member.passkeys_reset")
+        .with_session(&rob.session)
+        .send(&h.router)
+        .await;
+    reset_rows.expect(StatusCode::OK);
+    assert_eq!(
+        reset_rows.body.as_array().unwrap().len(),
+        0,
+        "the forced audit-write failure must itself result in no \
+         org.member.passkeys_reset row existing"
+    );
 }
 
 /// Without a claim code, a reset account must not be claimable at all — that
