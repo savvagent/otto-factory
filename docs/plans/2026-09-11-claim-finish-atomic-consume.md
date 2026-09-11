@@ -17,15 +17,29 @@ passes, with two new tests proving the rollback deterministically.
 
 ## Status — 2026-09-11
 
-Done. All three tasks implemented and committed, in order. `cargo test --workspace`,
-`cargo clippy --all-targets -- -D warnings`, and `cargo fmt --all --check` all pass; both new tests
-(`a_forced_audit_failure_also_restores_the_ceremony` in `of-auth`,
+Shipped. All three tasks implemented and committed, in order, and merged as
+`savvagent/otto-factory#164` (`546bc6393e0926a8cb486b8d1c40046c19239707`). `cargo test --workspace`,
+`cargo clippy --all-targets -- -D warnings`, and `cargo fmt --all --check` all passed; both original
+tests (`a_forced_audit_failure_also_restores_the_ceremony` in `of-auth`,
 `a_credential_collision_during_claim_finish_leaves_the_claim_code_usable` in `of-web`) were confirmed
 red against the unmodified source before the corresponding implementation step, then green after.
-PR pending review. Original task-ordering rationale below, still accurate: three tasks, sequential
+Original task-ordering rationale below, still accurate: three tasks, sequential
 (Task 2 depends on nothing from Task 1's code but the plan
 orders `of-core` before `of-auth` before `of-web` to match the dependency direction of the crates
 that consume each new function; Task 3 depends on both).
+
+The mandatory review trio surfaced two gaps beyond this plan's three tasks, both closed in
+review-response commits before merge, with two more regression tests:
+- `claim_finish` had no throttle of its own (`claim_start` does); added a `throttle_by_source` call
+  as its first line.
+- A rejected `claim_finish` (the ownership mismatch, or a failure partway through registration)
+  left zero audit trace, since nothing commits on that path. Added `auth.claim.refused`
+  (`crates/of-core/src/audit.rs`) and a best-effort post-rollback `audit_global` write.
+- New tests: `a_ceremony_ownership_mismatch_leaves_the_claim_and_ceremony_usable` (the
+  ownership-mismatch path Task 3 shipped with no coverage) and
+  `a_forced_audit_failure_during_claim_finish_also_restores_the_claim` (the audit-write-failure
+  rollback, proven through `claim_finish` itself rather than only at the `finish_registration_tx`
+  level), both in `crates/of-web/tests/console.rs`.
 
 ## Global Constraints
 

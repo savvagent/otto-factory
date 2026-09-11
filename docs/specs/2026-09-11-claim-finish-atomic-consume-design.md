@@ -1,11 +1,19 @@
 # `claim_finish`'s claim code and ceremony become part of its own transaction
 
-> **Status:** DRAFT — closes `savvagent/otto-factory#132`, filed during the mandatory review trio
-> on `savvagent/otto-factory#131` (`docs/specs/2026-09-10-passkey-registration-atomic-audit-design.md`,
+> **Status:** IMPLEMENTED — merged as `savvagent/otto-factory#164` (`546bc6393e0926a8cb486b8d1c40046c19239707`),
+> closing `savvagent/otto-factory#132`. Filed during the mandatory review trio on
+> `savvagent/otto-factory#131` (`docs/specs/2026-09-10-passkey-registration-atomic-audit-design.md`,
 > which made `finish_registration`'s credential insert and audit write atomic and, in doing so,
 > widened this gap's probability surface). Related but explicitly out of scope: `#109` tracks a
 > different ordering concern (the ceremony-ownership check happening after the write) on the same
-> function's `claim_finish`/`add_passkey_finish` paths.
+> function's `claim_finish`/`add_passkey_finish` paths — its claim-code half is now closed by this
+> change.
+>
+> `#164`'s own review trio surfaced two more gaps this design's Risks section did not anticipate,
+> both closed before merge: `claim_finish` had no throttle of its own, and a rejected request left
+> no audit trace. See the PR's review-response commits for the fix (a `throttle_by_source` call and
+> a best-effort `auth.claim.refused` audit write on rollback) and the two additional regression
+> tests they came with.
 
 ## Goal & Success Criteria
 
