@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$HOME\"/.claude/hooks/session-start-hook.sh"
+            "command": "\"${HOME:?}\"/.claude/hooks/session-start-hook.sh"
           }
         ]
       }

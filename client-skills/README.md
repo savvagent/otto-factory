@@ -46,16 +46,33 @@ actually takes — follows the same job lifecycle:
    delay, or surface an error in the developer's actual session. Where the client's own
    hook surface supports a non-fatal warning channel (e.g. stderr), one line is
    acceptable; nothing that interrupts or narrates over the developer's own work.
-6. **Treat every local value you interpolate as untrusted.** A git remote URL, a branch
-   name, a file path — anything read from the developer's own repository state and then
-   embedded in text a model is told to treat as instructions — must be validated against a
-   strict allowlist (safe characters, a length cap) before it is used anywhere, and
-   presented to the model as clearly labeled, fenced *data* the instruction refers to by
-   name, never interpolated directly into the imperative steps themselves. This matters even
-   though the value is "local": a hostile remote or a hostile branch name is still something
-   an attacker, not the developer, chose. See `claude-code/session-start-hook.sh` and its
-   README's Security section for a worked example, including how to keep a shell script's own
-   heredoc construction from re-interpolating a captured value.
+6. **Treat every local value you interpolate as untrusted — and know what a character
+   allowlist actually defends.** A git remote URL, a branch name, a file path — anything
+   read from the developer's own repository state and then embedded in text a model is told
+   to treat as instructions — is something an attacker, not the developer, chose, even
+   though the value is "local" (anyone who controls a remote you add, or a branch you
+   fetch, controls these bytes). A character allowlist over such a value defends the
+   **shell** it passes through, nothing more: letters, digits, `.`, `-`, `_`, and `/` are
+   already sufficient to write a fluent imperative sentence, so a value built only from
+   "safe" characters can still read as an instruction override once it lands in front of a
+   model. The control that actually matters for any value reaching model-facing text is
+   that the value be **structurally incapable of reading as prose** — a digest (e.g. a
+   short hex hash of a branch name, never the branch name itself), a value drawn from a
+   fixed enumeration, or a narrowly-grammared form (e.g. an actual URL grammar — scheme,
+   host, length-capped path segments — rather than a flat character class over the whole
+   string). Present the result as clearly labeled, fenced *data* the instruction refers to
+   by name, never interpolated directly into the imperative steps themselves — fencing is
+   real **defense in depth**, but never the primary control, and never a substitute for the
+   value itself being non-prose-capable. Additionally, **gate emission on something the
+   developer explicitly opted into** (e.g. an allowlisted remote host) *before* any
+   untrusted byte is used to build model-facing text — the one thing the model can do that
+   nothing upstream of it can, is check whether a repo is *actually* related to this
+   otto-factory org (`resolve_repo`), and by the time the model runs that check the
+   untrusted bytes are already in its context. See `claude-code/session-start-hook.sh` and
+   its README's Security section for a worked example: a hex branch digest instead of the
+   raw branch name, a URL grammar instead of a character class for the remote, a host
+   opt-in allowlist checked before anything else is built, and how to keep a shell script's
+   own heredoc construction from re-interpolating a captured value.
 
 ## What this directory is not
 
@@ -131,10 +148,21 @@ below:
 - [ ] Does not attempt to auto-register an unregistered repo.
 - [ ] Does not call `claim_jobs` against anything from the general `ready` pool — only
       against a job id this same template just created.
-- [ ] Validates every local value it interpolates into a model-facing instruction (a
-      remote URL, a branch name, a file path) against a strict allowlist before use, and
-      presents it as labeled, fenced data the instruction refers to rather than text
-      spliced directly into an imperative step — see the behavior contract's point 6 above.
+- [ ] Every local value that reaches a model-facing instruction (a remote URL, a branch
+      name, a file path) is **structurally incapable of reading as prose** — a digest, an
+      enumerated value, or a narrowly-grammared form — not merely restricted to a "safe"
+      character set. A character allowlist alone is not sufficient and does not satisfy this
+      box: letters, digits, `.`, `-`, `_`, `/` already spell fluent English. State plainly, in
+      the PR description, what specifically makes each interpolated value non-prose-capable.
+      Fencing/labeling the value as data the instruction refers to (rather than splicing it
+      into an imperative step) is required in addition to this, as defense in depth — never
+      as a substitute for it.
+- [ ] If the template fires automatically in every repo the client opens (rather than only on
+      an explicit, per-invocation action by the developer), emission is gated on something the
+      developer opted into beforehand (e.g. an allowlisted remote host read from a file under
+      the developer's own control) — checked before any untrusted byte is used to build
+      model-facing text, so the template is inert by default in a repo the developer never
+      opted in.
 
 There is no CI enforcement of this directory's contents — no lint job, no schema
 validator. The checklist above is the only guard, enforced like any other open-source
