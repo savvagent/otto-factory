@@ -17,7 +17,13 @@ passes, with two new tests proving the rollback deterministically.
 
 ## Status — 2026-09-11
 
-Not started. Three tasks, sequential (Task 2 depends on nothing from Task 1's code but the plan
+Done. All three tasks implemented and committed, in order. `cargo test --workspace`,
+`cargo clippy --all-targets -- -D warnings`, and `cargo fmt --all --check` all pass; both new tests
+(`a_forced_audit_failure_also_restores_the_ceremony` in `of-auth`,
+`a_credential_collision_during_claim_finish_leaves_the_claim_code_usable` in `of-web`) were confirmed
+red against the unmodified source before the corresponding implementation step, then green after.
+PR pending review. Original task-ordering rationale below, still accurate: three tasks, sequential
+(Task 2 depends on nothing from Task 1's code but the plan
 orders `of-core` before `of-auth` before `of-web` to match the dependency direction of the crates
 that consume each new function; Task 3 depends on both).
 
@@ -65,7 +71,7 @@ survives it.
 
 ---
 
-## Task 1 — `of-core`: `consume_account_claim_tx` ⬜
+## Task 1 — `of-core`: `consume_account_claim_tx` ✅
 
 **Files:** `crates/of-core/src/invites.rs`
 **Interfaces:** produces `pub async fn consume_account_claim_tx(conn: &mut sqlx::PgConnection, token_hash: &[u8]) -> Result<UserId>`, consumed by Task 3.
@@ -79,37 +85,37 @@ test-investment shape for one function; the new function is instead exercised fo
 end-to-end test, the same way its sibling `create_account_claim_tx` is exercised only through
 `crates/of-web/tests/console.rs`'s `reset_member_passkeys` flow.
 
-- [ ] Read `crates/of-core/src/invites.rs`'s existing `create_account_claim`/`create_account_claim_tx`
+- [x] Read `crates/of-core/src/invites.rs`'s existing `create_account_claim`/`create_account_claim_tx`
       pair (lines ~255–330) once more immediately before editing, to match its doc-comment and
       last-use-moves-the-reference style exactly.
-- [ ] Add `pub async fn consume_account_claim_tx(conn: &mut sqlx::PgConnection, token_hash: &[u8]) -> Result<UserId>`
+- [x] Add `pub async fn consume_account_claim_tx(conn: &mut sqlx::PgConnection, token_hash: &[u8]) -> Result<UserId>`
       as a free function (not a `Db` method — matching `create_account_claim_tx`), with the same
       `UPDATE account_claims SET consumed_at = now() WHERE token_hash = $1 AND consumed_at IS NULL
       AND expires_at > now() RETURNING user_id` statement `Db::consume_account_claim` already runs,
       bound against `conn` instead of `self.pool()`. Doc comment cites `savvagent/otto-factory#132`
       and names `claim_finish` as the caller, mirroring `create_account_claim_tx`'s own doc comment
       citing `#87` and `reset_member_passkeys`.
-- [ ] Rewrite `Db::consume_account_claim` to open its own unpinned transaction, delegate to
+- [x] Rewrite `Db::consume_account_claim` to open its own unpinned transaction, delegate to
       `consume_account_claim_tx(&mut tx, token_hash)`, and commit — the same shape
       `create_account_claim`/`create_account_claim_tx` already use for their pair. Keep its existing
       doc comment ("Spend a claim. One statement...") — still true: the `UPDATE ... RETURNING` is
       still the one statement that decides atomically whether the claim was live; the wrapping
       transaction adds no second statement that could race it.
-- [ ] `cargo build -p of-core` — confirms the new function and the rewritten wrapper compile and that
+- [x] `cargo build -p of-core` — confirms the new function and the rewritten wrapper compile and that
       nothing else in `of-core` references the old body in a way that breaks.
-- [ ] `cargo test -p of-core` — full crate suite must stay green (no existing test touches
+- [x] `cargo test -p of-core` — full crate suite must stay green (no existing test touches
       `consume_account_claim`, so this is a compile-and-no-regression check, not new coverage).
-- [ ] Format and commit: `cargo fmt --all` then
+- [x] Format and commit: `cargo fmt --all` then
       `git commit -m "of-core: add consume_account_claim_tx, a connection-taking claim consumption"`.
 
 ---
 
-## Task 2 — `of-auth`: `finish_registration_tx`, widened `take_ceremony`, new ceremony-restoration test ⬜
+## Task 2 — `of-auth`: `finish_registration_tx`, widened `take_ceremony`, new ceremony-restoration test ✅
 
 **Files:** `crates/of-auth/src/passkeys.rs`, `crates/of-auth/tests/passkeys.rs`
 **Interfaces:** consumes nothing from Task 1; produces `pub async fn finish_registration_tx(tx: &mut sqlx::PgConnection, webauthn: &Webauthn, ceremony: Uuid, credential: &RegisterPublicKeyCredential, nickname: Option<&str>, via: RegistrationVia, ip: Option<&str>) -> Result<UserId>`, consumed by Task 3.
 
-- [ ] Write the failing test first. In `crates/of-auth/tests/passkeys.rs`, add
+- [x] Write the failing test first. In `crates/of-auth/tests/passkeys.rs`, add
       `a_forced_audit_failure_also_restores_the_ceremony`, adjacent to the existing
       `a_forced_audit_failure_rolls_back_the_credential` (same `BEFORE INSERT ON audit_events`
       trigger technique — copy its setup verbatim). After the forced `finish_registration` call
@@ -120,19 +126,19 @@ end-to-end test, the same way its sibling `create_account_claim_tx` is exercised
       today's code (ceremony deleted autocommitted, before `finish_registration`'s transaction
       opens) this assertion fails with `0` even on a passing build; it must go red against the
       current implementation before Task 2's implementation steps proceed.
-- [ ] `cargo test -p of-auth --test passkeys a_forced_audit_failure_also_restores_the_ceremony` —
+- [x] `cargo test -p of-auth --test passkeys a_forced_audit_failure_also_restores_the_ceremony` —
       confirm it fails (red) against the unmodified source, for exactly the reason above (ceremony
       count is `0`, not `1`).
-- [ ] In `crates/of-auth/src/passkeys.rs`, widen `take_ceremony`'s signature from
+- [x] In `crates/of-auth/src/passkeys.rs`, widen `take_ceremony`'s signature from
       `async fn take_ceremony<T: serde::de::DeserializeOwned>(db: &Db, id: Uuid, kind: &str)` to
       `async fn take_ceremony<'e, T, E>(conn: E, id: Uuid, kind: &str) -> Result<(Option<UserId>, T)>
       where T: serde::de::DeserializeOwned, E: sqlx::PgExecutor<'e>` — mirroring
       `crates/of-core/src/audit.rs`'s `Entry::write<'e, E>` precedent from `#131` exactly (same
       bound, same lifetime naming). Body unchanged except `.fetch_optional(db.pool())` becomes
       `.fetch_optional(conn)`.
-- [ ] Update `finish_authentication`'s call site: `take_ceremony(db, ceremony, "authenticate")`
+- [x] Update `finish_authentication`'s call site: `take_ceremony(db, ceremony, "authenticate")`
       becomes `take_ceremony(db.pool(), ceremony, "authenticate")`.
-- [ ] Add `pub async fn finish_registration_tx(tx: &mut sqlx::PgConnection, webauthn: &Webauthn,
+- [x] Add `pub async fn finish_registration_tx(tx: &mut sqlx::PgConnection, webauthn: &Webauthn,
       ceremony: Uuid, credential: &RegisterPublicKeyCredential, nickname: Option<&str>, via:
       RegistrationVia, ip: Option<&str>) -> Result<UserId>`, moving `finish_registration`'s existing
       body into it verbatim except: (a) `take_ceremony(db, ceremony, "register")` becomes
@@ -144,32 +150,32 @@ end-to-end test, the same way its sibling `create_account_claim_tx` is exercised
       `create_account_claim_tx`'s last-use-moves-the-reference convention — see Task 1). Doc comment
       per the spec §2, citing `#132` and naming `claim_finish` as the caller that needs this half
       split out.
-- [ ] Rewrite `finish_registration` to a two-line wrapper: open `db.begin_unpinned()`, call
+- [x] Rewrite `finish_registration` to a two-line wrapper: open `db.begin_unpinned()`, call
       `finish_registration_tx(&mut tx, webauthn, ceremony, credential, nickname, via, ip).await?`,
       `tx.commit().await?`, return the user id. Doc comment updated per spec §2 to note the split.
-- [ ] `cargo test -p of-auth --test passkeys a_forced_audit_failure_also_restores_the_ceremony` —
+- [x] `cargo test -p of-auth --test passkeys a_forced_audit_failure_also_restores_the_ceremony` —
       confirm it now passes (green).
-- [ ] `cargo test -p of-auth --test passkeys` — full suite, including
+- [x] `cargo test -p of-auth --test passkeys` — full suite, including
       `a_forced_audit_failure_rolls_back_the_credential` and every test that calls
       `passkeys::finish_registration` directly (`register_new` and its callers) — must stay green
       unchanged, since `finish_registration`'s signature and observable behavior on success are
       identical.
-- [ ] `cargo test -p of-auth` — full crate suite.
-- [ ] `cargo clippy -p of-auth --all-targets -- -D warnings` — the new generic bound on
+- [x] `cargo test -p of-auth` — full crate suite.
+- [x] `cargo clippy -p of-auth --all-targets -- -D warnings` — the new generic bound on
       `take_ceremony` is the one place clippy could plausibly object (needless lifetime, unused
       type param); confirm it is clean, matching `Entry::write`'s already-clean precedent.
-- [ ] Format and commit: `cargo fmt --all` then
+- [x] Format and commit: `cargo fmt --all` then
       `git commit -m "of-auth: split finish_registration into a connection-taking half"`.
 
 ---
 
-## Task 3 — `of-web`: atomic `claim_finish`, end-to-end regression test ⬜
+## Task 3 — `of-web`: atomic `claim_finish`, end-to-end regression test ✅
 
 **Files:** `crates/of-web/src/routes/auth.rs`, `crates/of-web/tests/console.rs`
 **Interfaces:** consumes `of_core::invites::consume_account_claim_tx` (Task 1) and
 `of_auth::passkeys::finish_registration_tx` (Task 2).
 
-- [ ] Write the failing test first. In `crates/of-web/tests/console.rs`, add
+- [x] Write the failing test first. In `crates/of-web/tests/console.rs`, add
       `a_credential_collision_during_claim_finish_leaves_the_claim_code_usable`, adjacent to the
       existing claim tests (`a_reset_account_cannot_be_claimed_without_the_code` and the reclaim
       happy-path test above it). Sequence:
@@ -201,10 +207,10 @@ end-to-end test, the same way its sibling `create_account_claim_tx` is exercised
          existing test helper) against the new `claim/start` challenge from step 7, assert `200`,
          and assert the returned `user.id` equals `bob.user` — the same shape as the existing
          reclaim happy-path test just above this one in the file.
-- [ ] `cargo test -p of-web --test console a_credential_collision_during_claim_finish_leaves_the_claim_code_usable`
+- [x] `cargo test -p of-web --test console a_credential_collision_during_claim_finish_leaves_the_claim_code_usable`
       — confirm it fails (red) against the unmodified `claim_finish`, specifically at step 7's
       assertion (the retried `claim/start` returns non-`200`).
-- [ ] In `crates/of-web/src/routes/auth.rs`, rewrite `claim_finish` per spec §3: open
+- [x] In `crates/of-web/src/routes/auth.rs`, rewrite `claim_finish` per spec §3: open
       `let mut tx = state.db.begin_unpinned().await?;`, call
       `of_core::invites::consume_account_claim_tx(&mut tx, &hash_claim(&req.code)).await?` for
       `user`, call `passkeys::finish_registration_tx(&mut tx, &state.webauthn, req.ceremony_id,
@@ -214,15 +220,15 @@ end-to-end test, the same way its sibling `create_account_claim_tx` is exercised
       commit, then `tx.commit().await.map_err(of_core::Error::from)?;`, then the existing
       `login::with_passkey` + `signed_in_response` tail unchanged. Update the function's doc comment
       per spec §3.
-- [ ] `cargo test -p of-web --test console a_credential_collision_during_claim_finish_leaves_the_claim_code_usable`
+- [x] `cargo test -p of-web --test console a_credential_collision_during_claim_finish_leaves_the_claim_code_usable`
       — confirm it now passes (green).
-- [ ] `cargo test -p of-web --test console` — full suite, including
+- [x] `cargo test -p of-web --test console` — full suite, including
       `a_reset_account_cannot_be_claimed_without_the_code` and the reclaim happy-path test, must
       stay green unchanged (the success and 403 response shapes are byte-identical to today's).
-- [ ] `cargo test --workspace` — everything, one final pass.
-- [ ] `cargo clippy --all-targets -- -D warnings`.
-- [ ] `cargo fmt --all --check`.
-- [ ] Format and commit: `cargo fmt --all` then
+- [x] `cargo test --workspace` — everything, one final pass.
+- [x] `cargo clippy --all-targets -- -D warnings`.
+- [x] `cargo fmt --all --check`.
+- [x] Format and commit: `cargo fmt --all` then
       `git commit -m "of-web: make claim_finish's claim, ceremony, credential, and audit writes atomic"`.
 
 ---
