@@ -214,6 +214,46 @@ describe('the queue poller', () => {
     unmount(instance);
   });
 
+  it('shows the stale note even when the job list is empty', async () => {
+    // Regression test for the render-tree bug where the stale/parked note lived
+    // only inside the table's branch: a successful-but-empty poll (a filter
+    // matching nothing, or a fresh org) followed by a failing tick used to
+    // render a confident "no jobs" empty state with no staleness indication at
+    // all. The note must now be reachable regardless of `jobs.length`.
+    let jobsStatus = 200;
+    const fetchMock = vi.fn((path: string) => {
+      if (path.includes('/repos') || path.includes('/teams')) return emptyPickers();
+      if (path.includes('/jobs')) {
+        return Promise.resolve(
+          jobsStatus === 200 ? jsonResponse([]) : new Response('', { status: jobsStatus })
+        );
+      }
+      return Promise.resolve(new Response('', { status: 404 }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const instance = mount(Harness, { target: container, props: { slug: 'acme' } });
+    await settle();
+
+    expect(container.textContent).toContain('Nothing has been queued yet.');
+    expect(container.querySelector('[role="status"]')).toBeNull();
+
+    jobsStatus = 502;
+    // 1.4x, not 1x: the tick lands somewhere inside the subscription's phase
+    // offset (up to +30%) — see poll.svelte.test.ts for that.
+    await vi.advanceTimersByTimeAsync(REFRESH_INTERVAL * 1.4);
+
+    await vi.waitFor(() => {
+      // Still the empty state — there is no table for this note to hide inside.
+      expect(container.textContent).toContain('Nothing has been queued yet.');
+      const note = container.querySelector('[role="status"]');
+      expect(note).not.toBeNull();
+      expect(note?.textContent).toContain('Refresh failed');
+    });
+
+    unmount(instance);
+  });
+
   it('stops polling and shows the error in place of the table on a 404', async () => {
     const fetchMock = vi.fn((path: string) => {
       if (path.includes('/repos') || path.includes('/teams')) return emptyPickers();
@@ -318,12 +358,12 @@ describe('the queue poller', () => {
     unmount(instance);
   });
 
-  it('a live fatal poll failure takes priority over a stale navigation error, with no false retry hint', async () => {
-    // Regression test for the `navError`/`pollError` precedence fix: a
-    // one-shot rejected `goto` must not permanently mask a later, currently-
-    // failing `jobsPoll` — especially a fatal one, which would otherwise be
-    // invisible until the reader changes org or filters. See `+page.svelte`'s
-    // `pollError`/`error` derivation and its adjoining comment.
+  it('a navigation error is its own independent notice: it is not erased by an unrelated poll success, and does not hide a live poll failure', async () => {
+    // Regression test for the corrected `navError`/`pollError` design: the two
+    // are no longer merged into one slot, so there is no "priority" between
+    // them at all. A rejected `goto` renders its own `Alert`, independent of
+    // whatever the job poll is doing, and it is retired only by a genuine
+    // org/filter change — never by an unrelated poll tick merely succeeding.
     Object.defineProperty(page, 'url', {
       configurable: true,
       get: () => new URL('http://example.test/o/acme/queue')
@@ -355,26 +395,39 @@ describe('the queue poller', () => {
     await settle();
 
     // `goto` rejected, so `page.url` never actually changed and the job-poll
-    // effect never re-ran — `navError` is what's showing, and it is the only
-    // thing showing: no live poll failure exists yet.
-    let alert = container.querySelector('[role="alert"]');
-    expect(alert).not.toBeNull();
-    expect(alert?.textContent).toContain('Could not load the queue.');
-    expect(alert?.textContent).not.toContain('Still retrying');
+    // effect never re-ran — the nav alert is showing, and the poll itself is
+    // still healthy (no poll-error alert alongside it).
+    const navAlert = () =>
+      Array.from(container.querySelectorAll('[role="alert"]')).find((el) =>
+        el.textContent?.includes('Could not load the queue.')
+      );
+    expect(navAlert()).toBeTruthy();
+    expect(container.querySelectorAll('[role="alert"]')).toHaveLength(1);
 
-    // Now the underlying poll itself hits a fatal failure on its next tick,
-    // with `navError` still set and nothing having changed org or filters.
+    // A full healthy poll tick passes — nothing about org or filters changed,
+    // so this must NOT clear the nav alert. (This is the regression the old
+    // auto-clear-on-`updatedAt` effect would have caused: it retired `navError`
+    // the moment any unrelated tick succeeded, with no bearing on whether the
+    // navigation problem itself was ever fixed.)
+    await vi.advanceTimersByTimeAsync(REFRESH_INTERVAL * 1.4);
+    await settle();
+    expect(navAlert()).toBeTruthy();
+
+    // Now the underlying poll hits a fatal failure on a later tick, with the
+    // nav alert still up and nothing having changed org or filters. Both
+    // alerts must be visible at once — one is not a substitute for the other.
     jobsStatus = 404;
     await vi.advanceTimersByTimeAsync(REFRESH_INTERVAL * 1.4);
     await vi.waitFor(() => {
-      alert = container.querySelector('[role="alert"]');
-      expect(alert).not.toBeNull();
-      // The poll's own failure message wins — not the stale nav message.
-      expect(alert?.textContent).toContain('Something went wrong');
-      expect(alert?.textContent).not.toContain('Could not load the queue.');
-      // A fatal (stopped) poll failure gets no "still retrying" hint either.
-      expect(alert?.textContent).not.toContain('Still retrying');
+      expect(navAlert()).toBeTruthy();
+      const pollAlert = Array.from(container.querySelectorAll('[role="alert"]')).find((el) =>
+        el.textContent?.includes('Something went wrong')
+      );
+      expect(pollAlert).toBeTruthy();
+      // A fatal (stopped) poll failure gets no "still retrying" hint.
+      expect(pollAlert?.textContent).not.toContain('Still retrying');
     });
+    expect(container.querySelectorAll('[role="alert"]')).toHaveLength(2);
 
     unmount(instance);
   });
