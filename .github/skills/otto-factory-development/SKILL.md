@@ -127,6 +127,10 @@ are true:
   alters runtime behavior is not)
 - No change to deploy/distribution shape (`Dockerfile`, `fly.toml`, `.github/workflows/`, `web/`,
   `web/worker/`, `crates/of-core/migrations/`)
+- No new file under `.github/skills/`, and no substantial rewrite of
+  dispatch/orchestration logic in an existing one — process documentation that drives
+  future autonomous runs is itself architecture (PR #150 fast-pathed on this reasoning
+  and needed five rounds of trio review to harden)
 - The acceptance criterion fits in one sentence
 
 Concrete examples that qualify:
@@ -145,8 +149,9 @@ TDD + commit step). The design spec and both critique loops are the parts that a
 the PR body: `Fast-path: no design spec per otto-factory-development trivial-task criteria — <reason>.`
 
 If you find yourself rationalizing into the fast-path on something that touches 3+ source files,
-introduces a new interface, touches the auth spine or tenant isolation, adds a migration, or has
-more than a one-sentence AC → STOP. Write the spec. The fast-path is for genuine triviality, not
+introduces a new interface, touches the auth spine or tenant isolation, adds a migration, adds a
+file or substantially rewrites dispatch/orchestration logic under `.github/skills/`, or has more
+than a one-sentence AC → STOP. Write the spec. The fast-path is for genuine triviality, not
 "I think this is small."
 
 | Fast-path rationalization                                  | Reality                                                                                                                                                                     |
@@ -158,6 +163,7 @@ more than a one-sentence AC → STOP. Write the spec. The fast-path is for genui
 | "I'll tweak the existing migration rather than add one"    | Migrations are forward-only. Editing an applied one is forbidden outright (Rule 6).                                                                                         |
 | "The type fix incidentally fixes a bug"                    | If behavior changes, you need the spec to record what it changed and why.                                                                                                   |
 | "I'll fast-path the first sub-change and spec the rest"    | If the work splits into sub-changes, write the spec. Multi-step work doesn't fast-path.                                                                                     |
+| "The new skill content is tiny — just a couple of files"   | Process docs that will drive future autonomous runs are themselves architecture. PR #150 fast-pathed a 511-line-at-the-time skill-file pair on "two logical files" and needed five rounds of trio review before it hardened. Spec first.                                  |
 | "No spec, but I'll still write a one-line plan"            | Either the work needs a plan (then write the spec too) or it doesn't (then it doesn't need the plan either — and per house style, even fast-path keeps a minimal plan doc). |
 
 ## Repository Conventions (otto-factory)
