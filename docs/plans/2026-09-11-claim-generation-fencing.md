@@ -55,9 +55,12 @@ One task. The `of-core` fix and its `of-mcp` wiring are inseparable in practice:
 compiler-driven call-site sweep (Global Constraints) touches both crates' test suites in
 one pass, and splitting into two commits would leave an intermediate commit where
 `of-mcp` fails to build against the changed `of-core` signatures. TDD order within the
-task: write the new failing `of-core` tests first (proving the bug exists today), then
-the `of-core` fix, then the new failing `of-mcp` tests, then the `of-mcp` wiring, then the
-full-workspace mechanical sweep, verified by the compiler and the full test suite.
+task: write the new tests first — the generation-fencing test genuinely fails against
+unmodified `of-core` (it asserts the fix's behavior, which does not exist yet), proving
+the bug via a real `assert` failure rather than a throwaway test that would need deleting
+— then the `of-core` fix, then the new failing `of-mcp` tests, then the `of-mcp` wiring,
+then the full-workspace mechanical sweep, verified by the compiler and the full test
+suite.
 
 ## Task 1 — Claim-generation fencing end-to-end
 
@@ -66,17 +69,29 @@ full-workspace mechanical sweep, verified by the compiler and the full test suit
 produces the new `expected_attempts`/`expectedAttempts` parameter on four `Tx` methods and
 four MCP tools.
 
-- [ ] **Failing test 1 (the bug, today):** in `crates/of-core/tests/queue.rs`, add
-      `same_account_stale_holder_can_still_clobber_a_reclaim_without_expected_attempts`
-      (or similar name) that reproduces spec §Goal's exact interleaving using the SAME
-      `UserId` for both claims (unlike the existing `a_stale_holder_cannot_finalize_after_
-      someone_else_reclaims`, which uses two different users) and asserts today's (buggy)
-      outcome: A's stale `complete_job` call **succeeds** despite A′ having reclaimed. This
-      test documents the bug as it stands on `origin/master`; it will be **deleted** in a
-      later step once the real fix tests (below) supersede it — do not leave a test
-      asserting buggy behavior in the final diff. Run
-      `cargo test -p of-core --test queue same_account_stale_holder` and confirm it passes
-      (proving the bug is real) before moving on.
+- [ ] **Failing test 1 (the fix's behavior, not yet implemented):** in
+      `crates/of-core/tests/queue.rs`, add
+      `stale_generation_cannot_finalize_or_renew_after_same_account_reclaims` that
+      reproduces spec §Goal's exact interleaving using the SAME `UserId` for both claims
+      (unlike the existing `a_stale_holder_cannot_finalize_after_someone_else_reclaims`,
+      which uses two different users): claim under account R with label "agent-a" (capture
+      `attempts`), force-expire (reuse the existing `expire_claim` helper), reclaim under
+      the SAME account R with label "agent-a-prime" (capture the new `attempts`), then
+      assert `complete_job`/`fail_job`/`cancel_job`/`renew_claim` called with the OLD
+      `attempts` value as `expected_attempts` all fail `already_claimed` naming
+      "agent-a-prime" (use a separate job per finalizer under test, since
+      `complete_job`/`fail_job`/`cancel_job` are each terminal), while the same calls with
+      the CURRENT `attempts` value succeed. This test does not compile against the
+      not-yet-changed `complete_job`/`fail_job`/`cancel_job`/`renew_claim` signatures (they
+      do not accept a 4th/5th argument yet) — that compile failure **is** this step's
+      "failing test," standing in for a runtime failure since the change is additive to a
+      function signature, not a value comparison. Do not attempt to run it as a passing
+      test yet; move directly to the next step, which makes it compile and pass together.
+- [ ] **Also add** `expected_attempts_omitted_preserves_todays_behavior` in the same file:
+      repeat the same claim/expire/reclaim setup, then confirm the stale caller's call
+      **without** `expected_attempts` (i.e. `None`) still succeeds exactly as today — the
+      additive-compatibility guarantee from spec §Success bullet 2. Same compile-failure
+      note applies until the next step.
 - [ ] **Failing test 2 (leases hypothesis):** in `crates/of-core/tests/queue.rs`, add
       `lease_reclaim_after_expiry_mints_a_new_id_fencing_the_stale_holder` per spec
       §"Premise correction": acquire a lease, force-expire it (`UPDATE repo_leases SET
@@ -100,25 +115,14 @@ four MCP tools.
       Run `cargo build -p of-core --tests` and fix every reported missing-argument call
       site in `crates/of-core/tests/jobs.rs`, `crates/of-core/tests/queue.rs`, and
       `crates/of-core/tests/isolation.rs` by appending `, None` (these existing tests are
-      not exercising the new argument) until the crate builds clean. **Delete** the
-      failing-bug test from the previous step now — replace it with the real fix test
-      below in the same edit, so no commit in this task's history asserts buggy behavior
-      as correct.
-- [ ] **New fix tests** in `crates/of-core/tests/queue.rs`:
-      `stale_generation_cannot_finalize_or_renew_after_same_account_reclaims` — claim under
-      account R with label "agent-a" (capture `attempts`), force-expire, reclaim under the
-      SAME account R with label "agent-a-prime" (capture the new `attempts`), then assert:
-      (a) `complete_job`/`fail_job`/`cancel_job`/`renew_claim` called with the OLD
-      `attempts` value all fail `already_claimed`, naming "agent-a-prime"; (b) the same
-      calls with the CURRENT `attempts` value succeed (use separate jobs per finalizer
-      under test, since `complete_job`/`fail_job`/`cancel_job` are each terminal). Also add
-      `expected_attempts_omitted_preserves_todays_behavior` — repeat the same
-      claim/expire/reclaim setup, then confirm the stale caller's call **without**
-      `expected_attempts` (i.e. `None`) still succeeds exactly as today (proving the
-      change is additive, per spec's Success bullet 2) — this test's assertion is the
-      mirror image of the deleted bug-documentation test, now kept permanently as the
-      additive-compatibility guarantee. Run
-      `cargo test -p of-core --test queue` (whole file) and confirm all pass.
+      not exercising the new argument) until the crate builds clean — this also makes the
+      two new tests from the previous steps compile. Run
+      `cargo test -p of-core --test queue` (whole file) and confirm all pass, including
+      `stale_generation_cannot_finalize_or_renew_after_same_account_reclaims`,
+      `expected_attempts_omitted_preserves_todays_behavior`, and
+      `lease_reclaim_after_expiry_mints_a_new_id_fencing_the_stale_holder`. Also run
+      `cargo test -p of-core --test jobs` and `cargo test -p of-core --test isolation` to
+      confirm the mechanical `, None` additions changed nothing about their outcomes.
 - [ ] **Wire the MCP tools** in `crates/of-mcp/src/tools/jobs.rs` per spec §5: add
       `expected_attempts: Option<i32>` (with the doc comment from spec §5, adapted per
       tool) to `CompleteJobArgs`, `FailJobArgs`, `CancelJobArgs`, `RenewClaimArgs`; pass
