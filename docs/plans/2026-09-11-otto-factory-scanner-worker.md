@@ -25,13 +25,17 @@ savvagent/otto-factory#149.
 
 ## Status — 2026-09-11
 
-🚧 In progress.
+✅ Shipped: `.github/skills/otto-factory-scanner/SKILL.md` and
+`.github/skills/otto-factory-worker/SKILL.md` committed (`ff45154`, follow-up self-location fix
+`eab837e`), spec-compliance and code-quality reviews both clean (no Critical/Important issues).
 
 ## Global Constraints
 
 - No AI self-attribution anywhere — commits, PR body, skill content.
-- `.claude/skills/` is where these live directly (no `.github/skills/` port-verification system
-  exists in this repo — unlike `otto`, there is no canonical/port split to maintain).
+- Both files live at `.github/skills/<name>/SKILL.md` — this repo's single source of truth for
+  skill content per `CLAUDE.md`'s "Development skills" section — and are visible to Claude Code
+  at `.claude/skills/<name>/SKILL.md` only via the repo's existing directory symlink. Unlike
+  `otto`, there is no CI port-verification/diff-checking system to maintain a second copy against.
 - No SQL, no crate, no MCP tool, no console route, no migration, no `OF_*` config key is
   touched by this change — it is skill-content only.
 - Every reference to `savvagent/otto`, `otto-development`, or `creating-github-issues` in the
@@ -41,8 +45,8 @@ savvagent/otto-factory#149.
 
 | File                                                    | Responsibility                                                                                                   |
 | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| **Create.** `.claude/skills/otto-factory-scanner/SKILL.md` | Adapted from `otto-scanner`: finds open `savvagent/otto-factory` issues with no job yet, checks/fixes a type label, queues via `add_job`/`link_ticket`. |
-| **Create.** `.claude/skills/otto-factory-worker/SKILL.md`  | Adapted from `otto-worker`: claims exactly one queued job for `savvagent/otto-factory`, dispatches a subagent to run it via `otto-factory-development`, resolves it (`complete_job`/`fail_job`). |
+| **Create.** `.github/skills/otto-factory-scanner/SKILL.md` (visible at `.claude/skills/otto-factory-scanner/SKILL.md` via the repo's existing symlink) | Adapted from `otto-scanner`: finds open `savvagent/otto-factory` issues with no job yet, checks/fixes a type label, queues via `add_job`/`link_ticket`. |
+| **Create.** `.github/skills/otto-factory-worker/SKILL.md` (visible at `.claude/skills/otto-factory-worker/SKILL.md` via the repo's existing symlink) | Adapted from `otto-worker`: claims exactly one queued job for `savvagent/otto-factory`, dispatches a subagent to run it via `otto-factory-development`, resolves it (`complete_job`/`fail_job`). |
 
 ## Task Order & Rationale
 
@@ -97,9 +101,9 @@ no new interface of its own (skill content only, no code).
 
 ## Final gate
 
-- [ ] `cargo test --workspace` — vacuously satisfied, no Rust source changed; state this
+- [x] `cargo test --workspace` — vacuously satisfied, no Rust source changed; state this
       explicitly in the PR body rather than running it pointlessly (no `.rs` file in this diff).
-- [ ] `cargo clippy --all-targets -- -D warnings` / `cargo fmt --all --check` — same, vacuous.
-- [ ] `cd web && npm run check && npm run lint && npm test` — vacuous, no `web/` file changed.
-- [ ] No container image, console bundle, Cloudflare Worker, or migration touched — Phase 5
+- [x] `cargo clippy --all-targets -- -D warnings` / `cargo fmt --all --check` — same, vacuous.
+- [x] `cd web && npm run check && npm run lint && npm test` — vacuous, no `web/` file changed.
+- [x] No container image, console bundle, Cloudflare Worker, or migration touched — Phase 5
       out-of-band verification is vacuously satisfied; state so explicitly.
