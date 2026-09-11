@@ -52,6 +52,11 @@ purpose is "what is happening to my jobs right now." Today a job moving `pending
   neither set of tests is removed.
 - One `web/README.md` Layout-table row edit (the `poll.svelte.ts` row already says "the overview
   uses it; `/queue` and `/repos` should" — updated to reflect that `/queue` now does).
+- **Added during review, beyond this list's original scope — see §2a's third point:**
+  `web/src/lib/poll-fatal.ts` (a shared `fatalApiFailure` classifier) and
+  `web/src/lib/poll-fatal.test.ts`, plus the corresponding one-line change to
+  `web/src/routes/o/[org]/+page.svelte` (the overview page) to consume the shared classifier
+  instead of its own local copy.
 
 **Out:**
 
@@ -212,8 +217,8 @@ way — only the results region below it switches on `error`/`loading`/`parked`/
 
 ## §2a What was actually built
 
-The description above is wrong in two ways a PR review caught, and both are now fixed in the
-shipped code rather than in this spec's prose only.
+The description above is wrong in three ways a PR review caught, and all three are now fixed in
+the shipped code rather than in this spec's prose only.
 
 First, the "three-way branch" was never accurate even for the code as designed here: `error` /
 `loading` / the results region is really a four-way split once the results region's own
@@ -238,6 +243,18 @@ actually got fixed. The shipped code renders `navError` as its own independent, 
 — and retires it only from the existing reset at the top of the job-poll `$effect` (on a genuine
 org/filter change, the only event that actually supersedes a failed navigation). `pollError`
 drives its own `{#if pollError}` branch with no precedence rule against `navError` at all.
+
+Third, §2's sketch gives the queue page its own local `fatal(failure): boolean` closure, byte-identical
+to the overview page's own copy. A review flagged this as the same duplication constraint 2 argues
+against elsewhere in this repo (`clients.ts` is "one table with one entry per client"; the router
+and OpenAPI document "are built from one list") — and the duplication carries a real side effect,
+`session.clear()` on a `401`, that a future edit to one copy and not the other would silently
+desync. The shipped code extracts the classifier into `web/src/lib/poll-fatal.ts` (exporting
+`fatalApiFailure`), consumed by both this page and the overview page, with a dedicated unit test
+(`web/src/lib/poll-fatal.test.ts`) covering its 401/403/404/non-`ApiError` branches — coverage
+neither page's own tests had provided for the 401 (`session.clear()`) or bare-403 cases before the
+extraction. This is a second file this spec's Scope section did not anticipate touching, alongside
+the render-tree and `navError` corrections above.
 
 ## §3 What does not change
 
@@ -264,6 +281,10 @@ drives its own `{#if pollError}` branch with no precedence rule against `navErro
     resolves late is not.
 - Existing `web/src/lib/poll.svelte.test.ts` / `poll.dom.test.ts` are unchanged — this migration
   adds no new behavior to `Poller` itself.
+- `web/src/lib/poll-fatal.test.ts` — added during review (§2a's third point), covering
+  `fatalApiFailure`'s four branches directly: a non-`ApiError` failure, a `401`
+  (`isUnauthenticated`, asserting `session.clear()` is called), an `isNotFound` failure, and a
+  bare `403`.
 - Gates: `npm run check`, `npm run lint`, `npm test`, `npm run build`.
 
 ## Error Handling & Edge Cases

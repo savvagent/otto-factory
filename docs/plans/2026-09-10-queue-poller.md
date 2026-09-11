@@ -16,13 +16,17 @@ exactly.
 
 ✅ Shipped in `savvagent/otto-factory#146`, closing `savvagent/otto-factory#104` and
 `savvagent/otto-factory#92`. Merged as `867c10b`; the merge commit's own CI run
-(`34554517396`) is green on `rust` and `web`. Task 1 went through three PR-review fix rounds
-(the mandatory Rust/architect/security trio plus Copilot) beyond what this plan's steps
-describe verbatim — most notably splitting `navError`/`pollError` into two independent
-notices rather than merging them, hoisting the stale/parked note above the `Empty`/table
-split so it is reachable on an empty result, and extracting the shared `fatalApiFailure`
-classifier into `web/src/lib/poll-fatal.ts` (also adopted by the overview page). See the
-design spec's §2a for the corrected account of what shipped.
+(`34554517396`) is green on `rust` and `web`. Task 1 went through three Copilot review
+rounds, plus the mandatory Rust/architect/security review trio, before merging — the
+design changed in response (most notably splitting `navError`/`pollError` into two
+independent notices rather than merging them, hoisting the stale/parked note above the
+`Empty`/table split so it is reachable on an empty result, and extracting a shared
+`fatalApiFailure` classifier into `web/src/lib/poll-fatal.ts`, adopted by both this page
+and the overview page). **The steps below have been corrected in place to match what
+actually shipped** — the File Structure table's rows for `poll-fatal.ts` and the overview
+page mark what was added beyond the original plan's scope, and the render-tree and
+`$effect` snippets in Task 1 reflect the final design. See the design spec's §2a for the
+corresponding account there.
 
 ## Global Constraints
 
