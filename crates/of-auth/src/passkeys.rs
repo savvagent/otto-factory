@@ -564,7 +564,7 @@ pub async fn remove(db: &Db, user: UserId, key: Uuid, ip: Option<&str>) -> Resul
     // aggregate cannot ride `FOR UPDATE`, hence selecting ids and counting in
     // Rust.
     let remaining: Vec<Uuid> =
-        sqlx::query_scalar("SELECT id FROM passkeys WHERE user_id = $1 FOR UPDATE")
+        sqlx::query_scalar("SELECT id FROM passkeys WHERE user_id = $1 ORDER BY id FOR UPDATE")
             .bind(user)
             .fetch_all(tx.conn())
             .await?;
@@ -673,6 +673,18 @@ pub async fn rename(
 /// and it is the function `#134` names — leaving it best-effort would fix the
 /// letter of the issue while leaving the bug for whichever direct caller
 /// shows up next (a self-service "clear my own passkeys" flow, say).
+///
+/// **Warning for any future caller, including that hypothetical self-service
+/// flow:** this function has no last-passkey guard (unlike [`remove`]) and
+/// mints no claim code (unlike `reset_member_passkeys`'s use of `clear_tx`).
+/// Calling it directly wipes every credential on the account with no way
+/// back in — a permanent, unrecoverable lockout on a product with no email
+/// recovery. Any new caller must mint a claim code (or an equivalent re-entry
+/// mechanism) in the *same transaction* as the wipe, the way
+/// `reset_member_passkeys` does around [`clear_tx`]; that machinery lives
+/// entirely there today, not in this function. This is the exact class of
+/// mistake `savvagent/otto-factory#87` already produced once by splitting the
+/// clear from the claim-code issuance.
 pub async fn clear(db: &Db, user: UserId, actor: UserId, ip: Option<&str>) -> Result<u64> {
     let mut tx = db.begin_unpinned().await?;
     let removed = clear_tx(tx.conn(), user).await?;

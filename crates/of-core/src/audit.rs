@@ -34,10 +34,19 @@ pub mod action {
     /// writes this constant anymore.
     pub const TOTP_ENROLLED: &str = "auth.totp.enrolled";
     /// Historical only, for the same reason as `TOTP_ENROLLED`. Rows predate a
-    /// split into two successors: `PASSKEY_CLEARED` (self-service, global) and
+    /// split into two successors: `PASSKEY_CLEARED` (global) and
     /// `MEMBER_PASSKEYS_RESET` (admin-assisted, org-scoped). A historical row
     /// under this action does not say which of the two occurred — check
-    /// whether it carries an `org_id` to tell them apart.
+    /// whether it carries an `org_id` to tell them apart. As of
+    /// `savvagent/otto-factory#134`, `PASSKEY_CLEARED` itself has zero
+    /// production writers — `reset_member_passkeys`, the only place an
+    /// account is cleared today, writes `MEMBER_PASSKEYS_RESET` only, and
+    /// `passkeys::clear` (the sole writer of `PASSKEY_CLEARED`) has no
+    /// production caller. A "self-service, global" framing for
+    /// `PASSKEY_CLEARED` would now be describing a flow that doesn't exist;
+    /// it stays defined because `passkeys::clear` is still public
+    /// crate-workspace API, exercised by its own tests, that a future
+    /// self-service clear flow could call — see that function's doc comment.
     pub const TOTP_RESET: &str = "auth.totp.reset";
     pub const RECOVERY_CODE_USED: &str = "auth.recovery_code.used";
     pub const MAGIC_LINK_SENT: &str = "auth.magic_link.sent";
