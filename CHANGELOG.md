@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.4.0](https://github.com/savvagent/otto-factory/compare/v0.3.1...v0.4.0) (2026-09-11)
+
+
+### Features
+
+* **web:** show console version in footer ([#142](https://github.com/savvagent/otto-factory/issues/142)) ([4d5cedf](https://github.com/savvagent/otto-factory/commit/4d5cedf500603f7e0e33a209111d9ef774958c09))
+
+
+### Bug Fixes
+
+* **of-core:** describe both RLS outcomes in begin_unpinned's doc comment ([#141](https://github.com/savvagent/otto-factory/issues/141)) ([3d21fa3](https://github.com/savvagent/otto-factory/commit/3d21fa3e35e67b21a2c71d058447669d76dd30f3)), closes [#112](https://github.com/savvagent/otto-factory/issues/112)
+
 ## [0.3.1](https://github.com/savvagent/otto-factory/compare/v0.3.0...v0.3.1) (2026-09-10)
 
 
