@@ -14,30 +14,48 @@
 # design and known gaps.
 #
 # ---------------------------------------------------------------------------
-# Security model (round 2): a character allowlist defends the SHELL, not the
+# Security model (round 3): a character allowlist defends the SHELL, not the
 # model. Letters, digits, '.', '-', '_', '/' are already enough to write
 # fluent imperative English — a branch or remote built only from those
 # characters can still read as an instruction override once it lands inside
 # `additionalContext`. Fluent prose was confirmed to pass a plain character
-# allowlist in the round-1 version of this script. Two structural changes
-# close that, instead of a wider or narrower character class:
+# allowlist in the round-1 version of this script. Round 2 closed that with
+# two structural changes (kept as-is below): the branch name never reaches
+# model-facing text in raw form — only a 16-hex-char digest of it does — and
+# the remote is constrained by an actual URL grammar rather than a flat
+# character class.
 #
-#   1. The branch name NEVER reaches model-facing text in its raw form.
-#      Only a short hex digest of it (`branch_digest`, 16 hex chars) is ever
-#      placed in the data block, the idempotency key, or `metadata`. Hex
-#      characters cannot spell an instruction, no matter what the branch was
-#      named.
-#   2. The remote URL still has to reach `resolve_repo` as itself, so it is
-#      constrained by an actual URL grammar (scheme + host + capped path
-#      segments) rather than a flat character class over the whole string —
-#      narrower than "any of these characters in any order," which is what
-#      let round 1's allowlist still admit prose.
+# Round 2's grammar check itself had a bug: it used `grep -Eq '^…$'`, and
+# POSIX/GNU `grep -E` anchors `^`/`$` per LINE, not per whole string. Since
+# `git remote get-url origin` can return a value containing an embedded
+# newline (git config stores a `\n` escape and expands it back to a literal
+# newline on read — not something git itself needs to be tricked into), a
+# remote whose FIRST line was a valid URL passed the grammar outright while
+# every subsequent line — including attacker-authored imperative prose, and
+# even a fence-escaping delimiter — was carried through unexamined into the
+# model's instruction payload. Confirmed empirically against the round-2
+# script. Round 3 closes this with two changes, both required (either alone
+# is insufficient):
 #
-# A second, independent control closes the other round-2 finding: this hook
-# is INERT — produces no `additionalContext` at all — for any repo whose
-# `origin` host is not explicitly opted into by the developer beforehand (see
-# HOST ALLOWLIST below). Opening or cloning a repo you have not opted in no
-# longer puts a single attacker-influenced byte in front of the model.
+#   1. Any remote containing a control character (which includes the
+#      newline responsible for the line-anchoring bypass) is rejected
+#      outright, before anything else is derived from it. A legitimate git
+#      remote URL never contains one.
+#   2. The grammar match itself is now `[[ "$remote" =~ $pattern ]]` — bash's
+#      own regex engine, anchored against the ENTIRE string with no
+#      per-line ambiguity — in place of `grep -Eq`.
+#
+# Round 3 also folds the host allowlist and the old, separately-written
+# `extract_host` string-slicing function into that same regex match: the
+# grammar match's own capture groups are now the only place a host or owner
+# is ever read from, so there is exactly one parser and one definition of
+# "legal remote" (round 2's `extract_host` and its grammar check could, and
+# once did, disagree about what a legal remote looked like — see the
+# REPO ALLOWLIST section below). The allowlist itself is now owner-scoped
+# (`host/owner`, e.g. `github.com/savvagent`) rather than host-scoped: a
+# bare hostname arms this hook in every repo on that host, including a
+# coworker's fork or a cloned dependency — exactly the population the gate
+# exists to exclude.
 #
 # The fencing/labeling of the data block (below) is kept as defense in
 # depth, not as a primary control — see client-skills/README.md's contract
@@ -47,13 +65,17 @@ set -euo pipefail
 
 # Claude Code pipes a JSON payload on stdin that includes a `cwd` field
 # naming the project directory. Read it defensively rather than assuming the
-# hook process's own working directory is already the project root. `cwd` is
-# extracted with a bounded, greedy-but-single-match sed pattern rather than a
-# JSON parser — no `jq` dependency is assumed to be installed, and the
-# payload's shape here is simple enough that a full parser would be
-# disproportionate; `|| true` guards the pipeline against `set -e`+`pipefail`
-# treating an early-closed `head` pipe as a script-ending failure rather than
-# the benign "nothing matched" case.
+# hook process's own working directory is already the project root, and cap
+# it at 64KiB (`head -c`) before anything touches it: Claude Code is the only
+# producer of this stdin today, so an unbounded read is hardening rather
+# than a response to an observed exposure, but it costs nothing and a real
+# `cwd` payload is a handful of bytes. `cwd` is then extracted with a
+# bounded, greedy-but-single-match sed pattern rather than a JSON parser — no
+# `jq` dependency is assumed to be installed, and the payload's shape here is
+# simple enough that a full parser would be disproportionate; `|| true`
+# guards the pipeline against `set -e`+`pipefail` treating an early-closed
+# `head` pipe as a script-ending failure rather than the benign "nothing
+# matched" case.
 #
 # Known, accepted limitation (kept deliberately, not an oversight): this
 # regex-based extraction truncates at the first unescaped `"` inside the
@@ -69,7 +91,7 @@ set -euo pipefail
 # self-contained script for one with an optional-but-recommended dependency,
 # for a gap whose worst outcome is already "do nothing," which is this
 # script's fail-closed default everywhere else.
-input="$(cat)"
+input="$(head -c 65536)"
 project_dir="$(printf '%s' "$input" | sed -n 's/.*"cwd"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1 || true)"
 if [ -z "$project_dir" ] || [ ! -d "$project_dir" ]; then
   project_dir="$PWD"
@@ -97,90 +119,110 @@ if [ -z "$remote" ] || [ -z "$branch" ] || [ "$branch" = "HEAD" ]; then
   exit 0
 fi
 
-# --- HOST ALLOWLIST (required, checked before anything else is built) -----
+# --- Control-character rejection (round 3, finding 1, part 1) --------------
+# Checked before anything else is derived from `$remote` — including the
+# length cap below and the grammar match after it. See the top-of-file
+# comment for why this specific check exists: it is what closes the
+# line-anchored `grep` bypass, since the bypass depended on an embedded
+# newline (a control character) surviving into a later step. A legitimate
+# git remote URL never contains one, so this rejects nothing a real remote
+# would ever produce.
+case "$remote" in
+  *[[:cntrl:]]*) exit 0 ;;
+esac
+
+if [ "${#remote}" -gt 200 ]; then
+  exit 0
+fi
+
+# --- Structural validation + host/owner extraction, as ONE step ------------
+# (round 3, finding 1 part 2, and finding 3.) The remote genuinely has to
+# reach `resolve_repo` as itself (it is the argument that names the repo),
+# so it is validated against an actual URL grammar — scheme, host, and a
+# capped run of path segments — rather than reduced to a digest the way the
+# branch was. `[[ "$remote" =~ $pattern ]]` is bash's OWN regex engine: it
+# matches the pattern against the entire string, with the `^…$` anchors
+# meaning exactly that (no per-line reinterpretation the way `grep -E`'s
+# anchors did — that per-line behavior is what let a multi-line remote pass
+# round 2's `grep -Eq "$pattern"` check on its first line alone while every
+# later line rode along unexamined). Checked against real
+# `git remote get-url origin` output for GitHub HTTPS, GitHub SSH (scp-like
+# `git@host:path` and `ssh://git@host/path`), and a self-hosted GitLab
+# remote with nested groups and a non-default port.
+#
+# The host and owner used by the REPO ALLOWLIST below are read from THIS
+# match's own capture groups — never from a second, independently-written
+# parser. Round 2's `extract_host` was exactly that second parser, and it
+# disagreed with the grammar about what counts as a legal remote: its
+# longest-match `@`-strip (`h="${h##*@}"`) would extract host `github.com`
+# from `https://evil.com/x@github.com/y` — not the host git would actually
+# contact — and was only saved from being a real bypass because the grammar
+# separately forbids `@` in that position. One parser now, not two that
+# happen (for now) to agree.
+https_pattern='^https://([A-Za-z0-9.-]{1,64})(:[0-9]{1,5})?/([A-Za-z0-9._-]{1,64})(/[A-Za-z0-9._-]{1,64}){0,7}(\.git)?$'
+ssh_pattern='^ssh://git@([A-Za-z0-9.-]{1,64})(:[0-9]{1,5})?/([A-Za-z0-9._-]{1,64})(/[A-Za-z0-9._-]{1,64}){0,7}(\.git)?$'
+scp_pattern='^git@([A-Za-z0-9.-]{1,64}):([A-Za-z0-9._-]{1,64})(/[A-Za-z0-9._-]{1,64}){0,7}(\.git)?$'
+
+remote_host=""
+remote_owner=""
+if [[ "$remote" =~ $https_pattern ]]; then
+  remote_host="${BASH_REMATCH[1]}"
+  remote_owner="${BASH_REMATCH[3]}"
+elif [[ "$remote" =~ $ssh_pattern ]]; then
+  remote_host="${BASH_REMATCH[1]}"
+  remote_owner="${BASH_REMATCH[3]}"
+elif [[ "$remote" =~ $scp_pattern ]]; then
+  remote_host="${BASH_REMATCH[1]}"
+  remote_owner="${BASH_REMATCH[2]}"
+else
+  # Not shaped like one of the three URL forms git itself produces — a
+  # remote built to look like a sentence (spaces, `$(...)`, or anything
+  # else) does not match, whatever host or owner substring it might
+  # otherwise contain.
+  exit 0
+fi
+
+# --- REPO ALLOWLIST (required, checked before anything else is built) -----
 # This hook is inert by default: absent an opt-in allowlist file, it never
-# produces `additionalContext`, in any repo, for any remote. The developer
-# opts a host in explicitly by listing it (one hostname per line, '#'
-# comments and blank lines ignored) in ~/.claude/otto-factory-hosts. This is
-# what stops the untrusted bytes from reaching the model's context before
-# `resolve_repo` (which the *model* calls, one turn later) has any chance to
-# reject a repo unrelated to otto-factory — merely opening a cloned repo is
-# enough to reach that point otherwise.
-hosts_file="${HOME:-}/.claude/otto-factory-hosts"
-if [ -z "${HOME:-}" ] || [ ! -f "$hosts_file" ]; then
+# produces `additionalContext`, in any repo, for any remote. Owner-scoped,
+# not host-scoped (round 3, finding 2): the realistic content of a
+# host-scoped allowlist is one line reading `github.com`, which arms this
+# hook in EVERY github.com repo the developer opens — a coworker's fork, a
+# PR checkout, a cloned dependency — the exact population the gate is
+# supposed to exclude. The developer instead opts in a `host/owner` pair,
+# one per line ('#' comments and blank lines ignored), in
+# ~/.claude/otto-factory-repos — e.g. `github.com/savvagent` — naming the
+# org/user that actually owns their otto-factory-registered repos, not
+# merely the host those repos happen to be hosted on. This is what stops the
+# untrusted bytes from reaching the model's context before `resolve_repo`
+# (which the *model* calls, one turn later) has any chance to reject a repo
+# unrelated to otto-factory — merely opening a cloned repo is enough to
+# reach that point otherwise.
+repos_file="${HOME:-}/.claude/otto-factory-repos"
+if [ -z "${HOME:-}" ] || [ ! -f "$repos_file" ]; then
   exit 0
 fi
 
-extract_host() {
-  # Structural host extraction for the three remote URL shapes git actually
-  # produces: https://, ssh://, and the scp-like git@host:path form. Any
-  # other shape yields an empty host, which fails the allowlist check below
-  # (fail closed, never fail open).
-  case "$1" in
-    https://*|http://*)
-      h="${1#*://}"
-      h="${h##*@}"   # drop optional userinfo
-      h="${h%%/*}"   # drop path
-      h="${h%%:*}"   # drop port
-      printf '%s' "$h"
-      ;;
-    ssh://*)
-      h="${1#ssh://}"
-      h="${h##*@}"
-      h="${h%%/*}"
-      h="${h%%:*}"
-      printf '%s' "$h"
-      ;;
-    git@*)
-      h="${1#git@}"
-      h="${h%%:*}"
-      printf '%s' "$h"
-      ;;
-    *)
-      printf ''
-      ;;
-  esac
-}
-
-remote_host="$(extract_host "$remote")"
-if [ -z "$remote_host" ]; then
-  exit 0
-fi
 # Case-insensitive match against the allowlist file, ignoring blank lines
-# and '#' comments.
+# and '#' comments. The candidate key is built from the grammar match's own
+# capture groups above, never re-derived.
 remote_host_lc="$(printf '%s' "$remote_host" | tr '[:upper:]' '[:lower:]')"
-host_allowed=0
+remote_owner_lc="$(printf '%s' "$remote_owner" | tr '[:upper:]' '[:lower:]')"
+remote_key_lc="${remote_host_lc}/${remote_owner_lc}"
+
+repo_allowed=0
 while IFS= read -r line || [ -n "$line" ]; do
   line="${line%%#*}"
   # trim surrounding whitespace
   line="$(printf '%s' "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
   [ -z "$line" ] && continue
   line_lc="$(printf '%s' "$line" | tr '[:upper:]' '[:lower:]')"
-  if [ "$line_lc" = "$remote_host_lc" ]; then
-    host_allowed=1
+  if [ "$line_lc" = "$remote_key_lc" ]; then
+    repo_allowed=1
     break
   fi
-done < "$hosts_file"
-if [ "$host_allowed" -ne 1 ]; then
-  exit 0
-fi
-
-# --- Structural validation (after the host gate, before use anywhere) -----
-# The remote must still reach `resolve_repo` as itself, so it is validated
-# against an actual URL grammar — scheme, host, and a capped run of path
-# segments — rather than a flat character-class allowlist over the whole
-# string. A flat allowlist (letters, digits, '.', '-', '_', '/', ':', '@',
-# '+', '~') is wide enough to spell fluent English; this grammar rejects any
-# string that isn't shaped like one of the three URL forms git itself
-# produces, which a hand-built instruction sentence is not. Verified against
-# real `git remote get-url origin` output for GitHub HTTPS, GitHub SSH
-# (scp-like `git@host:path` and `ssh://git@host/path`), and a self-hosted
-# GitLab remote with nested groups and a non-default port.
-if [ "${#remote}" -gt 200 ]; then
-  exit 0
-fi
-remote_pattern='^(https://[A-Za-z0-9.-]{1,64}(:[0-9]{1,5})?(/[A-Za-z0-9._-]{1,64}){1,8}(\.git)?|ssh://git@[A-Za-z0-9.-]{1,64}(:[0-9]{1,5})?(/[A-Za-z0-9._-]{1,64}){1,8}(\.git)?|git@[A-Za-z0-9.-]{1,64}:[A-Za-z0-9._-]{1,64}(/[A-Za-z0-9._-]{1,64}){0,7}(\.git)?)$'
-if ! printf '%s' "$remote" | grep -Eq "$remote_pattern"; then
+done < "$repos_file"
+if [ "$repo_allowed" -ne 1 ]; then
   exit 0
 fi
 
@@ -221,9 +263,14 @@ today="$(date -u +%Y-%m-%d)"
 # assuming `jq` (or any other JSON tool) is installed on the developer's
 # machine. `branch_digest` is hex and `today` is `YYYY-MM-DD`, neither of
 # which needs escaping; `remote` is the only substituted value that can
-# contain any of the three characters this function handles, and the URL
-# grammar above already excludes raw control characters and unescaped
-# quotes from it.
+# contain any of the three characters this function handles, and the
+# control-character rejection above already excludes raw newlines (along
+# with every other control character) from it, on top of the URL grammar
+# excluding unescaped quotes. The `\n` branch here is kept anyway, not
+# because a remote can still carry one — it cannot, once the check above
+# runs — but because a value could reach this function by some other path
+# in the future, and json_escape is cheap insurance to keep either way; it
+# is not, on its own, a control this script relies on today.
 json_escape() {
   local s="$1"
   s="${s//\\/\\\\}"

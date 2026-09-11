@@ -60,19 +60,25 @@ actually takes — follows the same job lifecycle:
    short hex hash of a branch name, never the branch name itself), a value drawn from a
    fixed enumeration, or a narrowly-grammared form (e.g. an actual URL grammar — scheme,
    host, length-capped path segments — rather than a flat character class over the whole
-   string). Present the result as clearly labeled, fenced *data* the instruction refers to
-   by name, never interpolated directly into the imperative steps themselves — fencing is
-   real **defense in depth**, but never the primary control, and never a substitute for the
-   value itself being non-prose-capable. Additionally, **gate emission on something the
-   developer explicitly opted into** (e.g. an allowlisted remote host) *before* any
-   untrusted byte is used to build model-facing text — the one thing the model can do that
-   nothing upstream of it can, is check whether a repo is *actually* related to this
+   string, matched as one whole string with no per-line ambiguity for something like `grep`'s
+   line-anchored `^`/`$` to exploit against a value that can carry an embedded newline).
+   Present the result as clearly labeled, fenced *data* the instruction refers to by name,
+   never interpolated directly into the imperative steps themselves — fencing is real
+   **defense in depth**, but never the primary control, and never a substitute for the value
+   itself being non-prose-capable. Additionally, **gate emission on something the developer
+   explicitly opted into, scoped as narrowly as the opt-in can honestly be** (e.g. an
+   allowlisted `host/owner` pair, not merely a host — a bare hostname's realistic content
+   arms a hook in every repo on that host, which is rarely the intended population) *before*
+   any untrusted byte is used to build model-facing text — the one thing the model can do
+   that nothing upstream of it can, is check whether a repo is *actually* related to this
    otto-factory org (`resolve_repo`), and by the time the model runs that check the
    untrusted bytes are already in its context. See `claude-code/session-start-hook.sh` and
    its README's Security section for a worked example: a hex branch digest instead of the
-   raw branch name, a URL grammar instead of a character class for the remote, a host
-   opt-in allowlist checked before anything else is built, and how to keep a shell script's
-   own heredoc construction from re-interpolating a captured value.
+   raw branch name, a URL grammar (matched with the language's own whole-string regex
+   construct, not a line-oriented tool) instead of a character class for the remote, an
+   owner-scoped opt-in allowlist read from that same grammar match's own capture groups and
+   checked before anything else is built, and how to keep a shell script's own heredoc
+   construction from re-interpolating a captured value.
 
 ## What this directory is not
 
@@ -159,8 +165,10 @@ below:
       as a substitute for it.
 - [ ] If the template fires automatically in every repo the client opens (rather than only on
       an explicit, per-invocation action by the developer), emission is gated on something the
-      developer opted into beforehand (e.g. an allowlisted remote host read from a file under
-      the developer's own control) — checked before any untrusted byte is used to build
+      developer opted into beforehand, scoped no wider than the population it is meant to
+      cover (e.g. an allowlisted `host/owner` pair read from a file under the developer's own
+      control — a bare hostname is not narrow enough, since its realistic content arms the
+      gate in every repo on that host) — checked before any untrusted byte is used to build
       model-facing text, so the template is inert by default in a repo the developer never
       opted in.
 
