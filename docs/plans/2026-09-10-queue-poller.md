@@ -252,6 +252,7 @@ existing imports). Produces no new public interface — this is page-internal st
       ```bash
       cd web && npm run lint -- --write && npm run lint
       cd .. && git add web/src/routes/o/\[org\]/queue/+page.svelte web/messages/*.json \
+        web/src/routes/o/\[org\]/queue/QueueHarness.svelte \
         web/src/routes/o/\[org\]/queue/page.render.test.ts web/README.md
       git commit -m "web: migrate the queue page's job list to Poller, keyed on filters too"
       ```
