@@ -1,6 +1,6 @@
 # Otto CLI connect recipe design
 
-> **Status:** DRAFT — unblock `savvagent/otto-factory#41` now that the upstream client ships a
+> **Status:** APPROVED — unblock `savvagent/otto-factory#41` now that the upstream client ships a
 > remote-MCP path, and add its `ClientRecipe` entry to the connect page.
 
 > **Implements:** `savvagent/otto-factory#41`
@@ -93,18 +93,25 @@ gap the issue identified without inventing a config shape that doesn't exist.
   oauth: (url) =>
     `[[mcp_servers]]\nname = "otto-factory"\ntransport = "http"\nurl = "${url}"\nauth = "oauth"`,
   token: (url, token) =>
-    `[[mcp_servers]]\nname = "otto-factory"\ntransport = "http"\nurl = "${url}"\nauth = "bearer"\n\n# then run \`otto\`, open /mcp, and paste the token when prompted — Otto stores it in the\n# OS keyring under service "otto", account "mcp:otto-factory"; it is never written to this file.`,
+    `[[mcp_servers]]\nname = "otto-factory"\ntransport = "http"\nurl = "${url}"\nauth = "bearer"\n\n# then run \`otto\`, open /mcp, and paste the token when prompted — Otto stores it in the\n# OS keyring under service "otto", account "mcp:otto-factory"; it is never written to this file.\n# Add/remove and a completed OAuth authorization both require restarting otto to take effect.`,
   note: () => m.client_note_otto_cli()
 }
 ```
 
 Notes on the shape, cited against upstream source:
 
-- `transport = "http"`, `name`, `url`, and `auth` are exactly the fields
-  `mcp_config_writer::entry_table`'s `McpServerEntry::Http` arm writes
-  (`crates/otto/src/mcp_config_writer.rs:63-75`), confirmed against that module's own
-  `add_server_preserves_malformed_rows_and_comments` test, which asserts the identical
-  `transport = "http"` / `url = "..."` / `auth = "bearer"` rendering for a `Bearer` entry.
+- `transport`, `name`, `url`, and `auth` are the same fields `mcp_config_writer::entry_table`'s
+  `McpServerEntry::Http` arm writes (`crates/otto/src/mcp_config_writer.rs:63-75`), confirmed
+  against that module's own `add_server_preserves_malformed_rows_and_comments` test, which asserts
+  the identical `transport = "http"` / `url = "..."` / `auth = "bearer"` rendering for a `Bearer`
+  entry — field *order* in the snippet above differs from what `entry_table` writes
+  (`transport, name, url, auth` upstream vs. `name, transport, url, auth` here), which is inert:
+  the format is internally tagged (`#[serde(tag = "transport")]`), so TOML key order carries no
+  meaning to the parser.
+- **Otto requires a restart to pick up a new or changed `mcp_servers` entry** — added and OAuth
+  connections included (upstream README: "Add/remove and successful OAuth authorization still
+  require a restart to take effect"). The token snippet's comment says so explicitly, so a reader
+  who authorizes and immediately tries calling a tool isn't left wondering why nothing connected.
 - `name = "otto-factory"` is the MCP-server *identity* Otto stores this connection under (used to
   key its keyring account, `mcp:otto-factory`) — an arbitrary but stable choice, same role as the
   `otto-factory` key already used in the Copilot CLI and Cursor JSON snippets in this same file.
@@ -126,7 +133,8 @@ entries" rule. English source string:
 
 > "Then run `otto`, open `/mcp`, press `o` to authorize in your browser, and press `c` once it
 > redirects back — Otto's OAuth consent is interactive-only, the same as Claude Code and Copilot
-> CLI above."
+> CLI above. Restart otto afterward; a new or newly-authorized server only connects on the next
+> launch."
 
 Placeholders: none. Plural category: none (not a plural message). `scripts/check-messages.mjs`
 (run by `npm run check`) is the gate that would fail on a missing locale, a dropped placeholder, or
