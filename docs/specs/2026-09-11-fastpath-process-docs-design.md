@@ -1,8 +1,9 @@
 # Fast-path criteria gains a normative-process-docs disqualifier design
 
-> **Status:** DRAFT — adds a fast-path disqualifier to `otto-factory-development`'s
+> **Status:** IMPLEMENTED — adds a fast-path disqualifier to `otto-factory-development`'s
 > trivial-task criteria for new-or-materially-changed normative process content under
 > `.github/skills/`, using PR #150's escalating five-round review as the motivating example.
+> Shipped in PR #171.
 
 ## Premise corrections
 

@@ -14,7 +14,27 @@ example, so such changes go through the design-spec path even when they are "onl
 
 ## Status — 2026-09-11
 
-⬜ Not started.
+✅ Shipped in PR #171, merged as commit `276e11f8192f0aa21926a2d7b24780e2933f4133`. CI on that
+merge commit is green (rust + web, run against master). One task, complete.
+
+The mandatory review trio (rust-pro, architect-reviewer, security-auditor) found no
+Critical/High issues. rust-pro and architect-reviewer independently flagged the same Important
+finding: the new disqualifier bullet and its trigger-paragraph clause had drifted in scope, and
+"substantial rewrite of dispatch/orchestration logic" reintroduced a size threshold graded by
+the same agent deciding whether to skip the spec — the exact self-assessment failure the section
+exists to prevent (echoed as a Low finding by security-auditor). Resolved in a follow-up commit
+on the PR: "substantial" was dropped entirely, so the bullet, the trigger-paragraph clause, and
+the rationalization table now agree that *any* change to dispatch/orchestration logic in an
+existing skill file disqualifies, however small, with an explicit prose/typo carve-out.
+architect-reviewer also flagged that the committed plan's prescribed trigger-paragraph wording
+had drifted from what shipped in `SKILL.md`; fixed in the same commit, and this document now
+matches. The spec's Out-of-scope claim that the new bullet was "appended, not interleaved" was
+corrected to describe its actual second-to-last insertion point (architect-reviewer Minor,
+security-auditor Informational). The one finding left as a follow-up rather than fixed in this
+PR: architect-reviewer and security-auditor both noted the disqualifier's rationale applies at
+least as strongly to `CLAUDE.md` as to `.github/skills/`, which stays fast-pathable after this
+PR — issue #152's acceptance criteria scoped the ask to `.github/skills/` specifically, so this
+was filed as `savvagent/otto-factory#172` rather than folded into this PR's scope.
 
 ## Global Constraints
 
@@ -50,13 +70,13 @@ example, so such changes go through the design-spec path even when they are "onl
 Single task — one file, one section, three closely-related edit points that all land together
 so the section stays internally consistent in one commit.
 
-## Task 1 — Add the normative-process-docs fast-path disqualifier ⬜
+## Task 1 — Add the normative-process-docs fast-path disqualifier ✅
 
 **Files:** `.github/skills/otto-factory-development/SKILL.md`
 **Interfaces:** none — this edits a Markdown criteria list read by whichever agent invokes the
 `otto-factory-development` skill; it has no compiled interface.
 
-- [ ] Confirm the current section text hasn't drifted since the spec was written:
+- [x] Confirm the current section text hasn't drifted since the spec was written:
       `sed -n '/^## Fast-Path: Trivial Tasks/,/^## Repository Conventions/p' .github/skills/otto-factory-development/SKILL.md`
       — should show the disqualifier list (ending "The acceptance criterion fits in one
       sentence"), the "Concrete examples that qualify" list, the fast-path-plan paragraph, the
@@ -64,7 +84,7 @@ so the section stays internally consistent in one commit.
       ending with the "No spec, but I'll still write a one-line plan" row. Using a
       heading-anchored range (rather than a fixed line count) keeps this command correct after
       the section grows by the insertions below.
-- [ ] Add a new bullet to the disqualifier list (after the existing "No change to
+- [x] Add a new bullet to the disqualifier list (after the existing "No change to
       deploy/distribution shape (...)" bullet and before "The acceptance criterion fits in one
       sentence", so the acceptance-criterion bullet — the tightest, most general check — stays
       last):
@@ -72,7 +92,7 @@ so the section stays internally consistent in one commit.
       - No new file under `.github/skills/`, and no change to dispatch/orchestration logic in
         an existing one, however small — a prose or typo fix inside one stays eligible
       ```
-- [ ] Extend the "If you find yourself rationalizing into the fast-path on…" trigger paragraph
+- [x] Extend the "If you find yourself rationalizing into the fast-path on…" trigger paragraph
       with the same category, inserted before the existing "or has more than a one-sentence
       AC" clause so the paragraph's final "→ STOP. Write the spec." still reads naturally:
       change
@@ -90,7 +110,7 @@ so the section stays internally consistent in one commit.
       eligible), or has more than a one-sentence AC → STOP. Write the spec. The fast-path is for
       genuine triviality, not "I think this is small."
       ```
-- [ ] Add a new row to the "Common Fast-Path Rationalizations" table (the `| Fast-path
+- [x] Add a new row to the "Common Fast-Path Rationalizations" table (the `| Fast-path
       rationalization | Reality |` table), after the existing "I'll fast-path the first
       sub-change and spec the rest" row and before the closing "No spec, but I'll still write a
       one-line plan" row:
@@ -98,30 +118,36 @@ so the section stays internally consistent in one commit.
       | "The new skill content is tiny — just a couple of files" | Process docs that will drive future autonomous runs are themselves architecture. PR #150 fast-pathed a 511-line-at-the-time skill-file pair on "two logical files" and needed five rounds of trio review before it hardened. Spec first. |
       | "It's only one bullet, hardly a substantial rewrite" | The rule doesn't turn on size — any change to dispatch/orchestration logic under `.github/skills/` disqualifies, however small. Grading your own edit as "not substantial" is the exact rationalization this section exists to refuse. Spec first (a prose/typo fix is the only carve-out). |
       ```
-- [ ] Confirm the diff is scoped exactly as planned: `git diff .github/skills/otto-factory-development/SKILL.md`
+- [x] Confirm the diff is scoped exactly as planned: `git diff .github/skills/otto-factory-development/SKILL.md`
       shows three additions (one disqualifier bullet, one trigger-paragraph edit, one table
       row) and nothing else — no reflow of unrelated lines, no change outside the "Fast-Path:
       Trivial Tasks" section.
-- [ ] Re-read the full "Fast-Path: Trivial Tasks" section once more
+- [x] Re-read the full "Fast-Path: Trivial Tasks" section once more
       (`sed -n '/^## Fast-Path: Trivial Tasks/,/^## Repository Conventions/p' .github/skills/otto-factory-development/SKILL.md`)
       to confirm it still reads coherently end to end with the three insertions in place —
       table column alignment doesn't need to be pixel-perfect (the existing table already has
       long, unaligned cells), but the row must parse as a valid Markdown table row.
-- [ ] Format and commit: `git commit -m "docs: disqualify normative skill-process changes from otto-factory-development's fast-path"`.
+- [x] Format and commit: `git commit -m "docs: disqualify normative skill-process changes from otto-factory-development's fast-path"`.
       No `cargo fmt` needed — no Rust file touched. `docs` is the correct Conventional-Commits
       type for the PR title `pr-title` CI checks against.
 
 ## Final Verification (after Task 1)
 
-- [ ] `git log --oneline` on the branch shows the spec commit, the plan commit, and the Task 1
+- [x] `git log --oneline` on the branch shows the spec commit, the plan commit, and the Task 1
       commit, none carrying AI attribution.
-- [ ] `cargo test --workspace` — vacuously unaffected (no Rust source touched); confirm the
+- [x] `cargo test --workspace` — vacuously unaffected (no Rust source touched); confirm the
       `rust` CI job on this PR passes to be sure nothing in the workspace parses `SKILL.md`.
-- [ ] No `web/` change — `npm run check`/`lint`/`test`/`build` vacuously satisfied; confirm the
+- [x] No `web/` change — `npm run check`/`lint`/`test`/`build` vacuously satisfied; confirm the
       `web` CI job on this PR passes.
-- [ ] No migration, no container image, no Cloudflare Worker touched — vacuously satisfied.
-- [ ] Re-read the edited "Fast-Path: Trivial Tasks" section fresh (as a future run invoking
+- [x] No migration, no container image, no Cloudflare Worker touched — vacuously satisfied.
+- [x] Re-read the edited "Fast-Path: Trivial Tasks" section fresh (as a future run invoking
       this skill would) and confirm a hypothetical PR #150-shaped change — a new pair of skill
       files under `.github/skills/`, described in the brief as "two logical files" — would now
       fail the disqualifier list on the new bullet, per the spec critique's advisory
       recommendation.
+
+## Record-as-shipped
+
+Done — this commit is that record: the spec's `> **Status:**` is flipped to IMPLEMENTED, and
+this plan's `## Status` block above carries the merge commit and the review-trio outcome, per
+Phase 4 step 12 of `otto-factory-development`.
