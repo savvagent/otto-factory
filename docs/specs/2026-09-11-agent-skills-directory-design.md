@@ -76,13 +76,30 @@ from an open-source directory so the community carries that maintenance burden p
   `pending`, not claimed, so a two-call `add_job` → `complete_job` sequence (this spec's first
   draft) errors on every invocation and leaves the marker stuck `pending` and genuinely claimable
   by any real agent polling `ready`, which is exactly the orphaned/confusable-with-real-work state
-  this bullet exists to avoid. The corrected three-call sequence closes that gap: `claim_jobs`
-  takes explicit job ids (`jobs: [<id>]`), so the script claims precisely the job it just created
-  — never anything from the general `ready` pool — and then completes it, all inside one
-  synchronous hook invocation with no gap another agent could act in. The net effect a reader of
-  `list_jobs`/`stats` sees is unchanged from the first draft: a completed marker, never present in
-  `ready`, needing no lease and no claim-TTL renewal loop (the default 900s TTL is vastly longer
-  than the sub-second gap between claim and complete) and no session-end hook to close it out.
+  this bullet exists to avoid. The corrected three-call sequence narrows that gap: `claim_jobs`
+  takes explicit job ids (`jobs: [<id>]`), so once the model reaches that step it claims precisely
+  the job it just created — never anything from the general `ready` pool.
+
+  **This does *not* mean the three calls happen with no gap another agent could act in — they do
+  not run inside one synchronous script invocation at all.** An earlier draft of this bullet
+  claimed that; it was true only of a script-driven design this spec no longer adopts. In the
+  two-actor design actually shipped (see the mechanism-bridging bullet above), `add_job` and
+  `claim_jobs` are two separate MCP round-trips the *model* issues on its own next turn, not one
+  atomic step a script performs — so the marker job genuinely sits `pending`, visible in the
+  general `ready` pool, for at least the gap between those two tool calls (plausibly a full model
+  turn). This repo's own `.github/skills/otto-factory-worker` claims jobs out of `ready` with no
+  `agentType` filter today and can win that race, claiming and dispatching real development work
+  against what is meant to be an inert marker. The mitigation actually shipped is tagging the
+  marker job `agentType: "session-marker"` (see Architecture) so a worker that filters its own
+  queue reads by `agentType` excludes it — this is a real, constraint-2-compliant narrowing, not a
+  claim that the window is closed: `agentType` is never enforced by the server, and a caller that
+  queries `ready`/`list_jobs` with no `agentType` filter at all (as `otto-factory-worker` currently
+  does) still sees and can still claim the job. Fully closing this would mean updating
+  `otto-factory-worker` (or `of-mcp`) to filter by `agentType`, which is out of scope for this
+  change. The net effect a reader of `list_jobs`/`stats` sees once the sequence completes is
+  unchanged from the first draft: a completed marker, never present in `ready` after that point,
+  needing no lease and no claim-TTL renewal loop (the default 900s TTL is vastly longer than the
+  gap between claim and complete) and no session-end hook to close it out.
   This is still a deliberate, documented simplification of the developer's literal phrasing
   ("added ... in the ... queue"); the alternative of leaving it open until a session-end hook
   completes it was considered and rejected because most clients have no reliable session-end
@@ -102,7 +119,10 @@ from an open-source directory so the community carries that maintenance burden p
   visibility.** Per the otto-factory MCP server's own instructions, queueing, claiming, and
   completing are all billable (only reads, `watch`, and lease renewals are free). A genuinely new
   marker (new branch, or a new UTC day) costs three billable calls; a same-day replay on the same
-  branch costs one (`add_job` alone, short-circuited before any claim/complete — see Architecture).
+  branch costs **zero** — confirmed against `crates/of-billing/src/meter.rs`: `add_job`'s replay
+  path calls `Meter::record_replay`, which records the call as `Free` regardless of `add_job`'s own
+  classification (`tx.record_usage(Some(user), tool, false)` — the third argument is `billable`),
+  short-circuited at step 3's `completed` branch before any claim/complete — see Architecture.
   This is a real, ongoing cost every session start incurs once a developer installs this hook, not
   a one-time setup cost — worth the developer weighing explicitly, not just noting as a technical
   aside. Flagged again in Risks.
@@ -142,7 +162,10 @@ from an open-source directory so the community carries that maintenance burden p
   working when nobody has verified it — worse than an honest "not yet, here's the shape a PR
   should take" stub. Copilot CLI, Cursor, Codex CLI, and Otto CLI each get a `README.md` stub
   (target client named, its likely automation surface named as a starting hypothesis, and the
-  contribution checklist below) and no functioning hook code at launch.
+  contribution checklist below) and no functioning hook code at launch. `generic` (the console's
+  catch-all "any other MCP client" entry, see the subdirectory-naming bullet above) also gets a
+  stub, but one that explains why it names no single automation surface to target rather than
+  offering a hypothesis — see Architecture.
 - **The console link (`web/src/lib/clients.ts`) is out of scope for this change.** Adding a
   pointer there is real, user-visible surface — it would need a new `note`/link field on
   `ClientRecipe`, a decision about whether that field is translated prose (the file's own "a new
@@ -159,10 +182,13 @@ from an open-source directory so the community carries that maintenance burden p
   therefore opens a tracking issue in `savvagent/otto-factory` before any code lands, so the
   eventual PR has one to reference; this is process, not a design decision, and is called out
   here only so the plan's Task 1 doesn't look unmotivated.
-- **Per-template subdirectory naming matches `ClientRecipe.id`.** `client-skills/claude-code/`,
+- **Per-template subdirectory naming matches `ClientRecipe.id`, exhaustively.** `client-skills/claude-code/`,
   `client-skills/copilot-cli/`, `client-skills/cursor/`, `client-skills/codex/`,
-  `client-skills/otto-cli/` — reusing the exact `id` strings already assigned in
-  `web/src/lib/clients.ts::CLIENTS`, so a future console link (the follow-up above) can construct
+  `client-skills/otto-cli/`, and `client-skills/generic/` — reusing the exact `id` strings already
+  assigned in `web/src/lib/clients.ts::CLIENTS` (all six entries, `generic` included — an earlier
+  draft of this change shipped five of the six subdirectories and left `generic` out, which
+  quietly broke this bullet's own stated rationale below for every reader who noticed the gap), so
+  a future console link (the follow-up above) can construct
   the URL from `id` alone with no separate mapping table to keep in sync.
 
 ## Goal & Success Criteria
@@ -181,7 +207,9 @@ the rest.
   user-level settings, verified against a real `of-server` instance.
 - `client-skills/{copilot-cli,cursor,codex,otto-cli}/README.md` each state the target client, a
   starting hypothesis for that client's own automation surface, and invite a contribution against
-  the same checklist — no fabricated, unverified hook code.
+  the same checklist — no fabricated, unverified hook code. `client-skills/generic/README.md`
+  completes the `ClientRecipe.id` set by explaining why that entry names no single automation
+  surface to target.
 - The repo's root `README.md` gains a short "Client skills" pointer in its getting-started flow,
   linking to `client-skills/README.md`.
 - A tracking GitHub issue exists in `savvagent/otto-factory` before the PR opens, and the PR
@@ -194,7 +222,8 @@ the rest.
 **In:**
 
 - New top-level `client-skills/` directory: a root `README.md`, one fully working subdirectory
-  for Claude Code, and four stub subdirectories (Copilot CLI, Cursor, Codex CLI, Otto CLI).
+  for Claude Code, and five stub subdirectories (Copilot CLI, Cursor, Codex CLI, Otto CLI,
+  generic).
 - A short pointer from the repo's root `README.md`.
 - A tracking GitHub issue.
 
@@ -207,7 +236,9 @@ the rest.
   follow-up (see Assumptions) rather than folded in here.
 - Working, verified hook code for Copilot CLI, Cursor, Codex CLI, or Otto CLI. These ship as
   stubs only; a community PR (or a later otto-factory-development run) fills each in against the
-  checklist this change establishes.
+  checklist this change establishes. (`generic` is a stub for a different reason — see
+  Architecture — and is not expected to graduate the same way, since it names no single client to
+  verify against.)
 - Any CI enforcement of `client-skills/`'s contents (no lint job, no schema validator). The
   templates are prose-plus-scripts consumed by a human outside this repo's own build, not code
   this repo compiles or tests. Revisiting this is a fair follow-up once there's more than one
@@ -234,6 +265,10 @@ client-skills/
     README.md                — stub, same shape
   otto-cli/
     README.md                — stub, same shape
+  generic/
+    README.md                — stub: explains why `generic` (any MCP client) has no single
+                                automation surface to target, points contributors at a
+                                named-client subdirectory instead
 ```
 
 **Claude Code reference template — data flow.** Two actors, because of the constraint above: the
@@ -244,53 +279,78 @@ it out.
 *The script (`session-start-hook.sh`), synchronous, runs once per session start:*
 
 1. Claude Code fires the `SessionStart` hook (matcher: `startup` only — a `resume` or `clear`
-   restart of an existing session is not a new work session, and re-running the hook on every
-   `resume` would defeat the idempotency key's "once per branch per day" intent by looking like a
-   fresh start each time; this is a hook-level choice recorded in the settings snippet's matcher
-   field, not a script-level check).
+   restart of an existing session is not a new work session. **Corrected justification**: an
+   earlier draft of this bullet argued firing on `resume` too "would defeat the idempotency key's
+   once-per-branch-per-day intent" — that is not actually true, since a same-day resume would
+   still collapse to the existing job via the idempotency key regardless of matcher. The real
+   reason `startup`-only is correct is the first one: a resume is not a new work session, and a
+   marker job exists to answer "when did a session start," not "how many times was this session
+   resumed." This is a hook-level choice recorded in the settings snippet's matcher field, not a
+   script-level check).
 2. The script runs `git remote get-url origin`, `git rev-parse --abbrev-ref HEAD`, and
    `date -u +%Y-%m-%d` in the hook's working directory (Claude Code passes the project directory
    as `cwd`). Either git command failing (not a git repo, no `origin` remote, detached HEAD) exits
    `0` immediately with no stdout — nothing injected, nothing queued.
-3. On success, the script prints one JSON object to stdout in whatever shape Claude Code's current
+3. **Both captured values are validated against a strict allowlist before use.** The remote and
+   branch are local git state, but attacker-influenceable — anyone who controls a remote you add,
+   or a branch you fetch, controls these bytes, and step 4 below embeds them in text a model is
+   told to treat as instructions. A remote containing anything outside
+   `[A-Za-z0-9._:/@+~-]`, or a branch containing anything outside `[A-Za-z0-9._/-]`, or either
+   exceeding a fixed length cap, is rejected the same way as "not a git repo": exit `0`, no stdout,
+   nothing injected. This is not optional hardening; it is what keeps step 4's data block honestly
+   labeled "safe to treat as inert data" rather than merely asserting it.
+4. On success, the script prints one JSON object to stdout in whatever shape Claude Code's current
    `SessionStart` hook documentation specifies for injecting text into the model's own next turn
    (at the time of writing, `hookSpecificOutput.additionalContext` — **verify the exact field name
    and shape against current Claude Code hook documentation before implementing; do not assume
    this spec's description is still accurate**, per the standing Risk on hook-schema drift). The
-   injected text is the full instruction block below, with the captured remote URL, branch, and
-   date substituted in literally — the model is never asked to compute or guess any of these three
-   values itself, only to follow the steps using them.
+   injected text carries the validated remote URL, branch, and date inside a clearly labeled,
+   fenced *data* block — not spliced directly into the imperative instruction steps below — with
+   the instruction referring back to that block by name rather than reading as if the model itself
+   wrote the values into a sentence telling it what to do. The model is never asked to compute or
+   guess any of these three values itself, only to follow the steps using them as data.
 
 *The model, processing that injected context on its own next turn (before or alongside responding
 to whatever the developer actually typed):*
 
-4. Call `resolve_repo` with `remote` set to the embedded URL. A resolution failure: do nothing
-   further, and do not mention this to the developer — an unregistered repo is not this hook's
-   problem to fix (see Assumptions: no auto-registration). On success, keep the resolved repo's
-   canonical `slug` from the response — the one identifier used in every following call, never the
-   raw remote URL and never re-derived a second way, so the repo argument on `add_job` and the
-   slug embedded in the idempotency key can never disagree with each other.
-5. Call `add_job` with:
-   - `repo`: the resolved `slug` from step 4 — required; `add_job` has no session-level notion of
+5. Call `resolve_repo` with `remote` set to the "remote" value in the data block above. A
+   resolution failure: do nothing further, and do not mention this to the developer — an
+   unregistered repo is not this hook's problem to fix (see Assumptions: no auto-registration). On
+   success, keep the resolved repo's canonical `slug` from the response — the one identifier used
+   in every following call, never the raw remote URL and never re-derived a second way, so the repo
+   argument on `add_job` and the slug embedded in the idempotency key can never disagree with each
+   other.
+6. Call `add_job` with:
+   - `repo`: the resolved `slug` from step 5 — required; `add_job` has no session-level notion of
      "current repo" to fall back to, and a job with no resolvable repo is refused outright (this
      repo's own `repo_id NOT NULL` rule), so omitting this would make every marker-job creation
      fail before the claim/complete sequence below ever runs
-   - `title`: `"session: <branch>"`
+   - `title`: a fixed, literal `"session marker"` — **not** `"session: <branch>"` as an earlier
+     draft had it. The branch name is attacker-influenceable (see step 3's validation), and `title`
+     is the field most likely to be read as prose by another agent browsing `ready`/`list_jobs`;
+     keeping it fixed and literal means an attacker-chosen branch string never lands there. The
+     branch still appears, but only inside `metadata` below, which tooling reads as structured data
+     rather than narrated prose.
    - `description`: fixed, literal text from the injected instruction — the same wording on every
-     call for the same idempotency key (see step 6; `add_job` errors if a replayed key's other
+     call for the same idempotency key (see step 7; `add_job` errors if a replayed key's other
      arguments differ), so the instruction text itself must not embed a timestamp or any other
      value that would vary between today's earlier session starts
+   - `agentType`: `"session-marker"` — a routing *hint*, never enforced by the server (any agent
+     may still claim any job). An agent that filters its own `ready`/`claim_jobs` reads by its own
+     `agentType` will not see this job; one that queries with no `agentType` filter at all still
+     does. See the correction to the `add_job`→`claim_jobs` window above — this narrows that gap,
+     it does not close it.
    - `metadata`: `{"kind": "session-marker", "source": "client-skills/claude-code", "branch":
      "<branch>"}` — an opaque, server-uninterpreted field per constraint 2, present so a customer's
      own tooling (or a future console filter) can distinguish marker jobs from real work without
      otto-factory itself needing to know the distinction exists
    - `idempotencyKey`: `"session-<repo-slug>-<branch>-<yyyy-mm-dd>"`, using the embedded date and
-     the exact same step-4 `slug` used for the `repo` argument above
+     the exact same step-5 `slug` used for the `repo` argument above
 
    `add_job` returns the created job on a first call, or — on a same-day replay for the same
    branch — "the original job unchanged," per its own documented idempotency contract. Either way
    the response carries that job's current `status`, which the next step branches on.
-6. Branch on the returned job's `status`:
+7. Branch on the returned job's `status`:
    - **`completed`:** stop here — today's marker for this branch already exists and is already
      closed out; do nothing further (no claim, no complete).
    - **`pending`** (the normal case for a job just created): call `claim_jobs` with
@@ -299,22 +359,21 @@ to whatever the developer actually typed):*
      unrelated real job. If the claim fails (for example, a concurrent duplicate hook invocation —
      two sessions starting in the same instant — claimed it first), stop here: the other
      invocation owns completing it.
-   - **Anything else (in practice, only `in-progress`** — the residue of a previous invocation
-     that crashed after claiming but before completing): stop here rather than guessing. This
-     session's own identity may or may not be the current claim holder, and attempting a
+   - **Anything else (in practice, `in-progress` or `active`** — the residue of a previous
+     invocation that crashed after claiming but before completing): stop here rather than guessing.
+     This session's own identity may or may not be the current claim holder, and attempting a
      `complete_job` that fails (wrong holder) or succeeds on a job it never actually did anything
      new for is worse than leaving it for a human to notice and resolve — see Error Handling.
-7. On a successful claim, call `complete_job` on that job id with a fixed `result` string
+8. On a successful claim, call `complete_job` on that job id with a fixed `result` string
    (`"session marker — no work performed"`).
-8. Throughout steps 4-7: do this without narrating it in the reply to the developer at all (no
-   "I've registered this session" preamble, and no mention of a failure either — every failure
-   case in steps 4-7 already says "do nothing further" for exactly this reason: an unconditional
-   rule is simpler to follow correctly than one that asks the model to judge, mid-turn, whether a
-   given failure is "worth" surfacing), and never let it delay or block addressing whatever the
-   developer actually asked for in their first message. The tool calls themselves are not hidden — they appear in the session's
-   normal tool-call transcript/UI, the same as any other tool call the model makes; "silent" here
-   means "not narrated in prose," not "invisible." Unlike the script's own steps 1-3, nothing
-   mechanically enforces steps 4-8 — this is the model following an instruction, not code running
+9. Throughout steps 5-8: keep any acknowledgement in the reply to the developer to at most one
+   short line — not an unconditional vow of silence on a genuine failure (an earlier draft of this
+   instruction asked for exactly that, which a review round correctly flagged: telling a model to
+   suppress every failure signal, including ones a developer would want to notice, converts a
+   survivable problem into an unobserved one), and never let it delay or block addressing whatever
+   the developer actually asked for in their first message. The tool calls themselves are not
+   hidden — they appear in the session's normal tool-call transcript/UI regardless of what the
+   reply says in prose. Unlike the script's own steps 1-4, nothing mechanically enforces steps 5-9
    to completion, and that is a deliberate, load-bearing trade-off (see Risks), not an oversight.
 
 Every other client's `README.md` documents whichever of these two shapes actually fits that
@@ -331,14 +390,14 @@ claim, complete) is the strong default regardless of which shape carries it out.
   even sees an instruction to act on.
 - **The model never sees, ignores, or only partially follows the injected instruction.** Unique to
   this mechanism (see the new Assumptions bullet on why the script can't call otto-factory
-  itself): nothing mechanically guarantees the model performs steps 4-7. A distracted or
+  itself): nothing mechanically guarantees the model performs steps 5-8. A distracted or
   differently-tuned model could narrate it, skip it, or perform only part of the sequence (e.g.
   `add_job` without following through to `claim_jobs`/`complete_job` — see the next bullet for why
   that specific partial failure is still safe). This is an accepted, load-bearing limitation of
   building on `additionalContext` rather than a script's own guaranteed control flow — flagged
   prominently in Risks, not something a future revision of the instruction wording can fully close.
 - **Repo not registered with otto-factory.** `resolve_repo` fails inside the model's own tool call
-  (step 4); per the injected instruction, it does nothing further and says nothing about it.
+  (step 5); per the injected instruction, it does nothing further and says nothing about it.
 - **No otto-factory MCP connection configured, or the server unreachable.** The model's
   `resolve_repo`/`add_job`/etc. call itself errors; per the injected instruction, it does not
   narrate this failure to the developer or retry. A developer who never configured otto-factory
@@ -347,26 +406,26 @@ claim, complete) is the strong default regardless of which shape carries it out.
   idempotency key on, and no instruction is ever injected.
 - **Repeated session starts, same branch, same day.** Collapses to one job via the idempotency
   key; the second and later `add_job` calls return the existing job, already `completed`, and step
-  6's status check stops immediately without a second claim/complete.
+  7's status check stops immediately without a second claim/complete.
 - **Repeated session starts, same branch, next day.** A new marker job — this is intended: it is
   what makes "who was active on this repo recently, and when" a genuinely useful query over
   `list_jobs`, rather than one permanent marker that never updates.
 - **Two sessions start in the same instant on the same branch (a genuine race, not a sequential
   replay).** Both get back the same job id from `add_job`; only one of them wins `claim_jobs`. The
-  loser sees the claim fail, per Architecture step 6, and stops — the winner completes it. No
+  loser sees the claim fail, per Architecture step 7, and stops — the winner completes it. No
   duplicate job, no stuck claim.
 - **`add_job`/`claim_jobs` succeed but `complete_job` fails or is never attempted** (a transient
   tool-call error, or the model simply not following through — see above). The job is left claimed
   (`in-progress`) rather than `pending` — not claimable by `ready`, but also never reaching
   `completed`, so a later session-start on the same branch the same day will see
-  `status: in-progress` on its `add_job` replay, landing on Architecture step 6's third branch
+  `status: in-progress` on its `add_job` replay, landing on Architecture step 7's third branch
   (anything but `pending` or `completed`), which — as that step already specifies — stops and does
   nothing further rather than guessing: this session's own identity may or may not be the current
   claim holder, and attempting a `complete_job` that fails (wrong holder) or succeeds on a job it
   never actually did anything new for is worse than leaving it for a human to notice and resolve.
   Documented explicitly in `client-skills/claude-code/README.md` as a known gap rather than
   silently risked; the practical mitigation is that a stray `in-progress` marker job is easy for a
-  human to spot (title prefix `session:`, `metadata.kind: "session-marker"`) and resolve by hand
+  human to spot (title `"session marker"`, `metadata.kind: "session-marker"`) and resolve by hand
   (`complete_job`/`fail_job`). A more robust fix (e.g. a single combined server-side call) would
   be a server-side feature and is explicitly out of scope (see Scope) — constraint 3 already rules
   out adding anything to the server that only exists to make one client's convenience script
@@ -389,7 +448,7 @@ claim, complete) is the strong default regardless of which shape carries it out.
   and observe both halves: that the script actually emits the `additionalContext` JSON (checkable
   directly by running the script by hand with a fake `SessionStart` stdin payload, no live session
   needed), and that a real Claude Code session, given that injected context, actually performs the
-  full tool-call sequence and a completed `session:` job appears via `list_jobs`/`stats` — this
+  full tool-call sequence and a completed `"session marker"` job appears via `list_jobs`/`stats` — this
   second half is exactly the compliance-based step the design can't mechanically guarantee (see
   Risks), so it is the one part of this template that has to be watched happen, not just read from
   code. Then restart the session on the same branch the same day and confirm no second job is
@@ -422,7 +481,15 @@ claim, complete) is the strong default regardless of which shape carries it out.
   it is worth the developer's explicit sign-off before implementation proceeds — the alternative
   (the script speaking MCP directly, reading Claude Code's stored credentials itself) was rejected
   as fragile and unsupported, not because this compliance-based approach is obviously the better
-  trade in every reader's judgment.
+  trade in every reader's judgment. **Status: this sign-off was not obtained before implementation
+  — recorded here honestly rather than silently treated as settled.** The mandatory review trio's
+  security and architecture findings on the resulting PR independently converged on the same
+  compliance-based design being the source of both the prompt-injection surface (closed by
+  validating and data-fencing every interpolated value — see the Claude Code template's own
+  Security section) and the `add_job`→`claim_jobs` race (narrowed, not closed, by the `agentType`
+  tag — see the correction above). Proceeding past review with those mitigations in place is a
+  judgment call the review-response pass made in the developer's stead; it is not a substitute for
+  the developer's own sign-off on the underlying compliance-based approach, which remains open.
 - **Directory name (`client-skills/` vs. `skills/` vs. something else).** A defensible judgment
   call made to avoid colliding with `.github/skills/`'s existing meaning (see Assumptions) — the
   developer may prefer a different name; renaming before the plan is executed is cheap, renaming
@@ -435,13 +502,23 @@ claim, complete) is the strong default regardless of which shape carries it out.
   `in-progress` claim needing manual cleanup. If the developer's actual intent was closer to
   "show as *currently* working," not "show that work *started and immediately finished*," this
   design under-delivers and a different primitive (a lease, held for the session's duration, or a
-  `send_message` announcement with no job at all) would fit better. Worth confirming before the
-  plan is executed, since it changes the reference implementation materially.
+  `send_message` announcement with no job at all) would fit better. **Status: also not confirmed
+  before implementation, same as the bullet above — still open**, and worth confirming before this
+  design is treated as final, since it changes the reference implementation materially.
 - **Every session start costs the org's billable otto-factory allowance** (three calls for a
-  genuinely new marker, one for a same-day replay — see Assumptions). A developer who starts many
-  sessions a day across many repos accumulates this automatically, with no per-call visibility
-  from inside the hook itself (failures are silent by design). Worth the developer weighing this
-  trade explicitly rather than discovering it later in a usage report.
+  genuinely new marker, **zero** for a same-day replay — `add_job`'s replay path is recorded via
+  `Meter::record_replay`, always free regardless of `add_job`'s own classification; see
+  Assumptions). A developer who starts many sessions a day across many repos accumulates this
+  automatically, with no per-call visibility from inside the hook itself (failures are silent by
+  design). Worth the developer weighing this trade explicitly rather than discovering it later in
+  a usage report.
+- **`ListJobsArgs`/`stats` have no way to exclude marker jobs from general view.** A session
+  marker counts toward job-list and `stats` totals like any other job. The `agentType:
+  "session-marker"` tag (see Architecture and the correction above) is the practical,
+  constraint-2-compliant mitigation available today — a caller can filter it out of its own reads
+  by that tag — but there is no server-side "hide markers" switch, and adding one would mean the
+  server interpreting `metadata`/`agentType` semantics itself, which constraint 2 (substrate, not
+  workflow) rules out. Not a full fix; worth a future console-side filter as a separate change.
 - **No CI enforcement means directory drift is possible.** A community contribution could add a
   template that violates the behavior contract (blocks the session, auto-registers a repo, etc.)
   and nothing catches it mechanically — the `README.md` contribution checklist is the only guard,

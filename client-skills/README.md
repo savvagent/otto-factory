@@ -1,6 +1,6 @@
 # client-skills/
 
-Per-coding-agent templates that register a session-start marker job on otto-factory,
+Per-client templates that register a session-start marker job on otto-factory,
 maintained by the community rather than by the server.
 
 ## Purpose
@@ -46,6 +46,16 @@ actually takes — follows the same job lifecycle:
    delay, or surface an error in the developer's actual session. Where the client's own
    hook surface supports a non-fatal warning channel (e.g. stderr), one line is
    acceptable; nothing that interrupts or narrates over the developer's own work.
+6. **Treat every local value you interpolate as untrusted.** A git remote URL, a branch
+   name, a file path — anything read from the developer's own repository state and then
+   embedded in text a model is told to treat as instructions — must be validated against a
+   strict allowlist (safe characters, a length cap) before it is used anywhere, and
+   presented to the model as clearly labeled, fenced *data* the instruction refers to by
+   name, never interpolated directly into the imperative steps themselves. This matters even
+   though the value is "local": a hostile remote or a hostile branch name is still something
+   an attacker, not the developer, chose. See `claude-code/session-start-hook.sh` and its
+   README's Security section for a worked example, including how to keep a shell script's own
+   heredoc construction from re-interpolating a captured value.
 
 ## What this directory is not
 
@@ -60,6 +70,19 @@ actually takes — follows the same job lifecycle:
   stays exactly as ignorant of whether, or how, any client automates queue registration
   as it was before this directory existed.
 
+## Launch scope
+
+This repo's own conformance work (`docs/clients/matrix.md`) has only ever driven Claude Code
+and Copilot CLI live against a real otto-factory server. Shipping a fabricated, never-run
+template for a client nobody here has actually exercised would read as working when it
+isn't — worse than an honest "not yet, here's the shape a PR should take." So launch ships
+exactly one fully working reference template (Claude Code) and a stub `README.md` for every
+other client this directory names, each stating the target client, a starting hypothesis for
+its automation surface, and the contribution checklist below — no functioning hook code, no
+fabricated verification claims. A stub graduates to a working template only once someone has
+actually run it against a live `of-server` and can honestly check every contribution-checklist
+box.
+
 ## Directory layout
 
 ```
@@ -70,7 +93,13 @@ client-skills/
   cursor/            — stub: contribution invitation
   codex/             — stub: contribution invitation
   otto-cli/          — stub: contribution invitation
+  generic/           — stub: contribution invitation
 ```
+
+Subdirectory names match `web/src/lib/clients.ts::CLIENTS`'s own `id` values exactly (see
+that file's own `generic` entry: "exists so that a client nobody here has heard of is still
+a first-class citizen"), so a future console link can construct the directory URL from `id`
+alone with no separate mapping table to keep in sync.
 
 See `claude-code/README.md` for a worked example — the fullest description of the
 contract above applied to one real client. Claude Code's own template needs a two-actor
@@ -102,6 +131,10 @@ below:
 - [ ] Does not attempt to auto-register an unregistered repo.
 - [ ] Does not call `claim_jobs` against anything from the general `ready` pool — only
       against a job id this same template just created.
+- [ ] Validates every local value it interpolates into a model-facing instruction (a
+      remote URL, a branch name, a file path) against a strict allowlist before use, and
+      presents it as labeled, fenced data the instruction refers to rather than text
+      spliced directly into an imperative step — see the behavior contract's point 6 above.
 
 There is no CI enforcement of this directory's contents — no lint job, no schema
 validator. The checklist above is the only guard, enforced like any other open-source
