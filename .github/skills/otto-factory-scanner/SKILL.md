@@ -9,11 +9,14 @@ This skill is the periodic bridge between GitHub Issues on `savvagent/otto-facto
 the otto-factory job queue: it finds open issues that have no job yet, makes sure each
 one carries exactly one type label, and queues it via the `otto-factory` MCP server. It
 is Claude-Code-native — it orchestrates via the Agent tool and calls `otto-factory` MCP
-tools directly. Unlike `otto-factory-development` (a `.claude/skills/` symlink into
-`.github/skills/`, this repo's single source of truth for the development workflow),
-this skill has no `.github/skills/` counterpart at all: otto-factory has no
-port-verification system to keep a second copy in sync with, so it lives directly and
-only at `.claude/skills/otto-factory-scanner/SKILL.md`, with no canonical/port split.
+tools directly. Like `otto-factory-development`, this file's own canonical location is
+`.github/skills/otto-factory-scanner/SKILL.md` — the same single source of truth every
+skill in this repo uses — and it is visible to Claude Code at
+`.claude/skills/otto-factory-scanner/SKILL.md` only because of this repo's existing
+`.claude/skills` → `.github/skills` symlink. Unlike `otto`, this repo has no CI
+port-verification/diff-checking system (`check-claude-skill-ports.sh`-equivalent) to keep
+a second copy in sync with: these are just ordinary skill files here, no
+`NATIVE_SKILLS`-allowlist concept, no diff record to regenerate.
 
 This skill only **queues** work. It never implements an issue, opens a PR, or
 claims a job itself — that is `otto-factory-worker`'s job once it claims what this
