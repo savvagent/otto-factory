@@ -1,7 +1,10 @@
 # Claim-generation fencing for complete_job/fail_job/cancel_job/renew_claim design
 
-> **Status:** DRAFT — closes savvagent/otto-factory#103, the known limitation recorded in
-> `docs/specs/2026-09-10-queue-claim-expiry-design.md`'s Risks & Open Questions.
+> **Status:** IMPLEMENTED — shipped in savvagent/otto-factory#161, closing
+> savvagent/otto-factory#103, the known limitation recorded in
+> `docs/specs/2026-09-10-queue-claim-expiry-design.md`'s Risks & Open Questions. Shipped as a
+> **breaking** change (`fix(of-core)!: ...`) per the "Addendum" section below, not the purely
+> additive change originally drafted.
 
 > **Depends on:** `docs/specs/2026-09-10-queue-claim-expiry-design.md` (shipped in
 > savvagent/otto-factory#102) — this spec extends `ensure_claim_held`, the claimer fence

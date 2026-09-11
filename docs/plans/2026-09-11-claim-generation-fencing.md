@@ -12,7 +12,8 @@ plan implements it exactly.
 
 ## Status — 2026-09-11
 
-Drafted, plan critique pending.
+✅ Shipped in savvagent/otto-factory#161 (merged as `fix(of-core)!: fence
+complete_job/fail_job/cancel_job/renew_claim by claim generation`).
 
 **Update (same day, PR review):** the mandatory review trio's independent `security-auditor`
 pass found the plan as drafted left an unfenced expiry race open for any caller that never
@@ -25,6 +26,15 @@ The two test names this plan specifies below
 response to `expected_attempts_omitted_preserves_todays_behavior_for_a_reclaimed_claim`,
 since the un-renamed name overstated what the test proves once the expiry check exists
 alongside it.
+
+**Update (round 2, blind security-auditor re-review):** the expiry check itself was found
+sound (atomic, boundary-consistent, no clock skew, no bypass), but the downstream wording and
+documentation were not — the expiry-refusal wording was fixed to stop misattributing an
+expired claim to a caller who never held it, the generation-mismatch message no longer echoes
+the value it says never to obtain, `cancel_job`'s exemption gained its own dedicated tests,
+and all five affected tool descriptions now say plainly that an expired claim cannot be
+renewed or finalized. See PR #161's aggregated review-findings comment for the full
+Critical/Important/Suggestions/Strengths breakdown across both rounds.
 
 ## Global Constraints
 
@@ -77,7 +87,7 @@ the bug via a real `assert` failure rather than a throwaway test that would need
 then the full-workspace mechanical sweep, verified by the compiler and the full test
 suite.
 
-## Task 1 — Claim-generation fencing end-to-end
+## Task 1 — Claim-generation fencing end-to-end ✅
 
 **Files:** all six rows in File Structure above.
 **Interfaces:** consumes `Job.attempts` (already exists, `crates/of-core/src/jobs.rs`);
