@@ -26,37 +26,44 @@ savvagent/otto-factory#149.
 ## Status — 2026-09-11
 
 ✅ Shipped in savvagent/otto-factory#150 (squash-merged as `8233d6a`), closing #149. Five rounds
-of mandatory rust-pro/architect-reviewer/security-auditor review (plus a comment-quality pass on
-round 1) ran against the PR before merge; each round's findings were fixed in the commit that
+of mandatory rust-pro/architect-reviewer/security-auditor review ran against the PR before merge
+(round 1 also had a comment-quality pass); each round's findings were fixed in the commit that
 followed it, summarized as PR comments referencing the commit SHA.
-Round 2 re-review found structural issues in the worker's Step 4/4.5/5 split (a self-report
-merge bypass, a lease-id/resource-name mismatch, and double ownership of review findings) and
-in the scanner's per-issue trust ordering; both `SKILL.md` files were revised accordingly.
-Round 3 found the trio-cleared marker itself guessable/forgeable in this public repo, plus a
-handful of smaller gaps (unbounded `NEEDS_SECURITY_REEVIEW` recursion, a lease-release bug on
-that recursive path, an ambiguous pre-/post-merge CI check, unfenced trio reports in the Step
-4.5 follow-up prompt). Round 4 closed all of those: the marker is bound to an
-orchestrator-generated nonce and a head SHA, Step 5 verifies that marker's nonce/SHA/author
-rather than just the job id, the CI check is split into a pre-merge head-commit check and a
-post-merge `mergeCommit.oid`-matched check on `master`, the security-reevaluation recursion is
-capped at 3 rounds, lease release is now conditioned on a genuinely terminal report, and the
-record-as-shipped PR goes through the same trio-review cycle as the feature PR instead of being
-merged by a subagent with no `Agent` tool. Round 4's SHA binding, however, still didn't verify
-anything: the head SHA it embedded was captured by the orchestrator at the *start* of Step 4.5
-(before the review-response loop that follows-up subagent runs), and Step 5 then compared the
-marker against that same already-known constant — never against what actually merged. Round 5
-(both reviewers converged on this independently) fixed the mechanism itself: the follow-up
-subagent now captures its own `headRefOid` immediately before merging (not the orchestrator's
-earlier snapshot) and embeds *that* in the marker, and Step 5 checks it against the PR's actual
-post-merge `headRefOid` — the comparison that genuinely enforces "no commit lands between the
-marker being posted and the merge." Round 5 also fixed a handful of smaller, explicitly-scoped
-gaps: the record-as-shipped review cycle now carries an explicit `Cycle` field, is capped at one
-round, and acquires its own lease (releasing the feature branch's first) instead of reusing it;
-the reviewer-report fence check drops its hostile-content branch, since a review of these two
-skill files legitimately quotes the fence syntax by name; `complete_job`'s PR URL is constructed
-from the already-validated PR number rather than echoed from a subagent's report; and several
-smaller citation/validation gaps (lease release before `fail_job` on field-validation failures,
-`gh run list --json` fields for SHA matching, the Phase 5 step 13 citation) are fixed.
+
+- **Round 1** (initial trio + comment-analyzer): a self-location doc error in both skills' opening
+  paragraphs, and the design gap the rest of the rounds build on — a dispatched subagent has no
+  `Agent` tool and so cannot itself satisfy the mandatory review trio. Also introduced, in this
+  round, the properties every later round hardens: the scanner's `authorAssociation` gate (only
+  `OWNER`/`MEMBER`/`COLLABORATOR`-authored issues are ever labeled or queued — this repo is public
+  with issues enabled), the worker's `<<<BEGIN...END>>>` fencing of job content as untrusted data,
+  the `whoami` org confirmation, and `register_repo` demoted from auto-remediate to report-and-stop.
+- **Round 2** (re-review): a trust-boundary gap in how fenced job content reached the dispatched
+  subagent, a self-attested merge-verification gate, and the unchecked `whoami` comparison
+  tightened further.
+- **Round 3** (re-review of the Step 4/4.5 rework): a documented bypass around the trio gate (a
+  subagent could report "shipped and merged" without ever going through Step 4.5), a
+  lease-id/resource-name mismatch, and several missing failure branches.
+- **Round 4** (re-review): the trio-cleared marker itself was guessable/forgeable in this public
+  repo (sequential job ids, a publicly committed marker format), plus unvalidated
+  branch/PR-number/lease-id interpolation into orchestrator shell commands. Fixed with an
+  orchestrator-generated nonce, format validation, and moving the record-as-shipped PR under its
+  own trio-review cycle instead of letting a subagent with no `Agent` tool merge it directly.
+- **Round 5** (final re-review): round 4's SHA half of the marker still didn't verify anything —
+  it was captured by the orchestrator at the *start* of Step 4.5 (before the review-response loop
+  ran) and compared against that same already-known constant, never against what actually merged.
+  Both reviewers converged on this independently. Fixed by having the follow-up subagent capture
+  its own `headRefOid` immediately before merging and embedding *that* in the marker, with Step 5
+  checking it against the PR's actual post-merge `headRefOid` — the comparison that genuinely
+  enforces "no commit lands between the marker being posted and the merge." Also fixed: the
+  record-as-shipped review cycle's own termination (an explicit `Cycle` field, capped at one
+  round, its own lease), the reviewer-report fence check's false-positive on review content that
+  legitimately quotes the fence syntax by name, and several smaller citation/validation gaps.
+
+One round-1 architect finding was deferred rather than fixed in PR #150: the fast-path
+(no-design-spec) criteria in `otto-factory-development` have no category for normative process
+documentation, which is what let a change this design-heavy fast-path in the first place. Filed
+as savvagent/otto-factory#152, not fixed here — it's a change to a different skill's own criteria,
+out of scope for this PR.
 
 ## Global Constraints
 
@@ -74,7 +81,7 @@ smaller citation/validation gaps (lease release before `fail_job` on field-valid
 
 | File                                                    | Responsibility                                                                                                   |
 | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| **Create.** `.github/skills/otto-factory-scanner/SKILL.md` (visible at `.claude/skills/otto-factory-scanner/SKILL.md` via the repo's existing symlink) | Adapted from `otto-scanner`: finds open `savvagent/otto-factory` issues with no job yet, checks/fixes a type label, queues via `add_job`/`link_ticket`. |
+| **Create.** `.github/skills/otto-factory-scanner/SKILL.md` (visible at `.claude/skills/otto-factory-scanner/SKILL.md` via the repo's existing symlink) | Adapted from `otto-scanner`: finds open `savvagent/otto-factory` issues with no job yet, gates queueing on the issue author's GitHub `authorAssociation` (`OWNER`/`MEMBER`/`COLLABORATOR` only — this repo is public with issues enabled, so anything else is reported for human triage rather than labeled or queued), checks/fixes a type label, queues via `add_job`/`link_ticket`. |
 | **Create.** `.github/skills/otto-factory-worker/SKILL.md` (visible at `.claude/skills/otto-factory-worker/SKILL.md` via the repo's existing symlink) | Adapted from `otto-worker`, then hardened across five review rounds into a Step 4 → Step 4.5 → Step 5 split: a Step 4 implementer subagent claims the job and opens the PR but never merges; the orchestrator itself dispatches the mandatory rust-pro/architect-reviewer/security-auditor trio in Step 4.5 and hands their raw (fenced) reports to a follow-up subagent that addresses findings, captures its own head SHA immediately before merging, posts a nonce+that-SHA-bound `trio-cleared` marker, and merges — recursing on `NEEDS_SECURITY_REEVIEW` (capped at 3 rounds) and on the record-as-shipped PR's own `NEEDS_REVIEWERS_FOR_RECORD_PR` cycle (capped at 1 round, its own lease); Step 5 resolves the job only after independently verifying that marker against the PR's actual post-merge `headRefOid` (not an echoed constant), merge timing, and the post-merge CI run before `complete_job`/`fail_job`. |
 
 ## Task Order & Rationale
