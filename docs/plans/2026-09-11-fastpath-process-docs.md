@@ -7,10 +7,10 @@ implements it exactly.
 
 Closes `savvagent/otto-factory#152`: add a fast-path disqualifier to
 `.github/skills/otto-factory-development/SKILL.md`'s trivial-task criteria for new or
-materially-changed normative process content under `.github/skills/` — a new skill file, or a
-substantial rewrite of dispatch/orchestration logic in an existing one — citing PR #150's
-escalating five-round trio review as the motivating example, so such changes go through the
-design-spec path even when they are "only" 1-2 files.
+materially-changed normative process content under `.github/skills/` — a new skill file, or
+any change to dispatch/orchestration logic in an existing one, however small (a prose or typo
+fix stays eligible) — citing PR #150's escalating five-round trio review as the motivating
+example, so such changes go through the design-spec path even when they are "only" 1-2 files.
 
 ## Status — 2026-09-11
 
@@ -28,9 +28,12 @@ design-spec path even when they are "only" 1-2 files.
   REST API, OAuth/discovery endpoints, config surface, and schema do not include this repo's
   own skill files) — no breaking-change flag, no version-bump signal.
 - The new disqualifier's wording is scoped to the spec's Assumptions: "a new file under
-  `.github/skills/`, or a substantial rewrite of dispatch/orchestration logic in an existing
-  one" — not "any edit to a skill file." A prose typo fix inside a skill file remains eligible
-  for fast-path on its own merits.
+  `.github/skills/`, or any change to dispatch/orchestration logic in an existing one, however
+  small" — not "any edit to a skill file." A prose or typo fix inside a skill file remains
+  eligible for fast-path on its own merits. The rule deliberately does not turn on size — a
+  size threshold ("substantial") would be a self-graded judgment call made by the same agent
+  deciding whether to skip the spec, which is the exact failure mode this section exists to
+  refuse.
 - Match the existing disqualifier bullets' terse, one-line, no-sub-clause style (per the spec
   critique's advisory note) when drafting the new bullet.
 - No `cargo fmt`/`cargo test` gate applies — no Rust file is touched. The gate for this task is
@@ -66,10 +69,8 @@ so the section stays internally consistent in one commit.
       sentence", so the acceptance-criterion bullet — the tightest, most general check — stays
       last):
       ```
-      - No new file under `.github/skills/`, and no substantial rewrite of
-        dispatch/orchestration logic in an existing one — process documentation that drives
-        future autonomous runs is itself architecture (PR #150 fast-pathed on this reasoning
-        and needed five rounds of trio review to harden)
+      - No new file under `.github/skills/`, and no change to dispatch/orchestration logic in
+        an existing one, however small — a prose or typo fix inside one stays eligible
       ```
 - [ ] Extend the "If you find yourself rationalizing into the fast-path on…" trigger paragraph
       with the same category, inserted before the existing "or has more than a one-sentence
@@ -84,9 +85,10 @@ so the section stays internally consistent in one commit.
       to
       ```
       If you find yourself rationalizing into the fast-path on something that touches 3+ source files,
-      introduces a new interface, touches the auth spine or tenant isolation, adds a migration, adds or
-      substantially rewrites a skill file under `.github/skills/`, or has more than a one-sentence AC →
-      STOP. Write the spec. The fast-path is for genuine triviality, not "I think this is small."
+      introduces a new interface, touches the auth spine or tenant isolation, adds a migration, adds a
+      file or changes dispatch/orchestration logic under `.github/skills/` (a prose or typo fix stays
+      eligible), or has more than a one-sentence AC → STOP. Write the spec. The fast-path is for
+      genuine triviality, not "I think this is small."
       ```
 - [ ] Add a new row to the "Common Fast-Path Rationalizations" table (the `| Fast-path
       rationalization | Reality |` table), after the existing "I'll fast-path the first
@@ -94,6 +96,7 @@ so the section stays internally consistent in one commit.
       one-line plan" row:
       ```
       | "The new skill content is tiny — just a couple of files" | Process docs that will drive future autonomous runs are themselves architecture. PR #150 fast-pathed a 511-line-at-the-time skill-file pair on "two logical files" and needed five rounds of trio review before it hardened. Spec first. |
+      | "It's only one bullet, hardly a substantial rewrite" | The rule doesn't turn on size — any change to dispatch/orchestration logic under `.github/skills/` disqualifies, however small. Grading your own edit as "not substantial" is the exact rationalization this section exists to refuse. Spec first (a prose/typo fix is the only carve-out). |
       ```
 - [ ] Confirm the diff is scoped exactly as planned: `git diff .github/skills/otto-factory-development/SKILL.md`
       shows three additions (one disqualifier bullet, one trigger-paragraph edit, one table

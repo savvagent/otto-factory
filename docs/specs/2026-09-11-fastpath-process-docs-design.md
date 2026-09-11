@@ -19,9 +19,9 @@ repo and its round-1 architect review is the origin of this ticket, per the issu
 
 - One new bullet in the "ALL of the following are true" disqualifier list in
   `.github/skills/otto-factory-development/SKILL.md`'s "Fast-Path: Trivial Tasks" section,
-  disqualifying a new file under `.github/skills/`, or a substantial rewrite of
-  dispatch/orchestration logic in an existing one, from the fast path — regardless of how few
-  files it touches.
+  disqualifying a new file under `.github/skills/`, or any change to dispatch/orchestration
+  logic in an existing one however small (a prose or typo fix stays eligible), from the fast
+  path — regardless of how few files it touches.
 - That bullet cites the PR #150 precedent (a 511-line-at-the-time skill-file pair that
   fast-pathed on "two logical files" and needed five rounds of trio review to harden) as the
   motivating example, per the issue's second acceptance-criteria line.
@@ -52,20 +52,28 @@ repo and its round-1 architect review is the origin of this ticket, per the issu
   inside a skill file's prose (not its criteria or dispatch logic) still qualifies under the
   existing "Fix a typo in a string / comment / docstring" example, per the Assumptions below.
 - No renumbering or restructuring of the existing disqualifier bullets — the new bullet is
-  appended to the existing list, not interleaved, to keep the diff minimal and reviewable.
+  inserted as the second-to-last entry, immediately before the existing "The acceptance
+  criterion fits in one sentence" bullet (so that bullet — the tightest, most general check —
+  stays last), not interleaved elsewhere in the list, to keep the diff minimal and reviewable.
 
 ## Assumptions
 
-- **"Materially-changed" is scoped to the AC's own parenthetical, not to any edit whatsoever.**
-  The issue's acceptance criteria define the disqualified category explicitly: "a new skill
-  file or a substantial rewrite of dispatch/orchestration logic in an existing one." A
-  one-line prose fix, a typo correction, or a formatting tweak inside an existing skill file is
-  **not** a "substantial rewrite of dispatch/orchestration logic" and remains eligible for the
-  existing fast-path machinery on its own merits (subject to the *other* disqualifiers, same
-  as any other file). Without this scoping, the new rule would make every future one-character
-  fix to a skill file go through a full spec, which is disproportionate and not what the issue
-  asks for — the issue's own motivating complaint is about *design-heavy* skill content
-  (dispatch/orchestration logic), not skill-file edits in general.
+- **"Materially-changed" is scoped to *what* is edited, not *how much* — no size threshold.**
+  The issue's acceptance criteria name the disqualified category as "a new skill file or a
+  substantial rewrite of dispatch/orchestration logic in an existing one," but round-1 trio
+  review (rust-pro and architect-reviewer, independently) flagged that "substantial" reintroduces
+  a size test into a section whose whole house style is mechanical, and is a threshold graded by
+  the same agent deciding whether to skip the spec — precisely the self-assessment failure mode
+  this section exists to refuse. The shipped rule drops "substantial" entirely: **any** change to
+  dispatch/orchestration logic in an existing skill file disqualifies, however small. The
+  discriminator stays *what* is touched (dispatch/orchestration logic vs. prose) — a one-line
+  prose fix, a typo correction, or a formatting tweak inside an existing skill file remains
+  eligible for the existing fast-path machinery on its own merits (subject to the *other*
+  disqualifiers, same as any other file), because it touches no dispatch/orchestration logic at
+  all, not because the edit was small. Without the prose/typo carve-out, the new rule would make
+  every future one-character fix to a skill file go through a full spec, which is disproportionate
+  and not what the issue asks for — the issue's own motivating complaint is about *design-heavy*
+  skill content (dispatch/orchestration logic), not skill-file edits in general.
 - **This change is itself worked without invoking the fast path it is patching.** This spec
   exists — i.e., this exact job did not fast-path — because the change it makes is precisely
   "a substantial rewrite of dispatch/orchestration logic in an existing [skill] file": it edits
@@ -94,12 +102,12 @@ Close the loophole PR #150's round-1 architect review identified: `otto-factory-
 fast-path criteria are framed entirely in Rust/interface/deploy terms and have no category for
 new or materially-changed normative process content under `.github/skills/`, even though such
 content is itself architecture that drives every future autonomous run. A future change that
-adds a skill file or substantially rewrites an existing one's dispatch/orchestration logic
+adds a skill file, or changes an existing one's dispatch/orchestration logic however small,
 should go through the design-spec path even when it is "only" 1-2 files.
 
 - `.github/skills/otto-factory-development/SKILL.md`'s "Fast-Path: Trivial Tasks" disqualifier
-  list carries a new bullet disqualifying a new file, or a substantial dispatch/orchestration
-  rewrite of an existing one, under `.github/skills/`.
+  list carries a new bullet disqualifying a new file, or any dispatch/orchestration change to
+  an existing one (a prose or typo fix stays eligible), under `.github/skills/`.
 - That bullet (or text immediately adjacent to it) names PR #150 and its five-round trio-review
   outcome as the motivating example, per the issue's second acceptance-criteria line.
 - The rationalization table and the trigger paragraph each gain one matching entry, consistent
@@ -118,9 +126,10 @@ lines (`SKILL.md` is not `cargo test`-visible; it is read by whichever agent inv
 ## Risks & Open Questions
 
 - **Risk: the new bullet is read too broadly and blocks legitimate skill-file typo fixes.**
-  Mitigated by scoping the bullet's wording to the AC's own parenthetical ("a new skill file or
-  a substantial rewrite of dispatch/orchestration logic in an existing one") rather than "any
-  change to a file under `.github/skills/`" — see Assumptions.
+  Mitigated by scoping the bullet's wording to dispatch/orchestration logic specifically — "a
+  new file under `.github/skills/`, or a change to dispatch/orchestration logic in an existing
+  one, however small" — rather than "any change to a file under `.github/skills/`," and by an
+  explicit prose/typo carve-out — see Assumptions.
 - **Risk: the new bullet is read too narrowly and misses a skill file added somewhere other
   than a brand-new skill directory** (e.g., a new prompts file inside an existing skill's
   directory, the way `otto-factory-development`'s own `agent-prompts.md` sits alongside its
