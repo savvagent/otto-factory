@@ -150,9 +150,10 @@ the `MEMBER_PASSKEYS_RESET` row, which was already atomic before this change.
 None of these are the kind of change Non-Negotiable Rule 6 requires a version bump or a
 `docs/clients/matrix.md` update for — no tool, route, schema, or config surface changes shape or is
 removed/renamed. They are called out at length anyway, per the same rule's spirit and per `#131`'s
-own precedent, because the *behavior* changes (a rare-case 500 instead of a silent success; one
-audit row's `org_id` column changing from always-`NULL` to the real org) are exactly the kind of
-thing an architect reviewer should see named rather than discover in the diff.
+own precedent, because the *behavior* changes (a rare-case 500 instead of a silent success; the
+post-commit, always-`org_id = NULL` `auth.passkey.cleared` write on `reset_member_passkeys`
+disappearing entirely rather than being kept and re-scoped) are exactly the kind of thing an
+architect reviewer should see named rather than discover in the diff.
 
 ## §1 `passkeys::remove` becomes atomic
 

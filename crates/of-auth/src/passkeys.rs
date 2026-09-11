@@ -651,9 +651,13 @@ pub async fn rename(
 /// so a failure partway through cannot leave the account cleared with no way
 /// back in — see `savvagent/otto-factory#87`.
 ///
-/// The audit row is attributed to `actor`, not `user`: this is always called on
-/// somebody else's behalf, and a row that named the affected member as its own
-/// actor would misattribute an admin's action to the person it happened to.
+/// The audit row is attributed to `actor`, not `user`: `actor` is whoever
+/// initiated the clear (an admin for `reset_member_passkeys` today, or the
+/// account holder themselves for a hypothetical self-service caller — this
+/// function's own tests exercise `actor == user`), and `user` is the account
+/// being cleared. Recording both, rather than collapsing to one field, is
+/// what keeps an admin-initiated clear from misattributing to the person it
+/// happened to when the two differ.
 ///
 /// The delete and its `auth.passkey.cleared` audit row commit together, the
 /// same reasoning as [`remove`] above and `finish_registration`
