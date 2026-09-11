@@ -28,12 +28,18 @@ savvagent/otto-factory#149.
 🚧 In progress — implementation complete, addressing mandatory review trio findings on PR #150.
 Round 2 re-review found structural issues in the worker's Step 4/4.5/5 split (a self-report
 merge bypass, a lease-id/resource-name mismatch, and double ownership of review findings) and
-in the scanner's per-issue trust ordering; both `SKILL.md` files were revised accordingly. The
-worker's Step 5 verification gate is now a branch-resolution query
-(`gh pr list --head <branch> --state merged --json
-number,mergedAt,headRefName,closingIssuesReferences,body,comments,statusCheckRollup`) requiring
-merge timing after the claim, an issue cross-reference, green CI by run id, and a
-per-job `trio-cleared` marker comment — not the earlier two-field `gh pr view` check.
+in the scanner's per-issue trust ordering; both `SKILL.md` files were revised accordingly.
+Round 3 found the trio-cleared marker itself guessable/forgeable in this public repo, plus a
+handful of smaller gaps (unbounded `NEEDS_SECURITY_REEVIEW` recursion, a lease-release bug on
+that recursive path, an ambiguous pre-/post-merge CI check, unfenced trio reports in the Step
+4.5 follow-up prompt). Round 4 closed all of those: the marker is now bound to an
+orchestrator-generated nonce and the PR's head SHA at review time (`gh pr view --json
+headRefOid`), Step 5 verifies that marker's nonce/SHA/author exactly rather than just the job
+id, the CI check is split into a pre-merge head-commit check and a post-merge
+`mergeCommit.oid`-matched check on `master`, the security-reevaluation recursion is capped at 3
+rounds, lease release is now conditioned on a genuinely terminal report, and the record-as-
+shipped PR goes through the same trio-review cycle as the feature PR instead of being merged
+by a subagent with no `Agent` tool.
 
 ## Global Constraints
 
@@ -52,7 +58,7 @@ per-job `trio-cleared` marker comment — not the earlier two-field `gh pr view`
 | File                                                    | Responsibility                                                                                                   |
 | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
 | **Create.** `.github/skills/otto-factory-scanner/SKILL.md` (visible at `.claude/skills/otto-factory-scanner/SKILL.md` via the repo's existing symlink) | Adapted from `otto-scanner`: finds open `savvagent/otto-factory` issues with no job yet, checks/fixes a type label, queues via `add_job`/`link_ticket`. |
-| **Create.** `.github/skills/otto-factory-worker/SKILL.md` (visible at `.claude/skills/otto-factory-worker/SKILL.md` via the repo's existing symlink) | Adapted from `otto-worker`: claims exactly one queued job for `savvagent/otto-factory`, dispatches a subagent to run it via `otto-factory-development`, resolves it (`complete_job`/`fail_job`). |
+| **Create.** `.github/skills/otto-factory-worker/SKILL.md` (visible at `.claude/skills/otto-factory-worker/SKILL.md` via the repo's existing symlink) | Adapted from `otto-worker`, then hardened across four review rounds into a Step 4 → Step 4.5 → Step 5 split: a Step 4 implementer subagent claims the job and opens the PR but never merges; the orchestrator itself dispatches the mandatory rust-pro/architect-reviewer/security-auditor trio in Step 4.5 and hands their raw (fenced) reports to a follow-up subagent that addresses findings, posts a nonce+reviewed-commit-SHA-bound `trio-cleared` marker, and merges — recursing on `NEEDS_SECURITY_REEVIEW` (capped at 3 rounds) and on the record-as-shipped PR's own `NEEDS_REVIEWERS_FOR_RECORD_PR` cycle; Step 5 resolves the job only after independently verifying that marker (exact nonce/SHA/author match), merge timing, and the post-merge CI run before `complete_job`/`fail_job`. |
 
 ## Task Order & Rationale
 
