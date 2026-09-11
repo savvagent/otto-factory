@@ -188,7 +188,7 @@ pub struct UpdateJobArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ClaimJobsArgs {
     /// The job ids to take. All or none succeed.
     pub jobs: Vec<String>,
@@ -205,25 +205,49 @@ pub struct ClaimJobsArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CompleteJobArgs {
     pub job: String,
     /// What you did, for whoever reads this later.
     #[serde(default)]
     pub result: Option<String>,
+    /// Optional: the `attempts` value from your own claim_jobs response when
+    /// you claimed this job, or from your own last successful renew_claim
+    /// response — never a value read from get_job, which shows the job's
+    /// current state for orientation only and may belong to whoever holds
+    /// the claim now, not to you. A generation number, not a retry count. If
+    /// a different process under your own account has since reclaimed this
+    /// job after your claim lapsed, `attempts` has moved on; supplying the
+    /// value you actually hold makes this call fail (naming the current
+    /// holder) instead of silently overwriting their in-flight work. Omit
+    /// it to keep matching by account alone, as before.
+    #[serde(default)]
+    pub expected_attempts: Option<i32>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FailJobArgs {
     pub job: String,
     /// Why it failed, specifically enough that the next attempt can do better.
     #[serde(default)]
     pub error: Option<String>,
+    /// Optional: the `attempts` value from your own claim_jobs response when
+    /// you claimed this job, or from your own last successful renew_claim
+    /// response — never a value read from get_job, which shows the job's
+    /// current state for orientation only and may belong to whoever holds
+    /// the claim now, not to you. A generation number, not a retry count. If
+    /// a different process under your own account has since reclaimed this
+    /// job after your claim lapsed, `attempts` has moved on; supplying the
+    /// value you actually hold makes this call fail (naming the current
+    /// holder) instead of silently overwriting their in-flight work. Omit
+    /// it to keep matching by account alone, as before.
+    #[serde(default)]
+    pub expected_attempts: Option<i32>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RenewClaimArgs {
     /// The job you are still working on.
     pub job: String,
@@ -232,10 +256,23 @@ pub struct RenewClaimArgs {
     /// to 4 hours) as claim_jobs's ttl if omitted.
     #[serde(default)]
     pub ttl: Option<i64>,
+    /// Optional: the `attempts` value from your own claim_jobs response when
+    /// you claimed this job, or from your own last successful renew_claim
+    /// response — never a value read from get_job, which shows the job's
+    /// current state for orientation only and may belong to whoever holds
+    /// the claim now, not to you. A generation number, not a retry count. If
+    /// a different process under your own account has since reclaimed this
+    /// job after your claim lapsed, `attempts` has moved on; supplying the
+    /// value you actually hold makes this call fail (naming the current
+    /// holder) instead of silently renewing an expiry that belongs to their
+    /// claim, not yours. Omit it to keep matching by account alone, as
+    /// before.
+    #[serde(default)]
+    pub expected_attempts: Option<i32>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RequestCancelArgs {
     /// The job to ask to stop.
     pub job: String,
@@ -245,13 +282,25 @@ pub struct RequestCancelArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CancelJobArgs {
     /// The job you were working on and are stopping.
     pub job: String,
     /// What you were doing when you stopped, for whoever reads this later.
     #[serde(default)]
     pub note: Option<String>,
+    /// Optional: the `attempts` value from your own claim_jobs response when
+    /// you claimed this job, or from your own last successful renew_claim
+    /// response — never a value read from get_job, which shows the job's
+    /// current state for orientation only and may belong to whoever holds
+    /// the claim now, not to you. A generation number, not a retry count. If
+    /// a different process under your own account has since reclaimed this
+    /// job after your claim lapsed, `attempts` has moved on; supplying the
+    /// value you actually hold makes this call fail (naming the current
+    /// holder) instead of silently cancelling their in-flight work. Omit it
+    /// to keep matching by account alone, as before.
+    #[serde(default)]
+    pub expected_attempts: Option<i32>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -827,8 +876,16 @@ impl Factory {
                        never leave you believing you own work you do not. Fails if any job is \
                        already claimed or still blocked by an unfinished dependency. Claim \
                        before you start working. Claims expire (900s by default, or your ttl); \
-                       renew_claim pushes a claim you hold forward, and an expired claim \
-                       becomes claimable again — see ready."
+                       renew_claim pushes a claim you hold forward. Once a claim has already \
+                       expired, though, it cannot be renewed or finalized by its original \
+                       holder any more — complete_job/fail_job/cancel_job/renew_claim all \
+                       refuse it server-side — and claim_jobs, called again on the same job, \
+                       is the only way back in. Hold onto each returned job's \
+                       `attempts` value yourself if you might later call complete_job, \
+                       fail_job, cancel_job, or renew_claim with expectedAttempts to guard \
+                       against a same-account process having reclaimed the job out from under \
+                       you in the meantime — it is your claim's generation number, and it is \
+                       not repeated anywhere else you would otherwise think to look."
     )]
     pub async fn claim_jobs(
         &self,
@@ -864,7 +921,13 @@ impl Factory {
                        while a long-running job is still in progress: an unrenewed claim \
                        expires and the job becomes claimable by someone else, which is what \
                        lets a crashed agent's abandoned job be picked back up. Fails if you are \
-                       not the job's current claim holder."
+                       not the job's current claim holder — and once a claim has already \
+                       expired, this cannot bring it back, even for its original holder: call \
+                       claim_jobs again on the same job instead. Renewing comfortably before \
+                       expiry, not after, is the only way to keep a claim alive. Pass \
+                       expectedAttempts if you also want to guard against renewing a claim \
+                       generation a different process under your own account has since \
+                       reclaimed — see its own description."
     )]
     pub async fn renew_claim(
         &self,
@@ -877,7 +940,12 @@ impl Factory {
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "renew_claim").await?;
         let job = tx
-            .renew_claim(&JobId::from(args.job), caller.user_id, args.ttl)
+            .renew_claim(
+                &JobId::from(args.job),
+                caller.user_id,
+                args.ttl,
+                args.expected_attempts,
+            )
             .await
             .mcp()?;
         tx.commit().await.mcp()?;
@@ -889,7 +957,12 @@ impl Factory {
         name = "complete_job",
         description = "Mark a job you claimed as completed, with a summary of what was done. \
                        Anything that depends on it becomes claimable. Fails if you are not the \
-                       job's current claim holder."
+                       job's current claim holder — including when your own claim has already \
+                       expired and nobody has reclaimed it yet: an expired claim cannot be \
+                       finalized any more, even by its original holder, and must be reclaimed \
+                       with claim_jobs first. Pass expectedAttempts if you also want to \
+                       guard against completing over a claim generation a different process \
+                       under your own account has since reclaimed — see its own description."
     )]
     pub async fn complete_job(
         &self,
@@ -906,6 +979,7 @@ impl Factory {
                 &JobId::from(args.job),
                 caller.user_id,
                 args.result.as_deref(),
+                args.expected_attempts,
             )
             .await
             .mcp()?;
@@ -926,7 +1000,13 @@ impl Factory {
         description = "Mark a job you claimed as failed, recording why. Use this rather than \
                        leaving a job in-progress when you cannot finish it — an abandoned claim \
                        blocks everything downstream and tells nobody anything. Fails if you are \
-                       not the job's current claim holder."
+                       not the job's current claim holder — including when your own claim has \
+                       already expired and nobody has reclaimed it yet: an expired claim cannot \
+                       be finalized any more, even by its original holder, and must be \
+                       reclaimed with claim_jobs first. Pass expectedAttempts if you also \
+                       want to guard against failing over a claim generation a different \
+                       process under your own account has since reclaimed — see its own \
+                       description."
     )]
     pub async fn fail_job(
         &self,
@@ -943,6 +1023,7 @@ impl Factory {
                 &JobId::from(args.job),
                 caller.user_id,
                 args.error.as_deref(),
+                args.expected_attempts,
             )
             .await
             .mcp()?;
@@ -1039,7 +1120,15 @@ impl Factory {
                        'asked to stop, and did' from an ordinary failure. Also fails if the \
                        job is not currently in-progress or active — still pending, or already \
                        completed, failed, or cancelled — or if you are not its current claim \
-                       holder."
+                       holder. Unlike complete_job/fail_job/renew_claim, this one still \
+                       succeeds for a claim that has already expired, as long as the \
+                       cancellation was requested before it lapsed — that is what lets you \
+                       honestly record having complied even if the stop took longer than the \
+                       claim's TTL; if nobody asked this job to stop before your claim expired, \
+                       it is refused like the others and must be reclaimed with claim_jobs \
+                       first. Pass expectedAttempts if you also want to guard against \
+                       cancelling a claim generation a different process under your own \
+                       account has since reclaimed — see its own description."
     )]
     pub async fn cancel_job(
         &self,
@@ -1052,7 +1141,12 @@ impl Factory {
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "cancel_job").await?;
         let job = tx
-            .cancel_job(&JobId::from(args.job), caller.user_id, args.note.as_deref())
+            .cancel_job(
+                &JobId::from(args.job),
+                caller.user_id,
+                args.note.as_deref(),
+                args.expected_attempts,
+            )
             .await
             .mcp()?;
         tx.audit(

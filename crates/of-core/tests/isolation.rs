@@ -133,19 +133,25 @@ async fn cross_org_mutation_is_refused(pool: PgPool) {
         .is_err());
     assert!(tx.repend_job(&target.id).await.is_err());
     assert!(tx.request_cancel(&target.id, b.user, None).await.is_err());
-    assert!(tx.cancel_job(&claimed.id, b.user, None).await.is_err());
+    assert!(tx
+        .cancel_job(&claimed.id, b.user, None, None)
+        .await
+        .is_err());
     // The GH#65 claim-expiry additions: `claimed` is a real, live claim held
     // by A in A's org, so a call that reached the row would succeed. From B's
     // pinned transaction the row must not even be found — guard 1's org_id
     // predicate, not the claimer check inside `ensure_claim_held`, is what
     // has to refuse these.
-    assert!(tx.renew_claim(&claimed.id, b.user, None).await.is_err());
     assert!(tx
-        .complete_job(&claimed.id, b.user, Some("pwned"))
+        .renew_claim(&claimed.id, b.user, None, None)
         .await
         .is_err());
     assert!(tx
-        .fail_job(&claimed.id, b.user, Some("pwned"))
+        .complete_job(&claimed.id, b.user, Some("pwned"), None)
+        .await
+        .is_err());
+    assert!(tx
+        .fail_job(&claimed.id, b.user, Some("pwned"), None)
         .await
         .is_err());
     let _ = tx.rollback().await;
