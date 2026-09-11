@@ -484,4 +484,46 @@ describe('the queue poller', () => {
 
     unmount(instance);
   });
+
+  // `filters` is `$derived({ status, repo, team, mine, limit: 200 })` — the
+  // restart-on-filter-change test above only ever exercises `status`, which
+  // would still pass even if `repo`, `team`, or `mine` silently stopped
+  // participating in the effect's dependency set. That is exactly the
+  // regression `#92` tracks: the restart is about all four keys, not just one.
+  it.each([
+    ['repo', 'repo=repo-1'],
+    ['team', 'team=team-1'],
+    ['mine', 'mine=true']
+  ] as const)('restarts the poll when the %s filter changes', async (_key, expected) => {
+    const fetchMock = vi.fn((path: string) => {
+      if (path.includes('/repos') || path.includes('/teams')) return emptyPickers();
+      if (path.includes('/jobs')) return Promise.resolve(jsonResponse([baseJob]));
+      return Promise.resolve(new Response('', { status: 404 }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const instance = mount(Harness, {
+      target: container,
+      props: { slug: 'acme', url: new URL('http://example.test/o/acme/queue') }
+    }) as unknown as { setUrl: (next: URL) => void };
+    await settle();
+
+    const jobsCallCountBefore = fetchMock.mock.calls.filter(([path]) =>
+      String(path).includes('/jobs')
+    ).length;
+    expect(jobsCallCountBefore).toBe(1);
+
+    const [paramKey, paramValue] = expected.split('=') as [string, string];
+    const nextUrl = new URL('http://example.test/o/acme/queue');
+    nextUrl.searchParams.set(paramKey, paramValue);
+
+    instance.setUrl(nextUrl);
+    await settle();
+
+    const jobsCalls = fetchMock.mock.calls.filter(([path]) => String(path).includes('/jobs'));
+    expect(jobsCalls.length).toBe(2);
+    expect(String(jobsCalls[jobsCalls.length - 1]![0])).toContain(expected);
+
+    unmount(instance);
+  });
 });
