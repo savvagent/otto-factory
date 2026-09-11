@@ -150,17 +150,17 @@ language for it.
 
 ## Layout
 
-| Path                        | What it is                                                                                |
-| --------------------------- | ----------------------------------------------------------------------------------------- |
-| `src/lib/api.ts`            | The only place that talks to `of-web`. `ApiError` carries the stable `code`.              |
-| `src/lib/types.ts`          | The wire types, transcribed from `of-web`'s OpenAPI document.                             |
-| `src/lib/session.svelte.ts` | Who is signed in. A rune module, not a store.                                             |
-| `src/lib/org.svelte.ts`     | The org the current route is about, via context.                                          |
-| `src/lib/clients.ts`        | One recipe per coding agent, all the same shape.                                          |
-| `src/lib/poll.svelte.ts`    | Polling a page hands to an `$effect`. The overview uses it; `/queue` and `/repos` should. |
-| `src/routes/`               | Public pages at the root; org pages under `/o/[org]`.                                     |
-| `worker/index.ts`           | The Cloudflare Worker: serves this bundle, proxies the API to `of-server`.                |
-| `wrangler.jsonc`            | That Worker's config. `worker/tsconfig.json` type-checks it separately.                   |
+| Path                        | What it is                                                                               |
+| --------------------------- | ---------------------------------------------------------------------------------------- |
+| `src/lib/api.ts`            | The only place that talks to `of-web`. `ApiError` carries the stable `code`.             |
+| `src/lib/types.ts`          | The wire types, transcribed from `of-web`'s OpenAPI document.                            |
+| `src/lib/session.svelte.ts` | Who is signed in. A rune module, not a store.                                            |
+| `src/lib/org.svelte.ts`     | The org the current route is about, via context.                                         |
+| `src/lib/clients.ts`        | One recipe per coding agent, all the same shape.                                         |
+| `src/lib/poll.svelte.ts`    | Polling a page hands to an `$effect`. The overview and `/queue` use it; `/repos` should. |
+| `src/routes/`               | Public pages at the root; org pages under `/o/[org]`.                                    |
+| `worker/index.ts`           | The Cloudflare Worker: serves this bundle, proxies the API to `of-server`.               |
+| `wrangler.jsonc`            | That Worker's config. `worker/tsconfig.json` type-checks it separately.                  |
 
 Org pages live under `/o/[org]` rather than `/[org]` so that no org slug can ever collide
 with a page name. The routes the _server_ names — `/login`, `/verify`, `/recover`,

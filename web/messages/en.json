@@ -281,6 +281,9 @@
     }
   ],
   "queue_showing_capped": "Only the most recent {limit} are shown.",
+  "queue_refresh_failed": "Refresh failed. {reason} Showing the result from {age}.",
+  "queue_paused": "Updates paused while you were away. Interact with the page to resume.",
+  "queue_retrying": "Still retrying in the background.",
   "job_load_failed": "Could not load that job.",
   "job_back": "← Queue",
   "job_missing_title": "No such job",

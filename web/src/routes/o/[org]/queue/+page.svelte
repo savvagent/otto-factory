@@ -2,13 +2,15 @@
   import { page } from '$app/state';
   import { goto } from '$app/navigation';
 
-  import { api } from '$lib/api';
+  import { api, ApiError } from '$lib/api';
   import { messageFor } from '$lib/errors';
   import { m } from '$lib/paraglide/messages';
   import { useOrg } from '$lib/org.svelte';
   import { relative } from '$lib/format';
   import { statusLabel } from '$lib/labels';
   import { isClaimStranded } from '$lib/jobs';
+  import { Poller } from '$lib/poll.svelte';
+  import { session } from '$lib/session.svelte';
   import type { Job, JobStatus, Repo, Team } from '$lib/types';
   import Alert from '$lib/components/Alert.svelte';
   import Empty from '$lib/components/Empty.svelte';
@@ -53,11 +55,8 @@
   const team = $derived(page.url.searchParams.get('team') ?? undefined);
   const mine = $derived(page.url.searchParams.get('mine') === 'true');
 
-  let jobs = $state<Job[]>([]);
   let repos = $state<Repo[]>([]);
   let teams = $state<Team[]>([]);
-  let loading = $state(true);
-  let error = $state<string | undefined>(undefined);
 
   $effect(() => {
     const slug = org.slug;
@@ -75,54 +74,65 @@
     })();
   });
 
-  // Not $state: it identifies a request, it is never rendered, and making it
-  // reactive would retrigger the effect that writes it.
-  let latest = 0;
+  const jobsPoll = new Poller<Job[]>();
+
+  // A rejected `goto` (see `applyFilters` below) is not something `Poller`
+  // knows about, so it is not folded into `jobsPoll`'s own error state — it is
+  // combined with it below instead.
+  let navError = $state<string | undefined>(undefined);
+
+  const filters = $derived({ status, repo, team, mine, limit: 200 });
 
   $effect(() => {
     const slug = org.slug;
-    // Read inside the effect so each becomes a dependency.
-    const filters = { status, repo, team, mine, limit: 200 };
     if (!slug) return;
-
-    // Every dependency of this effect — the org *and* each filter — starts a new
-    // request, so staleness is decided by sequence rather than by comparing the
-    // org alone. Two quick filter changes otherwise race, and the first
-    // response can land after the second and repaint the table with rows that
-    // do not match the controls the reader is looking at.
-    const seq = ++latest;
-
-    loading = true;
-    error = undefined;
-
-    void (async () => {
-      try {
-        const found = await api.jobs(slug, filters);
-        if (seq !== latest) return;
-        jobs = found;
-      } catch (e) {
-        if (seq !== latest) return;
-        // An unregistered repo or team slug is a 404 naming what *is*
-        // registered — better than an empty table, which reads as a quiet
-        // queue rather than as a question nobody asked.
-        error = messageFor(e, m.queue_load_failed());
-        jobs = [];
-      } finally {
-        if (seq === latest) loading = false;
-      }
-    })();
+    // Switching orgs or filters runs this effect's cleanup, which stops the
+    // poll before the next subscription's starts — see the generation counter
+    // in `poll.svelte.ts`. That is what keeps a late response for a superseded
+    // filter from repainting the table with rows that do not match the
+    // controls the reader is looking at.
+    const active = filters;
+    // Same coupling the single `error` state used to have: a new subscription
+    // supersedes whatever a previous navigation failure left behind.
+    navError = undefined;
+    return jobsPoll.start(() => api.jobs(slug, active), { fatal });
   });
+
+  /**
+   * Which failures must not be retried.
+   *
+   * A `401` is a session that is gone: clearing the local copy is what lets the
+   * root layout's guard send this tab to `/login`. A `404` is the answer for an
+   * unregistered repo or team slug *and* for an org this account is no longer
+   * in (deliberate, per `CLAUDE.md`) — either way the data on screen belongs to
+   * a query this reader can no longer make, so it goes rather than sitting
+   * under a small warning. Everything else is a blip worth retrying.
+   */
+  function fatal(failure: unknown): boolean {
+    if (!(failure instanceof ApiError)) return false;
+    if (failure.isUnauthenticated) {
+      session.clear();
+      return true;
+    }
+    return failure.isNotFound || failure.status === 403;
+  }
+
+  const jobs = $derived(jobsPoll.value ?? []);
+  const loading = $derived(!jobsPoll.value);
+  const error = $derived(
+    navError ?? (jobsPoll.failed ? messageFor(jobsPoll.error, m.queue_load_failed()) : undefined)
+  );
 
   /**
    * The one place either filter control navigates. A rejected `goto` (the
    * origin check, a chunk-load failure) would otherwise vanish silently —
    * reproducing this exact bug's symptom, a filter that looks like it did
    * something but changed nothing, with no error shown — so it lands in the
-   * same `error`/`Alert` path the job-fetching effect already uses.
+   * same `error`/`Alert` path the job poll already uses.
    */
   function applyFilters(url: URL | string) {
     void goto(url, { replaceState: true, keepFocus: true, noScroll: true }).catch((e: unknown) => {
-      error = messageFor(e, m.queue_load_failed());
+      navError = messageFor(e, m.queue_load_failed());
     });
   }
 
@@ -223,7 +233,10 @@
   </div>
 
   {#if error}
-    <Alert>{error}</Alert>
+    <Alert>
+      {error}
+      {#if !jobsPoll.stopped}{m.queue_retrying()}{/if}
+    </Alert>
   {:else if loading && jobs.length === 0}
     <Loading what={m.queue_loading()} />
   {:else if jobs.length === 0}
@@ -236,6 +249,20 @@
       {/if}
     </Empty>
   {:else}
+    {#if jobsPoll.parked}
+      <p role="status" class="text-xs text-faint">{m.queue_paused()}</p>
+    {:else if jobsPoll.stale}
+      <p role="status" class="text-xs text-warn">
+        {m.queue_refresh_failed({
+          reason: messageFor(jobsPoll.error, m.error_network()),
+          age: relative(
+            jobsPoll.updatedAt === undefined
+              ? undefined
+              : new Date(jobsPoll.updatedAt).toISOString()
+          )
+        })}
+      </p>
+    {/if}
     <div class="of-card overflow-x-auto">
       <table class="w-full text-sm">
         <thead class="border-b border-edge/60 text-left text-xs text-faint">

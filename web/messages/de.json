@@ -281,6 +281,9 @@
     }
   ],
   "queue_showing_capped": "Es werden nur die {limit} neuesten angezeigt.",
+  "queue_refresh_failed": "Aktualisierung fehlgeschlagen. {reason} Angezeigt wird das Ergebnis von {age}.",
+  "queue_paused": "Aktualisierungen pausiert, während du weg warst. Interagiere mit der Seite, um sie fortzusetzen.",
+  "queue_retrying": "Es wird im Hintergrund weiter versucht.",
   "job_load_failed": "Dieser Auftrag konnte nicht geladen werden.",
   "job_back": "← Warteschlange",
   "job_missing_title": "Kein solcher Auftrag",
