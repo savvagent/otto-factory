@@ -419,12 +419,13 @@ compatible conversion into `ApiResult` — unchanged from today.
   violation, not a bonus. If `#109` needs its own PR after this merges, it needs its own PR — its
   scope is unaffected by this one landing first.
 - **`consume_account_claim`'s new wrapper-transaction shape** (open, delegate, commit) adds one
-  transaction round-trip over the previous single autocommitted statement, for the two call sites
-  that still use it (there are none today outside `claim_finish`, which now uses the `_tx` form
-  directly — `consume_account_claim` is kept for API symmetry with `peek_account_claim` and
-  `create_account_claim`/`create_account_claim_tx`, and because a connection-taking primitive with no
-  autocommit wrapper would be inconsistent with every other `_tx` pair in this file). Negligible cost,
-  not worth a special case.
+  transaction round-trip over the previous single autocommitted statement — a cost for whichever
+  future caller reaches for it, not a cost paid today: `claim_finish` now calls
+  `consume_account_claim_tx` directly, and there is no other call site. `consume_account_claim`
+  is kept for API symmetry with `peek_account_claim` and `create_account_claim`/
+  `create_account_claim_tx`, and because a connection-taking primitive with no autocommit wrapper
+  would be inconsistent with every other `_tx` pair in this file. Negligible cost, not worth a
+  special case.
 - **No migration, no new table, no RLS surface.** Confirmed against `account_claims`,
   `webauthn_ceremonies`, and `passkeys`' actual schema (`crates/of-core/migrations/0010_passkeys.sql`)
   — none carry an `org_id` column.

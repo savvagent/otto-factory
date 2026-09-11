@@ -243,10 +243,11 @@ impl RegistrationVia {
 ///
 /// Opens its own transaction and commits immediately — for `signup_finish`
 /// and `add_passkey_finish`, which have nothing else to fold into the same
-/// commit. `claim_finish` uses [`finish_registration_tx`] directly instead,
-/// so its claim-code consumption can share this function's transaction
-/// rather than commit separately, before it, with nothing to roll it back
-/// if what follows fails. See `savvagent/otto-factory#132`.
+/// commit. `claim_finish` uses [`finish_registration_tx`] directly instead
+/// and opens its own transaction around it, so its claim-code consumption
+/// can share *that* transaction rather than commit separately, before it,
+/// with nothing to roll it back if what follows fails. See
+/// `savvagent/otto-factory#132`.
 pub async fn finish_registration(
     db: &Db,
     webauthn: &Webauthn,
@@ -274,8 +275,19 @@ pub async fn finish_registration(
 /// decides when to commit it: [`finish_registration`] commits immediately
 /// after; `claim_finish` commits only once it has also checked that the
 /// ceremony's account matches the claim's.
+///
+/// **The connection must be unpinned** — the same requirement [`clear_tx`]
+/// documents for the same reason. This function ends by calling
+/// [`Db::audit_global_on`] on `conn`, which inserts a `NULL`-org row; handing
+/// it a pinned `Tx`'s connection instead sets `app.org_id`, and
+/// `audit_events`'s row-level-security policy either refuses the insert
+/// outright (wherever RLS is enforced) or silently accepts a row no tenant's
+/// own audit trail will ever show (wherever it is bypassed) — see
+/// `Db::audit_global_on`'s own doc comment. `pub`, and more inviting to reuse
+/// than its sibling, so this is worth restating rather than assuming a caller
+/// finds it there first.
 pub async fn finish_registration_tx(
-    tx: &mut sqlx::PgConnection,
+    conn: &mut sqlx::PgConnection,
     webauthn: &Webauthn,
     ceremony: Uuid,
     credential: &RegisterPublicKeyCredential,
@@ -284,7 +296,7 @@ pub async fn finish_registration_tx(
     ip: Option<&str>,
 ) -> Result<UserId> {
     let (user_id, state): (Option<UserId>, PasskeyRegistration) =
-        take_ceremony(&mut *tx, ceremony, "register").await?;
+        take_ceremony(&mut *conn, ceremony, "register").await?;
     let user_id = user_id.ok_or(AuthError::CeremonyExpired)?;
 
     let passkey = webauthn
@@ -306,7 +318,7 @@ pub async fn finish_registration_tx(
     .bind(&credential_id)
     .bind(&encoded)
     .bind(nickname)
-    .execute(&mut *tx)
+    .execute(&mut *conn)
     .await
     .map_err(|e| match &e {
         sqlx::Error::Database(db_err) if db_err.is_unique_violation() => {
@@ -315,8 +327,12 @@ pub async fn finish_registration_tx(
         _ => AuthError::from(e),
     })?;
 
+    // The credential and its audit row commit together: a live credential
+    // with no audit row is exactly the gap #108 exists to close, most of all
+    // on the `claim` path, which is the one event that proves who actually
+    // completed an admin-assisted takeover (#88).
     Db::audit_global_on(
-        tx,
+        conn,
         Entry::new(action::PASSKEY_REGISTERED)
             .actor(user_id)
             .detail(serde_json::json!({ "via": via.as_str() }))

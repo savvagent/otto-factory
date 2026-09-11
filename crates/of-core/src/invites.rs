@@ -281,8 +281,15 @@ impl Db {
         user.ok_or(Error::InviteInvalid)
     }
 
-    /// Spend a claim. One statement, so two requests racing the same code
-    /// cannot both win.
+    /// Spend a claim, in its own committed transaction.
+    ///
+    /// The atomicity that stops two requests racing the same code from both
+    /// winning comes from [`consume_account_claim_tx`]'s single `UPDATE …
+    /// RETURNING`, not from the transaction wrapped around it here — this
+    /// wrapper exists for a caller with nothing else to fold into the same
+    /// commit. `claim_finish` needs that folding and calls
+    /// [`consume_account_claim_tx`] directly instead; see its own doc
+    /// comment.
     pub async fn consume_account_claim(&self, token_hash: &[u8]) -> Result<UserId> {
         let mut tx = self.begin_unpinned().await?;
         let user = consume_account_claim_tx(&mut tx, token_hash).await?;
