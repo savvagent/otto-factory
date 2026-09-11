@@ -284,17 +284,35 @@ impl Db {
     /// Spend a claim. One statement, so two requests racing the same code
     /// cannot both win.
     pub async fn consume_account_claim(&self, token_hash: &[u8]) -> Result<UserId> {
-        let user: Option<UserId> = sqlx::query_scalar(
-            "UPDATE account_claims SET consumed_at = now() \
-             WHERE token_hash = $1 AND consumed_at IS NULL AND expires_at > now() \
-             RETURNING user_id",
-        )
-        .bind(token_hash)
-        .fetch_optional(self.pool())
-        .await?;
-
-        user.ok_or(Error::InviteInvalid)
+        let mut tx = self.begin_unpinned().await?;
+        let user = consume_account_claim_tx(&mut tx, token_hash).await?;
+        tx.commit().await?;
+        Ok(user)
     }
+}
+
+/// The same claim consumption as [`Db::consume_account_claim`], but run
+/// against a connection the caller already holds a transaction on — so a
+/// caller that must also finish a credential registration in the same
+/// commit (`of_web::routes::auth::claim_finish`) can fold both single-use
+/// secrets into one transaction. Before this existed, the claim was spent by
+/// an autocommitted statement *before* the credential/audit transaction even
+/// opened, so a failure anywhere in that transaction burned the claim for
+/// nothing. See `savvagent/otto-factory#132`.
+pub async fn consume_account_claim_tx(
+    conn: &mut sqlx::PgConnection,
+    token_hash: &[u8],
+) -> Result<UserId> {
+    let user: Option<UserId> = sqlx::query_scalar(
+        "UPDATE account_claims SET consumed_at = now() \
+         WHERE token_hash = $1 AND consumed_at IS NULL AND expires_at > now() \
+         RETURNING user_id",
+    )
+    .bind(token_hash)
+    .fetch_optional(conn)
+    .await?;
+
+    user.ok_or(Error::InviteInvalid)
 }
 
 /// The same claim-code issuance as [`Db::create_account_claim`], but run
