@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.6.0](https://github.com/savvagent/otto-factory/compare/v0.5.0...v0.6.0) (2026-09-11)
+
+
+### ⚠ BREAKING CHANGES
+
+* **of-core:** fence complete_job/fail_job/cancel_job/renew_claim by claim generation ([#161](https://github.com/savvagent/otto-factory/issues/161))
+
+### Features
+
+* **web:** add a public marketing front page ([#175](https://github.com/savvagent/otto-factory/issues/175)) ([21476b7](https://github.com/savvagent/otto-factory/commit/21476b7ad3c45c1afc9988d94a890413d13e6b0b))
+* **web:** add Otto CLI to the connect page's client list ([#153](https://github.com/savvagent/otto-factory/issues/153)) ([6cb3dd3](https://github.com/savvagent/otto-factory/commit/6cb3dd36adad8f5c8c3d432af3de0fd66866b5ce))
+
+
+### Bug Fixes
+
+* **of-auth:** make claim_finish's claim and ceremony consumption atomic with its writes ([#164](https://github.com/savvagent/otto-factory/issues/164)) ([546bc63](https://github.com/savvagent/otto-factory/commit/546bc6393e0926a8cb486b8d1c40046c19239707))
+* **of-core:** fence complete_job/fail_job/cancel_job/renew_claim by claim generation ([#161](https://github.com/savvagent/otto-factory/issues/161)) ([c7c5192](https://github.com/savvagent/otto-factory/commit/c7c51925f46d8392a4ef604cce598ff993101a6b))
+
 ## [0.5.0](https://github.com/savvagent/otto-factory/compare/v0.4.0...v0.5.0) (2026-09-11)
 
 
