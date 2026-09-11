@@ -12,7 +12,9 @@ implements it exactly.
 
 ## Status — 2026-09-11
 
-Not started. One task.
+Implemented on branch `core/audit-global-unpinned`; PR not yet opened at time of writing. One
+task, complete: `cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`, and
+`cargo fmt --all --check` all pass.
 
 ## Global Constraints
 
@@ -53,7 +55,7 @@ parameter type, and every call site touched by the type change all have to land 
 crate does not compile in any intermediate state where only some of them have moved, since
 `begin_unpinned`'s callers and `audit_global_on`'s one caller are both downstream of the same type.
 
-## Task 1 — `Unpinned` type, narrowed `audit_global_on`, and every call site ✅/🚧/⬜: ⬜
+## Task 1 — `Unpinned` type, narrowed `audit_global_on`, and every call site ✅/🚧/⬜: ✅
 
 **Files:** `crates/of-core/src/db.rs`, `crates/of-core/src/audit.rs`, `crates/of-auth/src/
 passkeys.rs`, `crates/of-auth/src/tokens.rs`, `crates/of-auth/src/ratelimit.rs`,
@@ -68,32 +70,32 @@ passkeys.rs`, `crates/of-auth/src/tokens.rs`, `crates/of-auth/src/ratelimit.rs`,
 
 Steps:
 
-- [ ] **Baseline: confirm the starting point is green.**
+- [x] **Baseline: confirm the starting point is green.**
   `podman compose up -d` (skip if already running), `cp .env.example .env` if no `.env` exists yet,
   then `cargo test -p of-core --test isolation` and `cargo test -p of-auth --test passkeys`.
   Expected: both pass, including the still-present
   `audit_global_on_refuses_a_pinned_connection` (this step establishes the before-state; it is
   removed later in this same task).
 
-- [ ] **Add `Unpinned` to `crates/of-core/src/db.rs`, beside `Tx`.**
+- [x] **Add `Unpinned` to `crates/of-core/src/db.rs`, beside `Tx`.**
   Exact shape per spec §1: `pub struct Unpinned { tx: Transaction<'static, Postgres> }` with
   `pub fn conn(&mut self) -> &mut sqlx::PgConnection`, `pub async fn commit(self) -> Result<()>`,
   `pub async fn rollback(self) -> Result<()>` — no `Deref`/`DerefMut` impl (spec's Scope/Out and
   Assumptions explain why). Full doc comment per spec §1.
 
-- [ ] **Change `Db::begin_unpinned`'s return type.**
+- [x] **Change `Db::begin_unpinned`'s return type.**
   `pub async fn begin_unpinned(&self) -> Result<Unpinned> { Ok(Unpinned { tx:
   self.pool.begin().await? }) }`. Its existing doc comment (the deployment-shape warning) carries
   over unchanged.
 
-- [ ] **Compile-check `of-core` alone to see the exact break list.**
+- [x] **Compile-check `of-core` alone to see the exact break list.**
   `cargo build -p of-core`. Expected: fails at every call site the type change touches inside this
   crate (`crates/of-core/src/orgs.rs`, `crates/of-core/src/invites.rs`,
   `crates/of-core/src/audit.rs`'s `audit_global_on` — not yet updated) plus
   `crates/of-core/tests/isolation.rs` (test target, checked separately). This is expected and is how
   the remaining steps are scoped — do not treat it as a regression.
 
-- [ ] **Narrow `Db::audit_global_on` in `crates/of-core/src/audit.rs`.**
+- [x] **Narrow `Db::audit_global_on` in `crates/of-core/src/audit.rs`.**
   `pub async fn audit_global_on(conn: &mut crate::db::Unpinned, e: Entry) -> Result<()> {
   e.write(None, conn.conn()).await }`. Replace the doc comment with spec §2's version (explains the
   type-level fix, contrasts with the previous generic signature and with `audit_global`'s best-effort
@@ -101,50 +103,50 @@ Steps:
   still names it directly (check: `Entry::write`'s own signature still uses it, so the import stays
   — confirm rather than assume).
 
-- [ ] **Fix `crates/of-core/src/orgs.rs`.**
+- [x] **Fix `crates/of-core/src/orgs.rs`.**
   At the one `begin_unpinned` site (~line 196), change `.fetch_one(&mut *tx)` and
   `.execute(&mut *tx)` to `.fetch_one(tx.conn())` and `.execute(tx.conn())`. `tx.commit()` is
   unchanged.
 
-- [ ] **Fix `crates/of-core/src/invites.rs`.**
+- [x] **Fix `crates/of-core/src/invites.rs`.**
   At the one `begin_unpinned` site (~line 261), no query runs on `tx` directly in this file — confirm
   by re-reading the current call site; if so, only the inferred type of `tx` changes and no line
   needs editing beyond leaving `tx.commit()` as-is. If a query call was missed during spec drafting,
   apply the same `&mut *tx` → `tx.conn()` substitution.
 
-- [ ] **Compile-check `of-core` again.**
+- [x] **Compile-check `of-core` again.**
   `cargo build -p of-core`. Expected: clean. `cargo test -p of-core --test isolation` will still fail
   to *compile* at this point, because `audit_global_on_refuses_a_pinned_connection`'s scenario is now
   a type error — expected, fixed two steps below.
 
-- [ ] **Fix `crates/of-auth/src/passkeys.rs`.**
+- [x] **Fix `crates/of-auth/src/passkeys.rs`.**
   Two `begin_unpinned` sites. In `finish_registration` (~lines 268–299): change
   `.execute(&mut *tx)` (the credential insert) to `.execute(tx.conn())`; change
   `Db::audit_global_on(&mut *tx, ...)` to `Db::audit_global_on(&mut tx, ...)`; `tx.commit()`
   unchanged. The second site (~line 590, `commit` only, no query) needs no edit beyond the inferred
   type.
 
-- [ ] **Fix `crates/of-auth/src/tokens.rs`.**
+- [x] **Fix `crates/of-auth/src/tokens.rs`.**
   Two `begin_unpinned` sites (~lines 344–368 and ~480–482). Apply `&mut *tx` → `tx.conn()` wherever
   a query executes on `tx`; leave `tx.commit()` calls unchanged.
 
-- [ ] **Fix `crates/of-auth/src/ratelimit.rs`.**
+- [x] **Fix `crates/of-auth/src/ratelimit.rs`.**
   Two `begin_unpinned` sites (~lines 115–131 and ~242–253). Apply the same substitution, including
   the `count_failures(&mut *tx, bucket, policy.window_secs)` call at the second site, which becomes
   `count_failures(tx.conn(), bucket, policy.window_secs)` — `count_failures`'s own signature is
   generic over `PgExecutor` and needs no change.
 
-- [ ] **Compile-check the whole workspace.**
+- [x] **Compile-check the whole workspace.**
   `cargo build --workspace`. Expected: clean except for `crates/of-core/tests/isolation.rs`, fixed
   next.
 
-- [ ] **Fix the nine `begin_unpinned` sites in `crates/of-core/tests/isolation.rs`.**
+- [x] **Fix the nine `begin_unpinned` sites in `crates/of-core/tests/isolation.rs`.**
   Apply `&mut *tx` → `tx.conn()` at each query call (lines ~710, 774, 865, 973, 1138, 1181, 1202,
   1243, 1285 as of the spec's drafting — re-locate by searching for `begin_unpinned` rather than
   trusting line numbers, since earlier edits in this task may have shifted them). Leave
   `tx.commit()`/`tx.rollback()` calls unchanged.
 
-- [ ] **Remove `audit_global_on_refuses_a_pinned_connection` and replace it with the explanatory
+- [x] **Remove `audit_global_on_refuses_a_pinned_connection` and replace it with the explanatory
   comment.**
   Delete the test function (its scenario — `of_core::Db::audit_global_on(tx.conn(), ...)` where
   `tx: Tx` — no longer typechecks: `Tx::conn()` yields `&mut sqlx::PgConnection`, and
@@ -152,24 +154,24 @@ Steps:
   the same location, naming `savvagent/otto-factory#133` and explaining that the misuse is now a
   compile error rather than a runtime-checked one.
 
-- [ ] **Compile-check the whole workspace including tests.**
+- [x] **Compile-check the whole workspace including tests.**
   `cargo build --workspace --tests`. Expected: clean.
 
-- [ ] **Run the affected test suites.**
+- [x] **Run the affected test suites.**
   `cargo test -p of-core --test isolation` and `cargo test -p of-auth --test passkeys`. Expected:
   same tests pass as the baseline run, minus the removed test — no assertion in any surviving test
   changes, since every substitution reaches the identical `&mut sqlx::PgConnection` the old deref
   did.
 
-- [ ] **Run the full workspace suite.**
+- [x] **Run the full workspace suite.**
   `cargo test --workspace`. Expected: green — this confirms no other test file (`crates/of-auth/
   tests/passkeys.rs`, `crates/of-auth/tests/tokens.rs` if present, etc.) depends on
   `begin_unpinned`'s old concrete return type in a way this task's changes broke.
 
-- [ ] **Lint and format.**
+- [x] **Lint and format.**
   `cargo clippy --all-targets -- -D warnings`, then `cargo fmt --all`.
 
-- [ ] **Format and commit.**
+- [x] **Format and commit.**
   `cargo fmt --all` (again, to catch anything the lint step's fixes touched), then:
   ```
   git add crates/of-core/src/db.rs crates/of-core/src/audit.rs crates/of-core/src/orgs.rs \
