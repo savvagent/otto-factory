@@ -1870,6 +1870,107 @@ async fn a_reset_account_cannot_be_claimed_without_the_code(pool: PgPool) {
     );
 }
 
+/// The exact hazard `savvagent/otto-factory#132` reports: a failure on the
+/// credential insert (a unique-violation, here forced by a colliding row —
+/// the literal pre-`#131` failure mode the issue names) must not leave the
+/// claim code burned with nothing to show for it. Before `#132`'s fix, the
+/// claim was spent by an autocommitted statement before `claim_finish` ever
+/// attempted the credential insert, so this exact sequence left an account
+/// with no passkey and no usable claim — for an org's last owner, nobody
+/// above them could issue a second one.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_credential_collision_during_claim_finish_leaves_the_claim_code_usable(pool: PgPool) {
+    let h = harness(pool);
+    let rob = onboard(&h, "rob@acme.test").await;
+    let org = org_with_owner(&h, "acme", &rob).await;
+    let bob = onboard(&h, "bob@acme.test").await;
+    add_member(&h, org, bob.user, of_core::orgs::Role::Member).await;
+
+    let reset = Call::post(format!(
+        "/api/orgs/acme/members/{}/reset-passkeys",
+        bob.user
+    ))
+    .with_session(&rob.session)
+    .send(&h.router)
+    .await;
+    reset.expect(StatusCode::CREATED);
+    let code = reset.body["code"]
+        .as_str()
+        .expect("no claim code")
+        .to_string();
+
+    let started = Call::post("/api/auth/claim/start")
+        .json(serde_json::json!({ "code": code }))
+        .send(&h.router)
+        .await;
+    started.expect(StatusCode::OK);
+
+    // Drive the ceremony to a real, signed credential — but do not submit it
+    // yet. Its raw id is what the eventual `claim/finish` will try to insert.
+    let mut new_device = common::authenticator();
+    let (ceremony_id, credential) = common::register_credential(&mut new_device, &started.body);
+    let colliding_id = credential.raw_id.as_ref().to_vec();
+
+    // Plant a passkey already using that exact credential id, on a different,
+    // unrelated account — this is what makes `claim_finish`'s own INSERT hit
+    // the unique-violation → `CredentialAlreadyRegistered` path deterministically,
+    // without needing to guess at a database-level fault to inject.
+    sqlx::query(
+        "INSERT INTO passkeys (user_id, credential_id, credential, nickname) \
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(rob.user)
+    .bind(&colliding_id)
+    .bind(serde_json::json!({}))
+    .bind("decoy")
+    .execute(h.db.pool())
+    .await
+    .unwrap();
+
+    let finished = Call::post("/api/auth/claim/finish")
+        .json(serde_json::json!({
+            "ceremonyId": ceremony_id,
+            "credential": credential,
+            "code": code,
+        }))
+        .send(&h.router)
+        .await;
+    assert_ne!(
+        finished.status,
+        StatusCode::OK,
+        "a colliding credential id must be refused, not silently accepted"
+    );
+
+    // The assertion this test exists for: the claim code must still be live.
+    // Under the pre-#132 code this fails — the code was already spent by an
+    // autocommitted `UPDATE` before the credential insert was even attempted.
+    let retried = Call::post("/api/auth/claim/start")
+        .json(serde_json::json!({ "code": code }))
+        .send(&h.router)
+        .await;
+    retried.expect(StatusCode::OK);
+
+    // And the account is actually recoverable end to end, not merely that the
+    // code still "looks" valid: a fresh device, a fresh ceremony (the failed
+    // attempt's ceremony is spent either way, by design — single-use), and a
+    // full reclaim.
+    let mut recovery_device = common::authenticator();
+    let reclaimed = common::finish_registration(
+        &h,
+        &mut recovery_device,
+        "/api/auth/claim/finish",
+        &retried.body,
+        serde_json::json!({ "code": code }),
+    )
+    .await;
+    reclaimed.expect(StatusCode::OK);
+    assert_eq!(
+        reclaimed.body["user"]["id"].as_str().unwrap(),
+        bob.user.to_string(),
+        "the claim must still land on the account it was issued for"
+    );
+}
+
 /// An admin must not reach through this endpoint what the role check refuses
 /// everywhere else — resetting an owner is an owner's business.
 #[sqlx::test(migrations = "../of-core/migrations")]

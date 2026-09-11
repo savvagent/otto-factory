@@ -335,6 +335,18 @@ pub async fn claim_start(
 ///
 /// The code is spent here rather than at `start`, so an interrupted ceremony
 /// does not burn somebody's only way back into their account.
+///
+/// The claim consumption, the ceremony consumption, the credential insert,
+/// and the audit write all share one transaction (`savvagent/otto-factory#132`):
+/// before this, the claim was spent by an autocommitted `UPDATE` and the
+/// ceremony by `finish_registration`'s own autocommitted `DELETE`, both
+/// *before* the credential/audit transaction `#131` added even opened. A
+/// failure anywhere after either point — including the credential insert
+/// itself, the audit write, `tx.commit()`, or this function's own
+/// ceremony-ownership check below — used to leave the account with a burned
+/// claim, a burned ceremony, and no passkey: for an org's last owner, nobody
+/// above them can issue a second claim. Now any such failure rolls back
+/// everything, and the claim and ceremony are both still there for a retry.
 pub async fn claim_finish(
     State(state): State<AppState>,
     parts: Parts,
@@ -342,12 +354,10 @@ pub async fn claim_finish(
 ) -> ApiResult<Response> {
     let ip = client_ip(&parts, &state.config);
 
-    let user = state
-        .db
-        .consume_account_claim(&hash_claim(&req.code))
-        .await?;
-    let registered = passkeys::finish_registration(
-        &state.db,
+    let mut tx = state.db.begin_unpinned().await?;
+    let user = of_core::invites::consume_account_claim_tx(&mut tx, &hash_claim(&req.code)).await?;
+    let registered = passkeys::finish_registration_tx(
+        &mut tx,
         &state.webauthn,
         req.ceremony_id,
         &req.credential,
@@ -357,13 +367,18 @@ pub async fn claim_finish(
     )
     .await?;
 
-    // The ceremony was started against the claimed account; if these disagree,
-    // something has been substituted and the safe answer is to refuse.
+    // The ceremony was started against the claimed account; if these
+    // disagree, something has been substituted and the safe answer is to
+    // refuse — before anything commits, so a mismatch rolls back the claim
+    // consumption and the credential/audit writes together instead of
+    // leaving them durable for a request that gets rejected.
     if registered != user {
         return Err(ApiError::forbidden(
             "that claim code is not for this ceremony",
         ));
     }
+
+    tx.commit().await.map_err(of_core::Error::from)?;
 
     let opened = login::with_passkey(&state.db, user, ip.as_deref()).await?;
     signed_in_response(&state, opened).await

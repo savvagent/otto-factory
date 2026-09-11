@@ -406,6 +406,32 @@ pub async fn finish_registration(
         .await
 }
 
+/// Drive a registration ceremony far enough to produce a real credential,
+/// without submitting it anywhere.
+///
+/// For a test that needs to inspect or pre-empt the credential (its raw id,
+/// say) before a `…/finish` endpoint ever sees it — [`finish_registration`]
+/// above drives the ceremony and posts it in one step, which cannot express
+/// that. Returns the ceremony id alongside the credential since callers of
+/// this need both to build their own `…/finish` request body.
+pub fn register_credential(
+    auth: &mut Authenticator,
+    started: &Value,
+) -> (String, webauthn_rs::prelude::RegisterPublicKeyCredential) {
+    let ceremony_id = started["ceremonyId"].as_str().unwrap().to_string();
+    let challenge: webauthn_rs::prelude::CreationChallengeResponse =
+        serde_json::from_value(soften(started["challenge"].clone())).unwrap();
+
+    let credential = auth
+        .do_registration(
+            webauthn_rs::prelude::Url::parse(PUBLIC_URL).unwrap(),
+            challenge,
+        )
+        .expect("the authenticator refused the registration challenge");
+
+    (ceremony_id, credential)
+}
+
 /// Sign in again with an account's own authenticator.
 pub async fn sign_in(h: &Harness, account: &mut Account) -> Reply {
     let credential_id = account.credential_id.clone();
