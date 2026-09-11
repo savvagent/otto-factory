@@ -32,14 +32,28 @@ in the scanner's per-issue trust ordering; both `SKILL.md` files were revised ac
 Round 3 found the trio-cleared marker itself guessable/forgeable in this public repo, plus a
 handful of smaller gaps (unbounded `NEEDS_SECURITY_REEVIEW` recursion, a lease-release bug on
 that recursive path, an ambiguous pre-/post-merge CI check, unfenced trio reports in the Step
-4.5 follow-up prompt). Round 4 closed all of those: the marker is now bound to an
-orchestrator-generated nonce and the PR's head SHA at review time (`gh pr view --json
-headRefOid`), Step 5 verifies that marker's nonce/SHA/author exactly rather than just the job
-id, the CI check is split into a pre-merge head-commit check and a post-merge
-`mergeCommit.oid`-matched check on `master`, the security-reevaluation recursion is capped at 3
-rounds, lease release is now conditioned on a genuinely terminal report, and the record-as-
-shipped PR goes through the same trio-review cycle as the feature PR instead of being merged
-by a subagent with no `Agent` tool.
+4.5 follow-up prompt). Round 4 closed all of those: the marker is bound to an
+orchestrator-generated nonce and a head SHA, Step 5 verifies that marker's nonce/SHA/author
+rather than just the job id, the CI check is split into a pre-merge head-commit check and a
+post-merge `mergeCommit.oid`-matched check on `master`, the security-reevaluation recursion is
+capped at 3 rounds, lease release is now conditioned on a genuinely terminal report, and the
+record-as-shipped PR goes through the same trio-review cycle as the feature PR instead of being
+merged by a subagent with no `Agent` tool. Round 4's SHA binding, however, still didn't verify
+anything: the head SHA it embedded was captured by the orchestrator at the *start* of Step 4.5
+(before the review-response loop that follows-up subagent runs), and Step 5 then compared the
+marker against that same already-known constant — never against what actually merged. Round 5
+(both reviewers converged on this independently) fixed the mechanism itself: the follow-up
+subagent now captures its own `headRefOid` immediately before merging (not the orchestrator's
+earlier snapshot) and embeds *that* in the marker, and Step 5 checks it against the PR's actual
+post-merge `headRefOid` — the comparison that genuinely enforces "no commit lands between the
+marker being posted and the merge." Round 5 also fixed a handful of smaller, explicitly-scoped
+gaps: the record-as-shipped review cycle now carries an explicit `Cycle` field, is capped at one
+round, and acquires its own lease (releasing the feature branch's first) instead of reusing it;
+the reviewer-report fence check drops its hostile-content branch, since a review of these two
+skill files legitimately quotes the fence syntax by name; `complete_job`'s PR URL is constructed
+from the already-validated PR number rather than echoed from a subagent's report; and several
+smaller citation/validation gaps (lease release before `fail_job` on field-validation failures,
+`gh run list --json` fields for SHA matching, the Phase 5 step 13 citation) are fixed.
 
 ## Global Constraints
 
@@ -58,7 +72,7 @@ by a subagent with no `Agent` tool.
 | File                                                    | Responsibility                                                                                                   |
 | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
 | **Create.** `.github/skills/otto-factory-scanner/SKILL.md` (visible at `.claude/skills/otto-factory-scanner/SKILL.md` via the repo's existing symlink) | Adapted from `otto-scanner`: finds open `savvagent/otto-factory` issues with no job yet, checks/fixes a type label, queues via `add_job`/`link_ticket`. |
-| **Create.** `.github/skills/otto-factory-worker/SKILL.md` (visible at `.claude/skills/otto-factory-worker/SKILL.md` via the repo's existing symlink) | Adapted from `otto-worker`, then hardened across four review rounds into a Step 4 → Step 4.5 → Step 5 split: a Step 4 implementer subagent claims the job and opens the PR but never merges; the orchestrator itself dispatches the mandatory rust-pro/architect-reviewer/security-auditor trio in Step 4.5 and hands their raw (fenced) reports to a follow-up subagent that addresses findings, posts a nonce+reviewed-commit-SHA-bound `trio-cleared` marker, and merges — recursing on `NEEDS_SECURITY_REEVIEW` (capped at 3 rounds) and on the record-as-shipped PR's own `NEEDS_REVIEWERS_FOR_RECORD_PR` cycle; Step 5 resolves the job only after independently verifying that marker (exact nonce/SHA/author match), merge timing, and the post-merge CI run before `complete_job`/`fail_job`. |
+| **Create.** `.github/skills/otto-factory-worker/SKILL.md` (visible at `.claude/skills/otto-factory-worker/SKILL.md` via the repo's existing symlink) | Adapted from `otto-worker`, then hardened across five review rounds into a Step 4 → Step 4.5 → Step 5 split: a Step 4 implementer subagent claims the job and opens the PR but never merges; the orchestrator itself dispatches the mandatory rust-pro/architect-reviewer/security-auditor trio in Step 4.5 and hands their raw (fenced) reports to a follow-up subagent that addresses findings, captures its own head SHA immediately before merging, posts a nonce+that-SHA-bound `trio-cleared` marker, and merges — recursing on `NEEDS_SECURITY_REEVIEW` (capped at 3 rounds) and on the record-as-shipped PR's own `NEEDS_REVIEWERS_FOR_RECORD_PR` cycle (capped at 1 round, its own lease); Step 5 resolves the job only after independently verifying that marker against the PR's actual post-merge `headRefOid` (not an echoed constant), merge timing, and the post-merge CI run before `complete_job`/`fail_job`. |
 
 ## Task Order & Rationale
 
