@@ -208,6 +208,35 @@ table), with one added state:
 The filter bar (the four controls plus "Clear filters") is unconditional today and stays that
 way — only the results region below it switches on `error`/`loading`/`parked`/`stale`.
 
+## §2a What was actually built
+
+The description above is wrong in two ways a PR review caught, and both are now fixed in the
+shipped code rather than in this spec's prose only.
+
+First, the "three-way branch" was never accurate even for the code as designed here: `error` /
+`loading` / the results region is really a four-way split once the results region's own
+`Empty`-vs-`table` choice is counted, and the stale/parked note was written nested *inside* the
+table's branch. That meant a successful-but-empty poll (a filter matching nothing, or a fresh org)
+followed by a failing or long-idle tick showed a confident "no jobs" empty state with no
+staleness or pause indication at all — exactly what the six rules in `poll.svelte.ts` exist to
+prevent. The shipped render tree puts the `parked`/`stale` note above the `Empty`/table split, so
+it fires whenever the poll has ever produced a value (fresh, stale, or parked, including an empty
+one) rather than only when that value happens to be non-empty.
+
+Second, this spec never mentions `navError` (the existing rejected-`goto` notice from
+`docs/specs/2026-09-09-queue-filter-refetch-design.md`) at all, but the shipped page has to
+render both it and the poll's own `error` somewhere. An earlier revision merged them into one
+`error` slot with `pollError ?? navError` precedence. That was wrong on its own terms: `stale`
+(data present, refresh failed non-fatally) leaves `pollError` `undefined`, so a stale poll fell
+through to a stale `navError` and replaced a perfectly good table with a nav-rejection alert; and
+an effect that cleared `navError` on every successful poll tick retired a real navigation failure
+report on a random 0-30s timer that proved nothing about whether the navigation itself ever
+actually got fixed. The shipped code renders `navError` as its own independent, always-visible
+`Alert` — a nav-rejection is a notice about a *control*, not a reason to blank the results region
+— and retires it only from the existing reset at the top of the job-poll `$effect` (on a genuine
+org/filter change, the only event that actually supersedes a failed navigation). `pollError`
+drives its own `{#if pollError}` branch with no precedence rule against `navError` at all.
+
 ## §3 What does not change
 
 - `setFilter`, `applyFilters`, the `filtered` derived, and every control in the filter bar —
