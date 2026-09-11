@@ -25,9 +25,7 @@ savvagent/otto-factory#149.
 
 ## Status — 2026-09-11
 
-✅ Shipped: `.github/skills/otto-factory-scanner/SKILL.md` and
-`.github/skills/otto-factory-worker/SKILL.md` committed (`ff45154`, follow-up self-location fix
-`eab837e`), spec-compliance and code-quality reviews both clean (no Critical/Important issues).
+🚧 In progress — implementation complete, addressing mandatory review trio findings on PR #150.
 
 ## Global Constraints
 
@@ -56,7 +54,7 @@ versa), so they are written and reviewed together.
 
 ## Task 1 — Add `otto-factory-scanner` and `otto-factory-worker` ✅
 
-**Files:** `.claude/skills/otto-factory-scanner/SKILL.md`, `.claude/skills/otto-factory-worker/SKILL.md`
+**Files:** `.github/skills/otto-factory-scanner/SKILL.md`, `.github/skills/otto-factory-worker/SKILL.md`
 
 **Interfaces:** consumes the `otto-factory` MCP server's own tools (`whoami`, `resolve_repo`,
 `list_repos`, `register_repo`, `list_jobs`, `add_job`, `link_ticket`, `ready`, `claim_jobs`,
@@ -66,7 +64,7 @@ no new interface of its own (skill content only, no code).
 
 - [x] Read `~/dev/otto/.claude/skills/otto-scanner/SKILL.md` and
       `~/dev/otto/.claude/skills/otto-worker/SKILL.md` in full.
-- [x] Write `.claude/skills/otto-factory-scanner/SKILL.md`:
+- [x] Write `.github/skills/otto-factory-scanner/SKILL.md`:
   - Retarget every `savvagent/otto` reference to `savvagent/otto-factory`.
   - Replace the `creating-github-issues`-based compliance check (Step 2) with: exactly one type
     label (`bug`/`enhancement`/`documentation`) present, confirmed against
@@ -82,7 +80,7 @@ no new interface of its own (skill content only, no code).
   - Update frontmatter `name:`/`description:` and every cross-reference
     (`Common Rationalizations`, `Red Flags`, `Cross-references`) to point at
     `otto-factory-worker` and drop the `creating-github-issues`/`otto-development` mentions.
-- [x] Write `.claude/skills/otto-factory-worker/SKILL.md`:
+- [x] Write `.github/skills/otto-factory-worker/SKILL.md`:
   - Retarget every `savvagent/otto` reference to `savvagent/otto-factory`.
   - Replace every `otto-development` dispatch with `otto-factory-development` (including the
     Step 4 subagent prompt template, its cutting-a-release rule reference, and its worktree
@@ -96,8 +94,8 @@ no new interface of its own (skill content only, no code).
 - [x] Cross-check both files against each other: `otto-factory-scanner`'s Cross-references
       section names `otto-factory-worker` and vice versa; neither file mentions
       `savvagent/otto`, `otto-development`, or `creating-github-issues` anywhere
-      (`grep -rn 'savvagent/otto"\|otto-development\|creating-github-issues' .claude/skills/otto-factory-scanner .claude/skills/otto-factory-worker` must return nothing).
-- [x] Format and commit: `git add .claude/skills/otto-factory-scanner .claude/skills/otto-factory-worker && git commit -m "docs: add otto-factory-scanner and otto-factory-worker skills"`.
+      (`grep -rn 'savvagent/otto"\|otto-development\|creating-github-issues' .github/skills/otto-factory-scanner .github/skills/otto-factory-worker` must return nothing).
+- [x] Format and commit: `git add .github/skills/otto-factory-scanner .github/skills/otto-factory-worker && git commit -m "docs: add otto-factory-scanner and otto-factory-worker skills"`.
 
 ## Final gate
 
