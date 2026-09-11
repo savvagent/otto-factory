@@ -12,8 +12,9 @@ plan implements it exactly.
 
 ## Status — 2026-09-11
 
-✅ Shipped in savvagent/otto-factory#161 (merged as `fix(of-core)!: fence
-complete_job/fail_job/cancel_job/renew_claim by claim generation`).
+✅ Shipped in savvagent/otto-factory#161, merged as `c7c51925f46d8392a4ef604cce598ff993101a6b`
+(`fix(of-core)!: fence complete_job/fail_job/cancel_job/renew_claim by claim generation`). CI
+on that merge commit is green (`rust` + `web`, run against `master`).
 
 **Update (same day, PR review):** the mandatory review trio's independent `security-auditor`
 pass found the plan as drafted left an unfenced expiry race open for any caller that never
@@ -32,9 +33,19 @@ sound (atomic, boundary-consistent, no clock skew, no bypass), but the downstrea
 documentation were not — the expiry-refusal wording was fixed to stop misattributing an
 expired claim to a caller who never held it, the generation-mismatch message no longer echoes
 the value it says never to obtain, `cancel_job`'s exemption gained its own dedicated tests,
-and all five affected tool descriptions now say plainly that an expired claim cannot be
-renewed or finalized. See PR #161's aggregated review-findings comment for the full
-Critical/Important/Suggestions/Strengths breakdown across both rounds.
+and each of the five affected tool descriptions now says plainly that an already-expired claim
+can no longer be renewed or finalized — `cancel_job`'s own description states its exemption
+(it still succeeds on an expired claim when the cancellation was requested before it lapsed)
+rather than implying uniform behavior across all five. See PR #161's aggregated
+review-findings comment for the full Critical/Important/Suggestions/Strengths breakdown
+across both rounds.
+
+**Deferred, not fixed here:** one round-2 Suggestion was flagged but deliberately not applied
+in #161 — `claimed_by_label` is unbounded, caller-controlled free text (from `claim_jobs`'s
+`agent` argument) that #161 interpolates into two additional error messages returned as tool
+output to a peer agent, an intra-tenant surface it widens rather than introduces. Filed as
+savvagent/otto-factory#163, not fixed here — capping/validating the label is its own scoped
+change with its own spec, per otto-factory-development's plan-by-plan discipline.
 
 ## Global Constraints
 
@@ -94,7 +105,7 @@ suite.
 produces the new `expected_attempts`/`expectedAttempts` parameter on four `Tx` methods and
 four MCP tools.
 
-- [ ] **Failing test 1 (the fix's behavior, not yet implemented):** in
+- [x] **Failing test 1 (the fix's behavior, not yet implemented):** in
       `crates/of-core/tests/queue.rs`, add
       `stale_generation_cannot_finalize_or_renew_after_same_account_reclaims` that
       reproduces spec §Goal's exact interleaving using the SAME `UserId` for both claims
@@ -112,12 +123,14 @@ four MCP tools.
       "failing test," standing in for a runtime failure since the change is additive to a
       function signature, not a value comparison. Do not attempt to run it as a passing
       test yet; move directly to the next step, which makes it compile and pass together.
-- [ ] **Also add** `expected_attempts_omitted_preserves_todays_behavior` in the same file:
+- [x] **Also add** `expected_attempts_omitted_preserves_todays_behavior` in the same file:
       repeat the same claim/expire/reclaim setup, then confirm the stale caller's call
       **without** `expected_attempts` (i.e. `None`) still succeeds exactly as today — the
       additive-compatibility guarantee from spec §Success bullet 2. Same compile-failure
-      note applies until the next step.
-- [ ] **Failing test 2 (leases hypothesis):** in `crates/of-core/tests/queue.rs`, add
+      note applies until the next step. (Shipped as
+      `expected_attempts_omitted_preserves_todays_behavior_for_a_reclaimed_claim` — renamed
+      during the review response per the Status update above.)
+- [x] **Failing test 2 (leases hypothesis):** in `crates/of-core/tests/queue.rs`, add
       `lease_reclaim_after_expiry_mints_a_new_id_fencing_the_stale_holder` per spec
       §"Premise correction": acquire a lease, force-expire it (`UPDATE repo_leases SET
       expires_at = now() - interval '1 second' WHERE id = $1`, same pattern as `queue.rs`'s
@@ -129,7 +142,7 @@ four MCP tools.
       **passes against unmodified `of-core`** — this is a regression test locking in
       existing behavior, not a test of new code, so it must pass before Task 1's `jobs.rs`
       edit and after it identically.
-- [ ] **Implement the fix** in `crates/of-core/src/jobs.rs` per spec §2: add
+- [x] **Implement the fix** in `crates/of-core/src/jobs.rs` per spec §2: add
       `expected_attempts: Option<i32>` to `ensure_claim_held` (select `attempts` alongside
       the existing columns; after the existing identity check, add the generation check
       exactly as spec §2 shows — reusing `Error::AlreadyClaimed` with the same `holder`
@@ -148,7 +161,7 @@ four MCP tools.
       `lease_reclaim_after_expiry_mints_a_new_id_fencing_the_stale_holder`. Also run
       `cargo test -p of-core --test jobs` and `cargo test -p of-core --test isolation` to
       confirm the mechanical `, None` additions changed nothing about their outcomes.
-- [ ] **Wire the MCP tools** in `crates/of-mcp/src/tools/jobs.rs` per spec §5: add
+- [x] **Wire the MCP tools** in `crates/of-mcp/src/tools/jobs.rs` per spec §5: add
       `expected_attempts: Option<i32>` (with the doc comment from spec §5, adapted per
       tool) to `CompleteJobArgs`, `FailJobArgs`, `CancelJobArgs`, `RenewClaimArgs`; pass
       `args.expected_attempts` through in `complete_job`, `fail_job`, `cancel_job`,
@@ -156,7 +169,7 @@ four MCP tools.
       `expectedAttempts`. Run `cargo build -p of-mcp --tests` and fix every reported
       missing-field struct literal in `crates/of-mcp/tests/tools.rs` by adding
       `expected_attempts: None` until the crate builds clean.
-- [ ] **New MCP-level tests** in `crates/of-mcp/tests/tools.rs`: extend or add alongside
+- [x] **New MCP-level tests** in `crates/of-mcp/tests/tools.rs`: extend or add alongside
       `renew_claim_extends_the_claim_and_completion_still_works` and
       `complete_job_from_a_non_holder_is_refused` — a test claiming a job, capturing
       `attempts` from the `claim_jobs` response's `jobs[0]["attempts"]`, force-expiring the
@@ -168,7 +181,7 @@ four MCP tools.
       `complete_job` call with the stale `expectedAttempts` fails with
       `code == "already_claimed"` while one with the current value succeeds. Run
       `cargo test -p of-mcp --test tools` and confirm it passes.
-- [ ] **Full-workspace sweep and gate:** run `cargo build --workspace --tests` once more
+- [x] **Full-workspace sweep and gate:** run `cargo build --workspace --tests` once more
       to confirm zero missing call sites remain anywhere (`crates/of-web` and
       `crates/of-billing` do not call these `Tx` methods directly per the earlier grep, but
       re-confirm with `grep -rln "\.complete_job(\|\.fail_job(\|\.cancel_job(\|\.renew_claim("
@@ -176,7 +189,7 @@ four MCP tools.
       surprise hit gets added to this task before proceeding). Then run the full gate:
       `cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`,
       `cargo fmt --all`.
-- [ ] **Format and commit:** `cargo fmt --all`, then
+- [x] **Format and commit:** `cargo fmt --all`, then
       `git add crates/of-core/src/jobs.rs crates/of-core/tests/jobs.rs crates/of-core/tests/queue.rs crates/of-core/tests/isolation.rs crates/of-mcp/src/tools/jobs.rs crates/of-mcp/tests/tools.rs`
       and `git commit -m "of-core: fence complete_job/fail_job/cancel_job/renew_claim by claim generation"`.
 
