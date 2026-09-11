@@ -54,21 +54,22 @@ so the section stays internally consistent in one commit.
 `otto-factory-development` skill; it has no compiled interface.
 
 - [ ] Confirm the current section text hasn't drifted since the spec was written:
-      `sed -n '110,161p' .github/skills/otto-factory-development/SKILL.md` — should show the
-      disqualifier list (ending "The acceptance criterion fits in one sentence"), the
-      "Concrete examples that qualify" list, the fast-path-plan paragraph, the "If you find
-      yourself rationalizing…" trigger paragraph, and the rationalization table ending with
-      the "No spec, but I'll still write a one-line plan" row.
+      `sed -n '/^## Fast-Path: Trivial Tasks/,/^## Repository Conventions/p' .github/skills/otto-factory-development/SKILL.md`
+      — should show the disqualifier list (ending "The acceptance criterion fits in one
+      sentence"), the "Concrete examples that qualify" list, the fast-path-plan paragraph, the
+      "If you find yourself rationalizing…" trigger paragraph, and the rationalization table
+      ending with the "No spec, but I'll still write a one-line plan" row. Using a
+      heading-anchored range (rather than a fixed line count) keeps this command correct after
+      the section grows by the insertions below.
 - [ ] Add a new bullet to the disqualifier list (after the existing "No change to
       deploy/distribution shape (...)" bullet and before "The acceptance criterion fits in one
       sentence", so the acceptance-criterion bullet — the tightest, most general check — stays
       last):
       ```
-      - No new file, and no substantial rewrite of dispatch/orchestration logic in an existing
-        file, under `.github/skills/` — process documentation that will drive future
-        autonomous runs is itself architecture, not incidental docs, and PR #150's
-        `otto-factory-scanner`/`otto-factory-worker` skill pair fast-pathed on "two logical
-        files" and needed five rounds of trio review to harden before it shipped
+      - No new file under `.github/skills/`, and no substantial rewrite of
+        dispatch/orchestration logic in an existing one — process documentation that drives
+        future autonomous runs is itself architecture (PR #150 fast-pathed on this reasoning
+        and needed five rounds of trio review to harden)
       ```
 - [ ] Extend the "If you find yourself rationalizing into the fast-path on…" trigger paragraph
       with the same category, inserted before the existing "or has more than a one-sentence
@@ -99,10 +100,10 @@ so the section stays internally consistent in one commit.
       row) and nothing else — no reflow of unrelated lines, no change outside the "Fast-Path:
       Trivial Tasks" section.
 - [ ] Re-read the full "Fast-Path: Trivial Tasks" section once more
-      (`sed -n '110,165p' .github/skills/otto-factory-development/SKILL.md`) to confirm it
-      still reads coherently end to end with the three insertions in place — table column
-      alignment doesn't need to be pixel-perfect (the existing table already has long,
-      unaligned cells), but the row must parse as a valid Markdown table row.
+      (`sed -n '/^## Fast-Path: Trivial Tasks/,/^## Repository Conventions/p' .github/skills/otto-factory-development/SKILL.md`)
+      to confirm it still reads coherently end to end with the three insertions in place —
+      table column alignment doesn't need to be pixel-perfect (the existing table already has
+      long, unaligned cells), but the row must parse as a valid Markdown table row.
 - [ ] Format and commit: `git commit -m "docs: disqualify normative skill-process changes from otto-factory-development's fast-path"`.
       No `cargo fmt` needed — no Rust file touched. `docs` is the correct Conventional-Commits
       type for the PR title `pr-title` CI checks against.
