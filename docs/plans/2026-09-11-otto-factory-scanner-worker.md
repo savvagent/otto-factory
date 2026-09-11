@@ -25,7 +25,10 @@ savvagent/otto-factory#149.
 
 ## Status — 2026-09-11
 
-🚧 In progress — implementation complete, addressing mandatory review trio findings on PR #150.
+✅ Shipped in savvagent/otto-factory#150 (squash-merged as `8233d6a`), closing #149. Five rounds
+of mandatory rust-pro/architect-reviewer/security-auditor review (plus a comment-quality pass on
+round 1) ran against the PR before merge; each round's findings were fixed in the commit that
+followed it, summarized as PR comments referencing the commit SHA.
 Round 2 re-review found structural issues in the worker's Step 4/4.5/5 split (a self-report
 merge bypass, a lease-id/resource-name mismatch, and double ownership of review findings) and
 in the scanner's per-issue trust ordering; both `SKILL.md` files were revised accordingly.
