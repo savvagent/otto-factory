@@ -1,19 +1,29 @@
 # `claim_finish`'s claim code and ceremony become part of its own transaction
 
 > **Status:** IMPLEMENTED — merged as `savvagent/otto-factory#164` (`546bc6393e0926a8cb486b8d1c40046c19239707`),
-> closing `savvagent/otto-factory#132`. Filed during the mandatory review trio on
+> closing `savvagent/otto-factory#132`. CI on that merge commit is green (rust + web, run against
+> master). Filed during the mandatory review trio on
 > `savvagent/otto-factory#131` (`docs/specs/2026-09-10-passkey-registration-atomic-audit-design.md`,
 > which made `finish_registration`'s credential insert and audit write atomic and, in doing so,
 > widened this gap's probability surface). Related but explicitly out of scope: `#109` tracks a
 > different ordering concern (the ceremony-ownership check happening after the write) on the same
-> function's `claim_finish`/`add_passkey_finish` paths — its claim-code half is now closed by this
-> change.
+> function's `claim_finish`/`add_passkey_finish` paths — this change narrows, but does not close,
+> `#109`'s claim-path half for `claim_finish` specifically (see Scope/Out below; `#109` remains
+> intentionally half-open for `add_passkey_finish`).
 >
-> `#164`'s own review trio surfaced two more gaps this design's Risks section did not anticipate,
-> both closed before merge: `claim_finish` had no throttle of its own, and a rejected request left
-> no audit trace. See the PR's review-response commits for the fix (a `throttle_by_source` call and
-> a best-effort `auth.claim.refused` audit write on rollback) and the two additional regression
-> tests they came with.
+> `#164`'s review passes — the mandatory trio plus four conditional reviewers (pr-test-analyzer,
+> type-design-analyzer, comment-analyzer, and the automated reviewer) — surfaced six Important
+> findings beyond this design's Risks section, all fixed in review-response commits before merge:
+> a missing regression test for the ceremony-ownership-mismatch path (`eec16dc8`); `claim_finish`
+> having no throttle of its own (`a449f1e9`); a rejected `claim_finish` leaving no audit trace
+> (`a449f1e9`); `finish_registration_tx`'s doc comment omitting the unpinned-connection hazard its
+> sibling `clear_tx` documents (security-auditor M2, `c8d5ff42`); the `#108`/`#88`
+> credential-audit-atomicity rationale comment being dropped by the `finish_registration`/
+> `finish_registration_tx` split with nothing put in its place (comment-analyzer, same commit
+> `c8d5ff42`); and the audit-write-failure rollback being proven only at the
+> `finish_registration_tx` level rather than through `claim_finish` itself (pr-test-analyzer,
+> `cc326835`). See the PR's review-response summary comment and its review-response commits for
+> the full detail.
 
 ## Goal & Success Criteria
 
@@ -43,8 +53,13 @@ a second admin-assisted reset. For an org's last owner, nobody above them can is
 - As a consequence of the ceremony consumption now running on the same transaction rather than
   autocommitted beforehand, this benefits `signup_finish` and `add_passkey_finish` too: a failure
   inside `finish_registration`'s own transaction now restores the ceremony row instead of leaving it
-  permanently burned for nothing. This is a free improvement of the same shape, not a second fix
-  requiring its own scoping.
+  permanently burned for nothing. This is the same shape of improvement as the fix itself, not a
+  second fix requiring its own scoping — but it is not an unqualified free win: `signup_finish` and
+  `add_passkey_finish` did not ask for this behavior change and gained it with no dedicated test of
+  their own (this PR's new coverage is all on `claim_finish`'s and `finish_registration`'s paths),
+  and the trade is a transaction held open slightly longer across a call that previously committed
+  as early as possible. Recorded here as a documented tradeoff, not an unqualified free win, per
+  PR #164's own review (architect-reviewer minor #3).
 - `cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`, and
   `cargo fmt --all --check` all pass. The existing passkey and claim test suites
   (`crates/of-auth/tests/passkeys.rs`, `crates/of-web/tests/console.rs`) continue to pass unchanged.
