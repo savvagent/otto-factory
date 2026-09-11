@@ -54,6 +54,12 @@ brought into line with it, not the other way around.
 
 - No change to `docs/deploy/fly.md` itself — it is already accurate; this spec brings
   `fly.toml` into agreement with it, not the reverse.
+
+  **As built:** this line did not hold — `docs/deploy/fly.md`'s `CREATE ROLE of_app NOLOGIN`
+  citation was corrected from `0007_rls.sql` to `0018_rename_tenant_role.sql` during PR
+  #156's review-response pass, since leaving that inaccuracy in the document this change
+  cites as authoritative would have defeated its purpose. See the plan's Final
+  Verification.
 - No change to any running infrastructure, Fly app, Postgres role, or secret. This is a
   comment-only edit with zero functional or deployment impact — confirmed in the issue body
   and independently by reading `fly.toml` (the comment block is `#`-prefixed lines above the
