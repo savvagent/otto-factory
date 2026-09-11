@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.1](https://github.com/savvagent/otto-factory/compare/v0.6.0...v0.6.1) (2026-09-11)
+
+
+### Bug Fixes
+
+* **of-auth:** make passkey removal and clearing atomic with their audit writes ([#170](https://github.com/savvagent/otto-factory/issues/170)) ([83d9763](https://github.com/savvagent/otto-factory/commit/83d9763ddf6aaa4afb8982079f7858a90ad30d5c))
+
 ## [0.6.0](https://github.com/savvagent/otto-factory/compare/v0.5.0...v0.6.0) (2026-09-11)
 
 
