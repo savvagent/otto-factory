@@ -1,7 +1,8 @@
 # Otto CLI connect recipe design
 
-> **Status:** APPROVED — unblock `savvagent/otto-factory#41` now that the upstream client ships a
-> remote-MCP path, and add its `ClientRecipe` entry to the connect page.
+> **Status:** IMPLEMENTED — shipped in `savvagent/otto-factory#153`, closing
+> `savvagent/otto-factory#41`. A live conformance run against a real `otto` binary remains open as
+> `savvagent/otto-factory#154`.
 
 > **Implements:** `savvagent/otto-factory#41`
 
