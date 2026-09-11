@@ -62,9 +62,10 @@ gap the issue identified without inventing a config shape that doesn't exist.
 **In:**
 
 - One new `ClientRecipe` object in `web/src/lib/clients.ts::CLIENTS`, placed before `generic`.
-- Two new i18n message keys (a `note`) across all six locale catalogs
-  (`web/messages/{en,es,de,fr,it,hi}.json`), matching the existing `client_note_claude_code` /
-  `client_note_copilot` pattern for a client whose OAuth path needs an interactive terminal.
+- One new i18n message key (`client_note_otto_cli`, the entry's `note`) across all six locale
+  catalogs (`web/messages/{en,es,de,fr,it,hi}.json`), matching the existing
+  `client_note_claude_code` / `client_note_copilot` pattern for a client whose OAuth path needs an
+  interactive terminal.
 - A new row in `docs/clients/matrix.md`.
 
 **Out:**
@@ -92,22 +93,42 @@ gap the issue identified without inventing a config shape that doesn't exist.
   location: '~/.otto/config.toml',
   oauth: (url) =>
     `[[mcp_servers]]\nname = "otto-factory"\ntransport = "http"\nurl = "${url}"\nauth = "oauth"`,
-  // `token` is unused on purpose: Otto never accepts the secret as a config field — it is
-  // handed over through /mcp's own prompt and stored in the OS keyring instead (see the
-  // comment in the rendered snippet below).
+  // `token` is unused on purpose: Otto never accepts the secret as a config field, and the
+  // snippet is pure copy-pasteable TOML with no instructional prose in it — that channel is
+  // never translated (see the module docstring). The how-to-actually-set-the-secret guidance
+  // lives entirely in `note`, which is.
   token: (url, _token) =>
-    `[[mcp_servers]]\nname = "otto-factory"\ntransport = "http"\nurl = "${url}"\nauth = "bearer"\n\n# then run otto, open /mcp, and paste the token when prompted — Otto stores it in the\n# OS keyring under service "otto", account "mcp:otto-factory"; it is never written to this file.\n# Add/remove and a completed OAuth authorization both require restarting otto to take effect.`,
+    `[[mcp_servers]]\nname = "otto-factory"\ntransport = "http"\nurl = "${url}"\nauth = "bearer"`,
   note: () => m.client_note_otto_cli()
 }
 ```
 
-(Revised once more after the implementation's own quality review: the `token` parameter is
-explicitly renamed `_token` with a comment recording that the omission is deliberate, not an
-oversight; the TOML comment's `` `otto` `` markdown-style backticks are dropped since that string
-is pasted into a real config file, not rendered as UI prose — plain text reads more naturally in an
-actual `.toml` comment; and the shared `note()` — which `+page.svelte` renders under *both* the
-OAuth and Token tabs — is reworded below to cover both auth paths rather than describing only the
-OAuth ceremony, since the original wording was actively misleading on the Token tab.)
+(Revised twice after review, on top of the first quality-review pass that renamed the `token`
+parameter to `_token`, dropped markdown backticks from the (now-removed) TOML comment, and reworded
+`note()` to cover both auth paths rather than only OAuth:
+
+- **Review-response round (PR #153):** the token snippet's TOML comment — three lines of English
+  instructional prose — was removed entirely rather than reworded, because `note` is the one
+  channel this module's own docstring says prose belongs in; a snippet is machine-read and never
+  translated (architect-reviewer finding). The comment's own content also described a flow that
+  does not work: Otto's `/mcp` list screen has no secret prompt for a row already present in the
+  config file — only its interactive "add a server" form (`a`) does — so a token user who pastes
+  this file and then opens `/mcp` sees a missing-secret status with no way to enter one
+  (`copilot-pull-request-reviewer` finding, `web/src/lib/clients.ts:131` on PR #153). `note` now
+  sends a token user through the add form directly instead of implying the pasted file is
+  sufficient.
+- The page's own "replace the placeholder with a token" warning (`connect_token_placeholder_note`)
+  is shown by `+page.svelte` for every recipe on the Token tab regardless of whether that recipe's
+  snippet has a placeholder in it — wrong for this entry specifically, since its snippet never
+  embeds a placeholder or a real token (architect-reviewer finding). Fixed by deriving, from the
+  rendered snippet itself, whether it actually contains `PLACEHOLDER` or the minted token
+  (`tokenEmbedsSecret` in `+page.svelte`) and gating the warning on that — not by adding a field to
+  `ClientRecipe`. This keeps the "no change to `ClientRecipe`'s interface" scoping decision above
+  intact: the fix reads the snippet's own content rather than asking the recipe to declare a new
+  property, so it also covers any future recipe that omits a token without every author needing to
+  remember a new opt-out flag. `web/src/lib/clients.test.ts` (new) asserts the underlying invariant
+  directly: any `CLIENTS` entry whose `token()` doesn't embed a placeholder/minted token must
+  supply a `note`.)
 
 Notes on the shape, cited against upstream source:
 
@@ -128,9 +149,14 @@ Notes on the shape, cited against upstream source:
   `otto-factory` key already used in the Copilot CLI and Cursor JSON snippets in this same file.
 - The token snippet cannot inline the token into TOML the way Claude Code's command-line snippet
   does: Otto never accepts a secret as a bare config field (`auth = "bearer"` means "load from the
-  keyring," per `crates/otto/src/config_file.rs`'s `McpAuthMode` and the upstream README), so the
-  token is handed over through `/mcp`'s prompt, not written to the file. The comment says this
-  explicitly rather than silently placing the token where the real client would reject it.
+  keyring," per `crates/otto/src/config_file.rs`'s `McpAuthMode` and the upstream README). Nor can
+  a reader get the secret into the keyring by pasting this snippet into the file and then opening
+  `/mcp`: `/mcp`'s list screen prompts for a secret only while adding a server (`a`), never for a
+  row already present in the config, so a row landed there by hand shows a missing-secret status
+  with nothing on screen to fix it (found by `copilot-pull-request-reviewer` against the recipe's
+  original prompts-when-`/mcp`-opens description on PR #153). `note` therefore sends a token user
+  through `/mcp`'s add form directly — enter the same fields shown in the snippet there, and paste
+  the token when that form asks for it — rather than describing the pasted file as sufficient.
 - `auth = "oauth"` triggers Otto's own PKCE + dynamic-registration flow inside `/mcp` (press `o` to
   open the browser, `c` after the loopback redirect completes) — interactive, like Claude Code's
   `claude mcp login` and Copilot's TUI-only consent. The `note` says so, mirroring
@@ -142,10 +168,16 @@ New key `client_note_otto_cli`, added to all six locale files
 (`web/messages/{en,es,de,fr,it,hi}.json`) per the project's "a new string costs six catalog
 entries" rule. English source string:
 
-> "Whichever form you use, run `otto` and open `/mcp` afterward — for OAuth, press `o` to authorize
-> in your browser and `c` once it redirects back (interactive-only, the same as Claude Code and
-> Copilot CLI above); for a token, paste it when `/mcp` prompts for one. Either way, restart otto
-> once: a new or newly-authorized server only connects on the next launch."
+> "Whichever form you use, run `otto` and open `/mcp` afterward. For OAuth, the entry above
+> authorizes from there: press `o` to open your browser and `c` once it redirects back
+> (interactive-only, the same as Claude Code and Copilot CLI above). For a token, don't paste this
+> file directly — `/mcp` only asks for the secret while adding a server: press `a`, enter the same
+> name, URL and transport shown above, and paste the token when it prompts you there; it goes
+> straight into the OS keyring and is never written to this file. Either way, restart otto once: a
+> new or newly-authorized server only connects on the next launch."
+
+(Reworded in the PR #153 review-response round from an earlier version that told a token user to
+"paste it when `/mcp` prompts for one" after pasting the file — the bug described above.)
 
 Covers both auth paths deliberately: `+page.svelte` renders `recipe.note()` under whichever tab
 (OAuth or Token) is selected, so a note describing only the OAuth ceremony would read as wrong
@@ -162,12 +194,18 @@ not machine-stubbed, matching how `client_note_claude_code`/`client_note_copilot
 Added to the client table:
 
 ```
-| Otto CLI | 0.29.1 | not run | not run | — | Config shape confirmed against upstream source (`crates/otto/src/config_file.rs`, `crates/otto/src/mcp_config_writer.rs`) and its own round-trip tests; not installed on the conformance machine. |
+| Otto CLI | — | not run | not run | — | Not installed on the conformance machine. Config shape (v0.29.1) confirmed against upstream source (`crates/otto/src/config_file.rs`, `crates/otto/src/mcp_config_writer.rs`) and its own round-trip tests, not a live run — see `savvagent/otto-factory#154` for the follow-up. |
 ```
 
 Consistent with the existing Cursor / Codex CLI rows' register — "not installed on the conformance
 machine... config shape is in `web/src/lib/clients.ts`" — rather than claiming a live run this pass
-did not perform.
+did not perform. The Version column uses `—`, the same as those two rows, rather than a version
+number: this pass's original draft put `0.29.1` there, which reads as a claim that the dated
+conformance run at the top of the file covers that version — it doesn't, since nothing ran
+(architect-reviewer finding, PR #153 review-response round). The version is kept, for provenance,
+in the Notes cell instead, where the "confirmed against upstream source" claim already lives; the
+live-conformance follow-up is tracked as `savvagent/otto-factory#154` rather than expanding this
+PR's scope to build a PTY-driving harness for Otto's TUI.
 
 ## Testing
 
@@ -202,9 +240,10 @@ this entry introduces no new branch, no new field, no new user input.
   explicitly for the architect reviewer as a deliberate, documented deviation from the literal issue
   text, justified by the Premise corrections above — not a silent scope change.
 - **No live conformance run.** `docs/clients/matrix.md`'s row is honest about this ("not run"), same
-  register as Cursor/Codex today. A follow-up issue to actually install and drive Otto CLI (and
-  update the matrix row to a real run) is worth filing separately rather than expanding this
-  change's scope to build a TUI-automation harness.
+  register as Cursor/Codex today. An automated reviewer on PR #153 disputed whether this satisfies
+  `Closes #41`'s acceptance criteria without one; dismissed for this PR on the same precedent
+  already accepted for Cursor and Codex CLI in this file, with the live run tracked as its own
+  fast, cheap follow-up rather than expanded into this PR's scope: `savvagent/otto-factory#154`.
 - **Upstream is one day old at v0.29.1.** The `Http` variant and `/mcp` flow could still have rough
   edges upstream has not hit yet. This is no different in kind from any other client entry in this
   file (none of the four existing entries are guaranteed stable indefinitely either), so it is not

@@ -53,7 +53,17 @@ export interface ClientRecipe {
   note?: () => string;
 }
 
-const PLACEHOLDER = 'of_pat_…';
+/**
+ * Stands in for a real token in a snippet nobody has minted one for yet.
+ *
+ * Exported so `+page.svelte` can tell, from the rendered snippet alone,
+ * whether a given `token()` actually embeds a secret slot at all — some
+ * clients (`otto-cli`) take the secret through their own interactive prompt
+ * instead of a pasted config value, and the page's "replace the placeholder"
+ * warning would be actively wrong shown next to a snippet with nothing to
+ * replace.
+ */
+export const PLACEHOLDER = 'of_pat_…';
 
 export const CLIENTS: ClientRecipe[] = [
   {
@@ -124,11 +134,14 @@ export const CLIENTS: ClientRecipe[] = [
     location: '~/.otto/config.toml',
     oauth: (url) =>
       `[[mcp_servers]]\nname = "otto-factory"\ntransport = "http"\nurl = "${url}"\nauth = "oauth"`,
-    // `token` is unused on purpose: Otto never accepts the secret as a config field — it is
-    // handed over through /mcp's own prompt and stored in the OS keyring instead (see the
-    // comment in the rendered snippet below).
+    // `token` is unused on purpose: Otto never accepts the secret as a config field, and the
+    // snippet is pure copy-pasteable TOML with no instructional prose in it (that channel is
+    // never translated) — the how-to-actually-set-the-secret guidance lives entirely in `note`,
+    // which is. It also cannot say "paste this file, then paste the token when /mcp prompts":
+    // /mcp's list screen has no secret prompt for a row already in the file — only its
+    // interactive "add a server" form does — so `note` sends a token user there instead.
     token: (url, _token) =>
-      `[[mcp_servers]]\nname = "otto-factory"\ntransport = "http"\nurl = "${url}"\nauth = "bearer"\n\n# then run otto, open /mcp, and paste the token when prompted — Otto stores it in the\n# OS keyring under service "otto", account "mcp:otto-factory"; it is never written to this file.\n# Add/remove and a completed OAuth authorization both require restarting otto to take effect.`,
+      `[[mcp_servers]]\nname = "otto-factory"\ntransport = "http"\nurl = "${url}"\nauth = "bearer"`,
     note: () => m.client_note_otto_cli()
   },
   {
