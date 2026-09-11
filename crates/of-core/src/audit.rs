@@ -16,8 +16,8 @@
 //! Actions are dotted and stable because they are queried by prefix and because
 //! they end up in customers' SIEM exports. Renaming one is a breaking change.
 
-use crate::db::{Db, Tx};
-use crate::error::Result;
+use crate::db::{Db, Tx, Unpinned};
+use crate::error::{Error, Result};
 use crate::ids::{OrgId, UserId};
 use serde::Serialize;
 use sqlx::FromRow;
@@ -236,19 +236,25 @@ impl Db {
     ///
     /// Takes `&mut Unpinned` rather than a bare `E: sqlx::PgExecutor<'e>` on
     /// purpose: an earlier, more permissive signature compiled against a
-    /// pinned [`Tx`]'s connection too, which writes a `NULL`-org row that is
-    /// either rejected at runtime (RLS-enforced deployments, where
-    /// `audit_events`'s `audit_events_append` policy's `WITH CHECK` catches
-    /// it) or silently unreachable in any tenant's own audit trail
-    /// (RLS-bypassed deployments — this deployment's actual shape today, per
-    /// `docs/deploy/fly.md`; see `Db::begin_unpinned`'s own doc comment for
-    /// why nothing in this crate may assume which shape it is running
-    /// under). [`crate::db::Unpinned`] is only ever produced by
-    /// [`Db::begin_unpinned`]; a pinned `Tx` has no accessor that yields one
-    /// — `Tx::conn()` hands out a bare `&mut PgConnection` — so the misuse is
-    /// now a type error the compiler catches wherever a caller reaches for
-    /// it, not a policy `WITH CHECK` catching it at runtime or a doc comment
-    /// asking nicely.
+    /// pinned [`Tx`]'s connection too. [`Unpinned`] is only ever produced by
+    /// [`Db::begin_unpinned`], and a pinned `Tx` has no accessor that yields
+    /// one — `Tx::conn()` hands out a bare `&mut PgConnection` — so passing a
+    /// `Tx`'s connection directly is now a compile error the type catches
+    /// wherever a caller reaches for it, not a policy `WITH CHECK` catching
+    /// it at runtime or a doc comment asking nicely.
+    ///
+    /// That compile-time guarantee covers provenance, not session state: the
+    /// caller could in principle run `set_config('app.org_id', …)` through
+    /// `Unpinned::conn()` by hand between opening the transaction and calling
+    /// this function, which the type alone cannot see. This function closes
+    /// that residual gap itself, at runtime: it re-reads `app.org_id` at the
+    /// start of every call and refuses — before writing anything — if the
+    /// transaction has been pinned since it was opened. This is the only
+    /// guard on the deployment shape that matters most here: where RLS is
+    /// bypassed (this deployment's actual shape today, per
+    /// `docs/deploy/fly.md`), the database itself would not have caught a
+    /// `NULL`-org write on a pinned connection at all, so this check is not
+    /// redundant with anything the database does.
     ///
     /// Unlike [`Self::audit_global`], a failure here is **not** swallowed: it
     /// propagates to the caller, who is expected to let it abort the
@@ -258,7 +264,22 @@ impl Db {
     /// ordinary login/enrollment path; this is the exception for a caller
     /// that decided the tradeoff the other way. Use [`Tx::audit`] for
     /// anything running on a pinned connection.
-    pub async fn audit_global_on(conn: &mut crate::db::Unpinned, e: Entry) -> Result<()> {
+    pub async fn audit_global_on(conn: &mut Unpinned, e: Entry) -> Result<()> {
+        let pinned: Option<String> =
+            sqlx::query_scalar("SELECT NULLIF(current_setting('app.org_id', true), '')")
+                .fetch_one(conn.conn())
+                .await?;
+        if pinned.is_some() {
+            return Err(Error::Invalid(
+                "audit_global_on was called on a transaction with app.org_id set — \
+                 it was opened via begin_unpinned but has since been pinned to an \
+                 org, so writing a NULL-org audit row through it would be silently \
+                 wrong on a deployment where RLS is bypassed. Use Tx::audit for an \
+                 org-scoped write, or call audit_global_on before pinning the \
+                 transaction."
+                    .to_string(),
+            ));
+        }
         e.write(None, conn.conn()).await
     }
 }

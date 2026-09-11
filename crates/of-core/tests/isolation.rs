@@ -1017,9 +1017,60 @@ async fn rls_scopes_the_lease_resource_backfills_per_org_loop(pool: PgPool) {
 // of_core::db::Unpinned` instead of `E: sqlx::PgExecutor<'e>`, and `Tx::conn()`
 // has no way to produce one — the misuse this test caught is now a compile
 // error, which every `cargo build`/`cargo test` run already proves on every
-// commit. No runtime test can prove a stronger fact than "this does not
-// compile"; keeping a test whose only remaining job would be to demonstrate
-// that a deleted test scenario is a type error is not useful.
+// commit. That type-level guarantee is provenance only, though: it says
+// nothing about a transaction that started unpinned and was pinned by hand
+// afterwards, nor about the database policy `audit_global_on` used to rely on
+// entirely. The two tests below replace it, one per remaining gap.
+
+/// The DB-level fact `audit_global_on_refuses_a_pinned_connection` used to
+/// prove, kept independent of which Rust API reaches `audit_events`: a
+/// pinned transaction's `WITH CHECK (current_org() IS NULL OR org_id =
+/// current_org())` must still reject a `NULL`-org row when written by raw
+/// SQL, not just when written through `Db::audit_global_on`. If a future
+/// migration ever loosens this policy (e.g. to admit `org_id IS NULL`
+/// unconditionally), this is the test that notices — independent of any
+/// Rust-level type change.
+#[sqlx::test]
+async fn a_pinned_transaction_cannot_append_a_null_org_audit_row(pool: PgPool) {
+    let db = db(pool);
+    let a = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+
+    let mut tx = db.begin(a.org).await.unwrap();
+    let err = sqlx::query(AUDIT_INSERT)
+        .bind(Option::<OrgId>::None)
+        .execute(tx.conn())
+        .await
+        .expect_err("a pinned transaction wrote a NULL-org audit row");
+    assert!(
+        err.to_string().contains("row-level security"),
+        "expected an RLS refusal, got: {err}"
+    );
+}
+
+/// `Db::audit_global_on`'s own runtime guard: an `Unpinned` transaction that
+/// has been pinned by hand since `begin_unpinned` opened it — the one thing
+/// the type itself cannot see, since `Unpinned::conn()` hands out the same
+/// bare `&mut PgConnection` a pinned transaction's `conn()` would. This is
+/// the case the type-level fix alone does not close, and the one that
+/// matters most on this deployment's actual (RLS-bypassed) shape, where the
+/// database itself would not have refused the write.
+#[sqlx::test]
+async fn audit_global_on_refuses_a_transaction_pinned_after_it_was_opened(pool: PgPool) {
+    let db = db(pool);
+    let a = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+
+    let mut tx = db.begin_unpinned().await.unwrap();
+    sqlx::query("SELECT set_config('app.org_id', $1, true)")
+        .bind(a.org.to_string())
+        .execute(tx.conn())
+        .await
+        .unwrap();
+
+    let err = of_core::Db::audit_global_on(&mut tx, of_core::audit::Entry::new("test.misuse"))
+        .await
+        .expect_err("audit_global_on must refuse a transaction pinned by hand after it was opened");
+    assert_eq!(err.code(), "invalid_argument", "got: {err}");
+}
 
 // ---------------------------------------------------------------------------
 // The guard on the guard.
