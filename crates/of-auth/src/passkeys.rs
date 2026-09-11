@@ -240,6 +240,13 @@ impl RegistrationVia {
 /// one that matters most: it is the takeover-completion event that follows an
 /// admin-assisted reset, and without `via` it is indistinguishable from an
 /// ordinary signup.
+///
+/// Opens its own transaction and commits immediately — for `signup_finish`
+/// and `add_passkey_finish`, which have nothing else to fold into the same
+/// commit. `claim_finish` uses [`finish_registration_tx`] directly instead,
+/// so its claim-code consumption can share this function's transaction
+/// rather than commit separately, before it, with nothing to roll it back
+/// if what follows fails. See `savvagent/otto-factory#132`.
 pub async fn finish_registration(
     db: &Db,
     webauthn: &Webauthn,
@@ -249,8 +256,35 @@ pub async fn finish_registration(
     via: RegistrationVia,
     ip: Option<&str>,
 ) -> Result<UserId> {
+    let mut tx = db.begin_unpinned().await?;
+    let user_id =
+        finish_registration_tx(&mut tx, webauthn, ceremony, credential, nickname, via, ip).await?;
+    tx.commit().await?;
+    Ok(user_id)
+}
+
+/// The connection-taking half of [`finish_registration`], for a caller that
+/// must fold another single-use secret's consumption into the same commit —
+/// `of_web::routes::auth::claim_finish` runs the account claim's own
+/// consumption on this same connection, so a failure anywhere in this
+/// function restores the claim rather than having already burned it. See
+/// `savvagent/otto-factory#132`.
+///
+/// Does not commit. The caller opens the transaction this runs on and
+/// decides when to commit it: [`finish_registration`] commits immediately
+/// after; `claim_finish` commits only once it has also checked that the
+/// ceremony's account matches the claim's.
+pub async fn finish_registration_tx(
+    tx: &mut sqlx::PgConnection,
+    webauthn: &Webauthn,
+    ceremony: Uuid,
+    credential: &RegisterPublicKeyCredential,
+    nickname: Option<&str>,
+    via: RegistrationVia,
+    ip: Option<&str>,
+) -> Result<UserId> {
     let (user_id, state): (Option<UserId>, PasskeyRegistration) =
-        take_ceremony(db, ceremony, "register").await?;
+        take_ceremony(&mut *tx, ceremony, "register").await?;
     let user_id = user_id.ok_or(AuthError::CeremonyExpired)?;
 
     let passkey = webauthn
@@ -260,12 +294,6 @@ pub async fn finish_registration(
     let credential_id = passkey.cred_id().as_ref().to_vec();
     let encoded = serde_json::to_value(&passkey)
         .map_err(|e| AuthError::Config(format!("could not store a passkey: {e}")))?;
-
-    // The credential and its audit row commit together: a live credential
-    // with no audit row is exactly the gap #108 exists to close, most of all
-    // on the `claim` path, which is the one event that proves who actually
-    // completed an admin-assisted takeover (#88).
-    let mut tx = db.begin_unpinned().await?;
 
     // The unique index on credential_id is the real guard: an authenticator
     // must not be registrable twice, to two accounts, which is what the
@@ -288,15 +316,13 @@ pub async fn finish_registration(
     })?;
 
     Db::audit_global_on(
-        &mut *tx,
+        tx,
         Entry::new(action::PASSKEY_REGISTERED)
             .actor(user_id)
             .detail(serde_json::json!({ "via": via.as_str() }))
             .from_request(ip, None),
     )
     .await?;
-
-    tx.commit().await?;
 
     Ok(user_id)
 }
@@ -334,7 +360,7 @@ pub async fn finish_authentication(
     ip: Option<&str>,
 ) -> Result<UserId> {
     let (_, state): (Option<UserId>, DiscoverableAuthentication) =
-        take_ceremony(db, ceremony, "authenticate").await?;
+        take_ceremony(db.pool(), ceremony, "authenticate").await?;
 
     // Resolve the account from the **credential ID**, not the user handle.
     //
@@ -678,11 +704,18 @@ async fn store_ceremony<T: serde::Serialize>(
 /// same statement for the same reason — a registration state must never be
 /// finishable as an authentication, and checking that after the fact would
 /// leave a window where it could.
-async fn take_ceremony<T: serde::de::DeserializeOwned>(
-    db: &Db,
-    id: Uuid,
-    kind: &str,
-) -> Result<(Option<UserId>, T)> {
+///
+/// Generic over the executor — `db.pool()` for [`finish_authentication`],
+/// which has nothing else to fold into a transaction, or a connection
+/// reborrowed from a caller-owned transaction for
+/// [`finish_registration_tx`], so a failure later in that same transaction
+/// restores the ceremony instead of leaving it burned for nothing. Mirrors
+/// `crate of_core::audit::Entry::write`'s identical generic-executor shape.
+async fn take_ceremony<'e, T, E>(conn: E, id: Uuid, kind: &str) -> Result<(Option<UserId>, T)>
+where
+    T: serde::de::DeserializeOwned,
+    E: sqlx::PgExecutor<'e>,
+{
     let row: Option<(Option<UserId>, serde_json::Value)> = sqlx::query_as(
         "DELETE FROM webauthn_ceremonies \
          WHERE id = $1 AND kind = $2 AND expires_at > now() \
@@ -690,7 +723,7 @@ async fn take_ceremony<T: serde::de::DeserializeOwned>(
     )
     .bind(id)
     .bind(kind)
-    .fetch_optional(db.pool())
+    .fetch_optional(conn)
     .await?;
 
     let (user, state) = row.ok_or(AuthError::CeremonyExpired)?;
