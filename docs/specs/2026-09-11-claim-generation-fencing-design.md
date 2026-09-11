@@ -116,6 +116,9 @@ Success:
   four affected tools are already classified.
 - A schema/migration change. `attempts` already exists on `jobs` (added long before #102);
   nothing new is persisted.
+- `close_from_ticket` — it finalizes a job from an inbound tracker webhook, not an MCP
+  caller, and by its own existing doc comment never calls `ensure_claim_held` at all (there
+  is no `UserId` to check against a webhook). Unaffected by this spec; not touched.
 - Reworking `Error::AlreadyClaimed`'s wording to distinguish "different account" from
   "same account, different generation" — see §3 for why the existing message already
   covers both correctly.
@@ -337,6 +340,22 @@ The four handlers (`complete_job`, `fail_job`, `cancel_job`, `renew_claim`) pass
 already returns `{"job": …}`, and `Job.attempts` is already serialized), `of-billing`
 (no new tool), any migration (no schema change), `docs/clients/matrix.md` (nothing here
 depends on a specific client's behavior — the argument is optional and generic).
+
+## Tenant isolation
+
+No tenant table is added and no column is added to one. `jobs` is already a tenant table
+registered in `0007_rls.sql`'s `tenant_tables` array, guarded by the existing
+`jobs_tenant_isolation` policy (`org_id = current_org()`), which already covers `attempts`
+on every row exactly as it covers every other column — `ensure_claim_held`'s new `SELECT`
+runs inside the same `Tx` (same `org_id = $1` predicate, same RLS context) as its existing
+one. Load-Bearing Invariant 1's cross-org-negative-test requirement applies to new tenant
+*tables*; this spec adds neither a table nor a column, only a new comparison inside an
+existing, already-org-scoped query. The existing cross-org tests in
+`crates/of-core/tests/isolation.rs` that call `complete_job`/`fail_job`/`cancel_job`/
+`renew_claim` (asserting org B cannot touch org A's job) are updated only mechanically
+(the new trailing parameter) and continue to prove the same cross-org boundary; no new
+cross-org test is required for this change specifically, since it introduces no new
+tenant-scoped surface, only an additional in-org check on an existing one.
 
 ## Public interface note
 
