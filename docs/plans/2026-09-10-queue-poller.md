@@ -44,6 +44,8 @@ exactly.
 | File                                                          | Responsibility                                                                                                                                                 |
 | --------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `web/src/routes/o/[org]/queue/+page.svelte`                     | **Modify.** Job-list `$effect` rewired through `Poller<Job[]>`, keyed on `org.slug` plus a `$derived` over the four filters; render tree gains `stale`/`parked`/`stopped` branches, keeping its existing `error` / `loading` / empty / table four-way branch intact. |
+| `web/src/lib/poll-fatal.ts`                                     | **New**, not in the original plan's scope. Added during implementation, in response to review feedback, to extract the `fatal()` classifier (401 clears the session, 403/404 stop the poll) out of page-local closures so this page and the overview page share one definition instead of two copies that could drift. Exports `fatalApiFailure`. |
+| `web/src/routes/o/[org]/+page.svelte`                           | **Modify**, not in the original plan's scope. Touched as part of the same extraction: its own inline `fatal()` closure was replaced with the shared `fatalApiFailure` import from `poll-fatal.ts`. |
 | `web/messages/en.json`, `es.json`, `de.json`, `fr.json`, `it.json`, `hi.json` | **Modify.** Add `queue_refresh_failed`, `queue_paused`, `queue_retrying` to each, mirroring the existing `overview_*` triad.                                    |
 | `web/src/routes/o/[org]/queue/QueueHarness.svelte`              | **Modify.** Accept an optional reactive `url` prop so a test can drive a live filter change without a second mount — needed for the new "restarts on filter change" test. Existing callers that omit `url` are unaffected. |
 | `web/src/routes/o/[org]/queue/page.render.test.ts`              | **Modify.** Add poller-behavior cases alongside the existing filter-navigation tests (neither set is removed).                                                 |
@@ -59,10 +61,13 @@ names either way. The README edit is a one-line tail on the same commit sequence
 ## Task 1 — Migrate the queue's job-list fetch to `Poller`, keyed on org + filters ✅
 
 **Files:** `web/src/routes/o/[org]/queue/+page.svelte` (modify), `web/messages/*.json` (modify, all
-six), `web/src/routes/o/[org]/queue/page.render.test.ts` (modify), `web/README.md` (modify)
-**Interfaces:** Consumes `Poller` from `$lib/poll.svelte`, `ApiError` from `$lib/api`, `session`
-from `$lib/session.svelte` (new imports in `+page.svelte`, mirroring `o/[org]/+page.svelte`'s
-existing imports). Produces no new public interface — this is page-internal state only.
+six), `web/src/routes/o/[org]/queue/page.render.test.ts` (modify), `web/README.md` (modify). During
+implementation, a review round extracted the shared `fatal()` classifier out of both this page and
+the overview page into a new `web/src/lib/poll-fatal.ts` — see the note at the end of this task.
+**Interfaces:** Consumes `Poller` from `$lib/poll.svelte` and `fatalApiFailure` from
+`$lib/poll-fatal` (not `ApiError`/`session` directly — those live behind `fatalApiFailure` now,
+shared with `o/[org]/+page.svelte`). Produces no new public interface — this is page-internal state
+only.
 
 - [x] **Add the three message keys to all six catalogs first**, so the page can reference them
       before the catalog check runs. In `web/messages/en.json`, add near the existing `queue_*`
@@ -231,18 +236,23 @@ existing imports). Produces no new public interface — this is page-internal st
           `jobsPoll.stopped` behavior; the healthy case's job-render assertions must NOT appear.
         - **"restarts the poll when a filter changes, and drops a late response for the old
           filter"** — mount the harness with `props: { slug: 'acme', url: new
-          URL('http://example.test/o/acme/queue') }` and a stub whose `/jobs` response resolves
-          asynchronously and depends on the request URL (so the unfiltered request and a later
-          `?status=pending` request can be told apart and resolved out of order). `settle()`, then
-          resolve the first (unfiltered) request. Call `instance.setUrl(new
+          URL('http://example.test/o/acme/queue') }` and a stub that, per `/jobs` call, hands back
+          its own genuinely independent, still-pending deferred promise, keyed by whether the
+          request URL is the unfiltered one or carries `status=pending` (as actually shipped: a
+          `resolve()` obtained from `new Promise(...)` per call, stored by key, rather than a single
+          promise resolved twice — a request already settled cannot be resolved "late" a second
+          time). `settle()` leaves the initial unfiltered request's deferred promise deliberately
+          pending — nothing resolves it yet. Call `instance.setUrl(new
           URL('http://example.test/o/acme/queue?status=pending'))` and `await settle()` — this
           re-runs the page's `$effect` (the `url` prop is `$state`-backed and reactive, per the
           harness change above), tearing down the unfiltered `Poller` subscription and starting a
-          new one for `status=pending`. Assert the newest `/jobs` fetch call's URL contains
-          `status=pending`. Then resolve the *original* (unfiltered) request's promise late and
-          assert the rendered table is unaffected by it — the response belongs to a superseded
-          `Poller` generation and must not be applied (`docs/specs/2026-09-09-overview-polling-design.md`
-          §3). Resolve the `status=pending` request and assert its result *is* what renders.
+          new one for `status=pending`, which gets its own new deferred promise. Assert the newest
+          `/jobs` fetch call's URL contains `status=pending`, then resolve *that* deferred promise
+          and assert its job renders. Only now resolve the original unfiltered request's
+          still-pending deferred promise — late, from a request that was never touched before the
+          filter switch — and assert the rendered table is unaffected by it — the response belongs
+          to a superseded `Poller` generation and must not be applied
+          (`docs/specs/2026-09-09-overview-polling-design.md` §3).
 - [x] Run `cd web && npm test` (full suite, not just `queue`) and confirm everything passes,
       including the untouched existing two filter-navigation tests in the same file.
 - [x] **Update `web/README.md`'s Layout table.** Change the `poll.svelte.ts` row from "Polling a
