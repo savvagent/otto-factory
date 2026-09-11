@@ -94,6 +94,7 @@
   "client_note_claude_code": "Then run `claude mcp login otto-factory` in an interactive terminal to consent — a `-p` session cannot open a browser and will report the server as unauthenticated.",
   "client_note_copilot": "Copilot only offers the browser consent from its interactive session; a `-p` run with no credential reports no such tool rather than asking. Script it with a token.",
   "client_note_generic": "Streamable HTTP. A conforming client needs nothing but this URL: the 401 it gets back points at the protected-resource document, which points at the authorization server.",
+  "client_note_otto_cli": "Whichever form you use, run `otto` and open `/mcp` afterward. For OAuth, the entry above authorizes from there: press `o` to open your browser and `c` once it redirects back (interactive-only, needing a terminal you can watch). For a token, don't paste this file directly — `/mcp` only asks for the secret while adding a server: press `a`, enter the same name, URL and transport shown above, and paste the token when it prompts you there; it goes straight into the OS keyring and is never written to this file. Either way, restart otto once: a new or newly-authorized server only connects on the next launch.",
   "nav_organizations": "Organizations",
   "nav_create_org": "Create an organization",
   "nav_sign_out": "Sign out",

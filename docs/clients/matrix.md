@@ -16,6 +16,7 @@ live in the client's own OAuth implementation and in the exact strings it sends.
 | Copilot CLI | 1.0.82 | ✅ server side, ⚠️ client step not scripted | ✅ | ✅ | Registers and opens the browser only in its interactive TUI; headless drops the server silently. |
 | Cursor | — | not run | not run | — | Not installed on the conformance machine. Config shape is in `web/src/lib/clients.ts`. |
 | Codex CLI | — | not run | not run | — | Same. |
+| Otto CLI | — | not run | not run | — | Not installed on the conformance machine. Config shape (v0.29.1) confirmed against upstream source (`crates/otto/src/config_file.rs`, `crates/otto/src/mcp_config_writer.rs`) and its own round-trip tests, not a live run — see `savvagent/otto-factory#154` for the follow-up. |
 | Any other MCP client | — | — | — | — | Streamable HTTP, `POST /mcp`. The `401` names the protected-resource document. |
 
 Two agents were driven against **one queue in one org** and coordinated through it: the

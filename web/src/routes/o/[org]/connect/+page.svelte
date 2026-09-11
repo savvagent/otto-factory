@@ -3,7 +3,7 @@
   import { messageFor } from '$lib/errors';
   import { m } from '$lib/paraglide/messages';
   import { useOrg } from '$lib/org.svelte';
-  import { CLIENTS } from '$lib/clients';
+  import { CLIENTS, PLACEHOLDER } from '$lib/clients';
   import { relative } from '$lib/format';
   import type { MintedToken, ProtectedResourceMetadata, TokenSummary } from '$lib/types';
   import Alert from '$lib/components/Alert.svelte';
@@ -80,6 +80,17 @@
 
   const snippet = $derived(
     !mcpUrl ? '' : usingToken ? recipe.token(mcpUrl, minted?.token ?? '') : recipe.oauth(mcpUrl)
+  );
+
+  // Whether the rendered token snippet actually has a secret slot in it. Most
+  // clients embed the placeholder pre-mint and the real token post-mint; a
+  // client that takes the secret through its own prompt instead (`otto-cli`)
+  // embeds neither, and showing "replace the placeholder" beside a snippet
+  // with nothing to replace would be telling the reader to do something the
+  // page itself gives them no way to do — `recipe.note()` carries the real
+  // instructions for that case instead.
+  const tokenEmbedsSecret = $derived(
+    snippet.includes(PLACEHOLDER) || (!!minted && snippet.includes(minted.token))
   );
 
   function toggleScope(scope: string, on: boolean) {
@@ -193,7 +204,7 @@
         <p class="mt-2 text-xs text-faint">{recipe.note()}</p>
       {/if}
 
-      {#if usingToken && !minted}
+      {#if usingToken && !minted && tokenEmbedsSecret}
         <p class="mt-2 text-xs text-warn">
           {m.connect_token_placeholder_note()}
         </p>

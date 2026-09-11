@@ -53,7 +53,17 @@ export interface ClientRecipe {
   note?: () => string;
 }
 
-const PLACEHOLDER = 'of_pat_…';
+/**
+ * Stands in for a real token in a snippet nobody has minted one for yet.
+ *
+ * Exported so `+page.svelte` can tell, from the rendered snippet alone,
+ * whether a given `token()` actually embeds a secret slot at all — some
+ * clients (`otto-cli`) take the secret through their own interactive prompt
+ * instead of a pasted config value, and the page's "replace the placeholder"
+ * warning would be actively wrong shown next to a snippet with nothing to
+ * replace.
+ */
+export const PLACEHOLDER = 'of_pat_…';
 
 export const CLIENTS: ClientRecipe[] = [
   {
@@ -116,6 +126,23 @@ export const CLIENTS: ClientRecipe[] = [
     oauth: (url) => `[mcp_servers.otto_factory]\nurl = "${url}"`,
     token: (url, token) =>
       `[mcp_servers.otto_factory]\nurl = "${url}"\n\n[mcp_servers.otto_factory.http_headers]\nAuthorization = "Bearer ${token || PLACEHOLDER}"`
+  },
+  {
+    id: 'otto-cli',
+    label: () => 'Otto CLI',
+    kind: 'toml',
+    location: '~/.otto/config.toml',
+    oauth: (url) =>
+      `[[mcp_servers]]\nname = "otto-factory"\ntransport = "http"\nurl = "${url}"\nauth = "oauth"`,
+    // `token` is unused on purpose: Otto never accepts the secret as a config field, and the
+    // snippet is pure copy-pasteable TOML with no instructional prose in it (that channel is
+    // never translated) — the how-to-actually-set-the-secret guidance lives entirely in `note`,
+    // which is. It also cannot say "paste this file, then paste the token when /mcp prompts":
+    // /mcp's list screen has no secret prompt for a row already in the file — only its
+    // interactive "add a server" form does — so `note` sends a token user there instead.
+    token: (url, _token) =>
+      `[[mcp_servers]]\nname = "otto-factory"\ntransport = "http"\nurl = "${url}"\nauth = "bearer"`,
+    note: () => m.client_note_otto_cli()
   },
   {
     id: 'generic',
