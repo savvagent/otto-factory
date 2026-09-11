@@ -1,6 +1,13 @@
 # `passkeys::remove` and `passkeys::clear`'s audit writes become atomic
 
-> **Status:** DRAFT — closes `savvagent/otto-factory#134`, filed during the review of `#131`
+> **Status:** IMPLEMENTED — shipped in `savvagent/otto-factory#170` (merged), closing
+> `savvagent/otto-factory#134`. Two rounds of PR review changed the shape from the original draft
+> below: the last-passkey count-then-delete race in `remove` (originally scoped out as
+> separately tracked) was reproduced and fixed in the same PR, and `reset_member_passkeys`'s
+> second audit write was dropped entirely rather than kept and re-scoped, per the corrected §3,
+> Assumptions, and Risks sections below. A second, independent `security-auditor` re-review then
+> verified the fix empirically and confirmed no audit coverage was lost. Originally filed during
+> the review of `#131`
 > (`docs/specs/2026-09-10-passkey-registration-atomic-audit-design.md`, which made
 > `finish_registration`'s credential INSERT and its `auth.passkey.registered` audit write atomic
 > and left the destructive half of the same forensic chain — `remove`/`clear` — untouched, per that

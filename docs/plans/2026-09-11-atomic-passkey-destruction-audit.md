@@ -13,9 +13,29 @@ plan implements it exactly.
 
 ## Status — 2026-09-11
 
-Not started. One task: all three call sites are fixed together because they share the same
-`Db::audit_global_on`/`Tx::audit` primitives and the same test technique, and splitting them would
-leave an intermediate commit fixing only one of three call sites the issue treats as one unit.
+**Shipped** in `savvagent/otto-factory#170` (merged). Task 1 landed as planned for `remove` and
+`clear`, but the implementation diverged from this plan in two ways during the review rounds
+below — recorded here rather than by rewriting the steps below, per this repo's record-as-shipped
+convention:
+
+- **The last-passkey race.** This plan (and the spec version it was drafted against) scoped `remove`'s
+  count-then-delete race out as a pre-existing, separately-tracked issue. PR review reproduced the
+  race directly (two concurrent `remove` calls on a two-key account could both pass the guard and
+  both commit, leaving zero passkeys) and found no such follow-up issue actually existed, so the fix
+  landed in this PR instead: the unlocked `SELECT count(*)` became `SELECT id ... ORDER BY id FOR
+  UPDATE`, counted in Rust, plus a concurrency test proving it.
+- **`reset_member_passkeys`'s second audit write.** This plan's Step 4 (below) called for keeping the
+  post-commit `auth.passkey.cleared` write and re-scoping it to the real `org_id` via a second
+  `tx.audit(...)` call. PR review converged on dropping that write entirely instead: it was redundant
+  with the already-atomic, already-org-scoped `org.member.passkeys_reset` row, justified only by a
+  now-disproven claim that it mirrored a self-service passkey clear (no such caller exists in
+  production). `remove_tx` was also simplified back into `remove` directly, since no second caller
+  for it ever appeared.
+
+A second, independent `security-auditor` re-review (blind to spec/plan/PR-body) then verified the
+`FOR UPDATE` fix empirically and confirmed the audit-write consolidation loses no observable
+coverage, and two documentation-accuracy suggestions from that round (plus a small deadlock-ordering
+hardening) landed in the same PR. Full review history is on the PR.
 
 ## Global Constraints
 
@@ -64,7 +84,7 @@ leave `#134` only partially closed at each intermediate commit, and the PR is sm
 call sites, ~150 lines including tests) that one task reviews as one coherent unit, matching how
 `#131` shipped its own two-file change as one task.
 
-## Task 1 — Atomic destruction + audit writes, all three call sites ✅/🚧/⬜: ⬜
+## Task 1 — Atomic destruction + audit writes, all three call sites ✅/🚧/⬜: ✅
 
 **Files:** `crates/of-auth/src/passkeys.rs`, `crates/of-web/src/routes/orgs.rs`,
 `crates/of-auth/tests/passkeys.rs`, `crates/of-web/tests/console.rs`
@@ -190,6 +210,6 @@ migration change in this task. (Vacuously satisfied, not skipped.)
 
 ## Record-as-shipped
 
-Not yet done — happens after merge, per `otto-factory-development`'s Phase 4 step 12: flip this
-plan's Task 1 marker to ✅, flip the spec's `> **Status:**` to IMPLEMENTED with the merged PR number,
-and update the `## Status` block above, via its own worktree + PR.
+Done, in this commit: Task 1's marker is flipped to ✅ above, the `## Status` block above records
+what actually shipped (including where it diverged from this plan's original steps), and the
+spec's `> **Status:**` is flipped to IMPLEMENTED with the merged PR number.
