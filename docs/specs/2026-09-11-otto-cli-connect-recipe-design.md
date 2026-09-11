@@ -1,6 +1,6 @@
 # Otto CLI connect recipe design
 
-> **Status:** IMPLEMENTED — shipped in `savvagent/otto-factory#153`, closing
+> **Status:** IMPLEMENTED — shipped in `savvagent/otto-factory#153` (merged as `6cb3dd3`), closing
 > `savvagent/otto-factory#41`. A live conformance run against a real `otto` binary remains open as
 > `savvagent/otto-factory#154`.
 
