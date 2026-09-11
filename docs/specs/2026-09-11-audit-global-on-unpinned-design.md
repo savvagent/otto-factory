@@ -1,10 +1,26 @@
 # `Db::audit_global_on` takes an `Unpinned` transaction, not any `PgExecutor`
 
-> **Status:** DRAFT — closes `savvagent/otto-factory#133`, filed during PR #131's mandatory review
-> trio (`docs/specs/2026-09-10-passkey-registration-atomic-audit-design.md`'s Risks & Open
+> **Status:** IMPLEMENTED — closes `savvagent/otto-factory#133`, filed during PR #131's mandatory
+> review trio (`docs/specs/2026-09-10-passkey-registration-atomic-audit-design.md`'s Risks & Open
 > Questions), which landed a doc-comment warning plus a runtime regression test
 > (`audit_global_on_refuses_a_pinned_connection`) as the cheap interim mitigation. This spec is the
-> stronger fix both reviewers asked for: make the misuse unrepresentable at the type level.
+> stronger fix both reviewers asked for: make the misuse unrepresentable at the type level. Merged
+> as `savvagent/otto-factory#165` (`b906ee614063054ba2bc5f9984a7530bf69440c9`). CI on that merge
+> commit is green (rust + web, run against master). Seven reviewers ran against #165 — the
+> mandatory trio (rust-pro, architect-reviewer, security-auditor) plus four conditional reviewers
+> (code-reviewer, pr-test-analyzer, comment-analyzer, type-design-analyzer) and the automated
+> Copilot reviewer — and converged on a residual gap the type alone could not close: a caller could
+> still pin an `Unpinned` by hand via `conn()` before calling `audit_global_on`, a finding
+> architect-reviewer, security-auditor, and code-reviewer each raised independently. Closed in the
+> same PR by a runtime guard inside `audit_global_on` itself (see its doc comment) plus a restored
+> DB-level policy test (`a_pinned_transaction_cannot_append_a_null_org_audit_row`) and a focused
+> test of the new guard (`audit_global_on_refuses_a_transaction_pinned_after_it_was_opened`),
+> independent of the Rust API — the second gap (the deleted runtime test's coverage loss) was
+> raised independently by architect-reviewer, security-auditor, code-reviewer, and
+> pr-test-analyzer. Three applied Suggestions also landed in the same PR: `Unpinned` re-exported at
+> the crate root, `audit_global_on` importing `Unpinned` directly instead of fully-qualifying it,
+> and a module-doc update to `db.rs`. **The compiler alone does not make the misuse fully
+> unrepresentable — see Risks & Open Questions below for the actual, final guarantee.**
 
 ## Goal & Success Criteria
 
@@ -30,9 +46,16 @@ will ever show.
   required because the parameter type is no longer generic).
 - `cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`, and `cargo fmt --all
   --check` all pass. `audit_global_on_refuses_a_pinned_connection`'s scenario (passing a pinned
-  `Tx`'s connection to `audit_global_on`) no longer compiles at all — the strongest possible proof —
-  so that runtime test is removed and replaced by a comment at its old location explaining why no
-  runtime test is needed (Testing, below).
+  `Tx`'s connection to `audit_global_on`) no longer compiles at all, so that runtime test is
+  removed and replaced by a comment at its old location. **Superseded during review:** the
+  compile-time fix alone does not make every misuse unrepresentable — `Unpinned::conn()` still
+  hands out a bare `&mut PgConnection`, so a caller can pin the session by hand
+  (`set_config('app.org_id', …)`) between opening an `Unpinned` and passing it to
+  `audit_global_on`. PR #165's review trio found this gap and closed it with a runtime guard in
+  `audit_global_on` itself plus two tests added back to `crates/of-core/tests/isolation.rs`
+  (`a_pinned_transaction_cannot_append_a_null_org_audit_row`,
+  `audit_global_on_refuses_a_transaction_pinned_after_it_was_opened`) — runtime tests *were*
+  needed after all; see Risks & Open Questions and Testing, below, for the corrected account.
 
 ## Premise corrections
 
@@ -165,6 +188,13 @@ Rust type.
 
 `crates/of-core/src/audit.rs`:
 
+> **Superseded — see Status above.** The code and doc comment reproduced below are the
+> pre-review version of this change, as originally drafted. PR #165's review trio found that the
+> doc comment's compile-time guarantee did not cover a caller pinning the session by hand through
+> `Unpinned::conn()`, and the shipped `audit_global_on` additionally re-checks `app.org_id` at
+> call time and refuses if the transaction has been pinned since it was opened. See
+> `crates/of-core/src/audit.rs` on `master` for the actual shipped code and doc comment.
+
 ```rust
 /// Record a global (no-org) event on an unpinned transaction the caller
 /// already holds open — typically one that also carries the change the
@@ -261,10 +291,16 @@ of reaching the same `&mut sqlx::PgConnection` with another.
   // deleted test scenario is a type error is not useful.
   ```
 
-  This satisfies the acceptance criterion ("unrepresentable", not "refused at runtime") more
-  strongly than the removed test did — the removed test verified rejection under one specific
-  deployment shape (RLS-enforced); the type-level fix rejects the misuse under both shapes,
-  unconditionally, at compile time.
+  **Superseded during review.** This comment's own claim — that the type-level fix alone makes the
+  misuse "unrepresentable" and needs no runtime test — did not survive PR #165's review trio: a
+  caller can still pin an `Unpinned`'s session by hand through `conn()` before calling
+  `audit_global_on`, which the type cannot see. Two tests were added back to
+  `crates/of-core/tests/isolation.rs` in the same PR, at the location this comment describes:
+  `a_pinned_transaction_cannot_append_a_null_org_audit_row` (the restored DB-level policy
+  coverage this section originally argued was no longer useful) and
+  `audit_global_on_refuses_a_transaction_pinned_after_it_was_opened` (proving the new runtime
+  guard in `audit_global_on` actually fires). Runtime tests *were* needed; see Risks & Open
+  Questions for the corrected account of what guarantee actually holds.
 - `cargo test --workspace` — must stay green; this is a mechanical, non-behavioral refactor across
   every `begin_unpinned` call site, so no test's assertions change, only how the local `tx` variable
   is dereferenced.
@@ -306,8 +342,37 @@ of reaching the same `&mut sqlx::PgConnection` with another.
 
 ## Risks & Open Questions
 
-- **None outstanding.** The one open question the parent spec flagged (`docs/specs/2026-09-10-
-  passkey-registration-atomic-audit-design.md`'s Risks & Open Questions) — "the blast radius is
-  small today (one caller) and grows with every future one" — is exactly what this issue closes:
-  after this change, a second caller of `audit_global_on` cannot reintroduce the misuse no matter
-  how it is written, because the compiler enforces it rather than a convention.
+- **Superseded during review — this section originally read "None outstanding" and claimed the
+  compiler alone makes the misuse unrepresentable "no matter how it is written." That claim is
+  false, and PR #165's review trio is what falsified it.** The real, final guarantee, as shipped,
+  has two parts, and both are required:
+  - **Compile-time (this spec's original contribution):** the compiler refuses to pass a `Tx`'s
+    connection directly to `audit_global_on`. `Tx::conn()` yields `&mut sqlx::PgConnection`, never
+    an `Unpinned`, and `Unpinned`'s own field is private — there is no path from one type to the
+    other. This closes the specific misuse `savvagent/otto-factory#133` named: a pinned `Tx`
+    reaching `audit_global_on` by construction.
+  - **Runtime (added during #165's review, not part of the original design):** `Unpinned::conn()`
+    still hands out a bare `&mut sqlx::PgConnection`, so a caller holding a genuine `Unpinned` can
+    pin its session by hand — `set_config('app.org_id', …)` through `conn()` — and then pass that
+    same `Unpinned` to `audit_global_on`, which the type system cannot see or prevent.
+    `audit_global_on` itself closes this gap: it re-checks `current_setting('app.org_id', true)`
+    at the start of every call and refuses (`Error::Invalid`) if the transaction has been pinned
+    since it was opened. This is the guard that actually matters on this deployment's
+    RLS-bypassed shape (per `docs/deploy/fly.md`), where the database itself provides no backstop
+    for a NULL-org write on a pinned connection.
+
+  The compiler prevents one specific misuse at construction time; the runtime guard catches a
+  different misuse the compiler cannot represent at all. Neither alone is the "no matter how it is
+  written" guarantee this section originally claimed — a future caller extending
+  `audit_global_on` who reads only the old claim and drops the runtime check as "redundant with
+  the type system" would silently reopen the exact gap #165's trio found. The type change and the
+  runtime guard are both load-bearing; see `crates/of-core/src/audit.rs` and
+  `crates/of-core/tests/isolation.rs`'s `a_pinned_transaction_cannot_append_a_null_org_audit_row`
+  and `audit_global_on_refuses_a_transaction_pinned_after_it_was_opened` on `master`.
+
+  The one open question the parent spec flagged (`docs/specs/2026-09-10-passkey-registration-
+  atomic-audit-design.md`'s Risks & Open Questions) — "the blast radius is small today (one
+  caller) and grows with every future one" — is closed only in the qualified sense above: a
+  future caller cannot reintroduce the *construction-time* misuse no matter how it is written, but
+  a future caller (or this one, if it acquires a second call site) still depends on the runtime
+  guard to catch a hand-pinned session, exactly as `finish_registration_tx` does today.
