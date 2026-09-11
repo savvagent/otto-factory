@@ -26,6 +26,14 @@ savvagent/otto-factory#149.
 ## Status — 2026-09-11
 
 🚧 In progress — implementation complete, addressing mandatory review trio findings on PR #150.
+Round 2 re-review found structural issues in the worker's Step 4/4.5/5 split (a self-report
+merge bypass, a lease-id/resource-name mismatch, and double ownership of review findings) and
+in the scanner's per-issue trust ordering; both `SKILL.md` files were revised accordingly. The
+worker's Step 5 verification gate is now a branch-resolution query
+(`gh pr list --head <branch> --state merged --json
+number,mergedAt,headRefName,closingIssuesReferences,body,comments,statusCheckRollup`) requiring
+merge timing after the claim, an issue cross-reference, green CI by run id, and a
+per-job `trio-cleared` marker comment — not the earlier two-field `gh pr view` check.
 
 ## Global Constraints
 
@@ -86,9 +94,10 @@ no new interface of its own (skill content only, no code).
     Step 4 subagent prompt template, its cutting-a-release rule reference, and its worktree
     convention reference — confirm the worktree path matches `otto-factory-development`'s own
     `.worktrees/<branch>` convention, not `otto`'s `.claude/worktrees/<branch>`).
-  - Keep: the claim/lease keep-alive split between orchestrator and subagent, the
-    `gh pr view --json state,mergedAt` verification gate before `complete_job`, the
-    `fail_job`/`cancel_job` resolution rules, and the final report shape.
+  - Keep: the claim/lease keep-alive split between orchestrator and subagent, an
+    independent verification gate before `complete_job` (superseded post-review — see
+    Status below), the `fail_job`/`cancel_job` resolution rules, and the final report
+    shape.
   - Update frontmatter `name:`/`description:` and every cross-reference to point at
     `otto-factory-scanner` and `otto-factory-development`.
 - [x] Cross-check both files against each other: `otto-factory-scanner`'s Cross-references
