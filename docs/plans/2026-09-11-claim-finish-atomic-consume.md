@@ -17,15 +17,55 @@ passes, with two new tests proving the rollback deterministically.
 
 ## Status — 2026-09-11
 
-Done. All three tasks implemented and committed, in order. `cargo test --workspace`,
-`cargo clippy --all-targets -- -D warnings`, and `cargo fmt --all --check` all pass; both new tests
-(`a_forced_audit_failure_also_restores_the_ceremony` in `of-auth`,
+Shipped. All three tasks implemented and committed, in order, and merged as
+`savvagent/otto-factory#164` (`546bc6393e0926a8cb486b8d1c40046c19239707`). `cargo test --workspace`,
+`cargo clippy --all-targets -- -D warnings`, and `cargo fmt --all --check` all passed; both original
+tests (`a_forced_audit_failure_also_restores_the_ceremony` in `of-auth`,
 `a_credential_collision_during_claim_finish_leaves_the_claim_code_usable` in `of-web`) were confirmed
 red against the unmodified source before the corresponding implementation step, then green after.
-PR pending review. Original task-ordering rationale below, still accurate: three tasks, sequential
+Original task-ordering rationale below, still accurate: three tasks, sequential
 (Task 2 depends on nothing from Task 1's code but the plan
 orders `of-core` before `of-auth` before `of-web` to match the dependency direction of the crates
 that consume each new function; Task 3 depends on both).
+
+`#164`'s review passes — the mandatory trio (rust-pro, architect-reviewer, security-auditor) plus
+four conditional reviewers (pr-test-analyzer, type-design-analyzer, comment-analyzer, and the
+automated reviewer) — surfaced six Important findings beyond this plan's three tasks, all fixed in
+review-response commits before merge:
+- Task 3 shipped with no coverage for the ceremony-ownership-mismatch path (`registered != user` →
+  403; architect-reviewer, pr-test-analyzer, type-design-analyzer, automated reviewer). Added
+  `a_ceremony_ownership_mismatch_leaves_the_claim_and_ceremony_usable`
+  (`crates/of-web/tests/console.rs`, commit `eec16dc8`).
+- `claim_finish` had no throttle of its own (`claim_start` does), and this PR's own rollback hands a
+  wrong code back intact rather than spending it — turning the endpoint into an unthrottled,
+  non-consuming validity oracle (architect-reviewer, security-auditor L1). Added a
+  `throttle_by_source` call as `claim_finish`'s first line (commit `a449f1e9`).
+- A rejected `claim_finish` left zero audit trace, since nothing commits on that path
+  (security-auditor M1). Added `auth.claim.refused` (`crates/of-core/src/audit.rs`) and a
+  best-effort post-rollback `audit_global` write (commit `a449f1e9`).
+- `finish_registration_tx`'s doc comment omitted the unpinned-connection hazard its sibling
+  `clear_tx` documents, despite calling `Db::audit_global_on` the same way (security-auditor M2).
+  Restated the hazard explicitly (commit `c8d5ff42`).
+- The `#108`/`#88` credential-audit-atomicity rationale comment above the audit write was dropped by
+  the `finish_registration`/`finish_registration_tx` split with nothing put in its place
+  (comment-analyzer). Restored (commit `c8d5ff42`, the same commit as the doc-comment fix above).
+- The audit-write-failure rollback was only proven at the `finish_registration_tx` level, never
+  through `claim_finish` itself (pr-test-analyzer). Added
+  `a_forced_audit_failure_during_claim_finish_also_restores_the_claim`
+  (`crates/of-web/tests/console.rs`, commit `cc326835`).
+
+Two findings from that same review loop were deliberately deferred with no follow-up issue filed,
+both Low/suggestion-level, not blocking: security-auditor's observation that the pool sets no
+`lock_timeout`/`statement_timeout`, so concurrent requests against one ceremony id serialize on a row
+lock instead of failing fast — a pool-wide connection-option change affecting every query on every
+surface, not just this path, and the reviewer's own assessment rated the exposure as "modest
+amplification, not an outage"; and type-design-analyzer's suggestion to consolidate
+`consume_account_claim_tx` and `finish_registration_tx` into one `claim_and_register`-shaped
+primitive so `state.db` and `tx` are never simultaneously reachable at `claim_finish`'s call site — a
+signature-changing refactor on the auth spine that, without its own spec, risks a worse mistake than
+the gap it closes. Neither is filed as a follow-up issue: both are narrow observations about this one
+call site rather than a repeated pattern this repo's own follow-up-issue precedent (`#107`→`#108`,
+`#86`→`#87`/`#88`/`#89`) is reserved for; revisit if the same shape recurs elsewhere.
 
 ## Global Constraints
 
