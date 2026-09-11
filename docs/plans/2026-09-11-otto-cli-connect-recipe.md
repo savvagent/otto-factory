@@ -68,15 +68,24 @@ new Paraglide message function, `m.client_note_otto_cli()`.
     location: '~/.otto/config.toml',
     oauth: (url) =>
       `[[mcp_servers]]\nname = "otto-factory"\ntransport = "http"\nurl = "${url}"\nauth = "oauth"`,
-    token: (url, token) =>
-      `[[mcp_servers]]\nname = "otto-factory"\ntransport = "http"\nurl = "${url}"\nauth = "bearer"\n\n# then run \`otto\`, open /mcp, and paste the token when prompted — Otto stores it in the\n# OS keyring under service "otto", account "mcp:otto-factory"; it is never written to this file.\n# Add/remove and a completed OAuth authorization both require restarting otto to take effect.`,
+    // `token` is unused on purpose: Otto never accepts the secret as a config field — it is
+    // handed over through /mcp's own prompt and stored in the OS keyring instead (see the
+    // comment in the rendered snippet below).
+    token: (url, _token) =>
+      `[[mcp_servers]]\nname = "otto-factory"\ntransport = "http"\nurl = "${url}"\nauth = "bearer"\n\n# then run otto, open /mcp, and paste the token when prompted — Otto stores it in the\n# OS keyring under service "otto", account "mcp:otto-factory"; it is never written to this file.\n# Add/remove and a completed OAuth authorization both require restarting otto to take effect.`,
     note: () => m.client_note_otto_cli()
   },
   ```
 
+  (This is the final, post-quality-review form: `token`'s second parameter is named `_token` with a
+  comment recording the omission is deliberate; the TOML comment drops markdown-style backticks
+  around `otto` since it is pasted into a real config file; and the `note` message below is worded
+  to cover both the OAuth and Token tabs, since `+page.svelte` renders it under whichever is
+  selected.)
+
 - [ ] In `web/messages/en.json`, add (after `client_note_generic`, before `nav_organizations`, per
       the file's existing `client_note_*` grouping):
-      `"client_note_otto_cli": "Then run \`otto\`, open \`/mcp\`, press \`o\` to authorize in your browser, and press \`c\` once it redirects back — Otto's OAuth consent is interactive-only, the same as Claude Code and Copilot CLI above. Restart otto afterward; a new or newly-authorized server only connects on the next launch.",`
+      `"client_note_otto_cli": "Whichever form you use, run \`otto\` and open \`/mcp\` afterward — for OAuth, press \`o\` to authorize in your browser and \`c\` once it redirects back (interactive-only, the same as Claude Code and Copilot CLI above); for a token, paste it when \`/mcp\` prompts for one. Either way, restart otto once: a new or newly-authorized server only connects on the next launch.",`
 - [ ] Add the matching translated string at the same key in `web/messages/es.json`,
       `web/messages/de.json`, `web/messages/fr.json`, `web/messages/it.json`, and
       `web/messages/hi.json`, in the same position relative to `client_note_generic` in each file.

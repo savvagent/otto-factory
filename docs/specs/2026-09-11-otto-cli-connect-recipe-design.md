@@ -92,11 +92,22 @@ gap the issue identified without inventing a config shape that doesn't exist.
   location: '~/.otto/config.toml',
   oauth: (url) =>
     `[[mcp_servers]]\nname = "otto-factory"\ntransport = "http"\nurl = "${url}"\nauth = "oauth"`,
-  token: (url, token) =>
-    `[[mcp_servers]]\nname = "otto-factory"\ntransport = "http"\nurl = "${url}"\nauth = "bearer"\n\n# then run \`otto\`, open /mcp, and paste the token when prompted — Otto stores it in the\n# OS keyring under service "otto", account "mcp:otto-factory"; it is never written to this file.\n# Add/remove and a completed OAuth authorization both require restarting otto to take effect.`,
+  // `token` is unused on purpose: Otto never accepts the secret as a config field — it is
+  // handed over through /mcp's own prompt and stored in the OS keyring instead (see the
+  // comment in the rendered snippet below).
+  token: (url, _token) =>
+    `[[mcp_servers]]\nname = "otto-factory"\ntransport = "http"\nurl = "${url}"\nauth = "bearer"\n\n# then run otto, open /mcp, and paste the token when prompted — Otto stores it in the\n# OS keyring under service "otto", account "mcp:otto-factory"; it is never written to this file.\n# Add/remove and a completed OAuth authorization both require restarting otto to take effect.`,
   note: () => m.client_note_otto_cli()
 }
 ```
+
+(Revised once more after the implementation's own quality review: the `token` parameter is
+explicitly renamed `_token` with a comment recording that the omission is deliberate, not an
+oversight; the TOML comment's `` `otto` `` markdown-style backticks are dropped since that string
+is pasted into a real config file, not rendered as UI prose — plain text reads more naturally in an
+actual `.toml` comment; and the shared `note()` — which `+page.svelte` renders under *both* the
+OAuth and Token tabs — is reworded below to cover both auth paths rather than describing only the
+OAuth ceremony, since the original wording was actively misleading on the Token tab.)
 
 Notes on the shape, cited against upstream source:
 
@@ -131,10 +142,15 @@ New key `client_note_otto_cli`, added to all six locale files
 (`web/messages/{en,es,de,fr,it,hi}.json`) per the project's "a new string costs six catalog
 entries" rule. English source string:
 
-> "Then run `otto`, open `/mcp`, press `o` to authorize in your browser, and press `c` once it
-> redirects back — Otto's OAuth consent is interactive-only, the same as Claude Code and Copilot
-> CLI above. Restart otto afterward; a new or newly-authorized server only connects on the next
-> launch."
+> "Whichever form you use, run `otto` and open `/mcp` afterward — for OAuth, press `o` to authorize
+> in your browser and `c` once it redirects back (interactive-only, the same as Claude Code and
+> Copilot CLI above); for a token, paste it when `/mcp` prompts for one. Either way, restart otto
+> once: a new or newly-authorized server only connects on the next launch."
+
+Covers both auth paths deliberately: `+page.svelte` renders `recipe.note()` under whichever tab
+(OAuth or Token) is selected, so a note describing only the OAuth ceremony would read as wrong
+guidance to a reader on the Token tab — a gap the quality review on this change's implementation
+caught after the first draft described only the OAuth flow.
 
 Placeholders: none. Plural category: none (not a plural message). `scripts/check-messages.mjs`
 (run by `npm run check`) is the gate that would fail on a missing locale, a dropped placeholder, or
