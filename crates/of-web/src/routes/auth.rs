@@ -441,10 +441,10 @@ pub async fn claim_finish(
 }
 
 /// Best-effort audit trace for a `claim/finish` request that rolled back —
-/// see [`claim_finish`]'s own doc comment for why this exists. Mirrors
-/// `passkeys::clear`'s post-commit `audit_global` pattern: logged rather than
-/// propagated, because losing this one row is worse to compound into a second
-/// failure on an already-failed request than it is to simply lose it.
+/// see [`claim_finish`]'s own doc comment for why this exists. Follows
+/// `Db::audit_global`'s own best-effort-by-design contract: logged rather
+/// than propagated, because losing this one row is worse to compound into a
+/// second failure on an already-failed request than it is to simply lose it.
 async fn note_claim_refused(state: &AppState, actor: UserId, ip: Option<&str>, reason: &str) {
     let entry = Entry::new(action::CLAIM_REFUSED)
         .actor(actor)

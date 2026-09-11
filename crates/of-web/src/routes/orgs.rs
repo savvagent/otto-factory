@@ -360,11 +360,19 @@ pub async fn reset_member_passkeys(
     let token = of_auth::crypto::generate(of_auth::crypto::prefix::INVITE);
 
     // Clearing the passkeys, ending the sessions they opened, minting the
-    // claim code, and recording both audit rows all share one transaction: a
+    // claim code, and recording the audit row all share one transaction: a
     // failure partway through must not leave the account cleared with no way
-    // back in (savvagent/otto-factory#87), and must not leave either audit
-    // row losable independently of the destructive change it records
-    // (savvagent/otto-factory#134).
+    // back in (savvagent/otto-factory#87), and must not leave the audit row
+    // losable independently of the destructive change it records
+    // (savvagent/otto-factory#134). This used to also write a second,
+    // best-effort, post-commit `auth.passkey.cleared` row on an unpinned
+    // connection, on the theory that it mirrored what a self-service clear
+    // writes globally (`of_auth::passkeys::clear`) — but there is no
+    // self-service passkey clear in production, so that write had no live
+    // counterpart to mirror and only duplicated this row under a second
+    // action name. Dropped rather than merely re-scoped: this one row,
+    // already atomic and already org-scoped, is `#134`'s actual fix for this
+    // call site. See `of_auth::passkeys::clear`'s doc comment.
     let mut tx = state.db.begin(ctx.org.id).await?;
     of_auth::passkeys::clear_tx(tx.conn(), target).await?;
     of_auth::sessions::revoke_all_tx(tx.conn(), target).await?;
@@ -372,28 +380,6 @@ pub async fn reset_member_passkeys(
         .await?;
     tx.audit(
         Entry::new(action::MEMBER_PASSKEYS_RESET)
-            .actor(ctx.user.id)
-            .target("user", target.to_string())
-            .from_request(ip.as_deref(), None),
-    )
-    .await?;
-    // The same auth.passkey.cleared action a self-service clear writes
-    // globally (of_auth::passkeys::clear), so a SIEM export keyed on this
-    // action string sees an admin-assisted clear too — but scoped to the
-    // real org rather than NULL. This connection is pinned to ctx.org.id, so
-    // a NULL-org insert here would violate audit_events's row-level-security
-    // policy wherever RLS applies (audit_events_append: `WITH CHECK
-    // (current_org() IS NULL OR org_id = current_org())`), which is exactly
-    // why this used to be a separate, best-effort, post-commit write on an
-    // unpinned connection. Writing it org-scoped instead — via `Tx::audit`,
-    // in this same transaction — is what makes it atomic with the delete it
-    // records, and it is also what makes it visible to the org admins who
-    // actually need to review it: a NULL-org row is invisible to
-    // `GET /api/orgs/{org}/audit`. Attributed to the admin who did this, not
-    // the member it happened to — the member did not clear their own
-    // passkeys. See savvagent/otto-factory#134.
-    tx.audit(
-        Entry::new(action::PASSKEY_CLEARED)
             .actor(ctx.user.id)
             .target("user", target.to_string())
             .from_request(ip.as_deref(), None),
