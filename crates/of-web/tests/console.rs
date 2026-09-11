@@ -2106,6 +2106,106 @@ async fn a_ceremony_ownership_mismatch_leaves_the_claim_and_ceremony_usable(pool
     );
 }
 
+/// `of-auth`'s own `a_forced_audit_failure_also_restores_the_ceremony` proves
+/// a forced audit-write failure rolls back at the `finish_registration_tx`
+/// level. It cannot prove more than that: it calls `finish_registration`
+/// directly and never touches claim consumption at all. This proves the same
+/// failure rolls back through `claim_finish` itself, restoring the claim
+/// code alongside the ceremony — flagged by pr-test-analyzer during `#164`'s
+/// review as unproven end to end through the endpoint the fix actually
+/// changed.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_forced_audit_failure_during_claim_finish_also_restores_the_claim(pool: PgPool) {
+    let h = harness(pool);
+    let rob = onboard(&h, "rob@acme.test").await;
+    let org = org_with_owner(&h, "acme", &rob).await;
+    let bob = onboard(&h, "bob@acme.test").await;
+    add_member(&h, org, bob.user, of_core::orgs::Role::Member).await;
+
+    let reset = Call::post(format!(
+        "/api/orgs/acme/members/{}/reset-passkeys",
+        bob.user
+    ))
+    .with_session(&rob.session)
+    .send(&h.router)
+    .await;
+    reset.expect(StatusCode::CREATED);
+    let code = reset.body["code"]
+        .as_str()
+        .expect("no claim code")
+        .to_string();
+
+    // Same fault-injection technique as `of-auth`'s test: force the audit
+    // write `finish_registration_tx` makes to fail, deterministically.
+    sqlx::query(
+        "CREATE FUNCTION reject_claim_registration_audit() RETURNS trigger AS $$ \
+         BEGIN RAISE EXCEPTION 'forced failure for test'; END; \
+         $$ LANGUAGE plpgsql",
+    )
+    .execute(h.db.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER reject_claim_registration_audit \
+         BEFORE INSERT ON audit_events \
+         FOR EACH ROW WHEN (NEW.action = 'auth.passkey.registered') \
+         EXECUTE FUNCTION reject_claim_registration_audit()",
+    )
+    .execute(h.db.pool())
+    .await
+    .unwrap();
+
+    let started = Call::post("/api/auth/claim/start")
+        .json(serde_json::json!({ "code": code }))
+        .send(&h.router)
+        .await;
+    started.expect(StatusCode::OK);
+    let ceremony_id: uuid::Uuid = started.body["ceremonyId"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    let mut device = common::authenticator();
+    let finished = common::finish_registration(
+        &h,
+        &mut device,
+        "/api/auth/claim/finish",
+        &started.body,
+        serde_json::json!({ "code": code }),
+    )
+    .await;
+    assert_ne!(
+        finished.status,
+        StatusCode::OK,
+        "a forced audit-write failure must abort the whole claim/finish request"
+    );
+
+    // The ceremony's own DELETE rolls back with the failed audit write, the
+    // same fact `of-auth`'s test proves at the lower level...
+    let ceremony_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM webauthn_ceremonies WHERE id = $1")
+            .bind(ceremony_id)
+            .fetch_one(h.db.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        ceremony_count, 1,
+        "the ceremony must survive a rolled-back claim/finish, not just a \
+         rolled-back finish_registration_tx"
+    );
+
+    // ...and so does the claim code, which only a test that goes through
+    // claim_finish itself can show: the code was consumed by
+    // consume_account_claim_tx on the same transaction, and must be restored
+    // by the same rollback.
+    let retried = Call::post("/api/auth/claim/start")
+        .json(serde_json::json!({ "code": code }))
+        .send(&h.router)
+        .await;
+    retried.expect(StatusCode::OK);
+}
+
 /// An admin must not reach through this endpoint what the role check refuses
 /// everywhere else — resetting an owner is an owner's business.
 #[sqlx::test(migrations = "../of-core/migrations")]
