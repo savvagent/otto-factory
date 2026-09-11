@@ -285,6 +285,9 @@
     }
   ],
   "queue_showing_capped": "Seuls les {limit} plus récents sont affichés.",
+  "queue_refresh_failed": "Échec de l'actualisation. {reason} Résultat affiché : {age}.",
+  "queue_paused": "Mises à jour en pause pendant votre absence. Interagissez avec la page pour les reprendre.",
+  "queue_retrying": "Nouvelle tentative en cours en arrière-plan.",
   "job_load_failed": "Impossible de charger cette tâche.",
   "job_back": "← File d'attente",
   "job_missing_title": "Tâche introuvable",

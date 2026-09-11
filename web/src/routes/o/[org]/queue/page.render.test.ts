@@ -24,6 +24,8 @@
 import { mount, unmount } from 'svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { IDLE_AFTER, REFRESH_INTERVAL } from '$lib/poll.svelte';
+
 const { gotoMock, replaceStateMock } = vi.hoisted(() => ({
   gotoMock: vi.fn((_url: URL | string, _opts?: Record<string, unknown>) => Promise.resolve()),
   replaceStateMock: vi.fn((_url: URL | string, _state: unknown) => undefined)
@@ -113,6 +115,414 @@ describe('the queue filters', () => {
     expect(String(url)).toBe('/o/acme/queue');
     expect(opts).toMatchObject({ replaceState: true, keepFocus: true, noScroll: true });
     expect(replaceStateMock).not.toHaveBeenCalled();
+
+    unmount(instance);
+  });
+});
+
+/**
+ * The job-list fetch itself, now a `Poller` subscription keyed on org and
+ * filters (see `+page.svelte`'s `jobsPoll`). `poll.svelte.test.ts` proves the
+ * state machine; this proves the table, the stale/parked note, and the
+ * per-filter subscription actually behave that way on this page.
+ *
+ * Every stub in this block must also answer `/repos` and `/teams` — the
+ * page's untouched picker `$effect` fires its own `Promise.all` on mount
+ * independent of the job poll, and a stub that only knows `/jobs` would make
+ * that effect fall through to whatever the `/jobs` branch returns.
+ */
+describe('the queue poller', () => {
+  const baseJob = {
+    id: 'job-1',
+    orgId: 'org-1',
+    repoId: 'repo-1',
+    teamId: null,
+    title: 'Wire the webhook ingest',
+    description: null,
+    status: 'pending',
+    ticketRef: null,
+    tracker: null,
+    agentType: null,
+    metadata: {},
+    createdAt: new Date().toISOString(),
+    startedAt: null,
+    completedAt: null,
+    attempts: 0,
+    result: null,
+    error: null,
+    createdBy: null,
+    claimedBy: null,
+    claimedByLabel: null,
+    claimExpiresAt: null,
+    cancelRequestedAt: null,
+    cancelRequestedBy: null,
+    cancelReason: null
+  };
+
+  function jsonResponse(body: unknown, status = 200) {
+    return new Response(JSON.stringify(body), {
+      status,
+      headers: { 'content-type': 'application/json' }
+    });
+  }
+
+  const emptyPickers = () => Promise.resolve(jsonResponse([]));
+
+  it('keeps the table and shows the stale note when a refresh fails, then clears it on recovery', async () => {
+    let jobsStatus = 200;
+    const fetchMock = vi.fn((path: string) => {
+      if (path.includes('/repos') || path.includes('/teams')) return emptyPickers();
+      if (path.includes('/jobs')) {
+        return Promise.resolve(
+          jobsStatus === 200 ? jsonResponse([baseJob]) : new Response('', { status: jobsStatus })
+        );
+      }
+      return Promise.resolve(new Response('', { status: 404 }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const instance = mount(Harness, { target: container, props: { slug: 'acme' } });
+    await settle();
+
+    expect(container.textContent).toContain('Wire the webhook ingest');
+    expect(container.querySelector('[role="status"]')).toBeNull();
+
+    jobsStatus = 502;
+    // 1.4x, not 1x: the tick lands somewhere inside the subscription's phase
+    // offset (up to +30%), and the page cannot inject a random source to pin
+    // it exactly — see poll.svelte.test.ts for that.
+    await vi.advanceTimersByTimeAsync(REFRESH_INTERVAL * 1.4);
+
+    // The real `fetch` mock answers with a real `Response`, and reading its
+    // body needs a genuine turn of the real event loop, not just the fake
+    // clock's microtask flush — `vi.waitFor` polls on a real timer until the
+    // assertion holds or the wait times out.
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain('Wire the webhook ingest');
+      const note = container.querySelector('[role="status"]');
+      expect(note).not.toBeNull();
+      expect(note?.textContent).toContain('Refresh failed');
+    });
+
+    jobsStatus = 200;
+    await vi.advanceTimersByTimeAsync(REFRESH_INTERVAL * 4);
+    await vi.waitFor(() => {
+      expect(container.querySelector('[role="status"]')).toBeNull();
+      expect(container.textContent).toContain('Wire the webhook ingest');
+    });
+
+    unmount(instance);
+  });
+
+  it('shows the stale note even when the job list is empty', async () => {
+    // Regression test for the render-tree bug where the stale/parked note lived
+    // only inside the table's branch: a successful-but-empty poll (a filter
+    // matching nothing, or a fresh org) followed by a failing tick used to
+    // render a confident "no jobs" empty state with no staleness indication at
+    // all. The note must now be reachable regardless of `jobs.length`.
+    let jobsStatus = 200;
+    const fetchMock = vi.fn((path: string) => {
+      if (path.includes('/repos') || path.includes('/teams')) return emptyPickers();
+      if (path.includes('/jobs')) {
+        return Promise.resolve(
+          jobsStatus === 200 ? jsonResponse([]) : new Response('', { status: jobsStatus })
+        );
+      }
+      return Promise.resolve(new Response('', { status: 404 }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const instance = mount(Harness, { target: container, props: { slug: 'acme' } });
+    await settle();
+
+    expect(container.textContent).toContain('Nothing has been queued yet.');
+    expect(container.querySelector('[role="status"]')).toBeNull();
+
+    jobsStatus = 502;
+    // 1.4x, not 1x: the tick lands somewhere inside the subscription's phase
+    // offset (up to +30%) — see poll.svelte.test.ts for that.
+    await vi.advanceTimersByTimeAsync(REFRESH_INTERVAL * 1.4);
+
+    await vi.waitFor(() => {
+      // Still the empty state — there is no table for this note to hide inside.
+      expect(container.textContent).toContain('Nothing has been queued yet.');
+      const note = container.querySelector('[role="status"]');
+      expect(note).not.toBeNull();
+      expect(note?.textContent).toContain('Refresh failed');
+    });
+
+    unmount(instance);
+  });
+
+  it('stops polling and shows the error in place of the table on a 404', async () => {
+    const fetchMock = vi.fn((path: string) => {
+      if (path.includes('/repos') || path.includes('/teams')) return emptyPickers();
+      if (path.includes('/jobs')) return Promise.resolve(new Response('', { status: 404 }));
+      return Promise.resolve(new Response('', { status: 404 }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const instance = mount(Harness, { target: container, props: { slug: 'acme' } });
+    await settle();
+
+    expect(container.querySelector('table')).toBeNull();
+    expect(container.textContent).not.toContain('Wire the webhook ingest');
+    const alert = container.querySelector('[role="alert"]');
+    expect(alert).not.toBeNull();
+    // The 404 stub answers with an empty body (no `error.code`), so `messageFor`
+    // falls through to its unknown-code sentence rather than `queue_load_failed`
+    // — the fallback there only applies to a failure that is not an `ApiError`
+    // at all.
+    expect(alert?.textContent).toContain('Something went wrong');
+
+    const jobsCallCount = () =>
+      fetchMock.mock.calls.filter(([path]) => String(path).includes('/jobs')).length;
+    expect(jobsCallCount()).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(REFRESH_INTERVAL * 6);
+    await settle();
+    expect(jobsCallCount()).toBe(1);
+
+    unmount(instance);
+  });
+
+  it('shows the paused note (not "Still retrying") when a never-successful poll parks', async () => {
+    // Regression test: `parked` and `failed` are independent flags on `Poller`
+    // (see `#schedule` in `poll.svelte.ts`, which sets `#parked` regardless of
+    // `#failed`) and can both be true at once — an initial load that never
+    // succeeds followed by a long enough idle stretch. The old render tree
+    // checked `pollError` first, so the paused note never rendered at all and
+    // the error alert's "Still retrying in the background" kept claiming a
+    // retry was scheduled even though the poll had parked and armed no timer.
+    const fetchMock = vi.fn((path: string) => {
+      if (path.includes('/repos') || path.includes('/teams')) return emptyPickers();
+      if (path.includes('/jobs')) return Promise.resolve(new Response('', { status: 502 }));
+      return Promise.resolve(new Response('', { status: 404 }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const instance = mount(Harness, { target: container, props: { slug: 'acme' } });
+    await settle();
+
+    // The first load already failed and nothing has ever rendered, so the
+    // error alert is up before any time passes — and, not parked yet, it
+    // still claims to be retrying. The stub's 502 has an empty body (no
+    // `error.code`), so `messageFor` falls through to its unknown-code
+    // sentence, same as the 404 case elsewhere in this file.
+    const errorAlert = () =>
+      Array.from(container.querySelectorAll('[role="alert"]')).find((el) =>
+        el.textContent?.includes('Something went wrong')
+      );
+    expect(errorAlert()).toBeTruthy();
+    expect(errorAlert()?.textContent).toContain('Still retrying');
+    expect(container.querySelector('[role="status"]')).toBeNull();
+
+    // Advance well past the idle threshold. Every retry in between keeps
+    // failing (502 forever), so `Poller` never leaves the loop of scheduling a
+    // backed-off retry — until a scheduling check lands after `IDLE_AFTER` of
+    // inactivity and parks instead of arming another timer.
+    await vi.advanceTimersByTimeAsync(IDLE_AFTER + REFRESH_INTERVAL * 10);
+
+    await vi.waitFor(() => {
+      const status = container.querySelector('[role="status"]');
+      expect(status).not.toBeNull();
+      expect(status?.textContent).toContain('Updates paused while you were away');
+    });
+
+    // The failure never went away (the poll is still `failed`, not `stopped`
+    // — 502 is not `fatal`), so the error alert is still shown alongside the
+    // paused note. But now that it is parked, there is nothing to retry, and
+    // the hint must not claim otherwise.
+    expect(errorAlert()).toBeTruthy();
+    expect(errorAlert()?.textContent).not.toContain('Still retrying');
+
+    unmount(instance);
+  });
+
+  it('restarts the poll when a filter changes, and drops a late response for the old filter', async () => {
+    function makeDeferred() {
+      let resolve!: (response: Response) => void;
+      const promise = new Promise<Response>((res) => {
+        resolve = res;
+      });
+      return { promise, resolve };
+    }
+
+    // Each `/jobs` call gets its own still-pending promise, keyed by which
+    // filter it belongs to, so the initial unfiltered request and the
+    // filtered request that supersedes it can be resolved independently and
+    // in whatever order the test needs — a genuinely in-flight request, not
+    // a second `resolve()` on one already settled.
+    const jobsDeferred: Record<'unfiltered' | 'pending', ReturnType<typeof makeDeferred>[]> = {
+      unfiltered: [],
+      pending: []
+    };
+
+    const fetchMock = vi.fn((path: string) => {
+      if (path.includes('/repos') || path.includes('/teams')) return emptyPickers();
+      if (path.includes('/jobs')) {
+        const key = path.includes('status=pending') ? 'pending' : 'unfiltered';
+        const deferred = makeDeferred();
+        jobsDeferred[key].push(deferred);
+        return deferred.promise;
+      }
+      return Promise.resolve(new Response('', { status: 404 }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const instance = mount(Harness, {
+      target: container,
+      props: { slug: 'acme', url: new URL('http://example.test/o/acme/queue') }
+    }) as unknown as { setUrl: (next: URL) => void };
+    await settle();
+
+    // The initial unfiltered request is in flight but deliberately left
+    // unresolved here — it is resolved late, after the filter switch below,
+    // to prove the superseded subscription's response is dropped.
+    expect(jobsDeferred.unfiltered).toHaveLength(1);
+
+    instance.setUrl(new URL('http://example.test/o/acme/queue?status=pending'));
+    await settle();
+
+    // The filter switch tore down the unfiltered `Poller` subscription and
+    // started a new one for `status=pending` — no second unfiltered call,
+    // and exactly one pending-filtered call now in flight.
+    expect(jobsDeferred.unfiltered).toHaveLength(1);
+    expect(jobsDeferred.pending).toHaveLength(1);
+
+    jobsDeferred.pending[0]!.resolve(
+      jsonResponse([{ ...baseJob, id: 'job-pending', title: 'Pending job' }])
+    );
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain('Pending job');
+    });
+
+    // The response for the superseded (unfiltered) subscription arrives
+    // late — from a promise that was never resolved before the switch — and
+    // must not be applied. See `Poller`'s generation counter and
+    // `docs/specs/2026-09-09-overview-polling-design.md` §3.
+    jobsDeferred.unfiltered[0]!.resolve(
+      jsonResponse([{ ...baseJob, id: 'job-late', title: 'Late unfiltered job' }])
+    );
+    await settle();
+    expect(container.textContent).not.toContain('Late unfiltered job');
+    expect(container.textContent).toContain('Pending job');
+
+    unmount(instance);
+  });
+
+  it('a navigation error is its own independent notice: it is not erased by an unrelated poll success, and does not hide a live poll failure', async () => {
+    // Regression test for the corrected `navError`/`pollError` design: the two
+    // are no longer merged into one slot, so there is no "priority" between
+    // them at all. A rejected `goto` renders its own `Alert`, independent of
+    // whatever the job poll is doing, and it is retired only by a genuine
+    // org/filter change — never by an unrelated poll tick merely succeeding.
+    Object.defineProperty(page, 'url', {
+      configurable: true,
+      get: () => new URL('http://example.test/o/acme/queue')
+    });
+
+    let jobsStatus = 200;
+    const fetchMock = vi.fn((path: string) => {
+      if (path.includes('/repos') || path.includes('/teams')) return emptyPickers();
+      if (path.includes('/jobs')) {
+        return Promise.resolve(
+          jobsStatus === 200 ? jsonResponse([baseJob]) : new Response('', { status: jobsStatus })
+        );
+      }
+      return Promise.resolve(new Response('', { status: 404 }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    // The one rejected navigation this test needs — every other `goto` call
+    // in this suite resolves via the default mock set up in `beforeEach`.
+    gotoMock.mockRejectedValueOnce(new Error('chunk failed to load'));
+
+    const instance = mount(Harness, { target: container, props: { slug: 'acme' } });
+    await settle();
+    expect(container.textContent).toContain('Wire the webhook ingest');
+
+    const select = container.querySelector('select') as HTMLSelectElement;
+    select.value = 'pending';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+    await settle();
+
+    // `goto` rejected, so `page.url` never actually changed and the job-poll
+    // effect never re-ran — the nav alert is showing, and the poll itself is
+    // still healthy (no poll-error alert alongside it).
+    const navAlert = () =>
+      Array.from(container.querySelectorAll('[role="alert"]')).find((el) =>
+        el.textContent?.includes('Could not load the queue.')
+      );
+    expect(navAlert()).toBeTruthy();
+    expect(container.querySelectorAll('[role="alert"]')).toHaveLength(1);
+
+    // A full healthy poll tick passes — nothing about org or filters changed,
+    // so this must NOT clear the nav alert. (This is the regression the old
+    // auto-clear-on-`updatedAt` effect would have caused: it retired `navError`
+    // the moment any unrelated tick succeeded, with no bearing on whether the
+    // navigation problem itself was ever fixed.)
+    await vi.advanceTimersByTimeAsync(REFRESH_INTERVAL * 1.4);
+    await settle();
+    expect(navAlert()).toBeTruthy();
+
+    // Now the underlying poll hits a fatal failure on a later tick, with the
+    // nav alert still up and nothing having changed org or filters. Both
+    // alerts must be visible at once — one is not a substitute for the other.
+    jobsStatus = 404;
+    await vi.advanceTimersByTimeAsync(REFRESH_INTERVAL * 1.4);
+    await vi.waitFor(() => {
+      expect(navAlert()).toBeTruthy();
+      const pollAlert = Array.from(container.querySelectorAll('[role="alert"]')).find((el) =>
+        el.textContent?.includes('Something went wrong')
+      );
+      expect(pollAlert).toBeTruthy();
+      // A fatal (stopped) poll failure gets no "still retrying" hint.
+      expect(pollAlert?.textContent).not.toContain('Still retrying');
+    });
+    expect(container.querySelectorAll('[role="alert"]')).toHaveLength(2);
+
+    unmount(instance);
+  });
+
+  // `filters` is `$derived({ status, repo, team, mine, limit: 200 })` — the
+  // restart-on-filter-change test above only ever exercises `status`, which
+  // would still pass even if `repo`, `team`, or `mine` silently stopped
+  // participating in the effect's dependency set. That is exactly the
+  // regression `#92` tracks: the restart is about all four keys, not just one.
+  it.each([
+    ['repo', 'repo=repo-1'],
+    ['team', 'team=team-1'],
+    ['mine', 'mine=true']
+  ] as const)('restarts the poll when the %s filter changes', async (_key, expected) => {
+    const fetchMock = vi.fn((path: string) => {
+      if (path.includes('/repos') || path.includes('/teams')) return emptyPickers();
+      if (path.includes('/jobs')) return Promise.resolve(jsonResponse([baseJob]));
+      return Promise.resolve(new Response('', { status: 404 }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const instance = mount(Harness, {
+      target: container,
+      props: { slug: 'acme', url: new URL('http://example.test/o/acme/queue') }
+    }) as unknown as { setUrl: (next: URL) => void };
+    await settle();
+
+    const jobsCallCountBefore = fetchMock.mock.calls.filter(([path]) =>
+      String(path).includes('/jobs')
+    ).length;
+    expect(jobsCallCountBefore).toBe(1);
+
+    const [paramKey, paramValue] = expected.split('=') as [string, string];
+    const nextUrl = new URL('http://example.test/o/acme/queue');
+    nextUrl.searchParams.set(paramKey, paramValue);
+
+    instance.setUrl(nextUrl);
+    await settle();
+
+    const jobsCalls = fetchMock.mock.calls.filter(([path]) => String(path).includes('/jobs'));
+    expect(jobsCalls.length).toBe(2);
+    expect(String(jobsCalls[jobsCalls.length - 1]![0])).toContain(expected);
 
     unmount(instance);
   });

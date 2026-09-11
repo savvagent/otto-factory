@@ -285,6 +285,9 @@
     }
   ],
   "queue_showing_capped": "Solo se muestran los {limit} más recientes.",
+  "queue_refresh_failed": "Error al actualizar. {reason} Se muestra el resultado de {age}.",
+  "queue_paused": "Actualizaciones en pausa mientras estuviste fuera. Interactúa con la página para reanudarlas.",
+  "queue_retrying": "Se sigue reintentando en segundo plano.",
   "job_load_failed": "No se pudo cargar ese trabajo.",
   "job_back": "← Cola",
   "job_missing_title": "No existe ese trabajo",

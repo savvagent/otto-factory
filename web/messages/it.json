@@ -285,6 +285,9 @@
     }
   ],
   "queue_showing_capped": "Sono mostrati solo i {limit} più recenti.",
+  "queue_refresh_failed": "Aggiornamento non riuscito. {reason} Viene mostrato il risultato di {age}.",
+  "queue_paused": "Aggiornamenti in pausa mentre eri assente. Interagisci con la pagina per riprenderli.",
+  "queue_retrying": "Nuovi tentativi in corso in background.",
   "job_load_failed": "Impossibile caricare questo processo.",
   "job_back": "← Coda",
   "job_missing_title": "Processo inesistente",
