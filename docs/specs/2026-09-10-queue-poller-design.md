@@ -47,6 +47,9 @@ purpose is "what is happening to my jobs right now." Today a job moving `pending
   hand-rolled `seq` counter — see §2).
 - Three new message keys — `queue_refresh_failed`, `queue_paused`, `queue_retrying` — added to all
   six catalogs (`web/messages/*.json`), matching the overview's three keys in shape and tone.
+- `web/src/routes/o/[org]/queue/QueueHarness.svelte` — test-only support gaining an optional `url`
+  prop (seeded once via `untrack`, updated thereafter through an exported `setUrl` method) so a
+  test can drive a live filter/org change on an already-mounted instance.
 - `web/src/routes/o/[org]/queue/page.render.test.ts` gains poller-behavior cases (stale-keeps-data,
   fatal-stops, restart-on-filter-change), added alongside the existing filter-navigation tests —
   neither set of tests is removed.

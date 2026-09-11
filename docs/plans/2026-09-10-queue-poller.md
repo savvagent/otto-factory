@@ -59,7 +59,7 @@ corresponding account there.
 | `web/src/lib/poll-fatal.ts`                                     | **New**, not in the original plan's scope. Added during implementation, in response to review feedback, to extract the `fatal()` classifier (401 clears the session, 403/404 stop the poll) out of page-local closures so this page and the overview page share one definition instead of two copies that could drift. Exports `fatalApiFailure`. |
 | `web/src/routes/o/[org]/+page.svelte`                           | **Modify**, not in the original plan's scope. Touched as part of the same extraction: its own inline `fatal()` closure was replaced with the shared `fatalApiFailure` import from `poll-fatal.ts`. |
 | `web/messages/en.json`, `es.json`, `de.json`, `fr.json`, `it.json`, `hi.json` | **Modify.** Add `queue_refresh_failed`, `queue_paused`, `queue_retrying` to each, mirroring the existing `overview_*` triad.                                    |
-| `web/src/routes/o/[org]/queue/QueueHarness.svelte`              | **Modify.** Accept an optional reactive `url` prop so a test can drive a live filter change without a second mount — needed for the new "restarts on filter change" test. Existing callers that omit `url` are unaffected. |
+| `web/src/routes/o/[org]/queue/QueueHarness.svelte`              | **Modify.** Accept an optional `url` prop, snapshotted once via `untrack` into a `current` `$state` a test can then update through an exported `setUrl` method — so a test can drive a live filter change without a second mount, needed for the new "restarts on filter change" test. Existing callers that omit `url` are unaffected. |
 | `web/src/routes/o/[org]/queue/page.render.test.ts`              | **Modify.** Add poller-behavior cases alongside the existing filter-navigation tests (neither set is removed).                                                 |
 | `web/README.md`                                                 | **Modify.** One Layout-table row: `poll.svelte.ts` now used by the overview *and* `/queue`.                                                                     |
 
@@ -204,16 +204,22 @@ only.
       before moving on (in particular: `ApiError`'s exported shape, `session.clear()`'s signature —
       both already used identically in `o/[org]/+page.svelte`, so mirror it exactly rather than
       re-deriving the types).
-- [x] **Give `QueueHarness.svelte` an optional reactive `url` prop**, so a test can drive a live
-      filter change on an already-mounted instance instead of remounting (remounting would create a
+- [x] **Give `QueueHarness.svelte` an optional `url` prop**, so a test can drive a live filter
+      change on an already-mounted instance instead of remounting (remounting would create a
       second, independent `Poller` subscription and could not demonstrate "a late response for the
       superseded filter is dropped," which requires one continuous subscription whose generation
-      counter increments). Existing tests, which never pass `url`, are unaffected because the
-      `Object.defineProperty` call below only runs when a `url` prop is actually supplied — the
-      "Clear filters" test's own external `Object.defineProperty(page, 'url', ...)` override (set
-      before mounting, on the `page` singleton directly) keeps working exactly as it does today:
+      counter increments). The prop is deliberately **not** reactive — it only ever seeds the
+      harness's own `current` state once, via `untrack`, and `setUrl()` is the sole update path
+      thereafter (a plain `$state(url)` seed, without `untrack`, trips `svelte-check`'s
+      `state_referenced_locally` warning on the later reads of `url`, since the compiler cannot tell
+      a one-time seed from a live dependency). Existing tests, which never pass `url`, are
+      unaffected because the `Object.defineProperty` call below only runs when a `url` prop is
+      actually supplied — the "Clear filters" test's own external
+      `Object.defineProperty(page, 'url', ...)` override (set before mounting, on the `page`
+      singleton directly) keeps working exactly as it does today:
       ```svelte
       <script lang="ts">
+        import { untrack } from 'svelte';
         import { page } from '$app/state';
         import { OrgContext, provideOrg } from '$lib/org.svelte';
         import Page from './+page.svelte';
@@ -222,14 +228,15 @@ only.
 
         provideOrg(new OrgContext(() => slug));
 
-        let current = $state(url);
+        const initialUrl = untrack(() => url);
+        let current = $state(initialUrl);
 
         /** Lets a test drive a live filter/org change on an already-mounted instance. */
         export function setUrl(next: URL) {
           current = next;
         }
 
-        if (url !== undefined) {
+        if (initialUrl !== undefined) {
           Object.defineProperty(page, 'url', {
             configurable: true,
             get: () => current
