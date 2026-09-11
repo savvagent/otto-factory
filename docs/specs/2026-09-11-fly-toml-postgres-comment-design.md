@@ -1,7 +1,8 @@
 # Fix fly.toml's header comment on the Postgres deployment shape
 
-> **Status:** DRAFT — corrects `fly.toml`'s header comment to match the actual, documented
-> Postgres deployment shape.
+> **Status:** IMPLEMENTED — PR #156 (merged, `b6781333368007374ffe97c4c4cfa332089edde3`) —
+> corrects `fly.toml`'s header comment to match the actual, documented Postgres deployment
+> shape.
 
 ## Premise corrections
 

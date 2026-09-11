@@ -13,10 +13,11 @@ plan it currently describes.
 
 ## Status — 2026-09-11
 
-Task 1 implemented and committed; verification steps re-run and checked off during PR
-#156's review-response pass, which also corrected two accuracy issues the mandatory
-review trio found in the header text itself (see Task 1's steps below) and fixed the
-`git commit -m` instruction's non-conventional-commit type. Awaiting merge.
+✅ Shipped in PR #156 (merged, `b6781333368007374ffe97c4c4cfa332089edde3`). Task 1
+implemented and committed; verification steps re-run and checked off during PR #156's
+review-response pass, which also corrected two accuracy issues the mandatory review trio
+found in the header text itself (see Task 1's steps below) and fixed the `git commit -m`
+instruction's non-conventional-commit type.
 
 ## Global Constraints
 
