@@ -32,9 +32,11 @@ serverless model would fight. See `CLAUDE.md` for why the process must stay warm
 
 Unlike a shared managed-Postgres cluster, this instance's connecting role,
 `otto_factory_mcp`, **is a superuser** (`fly postgres attach` creates it that way on a
-dedicated instance). That matters because `0007_rls.sql` issues `CREATE ROLE of_app
-NOLOGIN` and `GRANT of_app TO CURRENT_USER`, both of which need `CREATEROLE` — and a
-superuser has it unconditionally. Confirmed at first deploy:
+dedicated instance). That matters because `0018_rename_tenant_role.sql` (following
+`0007_rls.sql`, which established the same requirement for the role's original name,
+`df_app`) issues `CREATE ROLE of_app NOLOGIN` and `GRANT of_app TO CURRENT_USER`, both of
+which need `CREATEROLE` — and a superuser has it unconditionally. Confirmed at first
+deploy:
 
 ```
 INFO of_server: tenant isolation enforced as role "of_app"
