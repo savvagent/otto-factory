@@ -176,8 +176,15 @@ impl Db {
     /// tables are not touched.
     ///
     /// Named to be conspicuous at call sites. Anything reaching for this to get
-    /// at tenant data is a bug: it runs as the connecting role with no
-    /// `app.org_id`, so tenant tables return zero rows rather than everything.
+    /// at tenant data is a bug, and what it actually returns depends on which
+    /// deployment shape it runs against — see CLAUDE.md's "Tenant isolation"
+    /// section. Where the connecting role is neither a superuser nor
+    /// BYPASSRLS, `FORCE ROW LEVEL SECURITY` applies with no `app.org_id` set,
+    /// so `org_id = current_org()` is never true and tenant tables return zero
+    /// rows. Where the connecting role *is* a superuser or BYPASSRLS — this
+    /// deployment's actual shape today, per `docs/deploy/fly.md` — RLS does
+    /// not apply at all, `FORCE` included, so an unscoped read or write
+    /// against a tenant table returns or affects everything, not nothing.
     pub async fn begin_unpinned(&self) -> Result<Transaction<'static, Postgres>> {
         Ok(self.pool.begin().await?)
     }
