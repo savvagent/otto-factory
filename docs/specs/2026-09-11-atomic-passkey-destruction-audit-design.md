@@ -1,6 +1,21 @@
 # `passkeys::remove` and `passkeys::clear`'s audit writes become atomic
 
-> **Status:** DRAFT — closes `savvagent/otto-factory#134`, filed during the review of `#131`
+> **Status:** IMPLEMENTED — shipped in `savvagent/otto-factory#170` (merged as
+> `83d9763ddf6aaa4afb8982079f7858a90ad30d5c`), closing `savvagent/otto-factory#134`. Two rounds of
+> PR review changed the shape from the original draft below: the last-passkey count-then-delete
+> race in `remove` (originally scoped out as separately tracked) was reproduced and fixed in the
+> same PR, and `reset_member_passkeys`'s second audit write was dropped entirely rather than kept
+> and re-scoped, per the corrected §3, Assumptions, and Risks sections below. A second, independent
+> `security-auditor` re-review then verified the fix empirically and confirmed no audit coverage
+> was lost.
+>
+> **One follow-up remains open.** Dropping the redundant `org_id = NULL` write (§3) was justified
+> because `Tx::audit_trail` filters by `org_id`, so a global row was already invisible to any
+> org-scoped reader — but that same fact is exactly what `savvagent/otto-factory#176` ("Global
+> (`org_id IS NULL`) audit rows are permanently invisible to any reader") names as an unresolved
+> gap for *every* global audit row this codebase writes, not only the one this PR removed. This
+> design does not close `#176`; it only stopped adding to the pile the row it deleted would
+> otherwise have kept adding to. Originally filed during the review of `#131`
 > (`docs/specs/2026-09-10-passkey-registration-atomic-audit-design.md`, which made
 > `finish_registration`'s credential INSERT and its `auth.passkey.registered` audit write atomic
 > and left the destructive half of the same forensic chain — `remove`/`clear` — untouched, per that
@@ -511,4 +526,10 @@ corrected Scope/Out, §3, and Assumptions sections above for the full account:
 - ~~Two audit rows per admin-assisted reset ... should be confirmed with the architect reviewer~~ —
   confirmed, and resolved by dropping the redundant `PASSKEY_CLEARED` write rather than keeping it.
 
-No open risks remain from this design as shipped.
+**One follow-up does remain open, and it is a direct residue of this design's own §3 decision,**
+not a pre-existing, unrelated gap: `savvagent/otto-factory#176` (global, `org_id IS NULL` audit
+rows are permanently invisible to any reader). Dropping the redundant `auth.passkey.cleared` write
+in §3 was justified on the grounds that a `NULL`-org row is already unreadable by any org-scoped
+query (`Tx::audit_trail` filters by `org_id`) — which is exactly the gap `#176` names as unresolved
+for the rest of this codebase's global audit rows. This design does not fix `#176`; it only
+declines to add one more row to the pile it describes.

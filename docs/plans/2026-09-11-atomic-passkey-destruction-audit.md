@@ -9,13 +9,47 @@ destructive change it records instead of best-effort after commit — closing
 `savvagent/otto-factory#134`.
 
 **Spec:** `docs/specs/2026-09-11-atomic-passkey-destruction-audit-design.md` — read it first. This
-plan implements it exactly.
+plan implements it exactly. (As shipped, "exactly" needs a caveat — see the `## Status` block below
+for where the implementation diverged from the steps that follow.)
 
 ## Status — 2026-09-11
 
-Not started. One task: all three call sites are fixed together because they share the same
-`Db::audit_global_on`/`Tx::audit` primitives and the same test technique, and splitting them would
-leave an intermediate commit fixing only one of three call sites the issue treats as one unit.
+**Shipped** in `savvagent/otto-factory#170` (merged). Task 1 landed as planned for `remove` and
+`clear`, but the implementation diverged from this plan in two ways during the review rounds
+below — recorded here rather than by rewriting the steps below, per this repo's record-as-shipped
+convention:
+
+- **The last-passkey race.** This plan (and the spec version it was drafted against) scoped `remove`'s
+  count-then-delete race out as a pre-existing, separately-tracked issue. PR review reproduced the
+  race directly (two concurrent `remove` calls on a two-key account could both pass the guard and
+  both commit, leaving zero passkeys) and found no such follow-up issue actually existed, so the fix
+  landed in this PR instead: the unlocked `SELECT count(*)` became `SELECT id ... ORDER BY id FOR
+  UPDATE`, counted in Rust, plus a concurrency test proving it.
+- **`reset_member_passkeys`'s second audit write.** This plan's "Rewrite `reset_member_passkeys` in
+  `crates/of-web/src/routes/orgs.rs`" step (below) called for keeping the post-commit
+  `auth.passkey.cleared` write and re-scoping it to the real `org_id` via a second `tx.audit(...)`
+  call. PR review converged on dropping that write entirely instead: it was redundant
+  with the already-atomic, already-org-scoped `org.member.passkeys_reset` row, justified only by a
+  now-disproven claim that it mirrored a self-service passkey clear (no such caller exists in
+  production). `remove_tx` was also simplified back into `remove` directly, since no second caller
+  for it ever appeared.
+- **The Global Constraints section below is now stale on this same point, and is left unedited
+  below for the record.** It asserts that `reset_member_passkeys` "writes to audit_events with a
+  real org_id" and that this plan "adds a dedicated cross-org check (Step 8)" for that write.
+  Neither shipped: per the divergence above, the write was dropped rather than re-scoped, so there
+  is no org-scoped `PASSKEY_CLEARED` row to write a cross-org negative test against. The planned
+  cross-org check became moot for that reason; the test that actually shipped
+  (`an_admin_can_reset_a_members_authenticator_but_gains_nothing_by_it`, per §4 below) instead
+  asserts the row's *absence*, which is the correct proof for a write that no longer happens.
+
+A second, independent `security-auditor` re-review (blind to spec/plan/PR-body) then verified the
+`FOR UPDATE` fix empirically and confirmed the audit-write consolidation loses no observable
+coverage. Three documentation-accuracy corrections from that round (plus a small deadlock-ordering
+hardening) landed in the same PR, touching doc comments in `crates/of-core/src/audit.rs` (the
+`PASSKEY_CLEARED` action's doc comment), `crates/of-auth/src/passkeys.rs` (`clear`'s lockout warning
+and its actor-attribution note — already listed in the File Structure table below), and
+`crates/of-web/src/routes/auth.rs` (`note_claim_refused`'s comment) — the first and third of which
+touch files this plan's File Structure table never lists. Full review history is on the PR.
 
 ## Global Constraints
 
@@ -64,7 +98,7 @@ leave `#134` only partially closed at each intermediate commit, and the PR is sm
 call sites, ~150 lines including tests) that one task reviews as one coherent unit, matching how
 `#131` shipped its own two-file change as one task.
 
-## Task 1 — Atomic destruction + audit writes, all three call sites ✅/🚧/⬜: ⬜
+## Task 1 — Atomic destruction + audit writes, all three call sites ✅/🚧/⬜: ✅
 
 **Files:** `crates/of-auth/src/passkeys.rs`, `crates/of-web/src/routes/orgs.rs`,
 `crates/of-auth/tests/passkeys.rs`, `crates/of-web/tests/console.rs`
@@ -190,6 +224,6 @@ migration change in this task. (Vacuously satisfied, not skipped.)
 
 ## Record-as-shipped
 
-Not yet done — happens after merge, per `otto-factory-development`'s Phase 4 step 12: flip this
-plan's Task 1 marker to ✅, flip the spec's `> **Status:**` to IMPLEMENTED with the merged PR number,
-and update the `## Status` block above, via its own worktree + PR.
+Done, in this commit: Task 1's marker is flipped to ✅ above, the `## Status` block above records
+what actually shipped (including where it diverged from this plan's original steps), and the
+spec's `> **Status:**` is flipped to IMPLEMENTED with the merged PR number.
