@@ -1,8 +1,10 @@
 # Queue page Poller migration design
 
-> **Status:** DRAFT — migrate the queue page's job list from fetch-once-per-filter-change to a
-> `Poller` subscription, folding in the four-filter restart requirement `savvagent/otto-factory#92`
-> already flagged for this exact migration.
+> **Status:** IMPLEMENTED — `savvagent/otto-factory#146` (merged as `867c10b`), closing
+> `savvagent/otto-factory#104` and `savvagent/otto-factory#92`. The queue's job list refreshes via
+> `Poller`, keyed on org plus all four filter values. See §2a for how the shipped design departed
+> from this document's original sketch — the render tree, and the `navError`/`pollError` split, in
+> particular.
 
 > **Implements:** `savvagent/otto-factory#104`, `savvagent/otto-factory#92`
 
@@ -45,11 +47,19 @@ purpose is "what is happening to my jobs right now." Today a job moving `pending
   hand-rolled `seq` counter — see §2).
 - Three new message keys — `queue_refresh_failed`, `queue_paused`, `queue_retrying` — added to all
   six catalogs (`web/messages/*.json`), matching the overview's three keys in shape and tone.
+- `web/src/routes/o/[org]/queue/QueueHarness.svelte` — test-only support gaining an optional `url`
+  prop (seeded once via `untrack`, updated thereafter through an exported `setUrl` method) so a
+  test can drive a live filter/org change on an already-mounted instance.
 - `web/src/routes/o/[org]/queue/page.render.test.ts` gains poller-behavior cases (stale-keeps-data,
   fatal-stops, restart-on-filter-change), added alongside the existing filter-navigation tests —
   neither set of tests is removed.
 - One `web/README.md` Layout-table row edit (the `poll.svelte.ts` row already says "the overview
   uses it; `/queue` and `/repos` should" — updated to reflect that `/queue` now does).
+- **Added during review, beyond this list's original scope — see §2a's third point:**
+  `web/src/lib/poll-fatal.ts` (a shared `fatalApiFailure` classifier) and
+  `web/src/lib/poll-fatal.test.ts`, plus the corresponding change to
+  `web/src/routes/o/[org]/+page.svelte` (the overview page): its own local `fatal()` closure
+  removed and replaced with the shared `fatalApiFailure` import.
 
 **Out:**
 
@@ -210,8 +220,8 @@ way — only the results region below it switches on `error`/`loading`/`parked`/
 
 ## §2a What was actually built
 
-The description above is wrong in two ways a PR review caught, and both are now fixed in the
-shipped code rather than in this spec's prose only.
+The description above is wrong in three ways a PR review caught, and all three are now fixed in
+the shipped code rather than in this spec's prose only.
 
 First, the "three-way branch" was never accurate even for the code as designed here: `error` /
 `loading` / the results region is really a four-way split once the results region's own
@@ -237,6 +247,19 @@ actually got fixed. The shipped code renders `navError` as its own independent, 
 org/filter change, the only event that actually supersedes a failed navigation). `pollError`
 drives its own `{#if pollError}` branch with no precedence rule against `navError` at all.
 
+Third, §2's sketch gives the queue page its own local `fatal(failure): boolean` closure, byte-identical
+to the overview page's own copy. A review flagged this as the same shared-definition convention this
+repo's `web/` section argues for elsewhere (`clients.ts` is "one table with one entry per client";
+the router and OpenAPI document "are built from one list") — and the duplication carries a real
+side effect, `session.clear()` on a `401`, that a future edit to one copy and not the other would
+silently desync. The shipped code extracts the classifier into `web/src/lib/poll-fatal.ts`
+(exporting `fatalApiFailure`), consumed by both this page and the overview page, with a dedicated
+unit test (`web/src/lib/poll-fatal.test.ts`) covering all five cases (401, 404, bare 403, a
+non-`ApiError` failure, and a non-fatal 502) — coverage
+neither page's own tests had provided for the 401 (`session.clear()`) or bare-403 cases before the
+extraction. This is a second file this spec's Scope section did not anticipate touching, alongside
+the render-tree and `navError` corrections above.
+
 ## §3 What does not change
 
 - `setFilter`, `applyFilters`, the `filtered` derived, and every control in the filter bar —
@@ -256,12 +279,17 @@ drives its own `{#if pollError}` branch with no precedence rule against `navErro
     success clears it.
   - A `404` (simulating an unregistered `repo`/`team` filter, or an org the account no longer has
     access to) stops the poll (`jobsPoll.stopped`) and renders the error branch instead of a table.
-  - Changing a filter mid-poll (simulated by re-rendering the harness with a different `page.url`,
-    the same technique the existing filter tests already use) restarts the subscription: the new
-    filter's `fetch` call is the one whose result renders, and a response for the old filter that
-    resolves late is not.
+  - Changing a filter mid-poll — mounted once via `QueueHarness`'s `url` prop, then driven by
+    calling the harness instance's exported `instance.setUrl(...)` rather than re-rendering or
+    remounting — restarts the subscription: the new filter's `fetch` call is the one whose result
+    renders, and a response for the old filter that resolves late is not.
 - Existing `web/src/lib/poll.svelte.test.ts` / `poll.dom.test.ts` are unchanged — this migration
   adds no new behavior to `Poller` itself.
+- `web/src/lib/poll-fatal.test.ts` — added during review (§2a's third point), covering
+  `fatalApiFailure`'s five cases directly: a non-`ApiError` failure, a `401` (`isUnauthenticated`,
+  asserting `session.clear()` is called), an `isNotFound` failure, a bare `403`, and a non-fatal
+  `502` (returns `false`). The non-`ApiError`, `404`, and `403` cases each also assert
+  `session.clear()` was not called; the `502` case does not spy on the session.
 - Gates: `npm run check`, `npm run lint`, `npm test`, `npm run build`.
 
 ## Error Handling & Edge Cases

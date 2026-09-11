@@ -14,7 +14,19 @@ exactly.
 
 ## Status — 2026-09-10
 
-✅ Task 1 implemented and gated (`npm run check`, `npm run lint`, `npm test`, `npm run build` all green), including a regression test added after code-quality review for the `navError`/`pollError` precedence fix. Not yet merged — see the open PR.
+✅ Shipped in `savvagent/otto-factory#146`, closing `savvagent/otto-factory#104` and
+`savvagent/otto-factory#92`. Merged as `867c10b`; the merge commit's own CI run
+(`34554517396`) is green on `rust` and `web`. Task 1 went through three Copilot review
+rounds, plus the mandatory Rust/architect/security review trio, before merging — the
+design changed in response (most notably splitting `navError`/`pollError` into two
+independent notices rather than merging them, hoisting the stale/parked note above the
+`Empty`/table split so it is reachable on an empty result, and extracting a shared
+`fatalApiFailure` classifier into `web/src/lib/poll-fatal.ts`, adopted by both this page
+and the overview page). **The steps below have been corrected in place to match what
+actually shipped** — the File Structure table's rows for `poll-fatal.ts` and the overview
+page mark what was added beyond the original plan's scope, and the render-tree and
+`$effect` snippets in Task 1 reflect the final design. See the design spec's §2a for the
+corresponding account there.
 
 ## Global Constraints
 
@@ -43,11 +55,12 @@ exactly.
 
 | File                                                          | Responsibility                                                                                                                                                 |
 | --------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `web/src/routes/o/[org]/queue/+page.svelte`                     | **Modify.** Job-list `$effect` rewired through `Poller<Job[]>`, keyed on `org.slug` plus a `$derived` over the four filters; render tree gains `stale`/`parked`/`stopped` branches, keeping its existing `error` / `loading` / empty / table four-way branch intact. |
+| `web/src/routes/o/[org]/queue/+page.svelte`                     | **Modify.** Job-list `$effect` rewired through `Poller<Job[]>`, keyed on `org.slug` plus a `$derived` over the four filters; render tree gains `navError`/`stale`/`parked` notices, keeping its existing `error` / `loading` / empty / table four-way branch intact (`jobsPoll.stopped` is not its own branch — it only additionally gates the pre-existing "still retrying" hint inside the `pollError` alert). |
 | `web/src/lib/poll-fatal.ts`                                     | **New**, not in the original plan's scope. Added during implementation, in response to review feedback, to extract the `fatal()` classifier (401 clears the session, 403/404 stop the poll) out of page-local closures so this page and the overview page share one definition instead of two copies that could drift. Exports `fatalApiFailure`. |
-| `web/src/routes/o/[org]/+page.svelte`                           | **Modify**, not in the original plan's scope. Touched as part of the same extraction: its own inline `fatal()` closure was replaced with the shared `fatalApiFailure` import from `poll-fatal.ts`. |
+| `web/src/lib/poll-fatal.test.ts`                                | **New**, not in the original plan's scope. Unit tests for `fatalApiFailure`'s five cases (non-`ApiError`, 401, 404, bare 403, non-fatal 502), added during review since the page-level tests only ever exercised a 404. |
+| `web/src/routes/o/[org]/+page.svelte`                           | **Modify**, not in the original plan's scope. Touched as part of the same extraction: its own inline `fatal()` closure was removed and replaced with the shared `fatalApiFailure` import from `poll-fatal.ts`. |
 | `web/messages/en.json`, `es.json`, `de.json`, `fr.json`, `it.json`, `hi.json` | **Modify.** Add `queue_refresh_failed`, `queue_paused`, `queue_retrying` to each, mirroring the existing `overview_*` triad.                                    |
-| `web/src/routes/o/[org]/queue/QueueHarness.svelte`              | **Modify.** Accept an optional reactive `url` prop so a test can drive a live filter change without a second mount — needed for the new "restarts on filter change" test. Existing callers that omit `url` are unaffected. |
+| `web/src/routes/o/[org]/queue/QueueHarness.svelte`              | **Modify.** Accept an optional `url` prop, snapshotted once via `untrack` into a `current` `$state` a test can then update through an exported `setUrl` method — so a test can drive a live filter change without a second mount, needed for the new "restarts on filter change" test. Existing callers that omit `url` are unaffected. |
 | `web/src/routes/o/[org]/queue/page.render.test.ts`              | **Modify.** Add poller-behavior cases alongside the existing filter-navigation tests (neither set is removed).                                                 |
 | `web/README.md`                                                 | **Modify.** One Layout-table row: `poll.svelte.ts` now used by the overview *and* `/queue`.                                                                     |
 
@@ -61,9 +74,13 @@ names either way. The README edit is a one-line tail on the same commit sequence
 ## Task 1 — Migrate the queue's job-list fetch to `Poller`, keyed on org + filters ✅
 
 **Files:** `web/src/routes/o/[org]/queue/+page.svelte` (modify), `web/messages/*.json` (modify, all
-six), `web/src/routes/o/[org]/queue/page.render.test.ts` (modify), `web/README.md` (modify). During
-implementation, a review round extracted the shared `fatal()` classifier out of both this page and
-the overview page into a new `web/src/lib/poll-fatal.ts` — see the note at the end of this task.
+six), `web/src/routes/o/[org]/queue/QueueHarness.svelte` (modify),
+`web/src/routes/o/[org]/queue/page.render.test.ts` (modify), `web/README.md` (modify),
+`web/src/lib/poll-fatal.ts` (new), `web/src/lib/poll-fatal.test.ts` (new),
+`web/src/routes/o/[org]/+page.svelte` (modify). The last three were not in the original plan's
+scope — a review round extracted the shared `fatal()` classifier out of both this page and the
+overview page into `poll-fatal.ts`, with its own dedicated unit test; see the note at the end of
+this task and the File Structure table above.
 **Interfaces:** Consumes `Poller` from `$lib/poll.svelte` and `fatalApiFailure` from
 `$lib/poll-fatal` (not `ApiError`/`session` directly — those live behind `fatalApiFailure` now,
 shared with `o/[org]/+page.svelte`). Produces no new public interface — this is page-internal state
@@ -143,9 +160,10 @@ only.
       existing four-way content branch.** The shipped render tree keeps `navError` as its own
       unconditional `Alert` — independent of the poll, because a rejected `goto` is not a poll
       failure — then renders the `parked`/`stale` note unconditionally too (mutually exclusive with
-      each other, and with `navError`, above and independent of the content branching below), and
-      only then branches on `pollError`/`loading`/the empty check/the table (`+page.svelte:220-253`
-      as of this plan):
+      *each other*, but never with `navError`: `navError` and the `parked`/`stale` note can both be
+      visible at once, since neither gates the other — both sit above and independent of the content
+      branching below), and only then branches on `pollError`/`loading`/the empty check/the table
+      (`+page.svelte:220-253` as of this plan):
       ```svelte
       {#if navError}
         <Alert>{navError}</Alert>
@@ -192,16 +210,22 @@ only.
       before moving on (in particular: `ApiError`'s exported shape, `session.clear()`'s signature —
       both already used identically in `o/[org]/+page.svelte`, so mirror it exactly rather than
       re-deriving the types).
-- [x] **Give `QueueHarness.svelte` an optional reactive `url` prop**, so a test can drive a live
-      filter change on an already-mounted instance instead of remounting (remounting would create a
+- [x] **Give `QueueHarness.svelte` an optional `url` prop**, so a test can drive a live filter
+      change on an already-mounted instance instead of remounting (remounting would create a
       second, independent `Poller` subscription and could not demonstrate "a late response for the
       superseded filter is dropped," which requires one continuous subscription whose generation
-      counter increments). Existing tests, which never pass `url`, are unaffected because the
-      `Object.defineProperty` call below only runs when a `url` prop is actually supplied — the
-      "Clear filters" test's own external `Object.defineProperty(page, 'url', ...)` override (set
-      before mounting, on the `page` singleton directly) keeps working exactly as it does today:
+      counter increments). The prop is deliberately **not** reactive — it only ever seeds the
+      harness's own `current` state once, via `untrack`, and `setUrl()` is the sole update path
+      thereafter (a plain `$state(url)` seed, without `untrack`, trips `svelte-check`'s
+      `state_referenced_locally` warning on the later reads of `url`, since the compiler cannot tell
+      a one-time seed from a live dependency). Existing tests, which never pass `url`, are
+      unaffected because the `Object.defineProperty` call below only runs when a `url` prop is
+      actually supplied — the "Clear filters" test's own external
+      `Object.defineProperty(page, 'url', ...)` override (set before mounting, on the `page`
+      singleton directly) keeps working exactly as it does today:
       ```svelte
       <script lang="ts">
+        import { untrack } from 'svelte';
         import { page } from '$app/state';
         import { OrgContext, provideOrg } from '$lib/org.svelte';
         import Page from './+page.svelte';
@@ -210,14 +234,15 @@ only.
 
         provideOrg(new OrgContext(() => slug));
 
-        let current = $state(url);
+        const initialUrl = untrack(() => url);
+        let current = $state(initialUrl);
 
         /** Lets a test drive a live filter/org change on an already-mounted instance. */
         export function setUrl(next: URL) {
           current = next;
         }
 
-        if (url !== undefined) {
+        if (initialUrl !== undefined) {
           Object.defineProperty(page, 'url', {
             configurable: true,
             get: () => current
@@ -283,7 +308,8 @@ only.
       cd .. && git add web/src/routes/o/\[org\]/queue/+page.svelte web/messages/*.json \
         web/src/routes/o/\[org\]/queue/QueueHarness.svelte \
         web/src/routes/o/\[org\]/queue/page.render.test.ts web/README.md \
-        web/src/lib/poll-fatal.ts web/src/routes/o/\[org\]/+page.svelte
+        web/src/lib/poll-fatal.ts web/src/lib/poll-fatal.test.ts \
+        web/src/routes/o/\[org\]/+page.svelte
       git commit -m "web: migrate the queue page's job list to Poller, keyed on filters too"
       ```
 - [x] **Full gate, once more, from a clean state**: `cd web && npm run check && npm run lint && npm test && npm run build`.
