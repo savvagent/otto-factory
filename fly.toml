@@ -1,9 +1,16 @@
 # otto-factory on Fly.io, org "savvagent".
 #
-# Database: a dedicated `otto_factory` database and `otto-factory` schema_admin
-# role on the shared `savvagent-pg` managed Postgres cluster (kyzl60xmdjxopj9g),
-# isolated from the `light_factory` / nels-api databases on the same cluster.
-# DATABASE_URL is already staged as a secret via `fly mpg attach`.
+# Database: a dedicated, standalone (unmanaged) Fly Postgres app,
+# `otto-factory-mcp-db` (region iad), created specifically for this app rather
+# than attached to the shared `savvagent-pg` managed Postgres cluster that
+# nels-api uses — mpg's per-cluster role model does not grant CREATEROLE to a
+# tenant app's own role, which `0007_rls.sql` needs. The connecting role,
+# `otto_factory_mcp` (created by `fly postgres attach`), is a superuser on this
+# dedicated instance, which is what makes `CREATE ROLE of_app NOLOGIN` succeed
+# at migration time. DATABASE_URL is already staged as a secret via
+# `fly postgres attach otto-factory-mcp-db -a otto-factory-mcp`. See
+# docs/deploy/fly.md for the full account, including why the shared-cluster
+# plan was abandoned.
 #
 # Secrets are NOT in this file — `fly secrets set` puts DATABASE_URL and
 # OF_ENCRYPTION_KEY in the machine's environment. Everything below is
