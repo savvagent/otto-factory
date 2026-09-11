@@ -12,9 +12,20 @@ implements it exactly.
 
 ## Status — 2026-09-11
 
-Implemented on branch `core/audit-global-unpinned`; PR not yet opened at time of writing. One
-task, complete: `cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`, and
+Shipped in PR #165 (branch `core/audit-global-unpinned`, merged). One task, complete:
+`cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`, and
 `cargo fmt --all --check` all pass.
+
+The mandatory review trio on #165 found the type change alone left a residual gap — a caller
+could still pin an `Unpinned` by hand via `conn()` and `set_config('app.org_id', …)` before
+passing it to `audit_global_on`, which still compiled — and that deleting the old runtime test
+dropped the only coverage of `audit_events_append`'s `org_id IS NULL` branch under a pinned
+transaction. Both were closed in the same PR: `audit_global_on` now re-checks `app.org_id` at
+call time and refuses if the transaction has been pinned since it was opened, and a DB-level
+policy test plus a focused test of the new runtime guard were added to
+`crates/of-core/tests/isolation.rs`. `master` also gained a second production caller of
+`audit_global_on` (`finish_registration_tx`, from PR #164, landed concurrently) before #165
+merged; it was adapted to `&mut Unpinned` in the same PR's merge-conflict resolution.
 
 ## Global Constraints
 

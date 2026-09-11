@@ -1,10 +1,14 @@
 # `Db::audit_global_on` takes an `Unpinned` transaction, not any `PgExecutor`
 
-> **Status:** DRAFT — closes `savvagent/otto-factory#133`, filed during PR #131's mandatory review
-> trio (`docs/specs/2026-09-10-passkey-registration-atomic-audit-design.md`'s Risks & Open
+> **Status:** IMPLEMENTED — closes `savvagent/otto-factory#133`, filed during PR #131's mandatory
+> review trio (`docs/specs/2026-09-10-passkey-registration-atomic-audit-design.md`'s Risks & Open
 > Questions), which landed a doc-comment warning plus a runtime regression test
 > (`audit_global_on_refuses_a_pinned_connection`) as the cheap interim mitigation. This spec is the
-> stronger fix both reviewers asked for: make the misuse unrepresentable at the type level.
+> stronger fix both reviewers asked for: make the misuse unrepresentable at the type level. Shipped
+> in PR #165. The mandatory review trio on #165 converged on a residual gap the type alone could not
+> close — a caller could still pin an `Unpinned` by hand via `conn()` before calling
+> `audit_global_on` — closed in the same PR by a runtime guard inside `audit_global_on` itself (see
+> its doc comment) plus a restored DB-level policy test independent of the Rust API.
 
 ## Goal & Success Criteria
 
