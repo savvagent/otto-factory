@@ -9,7 +9,8 @@ destructive change it records instead of best-effort after commit — closing
 `savvagent/otto-factory#134`.
 
 **Spec:** `docs/specs/2026-09-11-atomic-passkey-destruction-audit-design.md` — read it first. This
-plan implements it exactly.
+plan implements it exactly. (As shipped, "exactly" needs a caveat — see the `## Status` block below
+for where the implementation diverged from the steps that follow.)
 
 ## Status — 2026-09-11
 
@@ -24,18 +25,31 @@ convention:
   both commit, leaving zero passkeys) and found no such follow-up issue actually existed, so the fix
   landed in this PR instead: the unlocked `SELECT count(*)` became `SELECT id ... ORDER BY id FOR
   UPDATE`, counted in Rust, plus a concurrency test proving it.
-- **`reset_member_passkeys`'s second audit write.** This plan's Step 4 (below) called for keeping the
-  post-commit `auth.passkey.cleared` write and re-scoping it to the real `org_id` via a second
-  `tx.audit(...)` call. PR review converged on dropping that write entirely instead: it was redundant
+- **`reset_member_passkeys`'s second audit write.** This plan's "Rewrite `reset_member_passkeys` in
+  `crates/of-web/src/routes/orgs.rs`" step (below) called for keeping the post-commit
+  `auth.passkey.cleared` write and re-scoping it to the real `org_id` via a second `tx.audit(...)`
+  call. PR review converged on dropping that write entirely instead: it was redundant
   with the already-atomic, already-org-scoped `org.member.passkeys_reset` row, justified only by a
   now-disproven claim that it mirrored a self-service passkey clear (no such caller exists in
   production). `remove_tx` was also simplified back into `remove` directly, since no second caller
   for it ever appeared.
+- **The Global Constraints section below is now stale on this same point, and is left unedited
+  below for the record.** It asserts that `reset_member_passkeys` "writes to audit_events with a
+  real org_id" and that this plan "adds a dedicated cross-org check (Step 8)" for that write.
+  Neither shipped: per the divergence above, the write was dropped rather than re-scoped, so there
+  is no org-scoped `PASSKEY_CLEARED` row to write a cross-org negative test against. The planned
+  cross-org check became moot for that reason; the test that actually shipped
+  (`an_admin_can_reset_a_members_authenticator_but_gains_nothing_by_it`, per §4 below) instead
+  asserts the row's *absence*, which is the correct proof for a write that no longer happens.
 
 A second, independent `security-auditor` re-review (blind to spec/plan/PR-body) then verified the
 `FOR UPDATE` fix empirically and confirmed the audit-write consolidation loses no observable
-coverage, and two documentation-accuracy suggestions from that round (plus a small deadlock-ordering
-hardening) landed in the same PR. Full review history is on the PR.
+coverage. Three documentation-accuracy corrections from that round (plus a small deadlock-ordering
+hardening) landed in the same PR, touching doc comments in `crates/of-core/src/audit.rs` (the
+`PASSKEY_CLEARED` action's doc comment), `crates/of-auth/src/passkeys.rs` (`clear`'s lockout warning
+and its actor-attribution note — already listed in the File Structure table below), and
+`crates/of-web/src/routes/auth.rs` (`note_claim_refused`'s comment) — the first and third of which
+touch files this plan's File Structure table never lists. Full review history is on the PR.
 
 ## Global Constraints
 
