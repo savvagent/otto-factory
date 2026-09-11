@@ -54,8 +54,15 @@
    * that has nothing to do with session state, so unlike `PUBLIC` above it is
    * never redirected away from — a signed-in visitor following the footer
    * link must land on the page, not bounce back to `/`.
+   *
+   * `/` is here for a different reason: it is the marketing front page, not
+   * a page with content of its own to gate. A signed-out visitor has to see
+   * it instead of bouncing to `/login` — the whole point of a front page is
+   * that someone who has never signed in can read it. A signed-in visitor is
+   * still moved along, but by `+page.svelte`'s own effect, which runs
+   * regardless of this list.
    */
-  const UNGATED = ['/docs/api'];
+  const UNGATED = ['/docs/api', '/'];
 
   const isPublic = $derived(PUBLIC.some((p) => page.url.pathname === p));
   const isUngated = $derived(UNGATED.some((p) => page.url.pathname === p));
@@ -206,6 +213,13 @@
           >
             {m.nav_sign_out()}
           </button>
+        {:else if session.ready}
+          <a
+            href="/login"
+            class="rounded-md border border-edge px-2.5 py-1 text-muted transition hover:bg-raised hover:text-ink"
+          >
+            {m.nav_sign_in()}
+          </a>
         {/if}
       </div>
     </div>
