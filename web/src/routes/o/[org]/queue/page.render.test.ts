@@ -255,17 +255,23 @@ describe('the queue poller', () => {
       return { promise, resolve };
     }
 
-    const jobsDeferred = {
-      unfiltered: makeDeferred(),
-      pending: makeDeferred()
+    // Each `/jobs` call gets its own still-pending promise, keyed by which
+    // filter it belongs to, so the initial unfiltered request and the
+    // filtered request that supersedes it can be resolved independently and
+    // in whatever order the test needs — a genuinely in-flight request, not
+    // a second `resolve()` on one already settled.
+    const jobsDeferred: Record<'unfiltered' | 'pending', ReturnType<typeof makeDeferred>[]> = {
+      unfiltered: [],
+      pending: []
     };
 
     const fetchMock = vi.fn((path: string) => {
       if (path.includes('/repos') || path.includes('/teams')) return emptyPickers();
       if (path.includes('/jobs')) {
-        return path.includes('status=pending')
-          ? jobsDeferred.pending.promise
-          : jobsDeferred.unfiltered.promise;
+        const key = path.includes('status=pending') ? 'pending' : 'unfiltered';
+        const deferred = makeDeferred();
+        jobsDeferred[key].push(deferred);
+        return deferred.promise;
       }
       return Promise.resolve(new Response('', { status: 404 }));
     });
@@ -277,37 +283,37 @@ describe('the queue poller', () => {
     }) as unknown as { setUrl: (next: URL) => void };
     await settle();
 
-    jobsDeferred.unfiltered.resolve(
-      jsonResponse([{ ...baseJob, id: 'job-unfiltered', title: 'Unfiltered job' }])
-    );
-    await vi.waitFor(() => {
-      expect(container.textContent).toContain('Unfiltered job');
-    });
+    // The initial unfiltered request is in flight but deliberately left
+    // unresolved here — it is resolved late, after the filter switch below,
+    // to prove the superseded subscription's response is dropped.
+    expect(jobsDeferred.unfiltered).toHaveLength(1);
 
     instance.setUrl(new URL('http://example.test/o/acme/queue?status=pending'));
     await settle();
 
-    const jobsCalls = fetchMock.mock.calls
-      .map(([path]) => String(path))
-      .filter((path) => path.includes('/jobs'));
-    expect(jobsCalls.at(-1)).toContain('status=pending');
+    // The filter switch tore down the unfiltered `Poller` subscription and
+    // started a new one for `status=pending` — no second unfiltered call,
+    // and exactly one pending-filtered call now in flight.
+    expect(jobsDeferred.unfiltered).toHaveLength(1);
+    expect(jobsDeferred.pending).toHaveLength(1);
 
-    // The response for the superseded (unfiltered) subscription arrives late
-    // and must not be applied — see `Poller`'s generation counter and
-    // `docs/specs/2026-09-09-overview-polling-design.md` §3.
-    jobsDeferred.unfiltered.resolve(
-      jsonResponse([{ ...baseJob, id: 'job-late', title: 'Late unfiltered job' }])
-    );
-    await settle();
-    expect(container.textContent).not.toContain('Late unfiltered job');
-
-    jobsDeferred.pending.resolve(
+    jobsDeferred.pending[0]!.resolve(
       jsonResponse([{ ...baseJob, id: 'job-pending', title: 'Pending job' }])
     );
     await vi.waitFor(() => {
       expect(container.textContent).toContain('Pending job');
     });
+
+    // The response for the superseded (unfiltered) subscription arrives
+    // late — from a promise that was never resolved before the switch — and
+    // must not be applied. See `Poller`'s generation counter and
+    // `docs/specs/2026-09-09-overview-polling-design.md` §3.
+    jobsDeferred.unfiltered[0]!.resolve(
+      jsonResponse([{ ...baseJob, id: 'job-late', title: 'Late unfiltered job' }])
+    );
+    await settle();
     expect(container.textContent).not.toContain('Late unfiltered job');
+    expect(container.textContent).toContain('Pending job');
 
     unmount(instance);
   });
