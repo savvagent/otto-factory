@@ -12,20 +12,39 @@ implements it exactly.
 
 ## Status — 2026-09-11
 
-Shipped in PR #165 (branch `core/audit-global-unpinned`, merged). One task, complete:
-`cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`, and
-`cargo fmt --all --check` all pass.
+Shipped in PR #165 (branch `core/audit-global-unpinned`), merged as
+`b906ee614063054ba2bc5f9984a7530bf69440c9`. CI on that merge commit is green (rust + web, run
+against master). One task, complete: `cargo test --workspace`,
+`cargo clippy --all-targets -- -D warnings`, and `cargo fmt --all --check` all pass.
 
-The mandatory review trio on #165 found the type change alone left a residual gap — a caller
-could still pin an `Unpinned` by hand via `conn()` and `set_config('app.org_id', …)` before
-passing it to `audit_global_on`, which still compiled — and that deleting the old runtime test
-dropped the only coverage of `audit_events_append`'s `org_id IS NULL` branch under a pinned
-transaction. Both were closed in the same PR: `audit_global_on` now re-checks `app.org_id` at
-call time and refuses if the transaction has been pinned since it was opened, and a DB-level
-policy test plus a focused test of the new runtime guard were added to
-`crates/of-core/tests/isolation.rs`. `master` also gained a second production caller of
-`audit_global_on` (`finish_registration_tx`, from PR #164, landed concurrently) before #165
-merged; it was adapted to `&mut Unpinned` in the same PR's merge-conflict resolution.
+Seven reviewers ran against PR #165: the mandatory trio (rust-pro, architect-reviewer,
+security-auditor) plus four conditional reviewers (code-reviewer, pr-test-analyzer,
+comment-analyzer, type-design-analyzer) and the automated Copilot reviewer. They converged on
+two Important findings, each independently raised by architect-reviewer, security-auditor, and
+code-reviewer, with the second also independently raised by pr-test-analyzer: the type change
+alone left a residual gap — a caller could still pin an `Unpinned` by hand via `conn()` and
+`set_config('app.org_id', …)` before passing it to `audit_global_on`, which still compiled — and
+deleting the old runtime test dropped the only coverage of `audit_events_append`'s
+`org_id IS NULL` branch under a pinned transaction. Both were closed in the same PR:
+`audit_global_on` now re-checks `app.org_id` at call time and refuses if the transaction has
+been pinned since it was opened, and a DB-level policy test
+(`a_pinned_transaction_cannot_append_a_null_org_audit_row`) plus a focused test of the new
+runtime guard (`audit_global_on_refuses_a_transaction_pinned_after_it_was_opened`) were added to
+`crates/of-core/tests/isolation.rs`. Three of the trio's applied Suggestions also landed in the
+same PR: `Unpinned` re-exported at the crate root (`pub use db::{Db, Tx, Unpinned}` in `lib.rs`),
+`audit_global_on` importing `Unpinned` directly instead of fully-qualifying
+`crate::db::Unpinned`, and a module-doc update to `db.rs` naming `Unpinned` alongside `Tx`.
+
+PR #164 (`finish_registration_tx`, landed concurrently) *extracted* `finish_registration_tx` out
+of `finish_registration`, moving the existing sole call to `audit_global_on` into the new
+function rather than adding a second call site — `finish_registration` becomes a two-line
+wrapper over it. That extracted function still used the pre-refactor generic-executor signature
+when #164 merged, which conflicted with this PR's `Unpinned` type change once #165's branch was
+synced with master; it was adapted to `&mut Unpinned` in the same PR's merge-conflict
+resolution, along with two further call sites that broke for the same reason:
+`Db::consume_account_claim` (`crates/of-core/src/invites.rs`) and
+`of_web::routes::auth::claim_finish` (`crates/of-web/src/routes/auth.rs`), both switched to
+`tx.conn()`.
 
 ## Global Constraints
 
@@ -196,4 +215,6 @@ migration change in this task. (Vacuously satisfied, not skipped.)
 
 ## Record-as-shipped
 
-Not yet done — see Phase 4 step 12 of `otto-factory-development` once this PR merges.
+Done — this commit (docs PR #167, following #165's merge) is that record: the spec's
+`> **Status:**` is flipped to IMPLEMENTED, and this plan's `## Status` block above carries the
+merge commit and the review-trio outcome, per Phase 4 step 12 of `otto-factory-development`.
