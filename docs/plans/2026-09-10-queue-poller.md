@@ -55,9 +55,10 @@ corresponding account there.
 
 | File                                                          | Responsibility                                                                                                                                                 |
 | --------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `web/src/routes/o/[org]/queue/+page.svelte`                     | **Modify.** Job-list `$effect` rewired through `Poller<Job[]>`, keyed on `org.slug` plus a `$derived` over the four filters; render tree gains `stale`/`parked`/`stopped` branches, keeping its existing `error` / `loading` / empty / table four-way branch intact. |
+| `web/src/routes/o/[org]/queue/+page.svelte`                     | **Modify.** Job-list `$effect` rewired through `Poller<Job[]>`, keyed on `org.slug` plus a `$derived` over the four filters; render tree gains `navError`/`stale`/`parked` notices, keeping its existing `error` / `loading` / empty / table four-way branch intact (`jobsPoll.stopped` is not its own branch — it only additionally gates the pre-existing "still retrying" hint inside the `pollError` alert). |
 | `web/src/lib/poll-fatal.ts`                                     | **New**, not in the original plan's scope. Added during implementation, in response to review feedback, to extract the `fatal()` classifier (401 clears the session, 403/404 stop the poll) out of page-local closures so this page and the overview page share one definition instead of two copies that could drift. Exports `fatalApiFailure`. |
-| `web/src/routes/o/[org]/+page.svelte`                           | **Modify**, not in the original plan's scope. Touched as part of the same extraction: its own inline `fatal()` closure was replaced with the shared `fatalApiFailure` import from `poll-fatal.ts`. |
+| `web/src/lib/poll-fatal.test.ts`                                | **New**, not in the original plan's scope. Unit tests for `fatalApiFailure`'s five cases (non-`ApiError`, 401, 404, bare 403, non-fatal 502), added during review since the page-level tests only ever exercised a 404. |
+| `web/src/routes/o/[org]/+page.svelte`                           | **Modify**, not in the original plan's scope. Touched as part of the same extraction: its own inline `fatal()` closure was removed and replaced with the shared `fatalApiFailure` import from `poll-fatal.ts`. |
 | `web/messages/en.json`, `es.json`, `de.json`, `fr.json`, `it.json`, `hi.json` | **Modify.** Add `queue_refresh_failed`, `queue_paused`, `queue_retrying` to each, mirroring the existing `overview_*` triad.                                    |
 | `web/src/routes/o/[org]/queue/QueueHarness.svelte`              | **Modify.** Accept an optional `url` prop, snapshotted once via `untrack` into a `current` `$state` a test can then update through an exported `setUrl` method — so a test can drive a live filter change without a second mount, needed for the new "restarts on filter change" test. Existing callers that omit `url` are unaffected. |
 | `web/src/routes/o/[org]/queue/page.render.test.ts`              | **Modify.** Add poller-behavior cases alongside the existing filter-navigation tests (neither set is removed).                                                 |
@@ -73,9 +74,13 @@ names either way. The README edit is a one-line tail on the same commit sequence
 ## Task 1 — Migrate the queue's job-list fetch to `Poller`, keyed on org + filters ✅
 
 **Files:** `web/src/routes/o/[org]/queue/+page.svelte` (modify), `web/messages/*.json` (modify, all
-six), `web/src/routes/o/[org]/queue/page.render.test.ts` (modify), `web/README.md` (modify). During
-implementation, a review round extracted the shared `fatal()` classifier out of both this page and
-the overview page into a new `web/src/lib/poll-fatal.ts` — see the note at the end of this task.
+six), `web/src/routes/o/[org]/queue/QueueHarness.svelte` (modify),
+`web/src/routes/o/[org]/queue/page.render.test.ts` (modify), `web/README.md` (modify),
+`web/src/lib/poll-fatal.ts` (new), `web/src/lib/poll-fatal.test.ts` (new),
+`web/src/routes/o/[org]/+page.svelte` (modify). The last three were not in the original plan's
+scope — a review round extracted the shared `fatal()` classifier out of both this page and the
+overview page into `poll-fatal.ts`, with its own dedicated unit test; see the note at the end of
+this task and the File Structure table above.
 **Interfaces:** Consumes `Poller` from `$lib/poll.svelte` and `fatalApiFailure` from
 `$lib/poll-fatal` (not `ApiError`/`session` directly — those live behind `fatalApiFailure` now,
 shared with `o/[org]/+page.svelte`). Produces no new public interface — this is page-internal state
@@ -303,7 +308,8 @@ only.
       cd .. && git add web/src/routes/o/\[org\]/queue/+page.svelte web/messages/*.json \
         web/src/routes/o/\[org\]/queue/QueueHarness.svelte \
         web/src/routes/o/\[org\]/queue/page.render.test.ts web/README.md \
-        web/src/lib/poll-fatal.ts web/src/routes/o/\[org\]/+page.svelte
+        web/src/lib/poll-fatal.ts web/src/lib/poll-fatal.test.ts \
+        web/src/routes/o/\[org\]/+page.svelte
       git commit -m "web: migrate the queue page's job list to Poller, keyed on filters too"
       ```
 - [x] **Full gate, once more, from a clean state**: `cd web && npm run check && npm run lint && npm test && npm run build`.

@@ -57,9 +57,9 @@ purpose is "what is happening to my jobs right now." Today a job moving `pending
   uses it; `/queue` and `/repos` should" — updated to reflect that `/queue` now does).
 - **Added during review, beyond this list's original scope — see §2a's third point:**
   `web/src/lib/poll-fatal.ts` (a shared `fatalApiFailure` classifier) and
-  `web/src/lib/poll-fatal.test.ts`, plus the corresponding one-line change to
-  `web/src/routes/o/[org]/+page.svelte` (the overview page) to consume the shared classifier
-  instead of its own local copy.
+  `web/src/lib/poll-fatal.test.ts`, plus the corresponding change to
+  `web/src/routes/o/[org]/+page.svelte` (the overview page): its own local `fatal()` closure
+  removed and replaced with the shared `fatalApiFailure` import.
 
 **Out:**
 
@@ -248,13 +248,14 @@ org/filter change, the only event that actually supersedes a failed navigation).
 drives its own `{#if pollError}` branch with no precedence rule against `navError` at all.
 
 Third, §2's sketch gives the queue page its own local `fatal(failure): boolean` closure, byte-identical
-to the overview page's own copy. A review flagged this as the same duplication constraint 2 argues
-against elsewhere in this repo (`clients.ts` is "one table with one entry per client"; the router
-and OpenAPI document "are built from one list") — and the duplication carries a real side effect,
-`session.clear()` on a `401`, that a future edit to one copy and not the other would silently
-desync. The shipped code extracts the classifier into `web/src/lib/poll-fatal.ts` (exporting
-`fatalApiFailure`), consumed by both this page and the overview page, with a dedicated unit test
-(`web/src/lib/poll-fatal.test.ts`) covering its 401/403/404/non-`ApiError` branches — coverage
+to the overview page's own copy. A review flagged this as the same shared-definition convention this
+repo's `web/` section argues for elsewhere (`clients.ts` is "one table with one entry per client";
+the router and OpenAPI document "are built from one list") — and the duplication carries a real
+side effect, `session.clear()` on a `401`, that a future edit to one copy and not the other would
+silently desync. The shipped code extracts the classifier into `web/src/lib/poll-fatal.ts`
+(exporting `fatalApiFailure`), consumed by both this page and the overview page, with a dedicated
+unit test (`web/src/lib/poll-fatal.test.ts`) covering all five cases (401, 404, bare 403, a
+non-`ApiError` failure, and a non-fatal 502) — coverage
 neither page's own tests had provided for the 401 (`session.clear()`) or bare-403 cases before the
 extraction. This is a second file this spec's Scope section did not anticipate touching, alongside
 the render-tree and `navError` corrections above.
