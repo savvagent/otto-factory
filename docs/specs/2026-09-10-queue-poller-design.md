@@ -278,16 +278,17 @@ the render-tree and `navError` corrections above.
     success clears it.
   - A `404` (simulating an unregistered `repo`/`team` filter, or an org the account no longer has
     access to) stops the poll (`jobsPoll.stopped`) and renders the error branch instead of a table.
-  - Changing a filter mid-poll (simulated by re-rendering the harness with a different `page.url`,
-    the same technique the existing filter tests already use) restarts the subscription: the new
-    filter's `fetch` call is the one whose result renders, and a response for the old filter that
-    resolves late is not.
+  - Changing a filter mid-poll — mounted once via `QueueHarness`'s `url` prop, then driven by
+    calling the harness instance's exported `instance.setUrl(...)` rather than re-rendering or
+    remounting — restarts the subscription: the new filter's `fetch` call is the one whose result
+    renders, and a response for the old filter that resolves late is not.
 - Existing `web/src/lib/poll.svelte.test.ts` / `poll.dom.test.ts` are unchanged — this migration
   adds no new behavior to `Poller` itself.
 - `web/src/lib/poll-fatal.test.ts` — added during review (§2a's third point), covering
-  `fatalApiFailure`'s four branches directly: a non-`ApiError` failure, a `401`
-  (`isUnauthenticated`, asserting `session.clear()` is called), an `isNotFound` failure, and a
-  bare `403`.
+  `fatalApiFailure`'s five cases directly: a non-`ApiError` failure, a `401` (`isUnauthenticated`,
+  asserting `session.clear()` is called), an `isNotFound` failure, a bare `403`, and a non-fatal
+  `502` (returns `false`). The non-`ApiError`, `404`, and `403` cases each also assert
+  `session.clear()` was not called; the `502` case does not spy on the session.
 - Gates: `npm run check`, `npm run lint`, `npm test`, `npm run build`.
 
 ## Error Handling & Edge Cases

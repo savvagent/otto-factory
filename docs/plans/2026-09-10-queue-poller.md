@@ -155,9 +155,10 @@ only.
       existing four-way content branch.** The shipped render tree keeps `navError` as its own
       unconditional `Alert` — independent of the poll, because a rejected `goto` is not a poll
       failure — then renders the `parked`/`stale` note unconditionally too (mutually exclusive with
-      each other, and with `navError`, above and independent of the content branching below), and
-      only then branches on `pollError`/`loading`/the empty check/the table (`+page.svelte:220-253`
-      as of this plan):
+      *each other*, but never with `navError`: `navError` and the `parked`/`stale` note can both be
+      visible at once, since neither gates the other — both sit above and independent of the content
+      branching below), and only then branches on `pollError`/`loading`/the empty check/the table
+      (`+page.svelte:220-253` as of this plan):
       ```svelte
       {#if navError}
         <Alert>{navError}</Alert>
