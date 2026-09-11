@@ -91,7 +91,7 @@ a human surface, no agent client sees this).
   filter combination is treated as a permanent failure of the *current subscription*, but "current
   subscription" already means "current org + current filters" per the point above, so a `404` from
   an unregistered `repo`/`team` slug in the URL stops retrying it every 30 seconds until the reader
-  picks a different filter or navigates — which is strictly better than the status quo (todays's
+  picks a different filter or navigates — which is strictly better than the status quo (today's
   code sets `error` once and never revisits, no polling at all).
 - **The repo/team-picker effect's failure handling is untouched.** It already swallows errors
   silently by design ("The pickers are a convenience... the filters still work by URL") — this
