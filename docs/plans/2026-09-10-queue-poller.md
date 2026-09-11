@@ -14,7 +14,7 @@ exactly.
 
 ## Status — 2026-09-10
 
-🚧 In progress.
+✅ Task 1 implemented and gated (`npm run check`, `npm run lint`, `npm test`, `npm run build` all green), including a regression test added after code-quality review for the `navError`/`pollError` precedence fix. Not yet merged — see the open PR.
 
 ## Global Constraints
 
@@ -56,7 +56,7 @@ there is no useful checkpoint between "the page still compiles with the old fetc
 compiles with the new one," since the render tree reads from the same `jobs`/`loading`/`error`
 names either way. The README edit is a one-line tail on the same commit sequence.
 
-## Task 1 — Migrate the queue's job-list fetch to `Poller`, keyed on org + filters ⬜
+## Task 1 — Migrate the queue's job-list fetch to `Poller`, keyed on org + filters ✅
 
 **Files:** `web/src/routes/o/[org]/queue/+page.svelte` (modify), `web/messages/*.json` (modify, all
 six), `web/src/routes/o/[org]/queue/page.render.test.ts` (modify), `web/README.md` (modify)
@@ -64,7 +64,7 @@ six), `web/src/routes/o/[org]/queue/page.render.test.ts` (modify), `web/README.m
 from `$lib/session.svelte` (new imports in `+page.svelte`, mirroring `o/[org]/+page.svelte`'s
 existing imports). Produces no new public interface — this is page-internal state only.
 
-- [ ] **Add the three message keys to all six catalogs first**, so the page can reference them
+- [x] **Add the three message keys to all six catalogs first**, so the page can reference them
       before the catalog check runs. In `web/messages/en.json`, add near the existing `queue_*`
       keys:
       ```json
@@ -79,10 +79,10 @@ existing imports). Produces no new public interface — this is page-internal st
       file verbatim (same reason, same wording, different key name) — do not re-translate from
       scratch. Confirm `{reason}`/`{age}` placeholders are present in every locale's
       `queue_refresh_failed` entry.
-- [ ] Run `cd web && npm run check` now, before touching the page — confirm it still passes (the
+- [x] Run `cd web && npm run check` now, before touching the page — confirm it still passes (the
       new keys are unused so far, which `check-messages.mjs` does not flag) and that no locale was
       missed.
-- [ ] **In `web/src/routes/o/[org]/queue/+page.svelte`, replace the job-list `$effect` and its
+- [x] **In `web/src/routes/o/[org]/queue/+page.svelte`, replace the job-list `$effect` and its
       supporting state.** Remove the `let jobs = $state<Job[]>([])`, `let loading = $state(true)`,
       `let error = $state<string | undefined>(undefined)` triad and the `let latest = 0` counter
       plus the `$effect` that uses them (the whole block from the `latest` declaration through the
@@ -122,7 +122,7 @@ existing imports). Produces no new public interface — this is page-internal st
       tree below needs no further edits for its existing branches — only the new `stale`/`parked`
       branches are additions. Import `relative` is already imported (used elsewhere on the page for
       `job.createdAt`); reuse it for `jobsPoll.updatedAt`.
-- [ ] **Add the `stale`/`parked` status line to the render tree, without collapsing the existing
+- [x] **Add the `stale`/`parked` status line to the render tree, without collapsing the existing
       four-way branch.** The page today is `{#if error}<Alert>...{:else if loading &&
       jobs.length === 0}<Loading>...{:else if jobs.length === 0}<Empty>...{:else}<table>...{/if}`
       (`+page.svelte:225-238` as of this plan). All four branches stay exactly as they are — this
@@ -164,11 +164,11 @@ existing imports). Produces no new public interface — this is page-internal st
       pattern-matching against the overview page's simpler two-way `{#if error}...{:else}` shape,
       which has no empty-state branch to preserve. Confirm `m.error_network` already exists (it is
       used by the overview page) rather than adding a new key for it.
-- [ ] **Type-check and build the page in isolation**: `cd web && npm run check`. Fix any TS error
+- [x] **Type-check and build the page in isolation**: `cd web && npm run check`. Fix any TS error
       before moving on (in particular: `ApiError`'s exported shape, `session.clear()`'s signature —
       both already used identically in `o/[org]/+page.svelte`, so mirror it exactly rather than
       re-deriving the types).
-- [ ] **Give `QueueHarness.svelte` an optional reactive `url` prop**, so a test can drive a live
+- [x] **Give `QueueHarness.svelte` an optional reactive `url` prop**, so a test can drive a live
       filter change on an already-mounted instance instead of remounting (remounting would create a
       second, independent `Poller` subscription and could not demonstrate "a late response for the
       superseded filter is dropped," which requires one continuous subscription whose generation
@@ -203,7 +203,7 @@ existing imports). Produces no new public interface — this is page-internal st
 
       <Page />
       ```
-- [ ] **Add the new test cases**, in `web/src/routes/o/[org]/queue/page.render.test.ts`, alongside
+- [x] **Add the new test cases**, in `web/src/routes/o/[org]/queue/page.render.test.ts`, alongside
       (not replacing) the existing `describe('the queue filters', ...)` block. Follow
       `o/[org]/page.render.test.ts`'s pattern (a `serve(healthy: () => boolean)` fetch stub keyed on
       URL path, `vi.useFakeTimers()`, `REFRESH_INTERVAL` imported from `$lib/poll.svelte`,
@@ -243,12 +243,12 @@ existing imports). Produces no new public interface — this is page-internal st
           assert the rendered table is unaffected by it — the response belongs to a superseded
           `Poller` generation and must not be applied (`docs/specs/2026-09-09-overview-polling-design.md`
           §3). Resolve the `status=pending` request and assert its result *is* what renders.
-- [ ] Run `cd web && npm test` (full suite, not just `queue`) and confirm everything passes,
+- [x] Run `cd web && npm test` (full suite, not just `queue`) and confirm everything passes,
       including the untouched existing two filter-navigation tests in the same file.
-- [ ] **Update `web/README.md`'s Layout table.** Change the `poll.svelte.ts` row from "Polling a
+- [x] **Update `web/README.md`'s Layout table.** Change the `poll.svelte.ts` row from "Polling a
       page hands to an `$effect`. The overview uses it; `/queue` and `/repos` should." to "Polling
       a page hands to an `$effect`. The overview and `/queue` use it; `/repos` should."
-- [ ] **Format and commit.**
+- [x] **Format and commit.**
       ```bash
       cd web && npm run lint -- --write && npm run lint
       cd .. && git add web/src/routes/o/\[org\]/queue/+page.svelte web/messages/*.json \
@@ -256,4 +256,4 @@ existing imports). Produces no new public interface — this is page-internal st
         web/src/routes/o/\[org\]/queue/page.render.test.ts web/README.md
       git commit -m "web: migrate the queue page's job list to Poller, keyed on filters too"
       ```
-- [ ] **Full gate, once more, from a clean state**: `cd web && npm run check && npm run lint && npm test && npm run build`.
+- [x] **Full gate, once more, from a clean state**: `cd web && npm run check && npm run lint && npm test && npm run build`.

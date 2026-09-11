@@ -317,4 +317,65 @@ describe('the queue poller', () => {
 
     unmount(instance);
   });
+
+  it('a live fatal poll failure takes priority over a stale navigation error, with no false retry hint', async () => {
+    // Regression test for the `navError`/`pollError` precedence fix: a
+    // one-shot rejected `goto` must not permanently mask a later, currently-
+    // failing `jobsPoll` — especially a fatal one, which would otherwise be
+    // invisible until the reader changes org or filters. See `+page.svelte`'s
+    // `pollError`/`error` derivation and its adjoining comment.
+    Object.defineProperty(page, 'url', {
+      configurable: true,
+      get: () => new URL('http://example.test/o/acme/queue')
+    });
+
+    let jobsStatus = 200;
+    const fetchMock = vi.fn((path: string) => {
+      if (path.includes('/repos') || path.includes('/teams')) return emptyPickers();
+      if (path.includes('/jobs')) {
+        return Promise.resolve(
+          jobsStatus === 200 ? jsonResponse([baseJob]) : new Response('', { status: jobsStatus })
+        );
+      }
+      return Promise.resolve(new Response('', { status: 404 }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    // The one rejected navigation this test needs — every other `goto` call
+    // in this suite resolves via the default mock set up in `beforeEach`.
+    gotoMock.mockRejectedValueOnce(new Error('chunk failed to load'));
+
+    const instance = mount(Harness, { target: container, props: { slug: 'acme' } });
+    await settle();
+    expect(container.textContent).toContain('Wire the webhook ingest');
+
+    const select = container.querySelector('select') as HTMLSelectElement;
+    select.value = 'pending';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+    await settle();
+
+    // `goto` rejected, so `page.url` never actually changed and the job-poll
+    // effect never re-ran — `navError` is what's showing, and it is the only
+    // thing showing: no live poll failure exists yet.
+    let alert = container.querySelector('[role="alert"]');
+    expect(alert).not.toBeNull();
+    expect(alert?.textContent).toContain('Could not load the queue.');
+    expect(alert?.textContent).not.toContain('Still retrying');
+
+    // Now the underlying poll itself hits a fatal failure on its next tick,
+    // with `navError` still set and nothing having changed org or filters.
+    jobsStatus = 404;
+    await vi.advanceTimersByTimeAsync(REFRESH_INTERVAL * 1.4);
+    await vi.waitFor(() => {
+      alert = container.querySelector('[role="alert"]');
+      expect(alert).not.toBeNull();
+      // The poll's own failure message wins — not the stale nav message.
+      expect(alert?.textContent).toContain('Something went wrong');
+      expect(alert?.textContent).not.toContain('Could not load the queue.');
+      // A fatal (stopped) poll failure gets no "still retrying" hint either.
+      expect(alert?.textContent).not.toContain('Still retrying');
+    });
+
+    unmount(instance);
+  });
 });
