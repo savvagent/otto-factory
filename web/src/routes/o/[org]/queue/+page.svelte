@@ -2,7 +2,7 @@
   import { page } from '$app/state';
   import { goto } from '$app/navigation';
 
-  import { api, ApiError } from '$lib/api';
+  import { api } from '$lib/api';
   import { messageFor } from '$lib/errors';
   import { m } from '$lib/paraglide/messages';
   import { useOrg } from '$lib/org.svelte';
@@ -10,7 +10,7 @@
   import { statusLabel } from '$lib/labels';
   import { isClaimStranded } from '$lib/jobs';
   import { Poller } from '$lib/poll.svelte';
-  import { session } from '$lib/session.svelte';
+  import { fatalApiFailure } from '$lib/poll-fatal';
   import type { Job, JobStatus, Repo, Team } from '$lib/types';
   import Alert from '$lib/components/Alert.svelte';
   import Empty from '$lib/components/Empty.svelte';
@@ -77,8 +77,9 @@
   const jobsPoll = new Poller<Job[]>();
 
   // A rejected `goto` (see `applyFilters` below) is not something `Poller`
-  // knows about, so it is not folded into `jobsPoll`'s own error state — it is
-  // combined with it below instead.
+  // knows about, so it renders as its own independent notice rather than being
+  // folded into the poll's own error state — see the render tree below for why
+  // merging the two was wrong.
   let navError = $state<string | undefined>(undefined);
 
   const filters = $derived({ status, repo, team, mine, limit: 200 });
@@ -92,62 +93,27 @@
     // filter from repainting the table with rows that do not match the
     // controls the reader is looking at.
     const active = filters;
-    // Same coupling the single `error` state used to have: a new subscription
-    // supersedes whatever a previous navigation failure left behind.
+    // A genuine org/filter change is the only event that supersedes an earlier
+    // navigation failure — clearing `navError` on an unrelated poll tick
+    // succeeding would prove nothing about whether the navigation itself ever
+    // actually applied, and would silently erase a report about a control that
+    // never worked.
     navError = undefined;
-    return jobsPoll.start(() => api.jobs(slug, active), { fatal });
+    return jobsPoll.start(() => api.jobs(slug, active), { fatal: fatalApiFailure });
   });
-
-  // A `navError` left over from an earlier, since-resolved `goto` rejection
-  // should not linger indefinitely just because nobody has changed the org or
-  // filters since — the moment the poll proves itself healthy again is the
-  // moment the stale warning has nothing left to say. Deliberately its own
-  // effect: it only needs to react to `jobsPoll.updatedAt`, not to the
-  // org/filters the job-poll effect above re-subscribes on.
-  $effect(() => {
-    if (jobsPoll.updatedAt !== undefined) navError = undefined;
-  });
-
-  /**
-   * Which failures must not be retried.
-   *
-   * A `401` is a session that is gone: clearing the local copy is what lets the
-   * root layout's guard send this tab to `/login`. A `404` is the answer for an
-   * unregistered repo or team slug *and* for an org this account is no longer
-   * in (deliberate, per `CLAUDE.md`) — either way the data on screen belongs to
-   * a query this reader can no longer make, so it goes rather than sitting
-   * under a small warning. Everything else is a blip worth retrying.
-   */
-  function fatal(failure: unknown): boolean {
-    if (!(failure instanceof ApiError)) return false;
-    if (failure.isUnauthenticated) {
-      session.clear();
-      return true;
-    }
-    return failure.isNotFound || failure.status === 403;
-  }
 
   const jobs = $derived(jobsPoll.value ?? []);
   const loading = $derived(!jobsPoll.value);
-
-  // `pollError` takes priority over `navError`, not just a merge: a currently
-  // failing poll — including a fatal 403/404 meaning access to this org or
-  // filter was revoked — must never be hidden behind an old one-shot
-  // navigation error just because that happened to be set first. A masked
-  // fatal failure is worse than losing a stale navigation warning, and the
-  // effect above already retires `navError` on the next successful tick, so
-  // it never outlives its usefulness once polling proves things are fine.
   const pollError = $derived(
     jobsPoll.failed ? messageFor(jobsPoll.error, m.queue_load_failed()) : undefined
   );
-  const error = $derived(pollError ?? navError);
 
   /**
    * The one place either filter control navigates. A rejected `goto` (the
    * origin check, a chunk-load failure) would otherwise vanish silently —
    * reproducing this exact bug's symptom, a filter that looks like it did
-   * something but changed nothing, with no error shown — so it lands in the
-   * same `error`/`Alert` path the job poll already uses.
+   * something but changed nothing, with no error shown — so it lands in
+   * `navError`'s own `Alert`, rendered independently of the job poll's.
    */
   function applyFilters(url: URL | string) {
     void goto(url, { replaceState: true, keepFocus: true, noScroll: true }).catch((e: unknown) => {
@@ -251,22 +217,17 @@
     {/if}
   </div>
 
-  {#if error}
+  {#if navError}
+    <Alert>{navError}</Alert>
+  {/if}
+
+  {#if pollError}
     <Alert>
-      {error}
-      {#if pollError && !jobsPoll.stopped}{m.queue_retrying()}{/if}
+      {pollError}
+      {#if !jobsPoll.stopped}{m.queue_retrying()}{/if}
     </Alert>
-  {:else if loading && jobs.length === 0}
+  {:else if loading}
     <Loading what={m.queue_loading()} />
-  {:else if jobs.length === 0}
-    <Empty title={filtered ? m.queue_empty_filtered() : m.queue_empty_title()}>
-      {#if !filtered}
-        {m.queue_empty_hint()}
-        <a class="text-muted underline hover:text-ink" href="/o/{org.slug}/connect">
-          {m.queue_connect_one()}
-        </a>.
-      {/if}
-    </Empty>
   {:else}
     {#if jobsPoll.parked}
       <p role="status" class="text-xs text-faint">{m.queue_paused()}</p>
@@ -282,51 +243,62 @@
         })}
       </p>
     {/if}
-    <div class="of-card overflow-x-auto">
-      <table class="w-full text-sm">
-        <thead class="border-b border-edge/60 text-left text-xs text-faint">
-          <tr>
-            <th class="px-4 py-2 font-medium">{m.queue_col_job()}</th>
-            <th class="px-4 py-2 font-medium">{m.queue_col_status()}</th>
-            <th class="px-4 py-2 font-medium">{m.queue_col_agent()}</th>
-            <th class="px-4 py-2 font-medium">{m.queue_col_ticket()}</th>
-            <th class="px-4 py-2 font-medium">{m.queue_col_queued()}</th>
-          </tr>
-        </thead>
-        <tbody class="divide-y divide-edge/40">
-          {#each jobs as job (job.id)}
-            <tr class="hover:bg-raised/40">
-              <td class="px-4 py-2">
-                <a class="text-ink hover:underline" href="/o/{org.slug}/queue/{job.id}">
-                  {job.title}
-                </a>
-                <div class="of-mono text-xs text-faint">{job.id}</div>
-              </td>
-              <td class="px-4 py-2">
-                <StatusPill status={job.status} />
-                {#if isClaimStranded(job)}
-                  <div class="text-xs font-medium text-bad">{m.job_claim_stranded()}</div>
-                {/if}
-              </td>
-              <td class="px-4 py-2 text-muted">
-                {job.claimedByLabel ?? job.agentType ?? '—'}
-              </td>
-              <td class="px-4 py-2 text-muted">{job.ticketRef ?? '—'}</td>
-              <td class="px-4 py-2 whitespace-nowrap text-faint">{relative(job.createdAt)}</td>
+    {#if jobs.length === 0}
+      <Empty title={filtered ? m.queue_empty_filtered() : m.queue_empty_title()}>
+        {#if !filtered}
+          {m.queue_empty_hint()}
+          <a class="text-muted underline hover:text-ink" href="/o/{org.slug}/connect">
+            {m.queue_connect_one()}
+          </a>.
+        {/if}
+      </Empty>
+    {:else}
+      <div class="of-card overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead class="border-b border-edge/60 text-left text-xs text-faint">
+            <tr>
+              <th class="px-4 py-2 font-medium">{m.queue_col_job()}</th>
+              <th class="px-4 py-2 font-medium">{m.queue_col_status()}</th>
+              <th class="px-4 py-2 font-medium">{m.queue_col_agent()}</th>
+              <th class="px-4 py-2 font-medium">{m.queue_col_ticket()}</th>
+              <th class="px-4 py-2 font-medium">{m.queue_col_queued()}</th>
             </tr>
-          {/each}
-        </tbody>
-      </table>
-    </div>
+          </thead>
+          <tbody class="divide-y divide-edge/40">
+            {#each jobs as job (job.id)}
+              <tr class="hover:bg-raised/40">
+                <td class="px-4 py-2">
+                  <a class="text-ink hover:underline" href="/o/{org.slug}/queue/{job.id}">
+                    {job.title}
+                  </a>
+                  <div class="of-mono text-xs text-faint">{job.id}</div>
+                </td>
+                <td class="px-4 py-2">
+                  <StatusPill status={job.status} />
+                  {#if isClaimStranded(job)}
+                    <div class="text-xs font-medium text-bad">{m.job_claim_stranded()}</div>
+                  {/if}
+                </td>
+                <td class="px-4 py-2 text-muted">
+                  {job.claimedByLabel ?? job.agentType ?? '—'}
+                </td>
+                <td class="px-4 py-2 text-muted">{job.ticketRef ?? '—'}</td>
+                <td class="px-4 py-2 whitespace-nowrap text-faint">{relative(job.createdAt)}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      </div>
 
-    <!--
-      Two sentences, not one built out of pieces. The count pluralizes and the
-      cap is a separate remark that only sometimes applies; welding them into a
-      single string would need a variant per plural category *and* per branch.
-    -->
-    <p class="text-xs text-faint">
-      {m.queue_showing({ count: jobs.length })}
-      {#if jobs.length === 200}{m.queue_showing_capped({ limit: 200 })}{/if}
-    </p>
+      <!--
+        Two sentences, not one built out of pieces. The count pluralizes and the
+        cap is a separate remark that only sometimes applies; welding them into a
+        single string would need a variant per plural category *and* per branch.
+      -->
+      <p class="text-xs text-faint">
+        {m.queue_showing({ count: jobs.length })}
+        {#if jobs.length === 200}{m.queue_showing_capped({ limit: 200 })}{/if}
+      </p>
+    {/if}
   {/if}
 </div>

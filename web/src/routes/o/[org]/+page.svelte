@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { api, ApiError } from '$lib/api';
+  import { api } from '$lib/api';
   import { messageFor } from '$lib/errors';
   import { m } from '$lib/paraglide/messages';
   import { currentLocale } from '$lib/locale';
@@ -7,7 +7,7 @@
   import { relative } from '$lib/format';
   import { roleLabel, statusLabel } from '$lib/labels';
   import { Poller } from '$lib/poll.svelte';
-  import { session } from '$lib/session.svelte';
+  import { fatalApiFailure } from '$lib/poll-fatal';
   import type { Job, QueueStats, Repo, UsageStatus } from '$lib/types';
   import Alert from '$lib/components/Alert.svelte';
   import Card from '$lib/components/Card.svelte';
@@ -66,30 +66,9 @@
         ]);
         return { stats, recent, repos, usage };
       },
-      { fatal }
+      { fatal: fatalApiFailure }
     );
   });
-
-  /**
-   * Which failures must not be retried.
-   *
-   * A `401` is a session that is gone: clearing the local copy is what lets the
-   * root layout's guard send this tab to `/login`, the same way every other
-   * flow does — the console never decides for itself that a cookie is still
-   * good. A `404` is the answer for an org that does not exist *and* for one
-   * this account is no longer in, which is deliberate (`CLAUDE.md`); either way
-   * the data on screen belongs to a page this reader can no longer see, so it
-   * goes rather than sitting under a small warning. Everything else — a `502`,
-   * a dropped connection, a timeout — is a blip worth retrying.
-   */
-  function fatal(failure: unknown): boolean {
-    if (!(failure instanceof ApiError)) return false;
-    if (failure.isUnauthenticated) {
-      session.clear();
-      return true;
-    }
-    return failure.isNotFound || failure.status === 403;
-  }
 
   const stats = $derived(overview.value?.stats);
   const recent = $derived(overview.value?.recent ?? []);
