@@ -188,7 +188,7 @@ pub struct UpdateJobArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ClaimJobsArgs {
     /// The job ids to take. All or none succeed.
     pub jobs: Vec<String>,
@@ -272,7 +272,7 @@ pub struct RenewClaimArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RequestCancelArgs {
     /// The job to ask to stop.
     pub job: String,
@@ -876,8 +876,11 @@ impl Factory {
                        never leave you believing you own work you do not. Fails if any job is \
                        already claimed or still blocked by an unfinished dependency. Claim \
                        before you start working. Claims expire (900s by default, or your ttl); \
-                       renew_claim pushes a claim you hold forward, and an expired claim \
-                       becomes claimable again — see ready. Hold onto each returned job's \
+                       renew_claim pushes a claim you hold forward. Once a claim has already \
+                       expired, though, it cannot be renewed or finalized by its original \
+                       holder any more — complete_job/fail_job/cancel_job/renew_claim all \
+                       refuse it server-side — and claim_jobs, called again on the same job, \
+                       is the only way back in. Hold onto each returned job's \
                        `attempts` value yourself if you might later call complete_job, \
                        fail_job, cancel_job, or renew_claim with expectedAttempts to guard \
                        against a same-account process having reclaimed the job out from under \
@@ -918,9 +921,13 @@ impl Factory {
                        while a long-running job is still in progress: an unrenewed claim \
                        expires and the job becomes claimable by someone else, which is what \
                        lets a crashed agent's abandoned job be picked back up. Fails if you are \
-                       not the job's current claim holder. Pass expectedAttempts if you also \
-                       want to guard against renewing a claim generation a different process \
-                       under your own account has since reclaimed — see its own description."
+                       not the job's current claim holder — and once a claim has already \
+                       expired, this cannot bring it back, even for its original holder: call \
+                       claim_jobs again on the same job instead. Renewing comfortably before \
+                       expiry, not after, is the only way to keep a claim alive. Pass \
+                       expectedAttempts if you also want to guard against renewing a claim \
+                       generation a different process under your own account has since \
+                       reclaimed — see its own description."
     )]
     pub async fn renew_claim(
         &self,
@@ -950,7 +957,10 @@ impl Factory {
         name = "complete_job",
         description = "Mark a job you claimed as completed, with a summary of what was done. \
                        Anything that depends on it becomes claimable. Fails if you are not the \
-                       job's current claim holder. Pass expectedAttempts if you also want to \
+                       job's current claim holder — including when your own claim has already \
+                       expired and nobody has reclaimed it yet: an expired claim cannot be \
+                       finalized any more, even by its original holder, and must be reclaimed \
+                       with claim_jobs first. Pass expectedAttempts if you also want to \
                        guard against completing over a claim generation a different process \
                        under your own account has since reclaimed — see its own description."
     )]
@@ -990,7 +1000,10 @@ impl Factory {
         description = "Mark a job you claimed as failed, recording why. Use this rather than \
                        leaving a job in-progress when you cannot finish it — an abandoned claim \
                        blocks everything downstream and tells nobody anything. Fails if you are \
-                       not the job's current claim holder. Pass expectedAttempts if you also \
+                       not the job's current claim holder — including when your own claim has \
+                       already expired and nobody has reclaimed it yet: an expired claim cannot \
+                       be finalized any more, even by its original holder, and must be \
+                       reclaimed with claim_jobs first. Pass expectedAttempts if you also \
                        want to guard against failing over a claim generation a different \
                        process under your own account has since reclaimed — see its own \
                        description."
@@ -1107,7 +1120,13 @@ impl Factory {
                        'asked to stop, and did' from an ordinary failure. Also fails if the \
                        job is not currently in-progress or active — still pending, or already \
                        completed, failed, or cancelled — or if you are not its current claim \
-                       holder. Pass expectedAttempts if you also want to guard against \
+                       holder. Unlike complete_job/fail_job/renew_claim, this one still \
+                       succeeds for a claim that has already expired, as long as the \
+                       cancellation was requested before it lapsed — that is what lets you \
+                       honestly record having complied even if the stop took longer than the \
+                       claim's TTL; if nobody asked this job to stop before your claim expired, \
+                       it is refused like the others and must be reclaimed with claim_jobs \
+                       first. Pass expectedAttempts if you also want to guard against \
                        cancelling a claim generation a different process under your own \
                        account has since reclaimed — see its own description."
     )]

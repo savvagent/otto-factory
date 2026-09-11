@@ -1439,15 +1439,25 @@ async fn stale_generation_cannot_finalize_or_renew_after_same_account_reclaims(p
     tx.commit().await.unwrap();
 }
 
-/// The additive-compatibility half of the fix above: a caller that never
-/// learns about `expected_attempts` (omits it, i.e. `None`) must see
-/// bit-for-bit today's behavior — the account-only fence still lets a stale
-/// same-account caller finalize over a reclaiming instance, exactly as
-/// before this change. This is not a regression to fix later; it is the
+/// The additive-compatibility half of the fix above, narrowed to the case it
+/// actually still covers: a caller that never learns about
+/// `expected_attempts` (omits it, i.e. `None`) sees today's behavior
+/// *for a claim that has already been reclaimed* — the account-only fence
+/// still lets a stale same-account caller finalize over a reclaiming
+/// instance, exactly as before this change, because the job is no longer
+/// expired by the time this call runs (the reclaim refreshed
+/// `claim_expires_at`). This is not a regression to fix later; it is the
 /// explicit price of an optional, additive argument (Non-Negotiable Rule 6):
 /// the guard is available to every caller, not forced on any of them.
+///
+/// This test does **not** prove immunity from this PR's other behavior
+/// change: an expired-but-*unreclaimed* claim is refused server-side
+/// regardless of `expected_attempts` — see
+/// `a_holder_cannot_act_on_their_own_expired_unreclaimed_claim` below, and
+/// this PR's spec's "Public interface note" for why that makes the overall
+/// change non-additive despite this one case staying compatible.
 #[sqlx::test]
-async fn expected_attempts_omitted_preserves_todays_behavior(pool: PgPool) {
+async fn expected_attempts_omitted_preserves_todays_behavior_for_a_reclaimed_claim(pool: PgPool) {
     let db = db(pool);
     let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
 
@@ -1476,9 +1486,9 @@ async fn expected_attempts_omitted_preserves_todays_behavior(pool: PgPool) {
 }
 
 /// The server-side half of the #103 security review: `ensure_claim_held`
-/// refuses `complete_job`/`fail_job`/`cancel_job`/`renew_claim` once the
-/// *caller's own* claim has expired and nobody else has reclaimed it yet —
-/// closing GH#65's race for every caller, not just ones that learned to pass
+/// refuses `complete_job`/`fail_job`/`renew_claim` once the *caller's own*
+/// claim has expired and nobody else has reclaimed it yet — closing GH#65's
+/// race for every caller, not just ones that learned to pass
 /// `expected_attempts`. Before this check, an expired-but-unreclaimed claim
 /// (`ready()` and `claim_jobs` already treat it as available; there is no
 /// background reaper) would still finalize or renew successfully for the
@@ -1486,6 +1496,13 @@ async fn expected_attempts_omitted_preserves_todays_behavior(pool: PgPool) {
 /// final `claim_jobs` proving the job is still genuinely reclaimable — the
 /// fence closes finalize/renew against the stale holder, not availability
 /// through the normal path.
+///
+/// `cancel_job` is deliberately not exercised here: it is the one entry
+/// point with a documented exception to this fence (a pending cancellation
+/// lets it survive its own expiry), so its behavior is covered on its own by
+/// `cancel_job_survives_its_own_expiry_when_a_cancellation_was_already_pending`
+/// and `cancel_job_still_refuses_expiry_without_a_pending_cancellation`
+/// below, rather than folded into this account-only-fence test.
 #[sqlx::test]
 async fn a_holder_cannot_act_on_their_own_expired_unreclaimed_claim(pool: PgPool) {
     let db = db(pool);
@@ -1527,26 +1544,6 @@ async fn a_holder_cannot_act_on_their_own_expired_unreclaimed_claim(pool: PgPool
         .unwrap_err();
     assert_eq!(err.code(), "already_claimed");
 
-    // cancel_job — a cancellation request on file first, so this proves the
-    // expiry check runs (and refuses) before cancel_job's own
-    // no-request-on-file check ever gets a chance to fire.
-    let j = tx
-        .add_job(job(&t, "expired, unreclaimed, cancel"))
-        .await
-        .unwrap();
-    tx.claim_jobs(std::slice::from_ref(&j.id), t.user, None, None)
-        .await
-        .unwrap();
-    tx.request_cancel(&j.id, t.user, Some("stop"))
-        .await
-        .unwrap();
-    expire_claim(&mut tx, t.org, &j.id).await;
-    let err = tx
-        .cancel_job(&j.id, t.user, Some("late"), None)
-        .await
-        .unwrap_err();
-    assert_eq!(err.code(), "already_claimed");
-
     // renew_claim
     let j = tx
         .add_job(job(&t, "expired, unreclaimed, renew"))
@@ -1574,6 +1571,112 @@ async fn a_holder_cannot_act_on_their_own_expired_unreclaimed_claim(pool: PgPool
         reclaimed[0].attempts, 2,
         "one attempt from the original claim, one from the reclaim"
     );
+    tx.commit().await.unwrap();
+}
+
+/// A second security-review finding on the expiry fence above: the "was
+/// claimed by you, but that claim has expired" wording is only true for the
+/// account that actually held the claim. An unrelated account probing a job
+/// it never claimed must get the ordinary "claimed by someone else" refusal
+/// instead — never a false statement about a claim of its own having
+/// expired, which would actively mislead an LLM caller about its own state.
+#[sqlx::test]
+async fn an_account_that_never_held_the_claim_is_not_told_its_own_claim_expired(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+    let stranger = second_user(&db, &t, "stranger@acme.test").await;
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let j = tx
+        .add_job(job(&t, "expired, probed by a stranger"))
+        .await
+        .unwrap();
+    tx.claim_jobs(std::slice::from_ref(&j.id), t.user, None, None)
+        .await
+        .unwrap();
+    expire_claim(&mut tx, t.org, &j.id).await;
+
+    let err = tx
+        .complete_job(&j.id, stranger, Some("not mine to finish"), None)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "already_claimed");
+    assert!(
+        !err.to_string().contains("was claimed by you"),
+        "a caller that never held this claim must not be told its own claim \
+         expired: {err}"
+    );
+    assert!(
+        err.to_string().contains("not you"),
+        "must fall through to the ordinary account-mismatch refusal: {err}"
+    );
+    tx.commit().await.unwrap();
+}
+
+/// The third security-review finding on the expiry fence: forcing every
+/// expired claim through `fail_job` would strip `cancel_job` of any way to
+/// record a cancellation the holder had already been asked for before its
+/// claim lapsed — collapsing the "asked to stop, and did" vs. "gave up on
+/// its own" distinction `cancel_job` exists to preserve. `ensure_claim_held`
+/// exempts `cancel_job` from the expiry check specifically when
+/// `cancel_requested_at IS NOT NULL`, so the original holder can still
+/// confirm the stop it was asked for even after its claim has lapsed and
+/// nobody has reclaimed the job yet.
+#[sqlx::test]
+async fn cancel_job_survives_its_own_expiry_when_a_cancellation_was_already_pending(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let j = tx
+        .add_job(job(&t, "cancellation pending, claim then expires"))
+        .await
+        .unwrap();
+    tx.claim_jobs(std::slice::from_ref(&j.id), t.user, None, None)
+        .await
+        .unwrap();
+    tx.request_cancel(&j.id, t.user, Some("stop, please"))
+        .await
+        .unwrap();
+    expire_claim(&mut tx, t.org, &j.id).await;
+
+    let cancelled = tx
+        .cancel_job(&j.id, t.user, Some("stopped, as asked"), None)
+        .await
+        .unwrap();
+    assert_eq!(cancelled.status, Status::Cancelled);
+    assert_eq!(cancelled.error.as_deref(), Some("stopped, as asked"));
+    assert_eq!(cancelled.cancel_reason.as_deref(), Some("stop, please"));
+    tx.commit().await.unwrap();
+}
+
+/// The exemption above must not become a general expiry bypass: without a
+/// pending cancellation, `cancel_job` on an expired, unreclaimed claim is
+/// refused exactly like `complete_job`/`fail_job`/`renew_claim` are (already
+/// covered by `a_holder_cannot_act_on_their_own_expired_unreclaimed_claim`
+/// above) — restated here as its own test so a future change narrowing the
+/// exemption's condition has a direct regression to break.
+#[sqlx::test]
+async fn cancel_job_still_refuses_expiry_without_a_pending_cancellation(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let j = tx
+        .add_job(job(&t, "no cancellation on file, claim expires"))
+        .await
+        .unwrap();
+    tx.claim_jobs(std::slice::from_ref(&j.id), t.user, None, None)
+        .await
+        .unwrap();
+    expire_claim(&mut tx, t.org, &j.id).await;
+
+    let err = tx
+        .cancel_job(&j.id, t.user, Some("too late"), None)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "already_claimed");
+    assert!(err.to_string().contains("expired"));
     tx.commit().await.unwrap();
 }
 

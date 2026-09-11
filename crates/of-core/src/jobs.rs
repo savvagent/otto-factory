@@ -145,7 +145,12 @@ pub struct Job {
     /// `fail_job`/`cancel_job`/`renew_claim` to fence your call against a
     /// same-account process having reclaimed the job in the meantime
     /// (savvagent/otto-factory#103) — never a value re-read from `get_job`,
-    /// which may already belong to whoever holds the claim now.
+    /// which may already belong to whoever holds the claim now. This field
+    /// now does two jobs at once: it is also the plain retry count a caller
+    /// might expect from its name, so on a fleet running short claim TTLs an
+    /// ordinary late `renew_claim` (which forces a fresh `claim_jobs`, not a
+    /// retry of failed work) climbs it too — a rising `attempts` is not by
+    /// itself evidence the work has actually been retried.
     pub attempts: i32,
     pub result: Option<String>,
     pub error: Option<String>,
@@ -1104,11 +1109,13 @@ impl Tx<'_> {
     }
 
     /// Lock the job row, confirm it is claimed (`in-progress` or `active`),
-    /// confirm the claim has not expired, confirm `caller` is the one who
-    /// holds it, and — if `expected_attempts` is supplied — confirm the
-    /// caller's own claim generation is still the current one. Shared by
-    /// `finalize`, `renew_claim`, and `cancel_job` — all three need the
-    /// identical fencing check.
+    /// confirm the claim has not expired (unless `honor_pending_cancel` is
+    /// set and a cancellation is already on file — see below), confirm
+    /// `caller` is the one who holds it, and — if `expected_attempts` is
+    /// supplied — confirm the caller's own claim generation is still the
+    /// current one. Shared by `finalize`, `renew_claim`, and `cancel_job` —
+    /// all three need the identical fencing check, with one deliberate
+    /// exception on the first of the three.
     ///
     /// Three checks, each closing a different shape of the same underlying
     /// problem — a caller acting on a claim it no longer validly holds:
@@ -1129,8 +1136,27 @@ impl Tx<'_> {
     ///   part in this check; it applies before the account and generation
     ///   checks even look at who the caller is, so it is not something an
     ///   agent can opt out of by omitting the argument.
+    ///
+    ///   `cancel_job` passes `honor_pending_cancel = true`, which exempts
+    ///   this specific check — and only this one — when `cancel_requested_at
+    ///   IS NOT NULL` on the row: a human already asked this job to stop
+    ///   before the claim lapsed, and letting the holder record that it
+    ///   complied is strictly more honest than forcing the only remaining
+    ///   move to be `fail_job`, which collapses the "asked to stop, and did"
+    ///   vs. "gave up on its own" distinction `cancel_job` exists to
+    ///   preserve. The account check immediately below still applies even
+    ///   when this exemption fires — it only waives the expiry line, not who
+    ///   is allowed to cross it. `complete_job`, `fail_job`, and
+    ///   `renew_claim` always pass `false`: there is no equivalent
+    ///   "a human already agreed to this" signal for finishing or extending
+    ///   work on a claim `ready()` has already put back up for grabs.
     /// - **Account.** `claimed_by == Some(caller)` closes GH#65 (two
-    ///   *different* accounts racing to finalize a job).
+    ///   *different* accounts racing to finalize a job). This check is also
+    ///   what the expiry message above depends on: it is only rendered when
+    ///   `claimed_by == Some(caller)` actually holds, so a caller that never
+    ///   held this claim at all falls through to this check's own "claimed
+    ///   by someone else" refusal instead of being told a claim of its own
+    ///   expired.
     /// - **Generation.** Closes savvagent/otto-factory#103 (two *instances*
     ///   of the same account racing): if this caller's process crashed, its
     ///   claim lapsed, and a second process under the identical account
@@ -1144,7 +1170,11 @@ impl Tx<'_> {
     ///   default) gets exactly today's account-only behavior for this
     ///   specific same-account-different-instance race — this argument is
     ///   purely additive on top of the account and expiry checks, neither of
-    ///   which it can be used to bypass.
+    ///   which it can be used to bypass. The refusal names only that the
+    ///   generation does not match, never the actual current value: that
+    ///   value is exactly what a stale caller would need to parse out and
+    ///   replay to defeat this fence in one round trip, so it is never
+    ///   echoed back.
     ///
     /// (`activate_job`, by contrast, checks status only — not `claimed_by`,
     /// expiry, or generation — because it is a refinement signal that cannot
@@ -1155,6 +1185,7 @@ impl Tx<'_> {
         id: &JobId,
         caller: UserId,
         expected_attempts: Option<i32>,
+        honor_pending_cancel: bool,
     ) -> Result<()> {
         #[derive(sqlx::FromRow)]
         struct ClaimRow {
@@ -1163,12 +1194,14 @@ impl Tx<'_> {
             claimed_by_label: Option<String>,
             attempts: i32,
             expired: bool,
+            cancel_requested_at: Option<chrono::DateTime<chrono::Utc>>,
         }
 
         let org = self.org();
         let row: Option<ClaimRow> = sqlx::query_as(
             "SELECT status, claimed_by, claimed_by_label, attempts, \
-                    (claim_expires_at IS NOT NULL AND claim_expires_at <= now()) AS expired \
+                    (claim_expires_at IS NOT NULL AND claim_expires_at <= now()) AS expired, \
+                    cancel_requested_at \
              FROM jobs WHERE org_id = $1 AND id = $2 FOR UPDATE",
         )
         .bind(org)
@@ -1181,6 +1214,7 @@ impl Tx<'_> {
             claimed_by_label,
             attempts,
             expired,
+            cancel_requested_at,
         } = row.ok_or_else(|| Error::JobNotFound(id.clone()))?;
 
         if !matches!(status, Status::InProgress | Status::Active) {
@@ -1201,15 +1235,19 @@ impl Tx<'_> {
             .or_else(|| claimed_by.map(|u| u.to_string()))
             .unwrap_or_else(|| "no recorded holder (data inconsistency)".into());
 
+        let is_holder = claimed_by == Some(caller);
+
         // Expiry fence (savvagent/otto-factory#103's High finding on the
         // original #65 fix): checked before the account check below because a
         // caller can fail this one while still nominally being `claimed_by`
         // — nobody has reclaimed the job yet, but `ready()` and `claim_jobs`
         // already treat it as up for grabs, so finalizing or renewing it here
-        // would race against whoever claims it next. `claimed_by`/`holder`
-        // above still name *this* caller in that case, which is exactly why
-        // the message below does not say "not you".
-        if expired {
+        // would race against whoever claims it next. `cancel_job`'s
+        // `honor_pending_cancel` exempts only this check, and only when a
+        // human already asked the job to stop before the claim lapsed — see
+        // the doc comment above.
+        let exempted_from_expiry = honor_pending_cancel && cancel_requested_at.is_some();
+        if expired && !exempted_from_expiry && is_holder {
             return Err(Error::AlreadyClaimed {
                 job: id.clone(),
                 reason: "was claimed by you, but that claim has expired and has not been \
@@ -1220,8 +1258,12 @@ impl Tx<'_> {
                     .into(),
             });
         }
+        // If `expired && !exempted_from_expiry && !is_holder`: this caller
+        // never held the claim in the first place — expired or not, "was
+        // claimed by you" would be false for it. Falls through to the
+        // account check below, which names the actual holder instead.
 
-        if claimed_by != Some(caller) {
+        if !is_holder {
             return Err(Error::AlreadyClaimed {
                 job: id.clone(),
                 reason: format!(
@@ -1239,22 +1281,24 @@ impl Tx<'_> {
         // new variant: both describe the identical remedy from the caller's
         // perspective — stop, call get_job to see who holds it now, do not
         // retry this exact call — but the rendered `reason` names the actual
-        // claim generations involved (unlike the identity branch's message,
-        // this can fire when `holder` is a *different instance of the
-        // caller's own account*, so "not you" would be false here), which is
-        // what lets a caller tell this refusal apart from an ordinary
-        // account mismatch when two instances happen to share a label.
+        // holder (unlike the identity branch's message, this can fire when
+        // `holder` is a *different instance of the caller's own account*, so
+        // "not you" would be false here) without naming the actual claim
+        // generation number: that number is exactly what a stale caller
+        // needs in order to parse it out of the refusal and retry with it,
+        // which would defeat this fence in the one round trip it is meant to
+        // prevent.
         if let Some(expected) = expected_attempts {
             if attempts != expected {
                 return Err(Error::AlreadyClaimed {
                     job: id.clone(),
                     reason: format!(
-                        "is currently claimed by {holder}, on claim generation {attempts} — \
-                            you supplied {expected}. Retrying this exact call cannot succeed: \
-                            get_job shows its current state for your own orientation only — \
-                            never read a value back from it as expected_attempts for a retry \
-                            — and claim_jobs is how to take the job back once it is available \
-                            again."
+                        "is currently claimed by {holder}, on a claim generation that does \
+                            not match what you supplied — it has moved on since you last read \
+                            this job's state. Retrying this exact call cannot succeed: get_job \
+                            shows its current state for your own orientation only — never read \
+                            a value back from it as expected_attempts for a retry — and \
+                            claim_jobs is how to take the job back once it is available again."
                     ),
                 });
             }
@@ -1272,7 +1316,7 @@ impl Tx<'_> {
         error: Option<&str>,
         expected_attempts: Option<i32>,
     ) -> Result<Job> {
-        self.ensure_claim_held(id, caller, expected_attempts)
+        self.ensure_claim_held(id, caller, expected_attempts, false)
             .await?;
         let org = self.org();
         let job = sqlx::query_as(&format!(
@@ -1303,7 +1347,7 @@ impl Tx<'_> {
         ttl_secs: Option<i64>,
         expected_attempts: Option<i32>,
     ) -> Result<Job> {
-        self.ensure_claim_held(id, caller, expected_attempts)
+        self.ensure_claim_held(id, caller, expected_attempts, false)
             .await?;
         let ttl = clamp_claim_ttl(ttl_secs);
         let org = self.org();
@@ -1402,7 +1446,12 @@ impl Tx<'_> {
         note: Option<&str>,
         expected_attempts: Option<i32>,
     ) -> Result<Job> {
-        self.ensure_claim_held(id, caller, expected_attempts)
+        // `honor_pending_cancel = true`: a claim that has already expired can
+        // still be confirmed cancelled here, but only when a cancellation was
+        // already requested before it lapsed — see `ensure_claim_held`'s doc
+        // comment for why that carve-out exists and why it goes no further
+        // than the expiry check.
+        self.ensure_claim_held(id, caller, expected_attempts, true)
             .await?;
         let org = self.org();
         let cancel_requested_at: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
