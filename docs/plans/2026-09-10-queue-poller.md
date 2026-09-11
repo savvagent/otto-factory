@@ -14,7 +14,15 @@ exactly.
 
 ## Status — 2026-09-10
 
-✅ Task 1 implemented and gated (`npm run check`, `npm run lint`, `npm test`, `npm run build` all green), including a regression test added after code-quality review for the `navError`/`pollError` precedence fix. Not yet merged — see the open PR.
+✅ Shipped in `savvagent/otto-factory#146`, closing `savvagent/otto-factory#104` and
+`savvagent/otto-factory#92`. Merged as `867c10b`; the merge commit's own CI run
+(`34554517396`) is green on `rust` and `web`. Task 1 went through three PR-review fix rounds
+(the mandatory Rust/architect/security trio plus Copilot) beyond what this plan's steps
+describe verbatim — most notably splitting `navError`/`pollError` into two independent
+notices rather than merging them, hoisting the stale/parked note above the `Empty`/table
+split so it is reachable on an empty result, and extracting the shared `fatalApiFailure`
+classifier into `web/src/lib/poll-fatal.ts` (also adopted by the overview page). See the
+design spec's §2a for the corrected account of what shipped.
 
 ## Global Constraints
 

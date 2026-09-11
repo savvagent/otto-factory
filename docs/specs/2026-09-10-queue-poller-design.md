@@ -1,8 +1,10 @@
 # Queue page Poller migration design
 
-> **Status:** DRAFT — migrate the queue page's job list from fetch-once-per-filter-change to a
-> `Poller` subscription, folding in the four-filter restart requirement `savvagent/otto-factory#92`
-> already flagged for this exact migration.
+> **Status:** IMPLEMENTED — `savvagent/otto-factory#146` (merged as `867c10b`), closing
+> `savvagent/otto-factory#104` and `savvagent/otto-factory#92`. The queue's job list refreshes via
+> `Poller`, keyed on org plus all four filter values. See §2a for how the shipped design departed
+> from this document's original sketch — the render tree, and the `navError`/`pollError` split, in
+> particular.
 
 > **Implements:** `savvagent/otto-factory#104`, `savvagent/otto-factory#92`
 
