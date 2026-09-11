@@ -98,6 +98,16 @@
     return jobsPoll.start(() => api.jobs(slug, active), { fatal });
   });
 
+  // A `navError` left over from an earlier, since-resolved `goto` rejection
+  // should not linger indefinitely just because nobody has changed the org or
+  // filters since — the moment the poll proves itself healthy again is the
+  // moment the stale warning has nothing left to say. Deliberately its own
+  // effect: it only needs to react to `jobsPoll.updatedAt`, not to the
+  // org/filters the job-poll effect above re-subscribes on.
+  $effect(() => {
+    if (jobsPoll.updatedAt !== undefined) navError = undefined;
+  });
+
   /**
    * Which failures must not be retried.
    *
@@ -119,9 +129,18 @@
 
   const jobs = $derived(jobsPoll.value ?? []);
   const loading = $derived(!jobsPoll.value);
-  const error = $derived(
-    navError ?? (jobsPoll.failed ? messageFor(jobsPoll.error, m.queue_load_failed()) : undefined)
+
+  // `pollError` takes priority over `navError`, not just a merge: a currently
+  // failing poll — including a fatal 403/404 meaning access to this org or
+  // filter was revoked — must never be hidden behind an old one-shot
+  // navigation error just because that happened to be set first. A masked
+  // fatal failure is worse than losing a stale navigation warning, and the
+  // effect above already retires `navError` on the next successful tick, so
+  // it never outlives its usefulness once polling proves things are fine.
+  const pollError = $derived(
+    jobsPoll.failed ? messageFor(jobsPoll.error, m.queue_load_failed()) : undefined
   );
+  const error = $derived(pollError ?? navError);
 
   /**
    * The one place either filter control navigates. A rejected `goto` (the
@@ -235,7 +254,7 @@
   {#if error}
     <Alert>
       {error}
-      {#if !jobsPoll.stopped}{m.queue_retrying()}{/if}
+      {#if pollError && !jobsPoll.stopped}{m.queue_retrying()}{/if}
     </Alert>
   {:else if loading && jobs.length === 0}
     <Loading what={m.queue_loading()} />
