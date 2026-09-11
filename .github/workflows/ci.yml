@@ -39,6 +39,7 @@ jobs:
   # docs/specs/2026-09-10-ci-assert-skills-symlink-design.md.
   rust:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     services:
       # Same image, user, db name and port-mapping rationale as compose.yaml:
       # `cargo test` runs `#[sqlx::test]` against a real Postgres, no mocks.
@@ -146,6 +147,7 @@ jobs:
   # startup requires `web/` to be built first, not CI.
   web:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: web
@@ -172,6 +174,7 @@ jobs:
   # itself builds.
   docker-build:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -289,7 +292,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # v1
 
