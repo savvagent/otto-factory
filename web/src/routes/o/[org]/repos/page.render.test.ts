@@ -146,8 +146,18 @@ describe('the repos page lease panel heading and explainer', () => {
   });
 });
 
+const leaseInfoDetail =
+  'Leases are what the list_leases and acquire_lease MCP tools coordinate through, and expire on their own if never renewed.';
+
+/** All "Who is in here?" / "Hide" row toggles, in row order. */
+function rowToggles(root: HTMLElement) {
+  return Array.from(root.querySelectorAll('button')).filter(
+    (b) => b.hasAttribute('aria-expanded') && /^(Who is in here\?|Hide)$/.test(b.textContent ?? '')
+  ) as HTMLButtonElement[];
+}
+
 describe('the repos page info affordance', () => {
-  it('opens on focus, closes on Escape, and closes on blur', async () => {
+  it('does not open on a bare focus event, opens on click, and closes on Escape or blur', async () => {
     vi.stubGlobal(
       'fetch',
       makeFetchMock({ leasesByRepo: { api: [] }, bindingsByRepo: { api: [] } })
@@ -156,37 +166,115 @@ describe('the repos page info affordance', () => {
     const instance = mount(Harness, { target: container, props: { slug: 'acme' } });
     await settle();
 
-    const toggle = Array.from(container.querySelectorAll('button')).find(
-      (b) => b.hasAttribute('aria-expanded') && b.textContent === 'Who is in here?'
-    ) as HTMLButtonElement;
-    toggle.click();
+    rowToggles(container)[0]?.click();
     await settle();
 
     const infoButton = container.querySelector(
       'button[aria-label="About leases"]'
     ) as HTMLButtonElement;
     expect(infoButton).toBeTruthy();
+    expect(infoButton.getAttribute('aria-controls')).toBe('repos-lease-info-api');
 
-    const detail =
-      'Leases are what the list_leases and acquire_lease MCP tools coordinate through, and expire on their own if never renewed.';
+    expect(container.textContent).not.toContain(leaseInfoDetail);
 
-    expect(container.textContent).not.toContain(detail);
-
+    // A bare focus (no click) must not open the popover any more — that was
+    // finding 1's bug: a real click fires focus before click, so an
+    // onfocus-opens handler raced the onclick toggle and lost.
     infoButton.dispatchEvent(new FocusEvent('focus', { bubbles: true }));
     await settle();
-    expect(container.textContent).toContain(detail);
+    expect(infoButton.getAttribute('aria-expanded')).toBe('false');
+    expect(container.textContent).not.toContain(leaseInfoDetail);
+
+    infoButton.click();
+    await settle();
+    expect(infoButton.getAttribute('aria-expanded')).toBe('true');
+    expect(container.textContent).toContain(leaseInfoDetail);
+    expect(container.querySelector('#repos-lease-info-api')).toBeTruthy();
 
     infoButton.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     await settle();
-    expect(container.textContent).not.toContain(detail);
+    expect(infoButton.getAttribute('aria-expanded')).toBe('false');
+    expect(container.textContent).not.toContain(leaseInfoDetail);
 
-    infoButton.dispatchEvent(new FocusEvent('focus', { bubbles: true }));
+    infoButton.click();
     await settle();
-    expect(container.textContent).toContain(detail);
+    expect(container.textContent).toContain(leaseInfoDetail);
 
     infoButton.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
     await settle();
-    expect(container.textContent).not.toContain(detail);
+    expect(infoButton.getAttribute('aria-expanded')).toBe('false');
+    expect(container.textContent).not.toContain(leaseInfoDetail);
+
+    unmount(instance);
+  });
+
+  it('opens from a real mouse click, where focus fires immediately before click', async () => {
+    vi.stubGlobal(
+      'fetch',
+      makeFetchMock({ leasesByRepo: { api: [] }, bindingsByRepo: { api: [] } })
+    );
+
+    const instance = mount(Harness, { target: container, props: { slug: 'acme' } });
+    await settle();
+
+    rowToggles(container)[0]?.click();
+    await settle();
+
+    const infoButton = container.querySelector(
+      'button[aria-label="About leases"]'
+    ) as HTMLButtonElement;
+
+    // JSDOM's HTMLElement.click() does not fire a focus event first, unlike a
+    // real browser (mousedown -> focus -> mouseup -> click), so this
+    // reproduces that ordering explicitly. The onclick toggle must still win.
+    infoButton.dispatchEvent(new FocusEvent('focus', { bubbles: true }));
+    infoButton.click();
+    await settle();
+
+    expect(infoButton.getAttribute('aria-expanded')).toBe('true');
+    expect(container.textContent).toContain(leaseInfoDetail);
+
+    unmount(instance);
+  });
+
+  it('does not leak an open popover into a different row switched to directly', async () => {
+    vi.stubGlobal(
+      'fetch',
+      makeFetchMock({
+        leasesByRepo: { api: [], quiet: [] },
+        bindingsByRepo: { api: [], quiet: [] }
+      })
+    );
+
+    const instance = mount(Harness, { target: container, props: { slug: 'acme' } });
+    await settle();
+
+    const toggles = rowToggles(container);
+    expect(toggles).toHaveLength(2);
+    const [firstToggle, secondToggle] = toggles as [HTMLButtonElement, HTMLButtonElement];
+    firstToggle.click();
+    await settle();
+
+    const firstInfoButton = container.querySelector(
+      'button[aria-label="About leases"]'
+    ) as HTMLButtonElement;
+    firstInfoButton.click();
+    await settle();
+    expect(firstInfoButton.getAttribute('aria-expanded')).toBe('true');
+    expect(container.textContent).toContain(leaseInfoDetail);
+
+    // Switch straight to the second row without collapsing the first.
+    secondToggle.click();
+    await settle();
+
+    const secondInfoButton = container.querySelector(
+      'button[aria-label="About leases"]'
+    ) as HTMLButtonElement;
+    expect(secondInfoButton).toBeTruthy();
+    expect(secondInfoButton.getAttribute('aria-controls')).toBe('repos-lease-info-quiet');
+    expect(secondInfoButton.getAttribute('aria-expanded')).toBe('false');
+    expect(container.textContent).not.toContain(leaseInfoDetail);
+    expect(container.querySelector('#repos-lease-info-quiet')).toBeNull();
 
     unmount(instance);
   });

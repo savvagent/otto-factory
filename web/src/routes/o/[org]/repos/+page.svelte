@@ -106,9 +106,9 @@
   });
 
   async function toggle(repo: Repo) {
+    infoOpen = false;
     if (expanded === repo.slug) {
       expanded = undefined;
-      infoOpen = false;
       return;
     }
     expanded = repo.slug;
@@ -375,8 +375,8 @@
                     class="flex h-4 w-4 items-center justify-center rounded-full border border-edge text-[10px] text-faint hover:text-ink"
                     aria-label={m.repos_leases_info_label()}
                     aria-expanded={infoOpen}
+                    aria-controls={`repos-lease-info-${repo.slug}`}
                     onclick={() => (infoOpen = !infoOpen)}
-                    onfocus={() => (infoOpen = true)}
                     onblur={() => (infoOpen = false)}
                     onkeydown={(e) => {
                       if (e.key === 'Escape') infoOpen = false;
@@ -386,7 +386,7 @@
                   </button>
                   {#if infoOpen}
                     <div
-                      role="tooltip"
+                      id={`repos-lease-info-${repo.slug}`}
                       class="absolute z-10 mt-1 w-64 rounded-md border border-edge bg-raised p-2 text-xs text-faint shadow-lg"
                     >
                       {m.repos_leases_info_detail()}
