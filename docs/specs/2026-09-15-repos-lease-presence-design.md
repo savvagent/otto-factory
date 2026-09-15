@@ -1,7 +1,7 @@
 # Repos page lease presence design
 
-> **Status:** DRAFT — gives the Repos page an at-a-glance "who's here" signal per repo and
-> explains the underlying lease concept in place, per issue #168.
+> **Status:** IMPLEMENTED — gives the Repos page an at-a-glance "who's here" signal per repo and
+> explains the underlying lease concept in place, per issue #168. Shipped in PR #182.
 
 ## Premise corrections
 
