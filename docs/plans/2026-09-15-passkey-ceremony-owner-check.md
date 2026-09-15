@@ -175,8 +175,9 @@ variant, consumed by `of-web` in Task 2.
 keeps its existing route, method, and response shapes (403 on mismatch, 204 on success).
 
 - [ ] Add the failing test first. In `crates/of-web/tests/console.rs`, near the existing
-      `add_passkey_finish_records_the_add_flow_and_its_ip` (reuse its harness-setup lines verbatim
-      — `Db::from_pool`, `Config::new`, `relying_party`, `AppState::new`, `Harness`), add:
+      `add_passkey_finish_records_the_add_flow_and_its_ip` (that test builds its harness by hand
+      because it needs a custom `client_ip_header`; this one doesn't, so it uses the plainer
+      `common::harness(pool)` helper other tests in this file already use), add:
 
       ```rust
       /// The `add_passkey_finish` half of `savvagent/otto-factory#109`: a ceremony
