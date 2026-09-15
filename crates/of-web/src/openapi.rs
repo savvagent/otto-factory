@@ -523,7 +523,25 @@ fn entity_schemas() -> Value {
         },
         "TeamMemberList": { "type": "array", "items": reference("TeamMember") },
         "Repo": repo,
-        "RepoList": { "type": "array", "items": reference("Repo") },
+        "RepoListItem": {
+            "allOf": [
+                reference("Repo"),
+                {
+                    "type": "object",
+                    "properties": {
+                        "hasActiveLease": {
+                            "type": "boolean",
+                            "description":
+                                "Whether an unexpired lease is held on any resource in this \
+                                 repo right now — computed once for the whole list, never \
+                                 fetched per repo.",
+                        },
+                    },
+                    "required": ["hasActiveLease"],
+                },
+            ],
+        },
+        "RepoList": { "type": "array", "items": reference("RepoListItem") },
         "Invite": invite,
         "InviteList": { "type": "array", "items": reference("Invite") },
         "Lease": {

@@ -21,7 +21,7 @@ use of_core::audit::{action, Entry};
 use of_core::ids::TeamId;
 use of_core::leases::Lease;
 use of_core::repos::{NewRepo, Provider, Repo, RepoPatch};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{ApiError, ApiResult};
 use crate::session::OrgCtx;
@@ -136,17 +136,46 @@ pub(crate) async fn require_visible(
     }
 }
 
+/// A repo plus whether anyone holds a live lease on it right now. Computed
+/// once for the whole page from the same live-lease read the per-repo panel
+/// already uses (`Tx::list_leases`), not fetched per row — the same N+1
+/// concern this module's doc comment already flags for why per-repo lease
+/// fetch is lazy today.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoListItem {
+    #[serde(flatten)]
+    pub repo: Repo,
+    pub has_active_lease: bool,
+}
+
 /// `GET /api/orgs/{org}/repos`
 pub async fn list_repos(
     State(state): State<AppState>,
     ctx: OrgCtx,
     axum::extract::Query(q): axum::extract::Query<ListReposQuery>,
-) -> ApiResult<Json<Vec<Repo>>> {
+) -> ApiResult<Json<Vec<RepoListItem>>> {
     let mut tx = state.db.begin(ctx.org.id).await?;
     let repos = tx.list_repos(q.include_inactive, None).await?;
     let repos = visible_repos(&mut tx, &ctx, repos).await?;
+
+    let active: std::collections::HashSet<_> = tx
+        .list_leases(None)
+        .await?
+        .into_iter()
+        .map(|l| l.repo_id)
+        .collect();
     tx.commit().await?;
-    Ok(Json(repos))
+
+    Ok(Json(
+        repos
+            .into_iter()
+            .map(|repo| RepoListItem {
+                has_active_lease: active.contains(&repo.id),
+                repo,
+            })
+            .collect(),
+    ))
 }
 
 /// `POST /api/orgs/{org}/repos` — register a repo.

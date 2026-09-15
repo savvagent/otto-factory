@@ -1443,6 +1443,79 @@ async fn the_lease_route_reports_the_resource_field(pool: PgPool) {
     );
 }
 
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn repos_list_reports_lease_presence_and_never_another_orgs(pool: PgPool) {
+    let h = harness(pool);
+    let rob = onboard(&h, "rob@acme.test").await;
+    let mallory = onboard(&h, "mallory@evil.test").await;
+    let acme = org_with_owner(&h, "acme", &rob).await;
+    org_with_owner(&h, "evil", &mallory).await;
+
+    let leased: of_core::ids::RepoId = {
+        let created = Call::post("/api/orgs/acme/repos")
+            .with_session(&rob.session)
+            .json(serde_json::json!({ "slug": "api" }))
+            .send(&h.router)
+            .await;
+        created.expect(StatusCode::CREATED);
+        created.body["id"].as_str().unwrap().parse().unwrap()
+    };
+    Call::post("/api/orgs/acme/repos")
+        .with_session(&rob.session)
+        .json(serde_json::json!({ "slug": "quiet" }))
+        .send(&h.router)
+        .await
+        .expect(StatusCode::CREATED);
+    Call::post("/api/orgs/evil/repos")
+        .with_session(&mallory.session)
+        .json(serde_json::json!({ "slug": "api" }))
+        .send(&h.router)
+        .await
+        .expect(StatusCode::CREATED);
+
+    {
+        let mut tx = h.db.begin(acme).await.unwrap();
+        tx.acquire_lease(
+            leased,
+            "src/main.rs",
+            rob.user,
+            Some("claude-code"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+    }
+
+    let acme_list = Call::get("/api/orgs/acme/repos")
+        .with_session(&rob.session)
+        .send(&h.router)
+        .await;
+    acme_list.expect(StatusCode::OK);
+    let by_slug = |body: &serde_json::Value, slug: &str| {
+        body.as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["slug"] == slug)
+            .unwrap_or_else(|| panic!("no repo named {slug} in {body}"))
+            .clone()
+    };
+    assert_eq!(by_slug(&acme_list.body, "api")["hasActiveLease"], true);
+    assert_eq!(by_slug(&acme_list.body, "quiet")["hasActiveLease"], false);
+
+    let evil_list = Call::get("/api/orgs/evil/repos")
+        .with_session(&mallory.session)
+        .send(&h.router)
+        .await;
+    evil_list.expect(StatusCode::OK);
+    assert_eq!(
+        by_slug(&evil_list.body, "api")["hasActiveLease"],
+        false,
+        "evil's own unleased 'api' repo must never report acme's active lease"
+    );
+}
+
 // --------------------------------------------------------- tokens & usage
 
 #[sqlx::test(migrations = "../of-core/migrations")]
