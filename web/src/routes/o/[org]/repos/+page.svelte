@@ -95,7 +95,7 @@
 
     void (async () => {
       try {
-        const [r, t] = await Promise.all([api.repos(org_, withInactive), api.teams(org_)]);
+        const [r, t] = await Promise.all([api.repos(org_, withInactive, true), api.teams(org_)]);
         if (seq !== latest) return;
         repos = r;
         teams = t;
@@ -230,7 +230,7 @@
       remotes = '';
       teamId = '';
       showForm = false;
-      repos = await api.repos(org.slug, includeInactive);
+      repos = await api.repos(org.slug, includeInactive, true);
     } catch (e) {
       formError = messageFor(e, m.repos_error_register());
     } finally {
@@ -241,7 +241,7 @@
   async function setActive(repo: Repo, active: boolean) {
     try {
       await api.updateRepo(org.slug, repo.slug, { active });
-      repos = await api.repos(org.slug, includeInactive);
+      repos = await api.repos(org.slug, includeInactive, true);
     } catch (e) {
       error = messageFor(e, m.repos_error_update());
     }

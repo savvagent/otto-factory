@@ -197,7 +197,8 @@ export interface Repo {
 }
 
 export interface RepoListItem extends Repo {
-  hasActiveLease: boolean;
+  /** Present only when `api.repos()` was called with `includeLeaseStatus: true`. */
+  hasActiveLease?: boolean;
 }
 
 export type TrackerProvider = 'github' | 'jira';

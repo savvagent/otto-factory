@@ -244,6 +244,22 @@ produces no new interface — this is the console-only presentation layer.
 - [ ] `npm run build` once, to confirm the SPA still builds cleanly with the retyped API client.
 - [ ] Commit: `git commit -m "web: show at-a-glance lease presence and explain leases on the repos page"`.
 
+## Addendum — `hasActiveLease` gated behind `?includeLeaseStatus=true` (post-review)
+
+Both tasks above describe `hasActiveLease` as unconditionally computed. Review on the PR found
+that `api.repos()` is also polled every 30 seconds by the org overview page and fetched by the
+queue pages' repo picker, neither of which uses `hasActiveLease` — so the unconditional design
+made every one of those call sites pay for an org-wide lease scan they never needed, far more
+often than "once per Repos-page visit." Fixed post-review: `ListReposQuery` gained an
+`include_lease_status` flag (default off); `list_repos` skips `list_leases` entirely unless it's
+set; `RepoListItem.has_active_lease` became `Option<bool>` (omitted from the JSON response, not
+sent as `false`, when not requested); `api.repos()` gained a matching third parameter, passed
+`true` only from the Repos page's three call sites; the OpenAPI schema dropped `hasActiveLease`
+from `RepoListItem`'s `required` array; and the backend test was extended to also assert the
+field is absent (not `false`) when the flag is omitted. See the design spec's own addendum for
+the full rationale. Committed as
+`git commit -m "of-web: gate the repos-list lease-presence read behind an opt-in query param"`.
+
 ## Final gate (both tasks)
 
 - [ ] `cargo test --workspace`

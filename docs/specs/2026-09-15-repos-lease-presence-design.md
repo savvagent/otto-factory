@@ -383,3 +383,25 @@ or an incomplete catalog.
   is happening here now," and no new color is introduced, but a reviewer with a stronger opinion
   on this may prefer a different existing token (`ok`, `accent`) — either is a one-line change if
   requested.
+
+## Addendum — `hasActiveLease` made opt-in (post-review)
+
+The rest of this document describes `hasActiveLease` as unconditionally computed on every
+`GET /api/orgs/{org}/repos` call. Review on the PR caught a real cost this spec underestimated:
+`api.repos()` is not called only by the Repos page — the org overview page polls it every 30
+seconds (`o/[org]/+page.svelte`'s `Poller`), and the queue pages' repo picker fetches it too, and
+neither reads `hasActiveLease` at all. Unconditionally adding an org-wide `list_leases(None)` scan
+to this handler meant every one of those unrelated call sites paid for a read it never used, on a
+30-second cadence rather than once per Repos-page visit — a materially different cost profile than
+"one extra query on page load," and one this spec did not weigh correctly in the Assumptions above.
+
+**Fix:** `hasActiveLease` is computed only when the caller passes `?includeLeaseStatus=true`.
+`ListReposQuery` gains that boolean (default `false`); `list_repos` skips the `list_leases` call
+entirely when it is unset; `RepoListItem.has_active_lease` becomes `Option<bool>`, `#[serde(skip_serializing_if
+= "Option::is_none")]` — omitted from the wire response rather than sent as `false`, so a caller
+that never asked can't mistake "not computed" for "known absent." `web/src/lib/api.ts`'s `repos()`
+gains a matching third parameter; only the Repos page's three call sites pass `true`. The
+OpenAPI schema drops `hasActiveLease` from `RepoListItem`'s `required` array to match. Everything
+else in this document — the boolean-not-count choice, approach (a) over a dedicated endpoint, the
+UI shape, the i18n keys — is unaffected; this addendum changes only how the field's presence in
+the *response* is gated, not what it means or how the UI reads it.

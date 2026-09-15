@@ -1488,7 +1488,7 @@ async fn repos_list_reports_lease_presence_and_never_another_orgs(pool: PgPool) 
         tx.commit().await.unwrap();
     }
 
-    let acme_list = Call::get("/api/orgs/acme/repos")
+    let acme_list = Call::get("/api/orgs/acme/repos?includeLeaseStatus=true")
         .with_session(&rob.session)
         .send(&h.router)
         .await;
@@ -1504,7 +1504,23 @@ async fn repos_list_reports_lease_presence_and_never_another_orgs(pool: PgPool) 
     assert_eq!(by_slug(&acme_list.body, "api")["hasActiveLease"], true);
     assert_eq!(by_slug(&acme_list.body, "quiet")["hasActiveLease"], false);
 
-    let evil_list = Call::get("/api/orgs/evil/repos")
+    // Without the flag, the field is omitted entirely rather than computed
+    // and reported `false` — the whole point of gating it is skipping the
+    // extra org-wide lease read for a caller that never asked.
+    let acme_default = Call::get("/api/orgs/acme/repos")
+        .with_session(&rob.session)
+        .send(&h.router)
+        .await;
+    acme_default.expect(StatusCode::OK);
+    assert!(
+        by_slug(&acme_default.body, "api")
+            .get("hasActiveLease")
+            .is_none(),
+        "hasActiveLease must be omitted, not computed, without ?includeLeaseStatus=true: {}",
+        acme_default.body
+    );
+
+    let evil_list = Call::get("/api/orgs/evil/repos?includeLeaseStatus=true")
         .with_session(&mallory.session)
         .send(&h.router)
         .await;

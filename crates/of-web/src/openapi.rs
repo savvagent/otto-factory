@@ -533,10 +533,11 @@ fn entity_schemas() -> Value {
                             "type": "boolean",
                             "description":
                                 "Whether an unexpired lease is held on any resource in this \
-                                 repo right now.",
+                                 repo right now. Present only when the request set \
+                                 `includeLeaseStatus=true`; omitted otherwise, since \
+                                 computing it costs an extra org-wide read.",
                         },
                     },
-                    "required": ["hasActiveLease"],
                 },
             ],
         },
@@ -1364,12 +1365,12 @@ mod tests {
             extension["properties"]["hasActiveLease"]["type"], "boolean",
             "RepoListItem schema is missing a boolean hasActiveLease property: {repo_list_item}"
         );
+        // Not required: the handler omits it entirely unless the caller asked
+        // for it via `?includeLeaseStatus=true`, since computing it costs an
+        // extra org-wide read that most callers of this endpoint don't need.
         assert!(
-            extension["required"]
-                .as_array()
-                .unwrap()
-                .contains(&serde_json::json!("hasActiveLease")),
-            "hasActiveLease is required on every RepoListItem this route returns: {repo_list_item}"
+            extension["required"].is_null(),
+            "hasActiveLease is opt-in, not required, on RepoListItem: {repo_list_item}"
         );
     }
 
