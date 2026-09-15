@@ -45,6 +45,7 @@ import type {
   ProtectedResourceMetadata,
   QueueStats,
   Repo,
+  RepoListItem,
   Role,
   SessionOpened,
   Team,
@@ -258,7 +259,7 @@ export const api = {
 
   // ---------------------------------------------------------------- repos
   repos: (org: string, includeInactive = false) =>
-    get<Repo[]>(`/api/orgs/${seg(org)}/repos${query({ includeInactive })}`),
+    get<RepoListItem[]>(`/api/orgs/${seg(org)}/repos${query({ includeInactive })}`),
   registerRepo: (org: string, body: Record<string, unknown>) =>
     post<Repo>(`/api/orgs/${seg(org)}/repos`, body),
   updateRepo: (org: string, repo: string, body: Record<string, unknown>) =>

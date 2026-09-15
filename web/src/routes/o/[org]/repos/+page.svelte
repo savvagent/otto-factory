@@ -5,7 +5,14 @@
   import { LINK, around } from '$lib/labels';
   import { useOrg } from '$lib/org.svelte';
   import { relative, slugPreview } from '$lib/format';
-  import type { Lease, Repo, Team, TrackerBinding, TrackerProvider } from '$lib/types';
+  import type {
+    Lease,
+    Repo,
+    RepoListItem,
+    Team,
+    TrackerBinding,
+    TrackerProvider
+  } from '$lib/types';
   import Alert from '$lib/components/Alert.svelte';
   import Button from '$lib/components/Button.svelte';
   import Card from '$lib/components/Card.svelte';
@@ -34,13 +41,14 @@
 
   const org = useOrg();
 
-  let repos = $state<Repo[]>([]);
+  let repos = $state<RepoListItem[]>([]);
   let teams = $state<Team[]>([]);
   let includeInactive = $state(false);
   let loading = $state(true);
   let error = $state<string | undefined>(undefined);
 
   let expanded = $state<string | undefined>(undefined);
+  let infoOpen = $state(false);
   let leases = $state<Record<string, Lease[] | 'loading' | 'failed'>>({});
   let bindings = $state<Record<string, TrackerBinding[] | 'loading' | 'failed'>>({});
 
@@ -100,6 +108,7 @@
   async function toggle(repo: Repo) {
     if (expanded === repo.slug) {
       expanded = undefined;
+      infoOpen = false;
       return;
     }
     expanded = repo.slug;
@@ -319,6 +328,13 @@
                     {m.repos_badge_retired()}
                   </span>
                 {/if}
+                {#if repo.hasActiveLease}
+                  <span
+                    class="rounded-full border border-busy/50 bg-busy/10 px-2 py-0.5 text-xs text-busy"
+                  >
+                    {m.repos_badge_in_use()}
+                  </span>
+                {/if}
               </div>
               <p class="mt-0.5 text-xs text-faint">
                 {repo.name} · {repo.provider} · {repo.defaultBranch} · {teamName(repo.teamId)}
@@ -349,6 +365,36 @@
 
           {#if expanded === repo.slug}
             <div class="border-t border-edge/60 px-4 py-3">
+              <div class="flex items-center gap-1.5">
+                <h3 class="text-xs font-semibold tracking-wide text-muted uppercase">
+                  {m.repos_leases_heading()}
+                </h3>
+                <div class="relative">
+                  <button
+                    type="button"
+                    class="flex h-4 w-4 items-center justify-center rounded-full border border-edge text-[10px] text-faint hover:text-ink"
+                    aria-label={m.repos_leases_info_label()}
+                    aria-expanded={infoOpen}
+                    onclick={() => (infoOpen = !infoOpen)}
+                    onfocus={() => (infoOpen = true)}
+                    onblur={() => (infoOpen = false)}
+                    onkeydown={(e) => {
+                      if (e.key === 'Escape') infoOpen = false;
+                    }}
+                  >
+                    i
+                  </button>
+                  {#if infoOpen}
+                    <div
+                      role="tooltip"
+                      class="absolute z-10 mt-1 w-64 rounded-md border border-edge bg-raised p-2 text-xs text-faint shadow-lg"
+                    >
+                      {m.repos_leases_info_detail()}
+                    </div>
+                  {/if}
+                </div>
+              </div>
+              <p class="mt-1 text-xs text-faint">{m.repos_leases_note()}</p>
               {#if leases[repo.slug] === 'loading'}
                 <Loading what={m.repos_leases_loading()} />
               {:else if leases[repo.slug] === 'failed'}
@@ -379,9 +425,6 @@
                     </li>
                   {/each}
                 </ul>
-                <p class="mt-2 text-xs text-faint">
-                  {m.repos_leases_note()}
-                </p>
               {/if}
             </div>
 
