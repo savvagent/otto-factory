@@ -196,6 +196,11 @@ export interface Repo {
   createdBy: string | null;
 }
 
+export interface RepoListItem extends Repo {
+  /** Present only when `api.repos()` was called with `includeLeaseStatus: true`. */
+  hasActiveLease?: boolean;
+}
+
 export type TrackerProvider = 'github' | 'jira';
 
 /**

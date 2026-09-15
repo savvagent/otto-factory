@@ -45,6 +45,7 @@ import type {
   ProtectedResourceMetadata,
   QueueStats,
   Repo,
+  RepoListItem,
   Role,
   SessionOpened,
   Team,
@@ -257,8 +258,16 @@ export const api = {
     del<void>(`/api/orgs/${seg(org)}/teams/${seg(team)}/members/${seg(user)}`),
 
   // ---------------------------------------------------------------- repos
-  repos: (org: string, includeInactive = false) =>
-    get<Repo[]>(`/api/orgs/${seg(org)}/repos${query({ includeInactive })}`),
+  /**
+   * `includeLeaseStatus` costs the server an extra org-wide lease read, so it
+   * defaults to off — only the Repos page, which renders the presence pill,
+   * passes `true`. The overview poller and the queue pages' repo picker call
+   * this same endpoint far more often and never read `hasActiveLease`.
+   */
+  repos: (org: string, includeInactive = false, includeLeaseStatus = false) =>
+    get<RepoListItem[]>(
+      `/api/orgs/${seg(org)}/repos${query({ includeInactive, includeLeaseStatus })}`
+    ),
   registerRepo: (org: string, body: Record<string, unknown>) =>
     post<Repo>(`/api/orgs/${seg(org)}/repos`, body),
   updateRepo: (org: string, repo: string, body: Record<string, unknown>) =>

@@ -21,7 +21,7 @@ use of_core::audit::{action, Entry};
 use of_core::ids::TeamId;
 use of_core::leases::Lease;
 use of_core::repos::{NewRepo, Provider, Repo, RepoPatch};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{ApiError, ApiResult};
 use crate::session::OrgCtx;
@@ -78,6 +78,14 @@ pub struct ListReposQuery {
     /// repo keeps its job history but should not clutter a picker.
     #[serde(default)]
     pub include_inactive: bool,
+    /// Compute `hasActiveLease` on every returned repo. Off by default: this
+    /// endpoint is also polled every 30 seconds by the org overview page and
+    /// fetched by the queue pages' repo picker, neither of which shows lease
+    /// presence, and the computation is one extra org-wide `list_leases` scan
+    /// — worth paying only for the one caller (the Repos page) that renders
+    /// it.
+    #[serde(default)]
+    pub include_lease_status: bool,
 }
 
 /// Filter repos down to what the caller is allowed to see.
@@ -136,17 +144,54 @@ pub(crate) async fn require_visible(
     }
 }
 
+/// A repo plus, when `?includeLeaseStatus=true` asked for it, whether anyone
+/// holds a live lease on it right now. Computed once for the whole page from
+/// the same live-lease read the `list_leases` handler already uses for a
+/// single repo, grouped once instead of fetched per row — avoiding one query
+/// per repo on every page load. Omitted from the wire response entirely
+/// (rather than `false`) when not requested, so a caller that never asked
+/// can't mistake "not computed" for "known absent".
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoListItem {
+    #[serde(flatten)]
+    pub repo: Repo,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_active_lease: Option<bool>,
+}
+
 /// `GET /api/orgs/{org}/repos`
 pub async fn list_repos(
     State(state): State<AppState>,
     ctx: OrgCtx,
     axum::extract::Query(q): axum::extract::Query<ListReposQuery>,
-) -> ApiResult<Json<Vec<Repo>>> {
+) -> ApiResult<Json<Vec<RepoListItem>>> {
     let mut tx = state.db.begin(ctx.org.id).await?;
     let repos = tx.list_repos(q.include_inactive, None).await?;
     let repos = visible_repos(&mut tx, &ctx, repos).await?;
+
+    let active: Option<std::collections::HashSet<_>> = if q.include_lease_status {
+        Some(
+            tx.list_leases(None)
+                .await?
+                .into_iter()
+                .map(|l| l.repo_id)
+                .collect(),
+        )
+    } else {
+        None
+    };
     tx.commit().await?;
-    Ok(Json(repos))
+
+    Ok(Json(
+        repos
+            .into_iter()
+            .map(|repo| RepoListItem {
+                has_active_lease: active.as_ref().map(|a| a.contains(&repo.id)),
+                repo,
+            })
+            .collect(),
+    ))
 }
 
 /// `POST /api/orgs/{org}/repos` — register a repo.

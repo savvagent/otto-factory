@@ -523,7 +523,25 @@ fn entity_schemas() -> Value {
         },
         "TeamMemberList": { "type": "array", "items": reference("TeamMember") },
         "Repo": repo,
-        "RepoList": { "type": "array", "items": reference("Repo") },
+        "RepoListItem": {
+            "allOf": [
+                reference("Repo"),
+                {
+                    "type": "object",
+                    "properties": {
+                        "hasActiveLease": {
+                            "type": "boolean",
+                            "description":
+                                "Whether an unexpired lease is held on any resource in this \
+                                 repo right now. Present only when the request set \
+                                 `includeLeaseStatus=true`; omitted otherwise, since \
+                                 computing it costs an extra org-wide read.",
+                        },
+                    },
+                },
+            ],
+        },
+        "RepoList": { "type": "array", "items": reference("RepoListItem") },
         "Invite": invite,
         "InviteList": { "type": "array", "items": reference("Invite") },
         "Lease": {
@@ -1335,6 +1353,24 @@ mod tests {
                 .unwrap()
                 .contains(&serde_json::json!("resource")),
             "resource is required on every Lease this route returns: {lease}"
+        );
+    }
+
+    #[test]
+    fn the_repo_list_item_schema_advertises_has_active_lease() {
+        let doc = doc();
+        let repo_list_item = &doc["components"]["schemas"]["RepoListItem"];
+        let extension = &repo_list_item["allOf"][1];
+        assert_eq!(
+            extension["properties"]["hasActiveLease"]["type"], "boolean",
+            "RepoListItem schema is missing a boolean hasActiveLease property: {repo_list_item}"
+        );
+        // Not required: the handler omits it entirely unless the caller asked
+        // for it via `?includeLeaseStatus=true`, since computing it costs an
+        // extra org-wide read that most callers of this endpoint don't need.
+        assert!(
+            extension["required"].is_null(),
+            "hasActiveLease is opt-in, not required, on RepoListItem: {repo_list_item}"
         );
     }
 
