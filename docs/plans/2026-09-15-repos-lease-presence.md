@@ -10,8 +10,12 @@ keyboard-reachable info affordance — closing out `savvagent/otto-factory#168`.
 
 ## Status — 2026-09-15
 
-Not started. Two tasks: backend (the `hasActiveLease` field + its test) then frontend (the
-page changes + locale catalogs + its test).
+Done. Both tasks shipped in `savvagent/otto-factory#182` (merged as `9c6d879`), plus a
+post-review addendum gating `hasActiveLease` behind `?includeLeaseStatus=true` (see that
+addendum below) after review found the unconditional read was polled every 30 seconds by
+the org overview page for callers that never used the field. Review also added a dedicated
+OpenAPI schema-shape test (`the_repo_list_item_schema_advertises_has_active_lease`) beyond
+what Task 1 originally scoped.
 
 ## Global Constraints
 
@@ -64,7 +68,7 @@ test first means Task 2's manual verification pass (`cargo run -p of-server` + a
 browser) has real data to look at, and Task 2's plan text can cite the exact JSON field
 name Task 1 committed rather than a placeholder.
 
-## Task 1 — `of-web`: `hasActiveLease` on the repos list ⬜
+## Task 1 — `of-web`: `hasActiveLease` on the repos list ✅
 
 **Files:** `crates/of-web/src/routes/repos.rs`, `crates/of-web/src/openapi.rs`,
 `crates/of-web/tests/console.rs`
@@ -73,7 +77,7 @@ name Task 1 committed rather than a placeholder.
 (unchanged); produces `of-web`'s new `RepoListItem` DTO, serialized as `Repo`'s fields
 flattened plus `hasActiveLease: boolean`, from the existing `GET /api/orgs/{org}/repos`.
 
-- [ ] Add the failing test first. In `crates/of-web/tests/console.rs`, near the existing
+- [x] Add the failing test first. In `crates/of-web/tests/console.rs`, near the existing
       `// ----------------------------------------------------------------- leases` section
       (right after `the_lease_route_reports_the_resource_field`), add:
 
@@ -144,28 +148,28 @@ flattened plus `hasActiveLease: boolean`, from the existing `GET /api/orgs/{org}
       }
       ```
 
-- [ ] Run `cargo test -p of-web repos_list_reports_lease_presence_and_never_another_orgs` and
+- [x] Run `cargo test -p of-web repos_list_reports_lease_presence_and_never_another_orgs` and
       confirm it fails to compile/run (the field does not exist yet).
-- [ ] In `crates/of-web/src/routes/repos.rs`, add the `RepoListItem` struct directly above
+- [x] In `crates/of-web/src/routes/repos.rs`, add the `RepoListItem` struct directly above
       `list_repos` and change `list_repos`'s signature and body per the spec's §1 (import
       `of_core::ids::RepoId` is not required — `HashSet<_>` infers it from `Lease::repo_id`).
       Keep `get_repo`, `register_repo`, `update_repo` returning bare `Repo`, unchanged.
-- [ ] Run `cargo test -p of-web repos_list_reports_lease_presence_and_never_another_orgs` again
+- [x] Run `cargo test -p of-web repos_list_reports_lease_presence_and_never_another_orgs` again
       and confirm it passes. Then run the pre-existing lease/repo tests in the same file
       (`cargo test -p of-web --test console`) to confirm no regression — in particular
       `the_lease_route_reports_the_resource_field` and
       `another_orgs_data_is_not_merely_forbidden_it_is_invisible`.
-- [ ] Update `crates/of-web/src/openapi.rs`: add the `RepoListItem` schema (spec §2, `allOf`
+- [x] Update `crates/of-web/src/openapi.rs`: add the `RepoListItem` schema (spec §2, `allOf`
       pattern mirroring `JobDetail`) and change `RepoList`'s `items` to
       `reference("RepoListItem")`.
-- [ ] Run `cargo test -p of-web` (the whole crate) to catch any OpenAPI-document test that
+- [x] Run `cargo test -p of-web` (the whole crate) to catch any OpenAPI-document test that
       snapshots the schema shape (e.g. a test asserting `paths["/api/orgs/{org}/repos"]` is an
       object, per `console.rs:1606` — confirm it still passes; it does not assert the referenced
       schema's contents, only that the path exists).
-- [ ] `cargo clippy --all-targets -- -D warnings` and `cargo fmt --all`.
-- [ ] Commit: `git commit -m "of-web: report per-repo lease presence on the repos list"`.
+- [x] `cargo clippy --all-targets -- -D warnings` and `cargo fmt --all`.
+- [x] Commit: `git commit -m "of-web: report per-repo lease presence on the repos list"`.
 
-## Task 2 — `web/`: presence pill, heading, explainer, info affordance ⬜
+## Task 2 — `web/`: presence pill, heading, explainer, info affordance ✅
 
 **Files:** `web/src/lib/types.ts`, `web/src/lib/api.ts`,
 `web/src/routes/o/[org]/repos/+page.svelte`, `web/src/routes/o/[org]/repos/RepoHarness.svelte`,
@@ -174,7 +178,7 @@ flattened plus `hasActiveLease: boolean`, from the existing `GET /api/orgs/{org}
 **Interfaces:** consumes `GET /api/orgs/{org}/repos`'s new `hasActiveLease` field (Task 1);
 produces no new interface — this is the console-only presentation layer.
 
-- [ ] `web/src/lib/types.ts`: add, immediately after the existing `Repo` interface:
+- [x] `web/src/lib/types.ts`: add, immediately after the existing `Repo` interface:
 
       ```ts
       export interface RepoListItem extends Repo {
@@ -182,25 +186,25 @@ produces no new interface — this is the console-only presentation layer.
       }
       ```
 
-- [ ] `web/src/lib/api.ts`: change `repos: (org: string, includeInactive = false) =>
+- [x] `web/src/lib/api.ts`: change `repos: (org: string, includeInactive = false) =>
       get<Repo[]>(...)` to `get<RepoListItem[]>(...)`, adding `RepoListItem` to the file's
       type imports.
-- [ ] Add locale keys to all six `web/messages/*.json` files (`en`, `es`, `de`, `fr`, `it`,
+- [x] Add locale keys to all six `web/messages/*.json` files (`en`, `es`, `de`, `fr`, `it`,
       `hi`) near the existing `repos_*` keys: `repos_leases_heading`, `repos_leases_info_label`,
       `repos_leases_info_detail`, `repos_badge_in_use`. Change `repos_hide_leases`'s value in
       all six (from "Hide leases"/its translation to a plain collapse word not naming the
       mechanism — sanity-check tone per locale rather than a literal word-for-word translation
       of the English "Hide"). Leave `repos_show_leases` untouched in all six.
-- [ ] Run `npm run check` from `web/` — `check:messages` will fail until every new key has a
+- [x] Run `npm run check` from `web/` — `check:messages` will fail until every new key has a
       value in every locale and no plural category is needed for these (no `{count}` in any of
       them); confirms the catalogs are complete before touching the component.
-- [ ] Write the failing component test first. Create
+- [x] Write the failing component test first. Create
       `web/src/routes/o/[org]/repos/RepoHarness.svelte`, mirroring
       `web/src/routes/o/[org]/OrgPageHarness.svelte` (not `queue/QueueHarness.svelte` — this page
       reads no query params, so it needs no `url` prop, no `setUrl` export, and no
       `$app/navigation` mocking; `OrgPageHarness.svelte`'s plain `provideOrg(new OrgContext(() =>
       slug))` + `<Page />` is the right-sized precedent).
-- [ ] Create `web/src/routes/o/[org]/repos/page.render.test.ts` with (at minimum) these cases,
+- [x] Create `web/src/routes/o/[org]/repos/page.render.test.ts` with (at minimum) these cases,
       following the `beforeEach`/`afterEach`/fake-timers/`vi.stubGlobal('fetch', ...)` harness
       pattern from `queue/page.render.test.ts`:
       - stubbing `/repos` to return one repo with `hasActiveLease: true` and one with `false`,
@@ -223,9 +227,9 @@ produces no new interface — this is the console-only presentation layer.
         while open closes it; blurring it (dispatch a `focusout`/call `.blur()`) also closes it;
         and switching directly to a different row's toggle must not carry a stale open popover
         into that row.
-- [ ] Run the new test file (`npx vitest run src/routes/o/[org]/repos/page.render.test.ts` from
+- [x] Run the new test file (`npx vitest run src/routes/o/[org]/repos/page.render.test.ts` from
       `web/`) and confirm it fails (the component has none of this yet).
-- [ ] Implement the changes in `web/src/routes/o/[org]/repos/+page.svelte` per spec §3–§4:
+- [x] Implement the changes in `web/src/routes/o/[org]/repos/+page.svelte` per spec §3–§4:
       - Add `RepoListItem` to the `$lib/types` import; retype `let repos = $state<Repo[]>([]);`
         to `$state<RepoListItem[]>([]);` (spec §3 — this is the one file where the wider type
         must be named, not merely accepted structurally).
@@ -237,12 +241,12 @@ produces no new interface — this is the console-only presentation layer.
         the lease `<div>` (spec §4's template), and delete `repos_leases_note`'s old
         rendering after the non-empty lease list (its content moved to the always-visible spot).
       - Nothing else in the expander (tracker-bindings block, admin buttons) changes.
-- [ ] Run the component test again and confirm it passes.
-- [ ] Run `npm run check`, `npm run lint`, and `npm test` (the whole suite) from `web/` and
+- [x] Run the component test again and confirm it passes.
+- [x] Run `npm run check`, `npm run lint`, and `npm test` (the whole suite) from `web/` and
       confirm no regression — in particular the existing `queue/page.render.test.ts` and
       `o/[org]/page.render.test.ts`, since both consume `api.repos()`'s return type.
-- [ ] `npm run build` once, to confirm the SPA still builds cleanly with the retyped API client.
-- [ ] Commit: `git commit -m "web: show at-a-glance lease presence and explain leases on the repos page"`.
+- [x] `npm run build` once, to confirm the SPA still builds cleanly with the retyped API client.
+- [x] Commit: `git commit -m "web: show at-a-glance lease presence and explain leases on the repos page"`.
 
 ## Addendum — `hasActiveLease` gated behind `?includeLeaseStatus=true` (post-review)
 
@@ -262,7 +266,7 @@ the full rationale. Committed as
 
 ## Final gate (both tasks)
 
-- [ ] `cargo test --workspace`
-- [ ] `cargo clippy --all-targets -- -D warnings`
-- [ ] `cargo fmt --all --check`
-- [ ] `cd web && npm run check && npm run lint && npm test && npm run build`
+- [x] `cargo test --workspace`
+- [x] `cargo clippy --all-targets -- -D warnings`
+- [x] `cargo fmt --all --check`
+- [x] `cd web && npm run check && npm run lint && npm test && npm run build`
