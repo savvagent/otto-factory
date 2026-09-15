@@ -152,12 +152,13 @@ variant, consumed by `of-web` in Task 2.
       `let user_id = user_id.ok_or(AuthError::CeremonyExpired)?;` and before
       `webauthn.finish_passkey_registration(...)`. Update both functions' doc comments per the
       spec's note in Approach §2 (name `expected` and the ordering guarantee).
-- [ ] Update the other 6 call sites in `crates/of-auth/tests/passkeys.rs` (every remaining call to
-      `passkeys::finish_registration(...)` — grep the file for `finish_registration(` to find all of
-      them) to pass `None` in the new parameter position. None of these tests' behavior or
+- [ ] Update all 7 pre-existing call sites in `crates/of-auth/tests/passkeys.rs` (every existing
+      call to `passkeys::finish_registration(...)` — grep the file for `finish_registration(` to
+      find all of them; the new test just added is a separate, brand-new function and is not one of
+      these 7) to pass `None` in the new parameter position. None of these tests' behavior or
       assertions change — this is purely a signature-compatibility edit.
 - [ ] Run `cargo test -p of-auth --test passkeys` (the whole file) and confirm every test passes,
-      including the new one and all 6 pre-existing call sites unchanged in behavior.
+      including the new one and all 7 pre-existing call sites unchanged in behavior.
 - [ ] Run `cargo build --workspace` and confirm the *only* errors are in `crates/of-web/src/routes/auth.rs`
       (missing arguments to `finish_registration`/`finish_registration_tx`) — i.e. the of-auth side
       is fully consistent and Task 2 is the only remaining work.
@@ -184,16 +185,16 @@ keeps its existing route, method, and response shapes (403 on mismatch, 204 on s
       /// after they've already committed.
       #[sqlx::test(migrations = "../of-core/migrations")]
       async fn add_passkey_finish_refuses_a_ceremony_started_by_another_account(pool: PgPool) {
-          let db = of_core::Db::from_pool(pool);
-          let config = of_web::Config::new(common::PUBLIC_URL, common::RESOURCE);
-          let webauthn = of_web::relying_party(&config).expect("relying party");
-          let state = of_web::AppState::new(db.clone(), common::cipher(), webauthn, config);
-          let h = common::Harness {
-              db,
-              router: of_web::router(state),
-              cipher: common::cipher(),
-          };
+          let h = common::harness(pool);
 
+          // `onboard` itself drives a real signup ceremony for each account, so
+          // each already has exactly one `passkeys` row and one
+          // `PASSKEY_REGISTERED` audit row before the mismatch attempt below —
+          // the zero-row assertions this test cares about must be scoped to
+          // `other` and expect that pre-existing one, not a bare table count
+          // (which `add_passkey_finish_records_the_add_flow_and_its_ip` already
+          // gets right by filtering on `actor_user_id`; this test follows the
+          // same discipline).
           let owner = onboard(&h, "owner@acme.test").await;
           let other = onboard(&h, "other@acme.test").await;
 
@@ -229,32 +230,38 @@ keeps its existing route, method, and response shapes (403 on mismatch, 204 on s
               .await;
           finished.expect(StatusCode::FORBIDDEN);
 
-          let passkey_count: i64 = sqlx::query_scalar("SELECT count(*) FROM passkeys")
+          // Scoped to `other` (the caller the mismatch was attributed to, and
+          // the account a successful attach would have added a *second*
+          // credential/audit row to) — `other` already has exactly one of each
+          // from `onboard`'s own signup ceremony, and the assertion is that the
+          // refused attempt added no more, not that the table is empty.
+          let passkey_count: i64 = sqlx::query_scalar("SELECT count(*) FROM passkeys WHERE user_id = $1")
+              .bind(other.user)
               .fetch_one(h.db.pool())
               .await
               .unwrap();
           assert_eq!(
-              passkey_count, 0,
-              "a ceremony/caller mismatch must not leave a credential behind"
+              passkey_count, 1,
+              "a ceremony/caller mismatch must not leave a second credential behind on `other`"
           );
 
           let audit_count: i64 = sqlx::query_scalar(
-              "SELECT count(*) FROM audit_events WHERE action = $1",
+              "SELECT count(*) FROM audit_events WHERE action = $1 AND actor_user_id = $2",
           )
           .bind(of_core::audit::action::PASSKEY_REGISTERED)
+          .bind(other.user)
           .fetch_one(h.db.pool())
           .await
           .unwrap();
           assert_eq!(
-              audit_count, 0,
-              "a refused request must not leave a row asserting it succeeded"
+              audit_count, 1,
+              "a refused request must not add a second row asserting `other` completed a registration"
           );
       }
       ```
 
-      Check `onboard`'s exact return shape (used elsewhere in this file, e.g. in
-      `add_passkey_finish_records_the_add_flow_and_its_ip` as `rob.session`/`rob.user`) before
-      relying on `.session` — match whatever field name that helper actually exposes.
+      `onboard`'s return type (`common::Account`) has `.user: UserId` and `.session: String` fields
+      — confirmed against `crates/of-web/tests/common/mod.rs`, used exactly this way above.
 - [ ] Run the new test and confirm it currently fails to compile (Task 1's signature change means
       every call site in `auth.rs` is currently broken, so nothing in this crate compiles yet —
       expected at this point in the plan).
