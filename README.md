@@ -15,6 +15,10 @@ claude mcp add --transport http factory https://mcp.<domain>/mcp
 
 That is the entire client-side install.
 
+Want your agent to register its own sessions automatically? See
+[`client-skills/`](client-skills/README.md) for per-client templates, maintained by the
+community rather than the server.
+
 ## Design principles
 
 **It is about coordinating work, anchored on repositories.** A repo is a first-class,
