@@ -63,6 +63,19 @@
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
+# Force C-locale byte semantics for every regex/glob/`case`/`tr` in this
+# script (final close-out pass, blind-security finding 2): bash's `[[ =~ ]]`
+# compiles POSIX ERE character ranges against the CURRENT locale, and under a
+# UTF-8 locale `[A-Za-z0-9._-]` collates accented multibyte letters as
+# alphabetic, so the host/owner grammar below would silently let e.g. `é`
+# into the "ASCII-only" URL in an environment that happens to export a UTF-8
+# locale. With `LC_ALL=C` the ranges are byte-exact and every non-ASCII byte
+# is rejected before anything is built from the remote. This only affects
+# this hook subprocess, never the session it fires in, and none of the
+# commands below (git reads, `date -u +%Y-%m-%d`, the JSON emission) produce
+# locale-dependent output.
+export LC_ALL=C
+
 # Claude Code pipes a JSON payload on stdin that includes a `cwd` field
 # naming the project directory. Read it defensively rather than assuming the
 # hook process's own working directory is already the project root, and cap

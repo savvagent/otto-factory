@@ -87,6 +87,16 @@ flat character-class allowlist:
    control 4 below (fencing) still matters as defense in depth, and control 2 below (the
    allowlist) is the one that matters most, since it is what keeps an attacker's own repo
    from reaching this point at all.
+
+   **The grammar is evaluated under an exported `LC_ALL=C` so its character ranges are
+   byte-exact.** Under a UTF-8 locale, bash's own regex engine collates accented multibyte
+   letters inside `[A-Za-z0-9._-]`, so a host or path spelled `café-repo` could pass a check
+   that claims to admit ASCII only. Forcing the C locale makes the "ASCII-only" claim
+   literally true regardless of the user's environment — every non-ASCII byte is rejected
+   before anything is built from the remote (confirmed empirically under
+   `LC_ALL=en_US.UTF-8`). This is in addition to control 2's allowlist compare, which is
+   byte-equality against ASCII `host/owner` entries and therefore rejects a non-ASCII host
+   or owner on its own.
 2. **The hook is inert by default, in every repo, until the developer opts a specific
    `host/owner` in — not merely a host.** Before anything else is built,
    `session-start-hook.sh` reads `~/.claude/otto-factory-repos` (one `host/owner` pair per
@@ -393,9 +403,14 @@ calls themselves always appear in the normal tool-call transcript.
   `host/owner` *is* opted in (e.g. another repo under the same org on `github.com`), this
   residual is not fully closed by this
   template alone — but what such a forged marker can *contain* is now bounded to a slug string
-  and a 16-character hex digest, never free text, so the worst outcome is a misleading but
-  inert audit-log entry, not an instruction reaching a model with real otto-factory
-  credentials. `metadata.branch` is `branch_digest` (hex) for exactly this reason.
+and a 16-character hex digest, never free text, so the worst outcome is a misleading but
+   inert audit-log entry, not an instruction reaching a model with real otto-factory
+   credentials. Even that narrower residue is bounded by `resolve_repo`'s own exact-match
+   semantics: the server matches a supplied remote by equality against the org's registered,
+   normalized remotes (`crates/of-core/src/repos.rs`), so a path under an opted-in
+   `host/owner` that the org never registered — an attacker-cloned `otto-factory-clone.git`
+   — resolves to nothing and the instruction chain stops there.
+   `metadata.branch` is `branch_digest` (hex) for exactly this reason.
 - **A stray `in-progress` marker job** (from `add_job`/`claim_jobs` succeeding but
   `complete_job` never being reached) is left claimed rather than completed. It is easy for
   a human to spot (title `"session marker — do not claim"`, `metadata.kind:
@@ -411,7 +426,10 @@ calls themselves always appear in the normal tool-call transcript.
 - **A remote or branch outside the validation rules, or a `host/owner` pair outside the
   allowlist, produces no marker at all**, silently, the same as "not a git repo." This is a
   known, accepted trade — see Security above — not a bug to fix by loosening the checks
-  without a reason.
+  without a reason. Note this includes genuine-looking remotes that the URL grammar simply
+  does not cover: percent-encoded paths (`a%20b.git`), a `~` in a path, or a scheme other
+  than the three forms git itself produces (`https`, `ssh://`, scp-like) are all rejected,
+  so a developer using such a remote just gets no marker.
 - **`idempotencyKey` is not unconstrained length.** `crates/of-core/src/idempotency.rs`
   enforces a 200-character cap; `branch_digest` is now a fixed 16 hex characters, so the only
   remaining variable-length component is the resolved slug — an unusually long slug could

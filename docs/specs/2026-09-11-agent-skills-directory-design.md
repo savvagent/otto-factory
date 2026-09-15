@@ -317,7 +317,13 @@ it out.
    second, independently-written one; and nothing is built at all until that `host/owner` pair
    matches an entry in the developer's own opt-in allowlist file (`~/.claude/otto-factory-repos`,
    owner-scoped rather than host-scoped, because a bare hostname arms the hook in every repo on
-   that host). Every rejection path exits `0` with no stdout, the same as "not a git repo."
+   that host). The grammar is evaluated under an exported `LC_ALL=C` so its character ranges
+   are byte-exact rather than collation-relative — under a UTF-8 locale, bash's regex engine
+   collates accented multibyte letters inside `[A-Za-z0-9._-]`, which a blind security review
+   of the final diff found would let a host or path like `café-repo` past a check that claims
+   to admit ASCII only; pinning the C locale (plus the byte-equality allowlist compare on
+   host/owner) closes it. Every rejection path exits `0` with no stdout, the same as "not a
+   git repo."
 4. On success, the script prints one JSON object to stdout in whatever shape Claude Code's current
    `SessionStart` hook documentation specifies for injecting text into the model's own next turn
    (at the time of writing, `hookSpecificOutput.additionalContext` — **verify the exact field name

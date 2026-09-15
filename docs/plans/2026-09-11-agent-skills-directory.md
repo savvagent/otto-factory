@@ -50,11 +50,23 @@ and the title, and warned against in the template's README). The close-out also:
 `date` command under `set -e` so a failing `date` exits `0` silently like every other local
 failure; carried the `claim_jobs` response's `attempts` through to `complete_job` as
 `expectedAttempts` (the claim-generation fence from #161); documented the minimum MCP scopes
-(`repos:read` + `jobs:write`) in the template's install steps; aligned the shared contract's
-failure policy with the instruction's one-short-line acknowledgement; documented the
-cross-user idempotency behavior (`created_by` sits in the fingerprint, so a second developer
-same-branch-same-day silently has no marker) as a decided limitation; and corrected the
-"what was verified" record to distinguish the raw-`/` key probe from the shipped digest key.
+   (`repos:read` + `jobs:write`) in the template's install steps; aligned the shared contract's
+   failure policy with the instruction's one-short-line acknowledgement; documented the
+   cross-user idempotency behavior (`created_by` sits in the fingerprint, so a second developer
+   same-branch-same-day silently has no marker) as a decided limitation; and corrected the
+   "what was verified" record to distinguish the raw-`/` key probe from the shipped digest key.
+
+   The one blind security review of the final diff (developer sign-off question 4) came back
+   clean of Critical/High/Moderate findings and made one concrete code claim before merge:
+   the URL grammar was locale-dependent (under a UTF-8 locale, bash's regex engine collates
+   accented letters inside `[A-Za-z0-9._-]`, so a `café` host/path could pass). Closed by
+   exporting `LC_ALL=C` in the hook so the ASCII-only invariant is byte-exact in any
+   environment — empirically confirmed with a `café-repo` remote under
+   `LC_ALL=en_US.UTF-8` (no stdout, exit 0). The review also asked one verification question
+   about the remote-resolution trust boundary, answered from the server source: `resolve_repo`
+   matches a remote by exact equality against the org's registered normalized remotes
+   (`crates/of-core/src/repos.rs`), so a path under an opted-in `host/owner` that was never
+   registered resolves to nothing and the instruction chain stops there.
 
 See the spec's Architecture, Error Handling, and Risks sections for the full correction
 record. The two sign-off questions are resolved: they were explicitly raised, explicitly
