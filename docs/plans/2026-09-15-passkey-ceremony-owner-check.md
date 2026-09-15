@@ -1,0 +1,293 @@
+# Passkey ceremony-ownership check moves before the write — implementation plan
+
+**Spec:** [`docs/specs/2026-09-15-passkey-ceremony-owner-check-design.md`](../specs/2026-09-15-passkey-ceremony-owner-check-design.md)
+— read it first. This plan implements it exactly.
+
+Goal: `add_passkey_finish` must fail a ceremony/caller mismatch before the credential is inserted
+and before the `auth.passkey.registered` audit row is written, so a refused request can never
+leave a record asserting it succeeded — closing the remaining half of `savvagent/otto-factory#109`
+(`claim_finish`'s half was already closed by `#164`/`#132`).
+
+## Status — 2026-09-15
+
+Not started. Two tasks: `of-auth` (the shared function + its own tests) first, then `of-web`
+(the three call sites + the HTTP-level regression test), since `of-web` cannot compile against
+the new signature until `of-auth` ships it.
+
+## Global Constraints
+
+- No AI self-attribution anywhere (commit messages, code comments, docs, PR body).
+- Run `cargo fmt --all` before every Rust commit.
+- No SQL changes anywhere — `webauthn_ceremonies`, `passkeys`, and `account_claims` carry no
+  `org_id` and no tenant-isolation policy (per `crates/of-web/src/routes/auth.rs`'s own comment on
+  `claim_finish`'s `begin_unpinned()` call); this fix is pure application-layer ordering, so no
+  cross-org test is owed and none is added.
+- This touches the auth spine (`of-auth`: passkey ceremonies) directly — never fast-path eligible,
+  regardless of size. The full spec + plan + critique loop already ran; this plan is the result.
+- No password, no email, no recovery-code reintroduction — untouched by this change.
+- Tests need a real Postgres: `podman compose up -d` and a `.env` with `DATABASE_URL`
+  (`cp .env.example .env`) before `cargo test -p of-auth` / `cargo test -p of-web`.
+- **Task 1 alone does not make `cargo test --workspace` pass** — `of-web`'s `auth.rs` still calls
+  the old three-parameter-shorter signature until Task 2 lands. Task 1's own gate is
+  `cargo test -p of-auth` (plus `cargo build --workspace` to confirm the *shape* of the breakage is
+  exactly "of-web hasn't been updated yet," not something else). The full-workspace gate runs only
+  after Task 2.
+- Non-Negotiable Rule 6: the `code` string for `add_passkey_finish`'s existing 403 changes from the
+  generic `"forbidden"` to a dedicated `"ceremony_account_mismatch"` — per the spec's Assumptions,
+  this is additive/refining, not breaking (status code stays 403; `"forbidden"` was never a
+  documented per-endpoint contract). No `docs/clients/matrix.md` update needed — this isn't a
+  client-registration or redirect-URI concern.
+
+## File Structure
+
+| File | Responsibility |
+|---|---|
+| **Modify.** `crates/of-auth/src/error.rs` | New `AuthError::CeremonyAccountMismatch` variant: `status()` (403), `public()` message. |
+| **Modify.** `crates/of-auth/src/passkeys.rs` | `finish_registration`/`finish_registration_tx` gain `expected: Option<UserId>`, checked immediately after `take_ceremony`, before any write. Doc comments updated. |
+| **Modify.** `crates/of-auth/tests/passkeys.rs` | 7 existing call sites updated for the new parameter; one new test proving a mismatch returns `Err` before any `passkeys` row exists. |
+| **Modify.** `crates/of-web/src/error.rs` | `auth_code()` gains `AuthError::CeremonyAccountMismatch => "ceremony_account_mismatch"`. |
+| **Modify.** `crates/of-web/src/routes/auth.rs` | `signup_finish`/`claim_finish` pass `expected: None`; `add_passkey_finish` passes `Some(caller.user.id)` and drops its now-unreachable post-hoc check. |
+| **Modify.** `crates/of-web/tests/console.rs` | New `#[sqlx::test]`: a ceremony/caller mismatch on `POST /api/me/passkeys/finish` returns 403 and writes neither a `passkeys` row nor a `PASSKEY_REGISTERED` audit row. |
+
+## Task Order & Rationale
+
+`of-auth` first: it owns `finish_registration`/`finish_registration_tx` and the new `AuthError`
+variant, and `of-web` is a downstream consumer that cannot compile against the new signature until
+it exists. Doing it in this order also means Task 1's own test (function-level, no HTTP/session
+plumbing) proves the ordering fix in isolation before Task 2 proves it end-to-end through the
+actual handler that was broken.
+
+## Task 1 — `of-auth`: `expected` parameter + dedicated error variant ⬜
+
+**Files:** `crates/of-auth/src/error.rs`, `crates/of-auth/src/passkeys.rs`,
+`crates/of-auth/tests/passkeys.rs`
+
+**Interfaces:** `finish_registration`/`finish_registration_tx` change signature (new
+`expected: Option<UserId>` parameter); produces the new `AuthError::CeremonyAccountMismatch`
+variant, consumed by `of-web` in Task 2.
+
+- [ ] Add the failing test first. In `crates/of-auth/tests/passkeys.rs`, near
+      `a_forced_audit_failure_rolls_back_the_credential` (which already establishes the
+      start-ceremony → do_registration → assert-zero-rows pattern this test reuses), add:
+
+      ```rust
+      /// `expected`, when `Some`, must be checked before anything is written — a
+      /// mismatch must not leave a live credential or an audit row for a request
+      /// the caller never actually authorized. `savvagent/otto-factory#109`.
+      #[sqlx::test(migrations = "../of-core/migrations")]
+      async fn a_ceremony_account_mismatch_writes_nothing(pool: PgPool) {
+          let db = Db::from_pool(pool);
+          let webauthn = rp();
+          let mut auth = authenticator();
+
+          // Two accounts: the ceremony belongs to `owner`, but the caller
+          // claims to be `other` — the substitution this check exists to catch.
+          // `create_unclaimed_user` is the same primitive `start_registration`
+          // itself uses to back a signup ceremony with `user: None` — a real,
+          // signable-into account, with no ceremony/session plumbing needed to
+          // get one for this test.
+          let owner = db.create_unclaimed_user().await.unwrap().id;
+          let other = db.create_unclaimed_user().await.unwrap().id;
+
+          let ceremony = passkeys::start_registration(&db, &webauthn, Some(owner))
+              .await
+              .unwrap();
+          let credential = auth
+              .do_registration(
+                  Url::parse(ORIGIN).unwrap(),
+                  for_soft_token(ceremony.challenge),
+              )
+              .expect("the authenticator refused the registration challenge");
+
+          let result = passkeys::finish_registration(
+              &db,
+              &webauthn,
+              ceremony.id,
+              &credential,
+              Some("laptop"),
+              passkeys::RegistrationVia::Add,
+              Some(other),
+              None,
+          )
+          .await;
+
+          assert!(
+              matches!(result, Err(AuthError::CeremonyAccountMismatch)),
+              "expected a CeremonyAccountMismatch, got {result:?}"
+          );
+
+          let passkey_count: i64 = sqlx::query_scalar("SELECT count(*) FROM passkeys")
+              .fetch_one(db.pool())
+              .await
+              .unwrap();
+          assert_eq!(
+              passkey_count, 0,
+              "a ceremony/caller mismatch must not leave a credential behind"
+          );
+
+          let audit_count: i64 = sqlx::query_scalar(
+              "SELECT count(*) FROM audit_events WHERE action = $1",
+          )
+          .bind(of_core::audit::action::PASSKEY_REGISTERED)
+          .fetch_one(db.pool())
+          .await
+          .unwrap();
+          assert_eq!(
+              audit_count, 0,
+              "a rejected request must not leave a row asserting it succeeded"
+          );
+      }
+      ```
+
+- [ ] Run `cargo test -p of-auth --test passkeys a_ceremony_account_mismatch_writes_nothing` and
+      confirm it fails to compile (the `expected` parameter and `AuthError::CeremonyAccountMismatch`
+      don't exist yet).
+- [ ] In `crates/of-auth/src/error.rs`, add the new variant per spec §1: the `#[error(...)]` unit
+      variant, its addition to `status()`'s existing `NotAMember | SsoRequired` 403 arm (now
+      `NotAMember | SsoRequired | CeremonyAccountMismatch`), and its `public()` message
+      (`"that ceremony belongs to a different account"`).
+- [ ] In `crates/of-auth/src/passkeys.rs`, add `expected: Option<UserId>` to both
+      `finish_registration` and `finish_registration_tx` per spec §2, positioned after `via` and
+      before `ip` in both signatures. Add the check immediately after
+      `let user_id = user_id.ok_or(AuthError::CeremonyExpired)?;` and before
+      `webauthn.finish_passkey_registration(...)`. Update both functions' doc comments per the
+      spec's note in Approach §2 (name `expected` and the ordering guarantee).
+- [ ] Update the other 6 call sites in `crates/of-auth/tests/passkeys.rs` (every remaining call to
+      `passkeys::finish_registration(...)` — grep the file for `finish_registration(` to find all of
+      them) to pass `None` in the new parameter position. None of these tests' behavior or
+      assertions change — this is purely a signature-compatibility edit.
+- [ ] Run `cargo test -p of-auth --test passkeys` (the whole file) and confirm every test passes,
+      including the new one and all 6 pre-existing call sites unchanged in behavior.
+- [ ] Run `cargo build --workspace` and confirm the *only* errors are in `crates/of-web/src/routes/auth.rs`
+      (missing arguments to `finish_registration`/`finish_registration_tx`) — i.e. the of-auth side
+      is fully consistent and Task 2 is the only remaining work.
+- [ ] `cargo clippy -p of-auth --all-targets -- -D warnings` and `cargo fmt --all`.
+- [ ] Commit: `git commit -m "of-auth: check ceremony ownership before any registration write"`.
+
+## Task 2 — `of-web`: the three call sites + the HTTP-level regression test ⬜
+
+**Files:** `crates/of-web/src/error.rs`, `crates/of-web/src/routes/auth.rs`,
+`crates/of-web/tests/console.rs`
+
+**Interfaces:** consumes `of_auth::passkeys::finish_registration`'s new signature and
+`AuthError::CeremonyAccountMismatch` (Task 1); produces no new interface — `add_passkey_finish`
+keeps its existing route, method, and response shapes (403 on mismatch, 204 on success).
+
+- [ ] Add the failing test first. In `crates/of-web/tests/console.rs`, near the existing
+      `add_passkey_finish_records_the_add_flow_and_its_ip` (reuse its harness-setup lines verbatim
+      — `Db::from_pool`, `Config::new`, `relying_party`, `AppState::new`, `Harness`), add:
+
+      ```rust
+      /// The `add_passkey_finish` half of `savvagent/otto-factory#109`: a ceremony
+      /// started by one account, finished while authenticated as a different one,
+      /// must be refused before the credential and its audit row exist — not
+      /// after they've already committed.
+      #[sqlx::test(migrations = "../of-core/migrations")]
+      async fn add_passkey_finish_refuses_a_ceremony_started_by_another_account(pool: PgPool) {
+          let db = of_core::Db::from_pool(pool);
+          let config = of_web::Config::new(common::PUBLIC_URL, common::RESOURCE);
+          let webauthn = of_web::relying_party(&config).expect("relying party");
+          let state = of_web::AppState::new(db.clone(), common::cipher(), webauthn, config);
+          let h = common::Harness {
+              db,
+              router: of_web::router(state),
+              cipher: common::cipher(),
+          };
+
+          let owner = onboard(&h, "owner@acme.test").await;
+          let other = onboard(&h, "other@acme.test").await;
+
+          // The ceremony is started while authenticated as `owner` ...
+          let started = Call::post("/api/me/passkeys/start")
+              .with_session(&owner.session)
+              .send(&h.router)
+              .await;
+          started.expect(StatusCode::OK);
+
+          let mut challenge: webauthn_rs::prelude::CreationChallengeResponse =
+              serde_json::from_value(started.body["challenge"].clone()).unwrap();
+          if let Some(selection) = challenge.public_key.authenticator_selection.as_mut() {
+              selection.require_resident_key = false;
+              selection.resident_key = None;
+          }
+          let mut device = common::authenticator();
+          let credential = device
+              .do_registration(
+                  webauthn_rs::prelude::Url::parse(common::PUBLIC_URL).unwrap(),
+                  challenge,
+              )
+              .expect("the authenticator refused the registration challenge");
+
+          // ... but finished while authenticated as `other`.
+          let finished = Call::post("/api/me/passkeys/finish")
+              .with_session(&other.session)
+              .json(serde_json::json!({
+                  "ceremonyId": started.body["ceremonyId"].as_str().unwrap(),
+                  "credential": credential,
+              }))
+              .send(&h.router)
+              .await;
+          finished.expect(StatusCode::FORBIDDEN);
+
+          let passkey_count: i64 = sqlx::query_scalar("SELECT count(*) FROM passkeys")
+              .fetch_one(h.db.pool())
+              .await
+              .unwrap();
+          assert_eq!(
+              passkey_count, 0,
+              "a ceremony/caller mismatch must not leave a credential behind"
+          );
+
+          let audit_count: i64 = sqlx::query_scalar(
+              "SELECT count(*) FROM audit_events WHERE action = $1",
+          )
+          .bind(of_core::audit::action::PASSKEY_REGISTERED)
+          .fetch_one(h.db.pool())
+          .await
+          .unwrap();
+          assert_eq!(
+              audit_count, 0,
+              "a refused request must not leave a row asserting it succeeded"
+          );
+      }
+      ```
+
+      Check `onboard`'s exact return shape (used elsewhere in this file, e.g. in
+      `add_passkey_finish_records_the_add_flow_and_its_ip` as `rob.session`/`rob.user`) before
+      relying on `.session` — match whatever field name that helper actually exposes.
+- [ ] Run the new test and confirm it currently fails to compile (Task 1's signature change means
+      every call site in `auth.rs` is currently broken, so nothing in this crate compiles yet —
+      expected at this point in the plan).
+- [ ] In `crates/of-web/src/error.rs`, add `AuthError::CeremonyAccountMismatch =>
+      "ceremony_account_mismatch",` to `auth_code()`'s match (compiler will refuse to build without
+      it — the match has no wildcard arm).
+- [ ] In `crates/of-web/src/routes/auth.rs`:
+      - `signup_finish` (~line 201): add `None,` in the new parameter position (after
+        `passkeys::RegistrationVia::Signup,`, before `ip.as_deref(),`).
+      - `claim_finish` (~line 387): add `None,` to its `finish_registration_tx` call, same
+        position. Do not touch anything else in this function — its own `if registered != user`
+        check, `drop(tx)`, and `note_claim_refused` calls stay exactly as they are.
+      - `add_passkey_finish` (~line 614): pass `Some(caller.user.id)` in that position; delete the
+        `let registered = ` binding (no longer needed) and the now-unreachable
+        `if registered != caller.user.id { return Err(ApiError::forbidden(...)) }` block per spec
+        §3's code sample.
+- [ ] Run `cargo build --workspace` and confirm it compiles clean.
+- [ ] Run the new test again and confirm it passes.
+- [ ] Run `cargo test -p of-web --test console` (the whole file) and confirm no regression — in
+      particular `add_passkey_finish_records_the_add_flow_and_its_ip` (the success path must be
+      completely unaffected) and every `claim_finish`-related test (`a_credential_collision_during_claim_finish_leaves_the_claim_code_usable`,
+      `a_forced_audit_failure_during_claim_finish_also_restores_the_claim`, and any other test whose
+      name contains `claim`).
+- [ ] Run `cargo test --workspace` (the full suite) and confirm everything passes.
+- [ ] `cargo clippy --all-targets -- -D warnings` and `cargo fmt --all`.
+- [ ] Commit: `git commit -m "of-web: pass the caller's identity through to the ceremony check"`.
+
+## Final gate (both tasks)
+
+- [ ] `cargo test --workspace`
+- [ ] `cargo clippy --all-targets -- -D warnings`
+- [ ] `cargo fmt --all --check`
+
+No `web/` change in this plan — nothing under `web/src` reads `AuthError`'s `code` string for this
+specific path (confirmed in the spec's Risks section), so `npm run check`/`lint`/`test`/`build` are
+not gated on this change. State this explicitly at close-out rather than skip it.
