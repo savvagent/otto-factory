@@ -196,9 +196,10 @@ produces no new interface — this is the console-only presentation layer.
       them); confirms the catalogs are complete before touching the component.
 - [ ] Write the failing component test first. Create
       `web/src/routes/o/[org]/repos/RepoHarness.svelte`, mirroring
-      `web/src/routes/o/[org]/queue/QueueHarness.svelte` exactly (mount `+page.svelte` inside
-      `provideOrg(new OrgContext(() => slug))`, no `url`/filter plumbing needed since this page
-      reads no query params).
+      `web/src/routes/o/[org]/OrgPageHarness.svelte` (not `queue/QueueHarness.svelte` — this page
+      reads no query params, so it needs no `url` prop, no `setUrl` export, and no
+      `$app/navigation` mocking; `OrgPageHarness.svelte`'s plain `provideOrg(new OrgContext(() =>
+      slug))` + `<Page />` is the right-sized precedent).
 - [ ] Create `web/src/routes/o/[org]/repos/page.render.test.ts` with (at minimum) these cases,
       following the `beforeEach`/`afterEach`/fake-timers/`vi.stubGlobal('fetch', ...)` harness
       pattern from `queue/page.render.test.ts`:
