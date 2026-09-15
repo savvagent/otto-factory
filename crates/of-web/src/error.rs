@@ -264,6 +264,7 @@ fn auth_code(e: &AuthError) -> &'static str {
         AuthError::CredentialAlreadyRegistered => "credential_already_registered",
         AuthError::UnknownCredential => "unknown_credential",
         AuthError::LastPasskey => "last_passkey",
+        AuthError::CeremonyAccountMismatch => "ceremony_account_mismatch",
 
         AuthError::Expired | AuthError::AlreadyConsumed | AuthError::Revoked => {
             "credential_expired"

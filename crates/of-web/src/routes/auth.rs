@@ -205,6 +205,7 @@ pub async fn signup_finish(
         &req.credential,
         req.nickname.as_deref(),
         passkeys::RegistrationVia::Signup,
+        None,
         ip.as_deref(),
     )
     .await?;
@@ -391,6 +392,7 @@ pub async fn claim_finish(
         &req.credential,
         req.nickname.as_deref(),
         passkeys::RegistrationVia::Claim,
+        None,
         ip.as_deref(),
     )
     .await
@@ -618,25 +620,17 @@ pub async fn add_passkey_finish(
     Json(req): Json<FinishRegistration>,
 ) -> ApiResult<Response> {
     let ip = client_ip(&parts, &state.config);
-    let registered = passkeys::finish_registration(
+    passkeys::finish_registration(
         &state.db,
         &state.webauthn,
         req.ceremony_id,
         &req.credential,
         req.nickname.as_deref(),
         passkeys::RegistrationVia::Add,
+        Some(caller.user.id),
         ip.as_deref(),
     )
     .await?;
-
-    // The ceremony was opened for this session's account. A mismatch means one
-    // was substituted, and the safe answer is to refuse rather than to attach
-    // somebody's key to somebody else's account.
-    if registered != caller.user.id {
-        return Err(ApiError::forbidden(
-            "that ceremony belongs to another account",
-        ));
-    }
 
     Ok(http::StatusCode::NO_CONTENT.into_response())
 }

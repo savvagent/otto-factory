@@ -445,6 +445,86 @@ async fn add_passkey_finish_records_the_add_flow_and_its_ip(pool: PgPool) {
     assert_eq!(row.1.as_deref(), Some("203.0.113.7"));
 }
 
+/// The `add_passkey_finish` half of `savvagent/otto-factory#109`: a ceremony
+/// started by one account, finished while authenticated as a different one,
+/// must be refused before the credential and its audit row exist — not
+/// after they've already committed.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn add_passkey_finish_refuses_a_ceremony_started_by_another_account(pool: PgPool) {
+    let h = common::harness(pool);
+
+    // `onboard` itself drives a real signup ceremony for each account, so
+    // each already has exactly one `passkeys` row and one
+    // `PASSKEY_REGISTERED` audit row before the mismatch attempt below —
+    // the zero-row assertions this test cares about must be scoped to
+    // `other` and expect that pre-existing one, not a bare table count
+    // (which `add_passkey_finish_records_the_add_flow_and_its_ip` already
+    // gets right by filtering on `actor_user_id`; this test follows the
+    // same discipline).
+    let owner = onboard(&h, "owner@acme.test").await;
+    let other = onboard(&h, "other@acme.test").await;
+
+    // The ceremony is started while authenticated as `owner` ...
+    let started = Call::post("/api/me/passkeys/start")
+        .with_session(&owner.session)
+        .send(&h.router)
+        .await;
+    started.expect(StatusCode::OK);
+
+    let mut challenge: webauthn_rs::prelude::CreationChallengeResponse =
+        serde_json::from_value(started.body["challenge"].clone()).unwrap();
+    if let Some(selection) = challenge.public_key.authenticator_selection.as_mut() {
+        selection.require_resident_key = false;
+        selection.resident_key = None;
+    }
+    let mut device = common::authenticator();
+    let credential = device
+        .do_registration(
+            webauthn_rs::prelude::Url::parse(common::PUBLIC_URL).unwrap(),
+            challenge,
+        )
+        .expect("the authenticator refused the registration challenge");
+
+    // ... but finished while authenticated as `other`.
+    let finished = Call::post("/api/me/passkeys/finish")
+        .with_session(&other.session)
+        .json(serde_json::json!({
+            "ceremonyId": started.body["ceremonyId"].as_str().unwrap(),
+            "credential": credential,
+        }))
+        .send(&h.router)
+        .await;
+    finished.expect(StatusCode::FORBIDDEN);
+
+    // Scoped to `other` (the caller the mismatch was attributed to, and
+    // the account a successful attach would have added a *second*
+    // credential/audit row to) — `other` already has exactly one of each
+    // from `onboard`'s own signup ceremony, and the assertion is that the
+    // refused attempt added no more, not that the table is empty.
+    let passkey_count: i64 = sqlx::query_scalar("SELECT count(*) FROM passkeys WHERE user_id = $1")
+        .bind(other.user)
+        .fetch_one(h.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        passkey_count, 1,
+        "a ceremony/caller mismatch must not leave a second credential behind on `other`"
+    );
+
+    let audit_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_events WHERE action = $1 AND actor_user_id = $2",
+    )
+    .bind(of_core::audit::action::PASSKEY_REGISTERED)
+    .bind(other.user)
+    .fetch_one(h.db.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        audit_count, 1,
+        "a refused request must not add a second row asserting `other` completed a registration"
+    );
+}
+
 /// `signalAllAcceptedCredentials` names the credentials that still exist, and a
 /// browser matches them by credential id — so a list that carries only a row's
 /// UUID leaves a deleted passkey being offered in the picker forever. The
