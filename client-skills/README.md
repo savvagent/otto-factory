@@ -25,27 +25,37 @@ actually takes — follows the same job lifecycle:
 
 1. **Resolve the repo** via `resolve_repo` (by git remote URL, the normal case). On any
    failure — the repo isn't registered, there's no otto-factory MCP connection
-   configured, the server is unreachable — stop immediately and produce no visible
-   output. This directory never auto-registers a repo on a resolution failure.
+   configured, the server is unreachable — stop immediately and take no further
+   otto-factory action. This directory never auto-registers a repo on a resolution
+   failure. (What, if anything, may be said about the failure is point 5's job, not
+   this one's.)
 2. **Use the resolved canonical `slug` for everything downstream.** The `slug` `resolve_repo`
    returns is the one identifier used in the job's `repo` argument and in the idempotency
    key below — never a second, independently derived string (e.g. the raw remote URL).
 3. **Create an idempotent marker job.** Call `add_job` with an `idempotencyKey` derived
-   from repo slug + branch + UTC date (`session-<slug>-<branch>-<yyyy-mm-dd>`), so
-   repeated session starts on the same branch the same day collapse to one job rather
-   than spamming the queue. A detached HEAD (no stable branch name) skips queuing
-   entirely.
+   from repo slug + a 16-hex-character SHA-256 digest of the branch + UTC date
+   (`session-<slug>-<branch_digest>-<yyyy-mm-dd>`), so repeated session starts on the
+   same branch the same day collapse to one job rather than spamming the queue, and no
+   attacker-influenceable branch string ever lands in a key or in model-facing text
+   verbatim. A detached HEAD (no stable branch name) skips queuing entirely.
 4. **Close the job out — never leave it claimable.** `add_job` alone never establishes a
    claim, so a marker left at `add_job` sits `pending` in the general `ready` list, which
    is exactly what "a marker job" must never look like — real work waiting to be picked
    up. Branch on the returned job's `status`: `completed` → nothing further to do;
    `pending` → `claim_jobs` on that exact returned job id, then (only on a successful
    claim) `complete_job`; anything else → stop without guessing.
-5. **Fail silently, always.** Every failure at any step above — a resolution failure, an
-   MCP call erroring, no otto-factory connection configured at all — must never block,
-   delay, or surface an error in the developer's actual session. Where the client's own
-   hook surface supports a non-fatal warning channel (e.g. stderr), one line is
-   acceptable; nothing that interrupts or narrates over the developer's own work.
+5. **Fail silently, always — with one precisely-scoped exception.** Every failure at any
+   step above — a resolution failure, an MCP call erroring, no otto-factory connection
+   configured at all — never blocks or delays the developer's session, never retries, and
+   never produces a narration of what happened. The actor carrying out the calls (a
+   deterministic hook/script, or — for a client whose automation surface can't itself
+   reach a credential — the model following an injected instruction) may give **at most
+   one short, non-dramatizing line** in a channel that does not interrupt the developer's
+   own work: a hook's own stderr, or a single sentence in a model's reply. Nothing about
+   an otto-factory-side failure is ever the substance of a reply or a tool output, error
+   detail is never surfaced, and a template is free to stay fully silent instead. This is
+   one policy for both shapes — a "script prints to stderr" exception and a "model says
+   one line" exception are the same rule applied to the actor that happens to exist.
 6. **Treat every local value you interpolate as untrusted — and know what a character
    allowlist actually defends.** A git remote URL, a branch name, a file path — anything
    read from the developer's own repository state and then embedded in text a model is told
@@ -149,8 +159,10 @@ below:
       an unverified starting hypothesis (see `docs/clients/matrix.md`'s own register for
       this — "not run" is an acceptable, honest answer; a silent claim of "verified" when
       it wasn't is not).
-- [ ] Follows the silent-failure contract above — no blocking, no error surfaced to the
-      developer's normal session on any otto-factory-side failure.
+- [ ] Follows the silent-failure contract above — never blocks or delays the developer's
+      session on any otto-factory-side failure, never retries, and surfaces nothing beyond
+      (at most) one short, non-dramatizing line in the actor's least-intrusive channel
+      (a hook's stderr, or one sentence in a model's reply).
 - [ ] Does not attempt to auto-register an unregistered repo.
 - [ ] Does not call `claim_jobs` against anything from the general `ready` pool — only
       against a job id this same template just created.

@@ -181,6 +181,13 @@ steps succeeded or failed (see Known Gaps' note on why unconditional silence was
 5. Confirm your coding agent already has a working otto-factory MCP connection (OAuth or a
    personal access token) — this template assumes that connection exists; it does not
    configure one. See the root `docs/clients/matrix.md` and the console's connect page.
+   **The connection must carry at least the `repos:read` scope (for `resolve_repo`) and
+   the `jobs:write` scope (for `add_job`, `claim_jobs`, and `complete_job`).** A
+   least-privilege connection that has either scope but not the other silently no-ops —
+   `resolve_repo` alone proves nothing anyone can see, and without `jobs:write` the whole
+   marker chain is refused before the point the instruction could notice — exactly the
+   silent-failure behavior this contract is built around, so there is no error telling you
+   which scope is missing.
 
 **Project-level (the documented exception, not the default):** copying the script into one
 repo's own `.claude/hooks/session-start-hook.sh` and merging the snippet into
@@ -269,11 +276,16 @@ way, so the real reason for `startup`-only is the first one, not a defeat of ide
 3. Branch on the returned job's `status`:
    - `completed` → stop; today's marker for this branch already exists and is closed out.
    - `pending` → `claim_jobs` with `jobs: [<that job id>]`. If the claim fails (a concurrent
-     duplicate invocation won the race), stop.
+     duplicate invocation won the race), stop. On a successful claim, note the `attempts`
+     value the response carries for that job id.
    - anything else (in practice, `in-progress` or `active`) → stop without calling
      `complete_job` — see Known Gaps.
-4. On a successful claim: `complete_job` on that same job id with
-   `result: "session marker — no work performed"`.
+4. On a successful claim: `complete_job` on that same job id, with
+   `result: "session marker — no work performed"` **and `expectedAttempts` set to the
+   `attempts` value from that claim_jobs response.** This is the claim-generation fence
+   (`crates/of-core/src/jobs.rs`'s `complete_job`): were the model's turn delayed past the
+   900s claim TTL and a later invocation reclaimed the job, supplying the stale `attempts`
+   makes the `complete_job` fail instead of finalizing someone else's newer claim.
 
 The model keeps any acknowledgement of the above to at most one short line in its reply —
 it is not instructed to hide a genuine failure, only to avoid narrating a play-by-play — and
@@ -315,15 +327,23 @@ calls themselves always appear in the normal tool-call transcript.
   remote and the allowlist file — confirmed the case-insensitive comparison still matches.
   All four run against the actual script, not asserted from reading it.
 - **The job-lifecycle contract** (`resolve_repo` → `add_job` → `claim_jobs` → `complete_job`,
-  the idempotency key, and the branch-with-`/` question): exercised directly against a live
-  otto-factory server, following the injected instruction's steps by hand exactly as
-  written. `resolve_repo` resolved the remote to the `otto-factory` slug; `add_job` accepted
-  an idempotency key containing `/` (`session-otto-factory-docs/client-skills-directory-<date>`)
-  without error; the created job claimed and completed cleanly; a same-day replay with
-  identical arguments returned the original job already `completed`, with no second job
-  created and no second claim attempted, and was recorded server-side as a free replay, not
-  a billable call — confirming the idempotency behavior, that branch names containing `/`
-  need no special-casing, and the billing note below.
+  idempotent replay, and the claim fence): exercised directly against a live otto-factory
+  server, following the injected instruction's steps by hand exactly as written, using the
+  shipped digest-based idempotency key. `resolve_repo` resolved the remote to the
+  `otto-factory` slug; `add_job` accepted the key
+  `session-otto-factory-<16-hex-digest>-<date>` without error; the created job claimed and
+  completed cleanly (passing the claim_jobs response's `attempts` through as
+  `expectedAttempts`); a same-day replay with identical arguments returned the original job
+  already `completed`, with no second job created and no second claim attempted, and was
+  recorded server-side as a free replay, not a billable call — confirming the idempotency
+  behavior and the billing note below. The earlier branch-with-`/` question — whether a raw
+  `/` is legal inside an `idempotencyKey` — was answered separately, before the digest
+  change: a hand-built key containing a literal `/`
+  (`session-otto-factory-docs/client-skills-directory-<date>`, the then-current key shape)
+  went straight to `add_job` on the live server and was accepted without error, so branch
+  names containing `/` need no special-casing. The shipped script never exercises that
+  path — the branch reaches the key only as its hex digest — so this is recorded as a
+  direct server-API probe, not a property exercised by the hook's own emitted key.
 - **Not verified in this pass: a genuinely fresh, separately-observed live Claude Code
   session actually firing its own `SessionStart` hook and the model autonomously following
   the injected instruction with no operator driving it by hand.** That is the one part of
@@ -397,6 +417,17 @@ calls themselves always appear in the normal tool-call transcript.
   remaining variable-length component is the resolved slug — an unusually long slug could
   still reach the cap, silently producing no marker for that one repo rather than an error
   the developer would see. This is a narrower version of the original gap, not a new one.
+- **Only one developer's marker is recorded per branch per UTC day.** `add_job`'s
+  idempotency fingerprint includes `created_by`
+  (`crates/of-core/src/jobs.rs`'s `job_idempotency_fingerprint`), so a *second* otto-factory
+  user who opens the same repo and branch the same day does not replay the first user's key:
+  the differing fingerprint makes the `add_job` an `idempotency_key_conflict`, which
+  rejects the call and — per the silent-failure contract — leaves that second developer
+  with no marker and no visible sign. Accepted: the marker answers "did a development
+  session begin on this branch today" for the developer whose session it is, and the
+  per-branch-per-day dedup intent holds for the common case (one developer, many sessions).
+  Recording every user's sessions would need a per-user component in the key or a
+  server-side change, both out of scope here.
 - **Every genuinely new marker job costs three billable otto-factory calls**
   (`add_job` + `claim_jobs` + `complete_job`); a same-day replay on the same branch costs
   **zero** — `add_job`'s replay path is recorded as a free call (`Meter::record_replay`),

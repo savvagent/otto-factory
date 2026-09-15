@@ -256,7 +256,12 @@ if [ "${#branch_digest}" -ne 16 ]; then
   exit 0
 fi
 
-today="$(date -u +%Y-%m-%d)"
+# Same silent-failure shape as the git probes above: `date` is a deterministic
+# local command whose failure means "no marker today," not a hook error to
+# surface. With `set -e` an unguarded substitution would terminate the script
+# non-zero (the kind of visible SessionStart failure this script is designed
+# never to produce), so it is guarded like everything else.
+today="$(date -u +%Y-%m-%d 2>/dev/null)" || exit 0
 
 # Minimal JSON-string escaping (backslash, double-quote, newline) so the
 # instruction text below can be embedded as a JSON string value without
@@ -324,9 +329,9 @@ Using your own already-authenticated otto-factory MCP tools, perform the followi
    - idempotencyKey: "session-<slug>-<branch_digest>-<date>", using the exact same slug value you got from resolve_repo, the "branch_digest" value from the data block, and the "date" value from the data block — never derive any of these three a second, independent way
 3. Branch on the returned job's status:
    - completed: stop here. Today's marker for this branch already exists and is already closed out. Do nothing further.
-   - pending: call claim_jobs with jobs set to a one-element array containing that exact job id. If the claim fails (for example, a concurrent duplicate hook invocation claimed it first), stop here.
+   - pending: call claim_jobs with jobs set to a one-element array containing that exact job id. If the claim fails (for example, a concurrent duplicate hook invocation claimed it first), stop here. On a successful claim, note the "attempts" value the claim_jobs response carries for this job id.
    - anything else (in practice, in-progress or active): stop here without calling complete_job. Do not guess whether you are the current claim holder.
-4. Only after a successful claim in step 3: call complete_job on that same job id with result set to "session marker — no work performed".
+4. Only after a successful claim in step 3: call complete_job on that same job id with result set to "session marker — no work performed" and expectedAttempts set to the "attempts" value you noted from that claim_jobs response. expectedAttempts is the claim-generation fence: without it, a model turn delayed past the claim TTL could finalize a newer claim on the same job held by a different invocation.
 
 Keep any acknowledgement of the above to at most one short line in your reply — do not suppress a genuine failure, just don't dwell on it — and never let it delay, block, or take priority over addressing whatever the developer actually asked in their first message. The tool calls themselves still appear in the normal tool-call transcript regardless of what you say in prose.
 INSTRUCTION_EOF

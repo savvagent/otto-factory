@@ -1,5 +1,15 @@
 # Agent skills directory design
 
+> **Status:** IMPLEMENTED — shipped in `savvagent/otto-factory#181`, closing
+> `savvagent/otto-factory#180`. Ships `client-skills/` (behavior contract + contribution
+> checklist), a working Claude Code reference template (`SessionStart` hook script +
+> settings snippet), stub READMEs for Copilot CLI, Cursor, Codex CLI, Otto CLI, and generic,
+> and a root-README pointer. The two Risks-section sign-off questions were explicitly
+> answered by the developer during PR review on 2026-09-14 — see those bullets and the plan's
+> Status block. Implementation details that diverged from this document's early drafts
+> (digest-based idempotency key, URL-grammar validation, owner-scoped opt-in allowlist,
+> `expectedAttempts` fencing) are recorded in the Architecture section and the plan.
+
 ## Brief
 
 > Design and plan a `skills/` directory for the otto-factory repo: a community-maintained
@@ -291,22 +301,32 @@ it out.
    `date -u +%Y-%m-%d` in the hook's working directory (Claude Code passes the project directory
    as `cwd`). Either git command failing (not a git repo, no `origin` remote, detached HEAD) exits
    `0` immediately with no stdout — nothing injected, nothing queued.
-3. **Both captured values are validated against a strict allowlist before use.** The remote and
-   branch are local git state, but attacker-influenceable — anyone who controls a remote you add,
-   or a branch you fetch, controls these bytes, and step 4 below embeds them in text a model is
-   told to treat as instructions. A remote containing anything outside
-   `[A-Za-z0-9._:/@+~-]`, or a branch containing anything outside `[A-Za-z0-9._/-]`, or either
-   exceeding a fixed length cap, is rejected the same way as "not a git repo": exit `0`, no stdout,
-   nothing injected. This is not optional hardening; it is what keeps step 4's data block honestly
-   labeled "safe to treat as inert data" rather than merely asserting it.
+3. **The captured values are validated structurally, and emission is gated, before anything
+   untrusted is used.** The remote and branch are local git state, but attacker-influenceable —
+   anyone who controls a remote you add, or a branch you fetch, controls these bytes, and step 4
+   below embeds them in text a model is told to treat as instructions. The round-1 defense was a
+   flat character allowlist; that defends the shell, not the model — letters, digits, `.`, `-`,
+   `_`, `/` already spell fluent English (confirmed empirically against the round-1 script). The
+   shipped design instead (all four used together): the branch name is reduced to a 16-hex-character
+   SHA-256 digest before anything is derived from it, so it never reaches model-facing text in raw
+   form; the remote is checked against an actual URL grammar — scheme, host, length-capped path
+   segments, matched as one whole string via bash's own `[[ =~ ]]`, with any remote containing a
+   control character rejected outright (closing the round-2 `grep -E` per-line-anchoring bypass,
+   which a multi-line remote could otherwise ride through on its first valid line); the remote's
+   host and owner are read from that grammar match's own capture groups — the one parser, never a
+   second, independently-written one; and nothing is built at all until that `host/owner` pair
+   matches an entry in the developer's own opt-in allowlist file (`~/.claude/otto-factory-repos`,
+   owner-scoped rather than host-scoped, because a bare hostname arms the hook in every repo on
+   that host). Every rejection path exits `0` with no stdout, the same as "not a git repo."
 4. On success, the script prints one JSON object to stdout in whatever shape Claude Code's current
    `SessionStart` hook documentation specifies for injecting text into the model's own next turn
    (at the time of writing, `hookSpecificOutput.additionalContext` — **verify the exact field name
    and shape against current Claude Code hook documentation before implementing; do not assume
    this spec's description is still accurate**, per the standing Risk on hook-schema drift). The
-   injected text carries the validated remote URL, branch, and date inside a clearly labeled,
-   fenced *data* block — not spliced directly into the imperative instruction steps below — with
-   the instruction referring back to that block by name rather than reading as if the model itself
+injected text carries the validated remote URL, the branch **digest** (never the raw branch),
+    and date inside a clearly labeled, fenced *data* block — not spliced directly into the
+    imperative instruction steps below — with the instruction referring back to that block by name
+    rather than reading as if the model itself
    wrote the values into a sentence telling it what to do. The model is never asked to compute or
    guess any of these three values itself, only to follow the steps using them as data.
 
@@ -325,12 +345,12 @@ to whatever the developer actually typed):*
      "current repo" to fall back to, and a job with no resolvable repo is refused outright (this
      repo's own `repo_id NOT NULL` rule), so omitting this would make every marker-job creation
      fail before the claim/complete sequence below ever runs
-   - `title`: a fixed, literal `"session marker"` — **not** `"session: <branch>"` as an earlier
-     draft had it. The branch name is attacker-influenceable (see step 3's validation), and `title`
-     is the field most likely to be read as prose by another agent browsing `ready`/`list_jobs`;
-     keeping it fixed and literal means an attacker-chosen branch string never lands there. The
-     branch still appears, but only inside `metadata` below, which tooling reads as structured data
-     rather than narrated prose.
+   - `title`: a fixed, literal `"session marker — do not claim"` — **not** `"session: <branch>"`
+     as an early draft had it, and extended to the current wording in round 2. The branch name is
+     attacker-influenceable (see step 3), and `title` is the field most likely to be read as prose
+     by another agent browsing `ready`/`list_jobs`; keeping it fixed and literal means an
+     attacker-chosen string never lands there, and the "do not claim" wording is a loud signal to
+     any worker that happens to see the job in the general pool.
    - `description`: fixed, literal text from the injected instruction — the same wording on every
      call for the same idempotency key (see step 7; `add_job` errors if a replayed key's other
      arguments differ), so the instruction text itself must not embed a timestamp or any other
@@ -340,12 +360,13 @@ to whatever the developer actually typed):*
      `agentType` will not see this job; one that queries with no `agentType` filter at all still
      does. See the correction to the `add_job`→`claim_jobs` window above — this narrows that gap,
      it does not close it.
-   - `metadata`: `{"kind": "session-marker", "source": "client-skills/claude-code", "branch":
-     "<branch>"}` — an opaque, server-uninterpreted field per constraint 2, present so a customer's
-     own tooling (or a future console filter) can distinguish marker jobs from real work without
+   - `metadata`: `{"kind": "session-marker", "source": "client-skills/claude-code",
+     "branch_digest": "<16 hex chars>"}` — the branch digest from step 3, never the raw branch
+     name, in an opaque, server-uninterpreted field per constraint 2, present so a customer's own
+     tooling (or a future console filter) can distinguish marker jobs from real work without
      otto-factory itself needing to know the distinction exists
-   - `idempotencyKey`: `"session-<repo-slug>-<branch>-<yyyy-mm-dd>"`, using the embedded date and
-     the exact same step-5 `slug` used for the `repo` argument above
+   - `idempotencyKey`: `"session-<repo-slug>-<branch_digest>-<yyyy-mm-dd>"`, using the embedded
+     date and the exact same step-5 `slug` used for the `repo` argument above
 
    `add_job` returns the created job on a first call, or — on a same-day replay for the same
    branch — "the original job unchanged," per its own documented idempotency contract. Either way
@@ -358,14 +379,21 @@ to whatever the developer actually typed):*
      else `ready` might be holding — so there is no risk of this accidentally claiming an
      unrelated real job. If the claim fails (for example, a concurrent duplicate hook invocation —
      two sessions starting in the same instant — claimed it first), stop here: the other
-     invocation owns completing it.
+     invocation owns completing it. On a successful claim, note the `attempts` value the response
+     carries for that job id — it is the claim generation, and step 8's `complete_job` passes it
+     back as `expectedAttempts`.
    - **Anything else (in practice, `in-progress` or `active`** — the residue of a previous
      invocation that crashed after claiming but before completing): stop here rather than guessing.
      This session's own identity may or may not be the current claim holder, and attempting a
      `complete_job` that fails (wrong holder) or succeeds on a job it never actually did anything
      new for is worse than leaving it for a human to notice and resolve — see Error Handling.
 8. On a successful claim, call `complete_job` on that job id with a fixed `result` string
-   (`"session marker — no work performed"`).
+   (`"session marker — no work performed"`) and `expectedAttempts` set to the `attempts` value
+   noted from step 7's `claim_jobs` response. `complete_job`'s `expectedAttempts` is the
+   claim-generation fence (see `docs/specs/2026-09-10-claim-generation-fencing-design.md` and the
+   underlying #161): were the model's turn delayed past the claim TTL and a later invocation
+   reclaimed the job, passing the stale `attempts` makes the `complete_job` fail instead of
+   finalizing a claim this session no longer holds.
 9. Throughout steps 5-8: keep any acknowledgement in the reply to the developer to at most one
    short line — not an unconditional vow of silence on a genuine failure (an earlier draft of this
    instruction asked for exactly that, which a review round correctly flagged: telling a model to
@@ -425,17 +453,21 @@ claim, complete) is the strong default regardless of which shape carries it out.
   never actually did anything new for is worse than leaving it for a human to notice and resolve.
   Documented explicitly in `client-skills/claude-code/README.md` as a known gap rather than
   silently risked; the practical mitigation is that a stray `in-progress` marker job is easy for a
-  human to spot (title `"session marker"`, `metadata.kind: "session-marker"`) and resolve by hand
+  human to spot (title `"session marker — do not claim"`, `metadata.kind: "session-marker"`) and
+  resolve by hand
   (`complete_job`/`fail_job`). A more robust fix (e.g. a single combined server-side call) would
   be a server-side feature and is explicitly out of scope (see Scope) — constraint 3 already rules
   out adding anything to the server that only exists to make one client's convenience script
   simpler.
 - **Branch names containing `/` (e.g. `feature/foo`), or other punctuation, land inside the
   `idempotencyKey` string verbatim.** Neither `add_job`'s schema nor this spec's reading of it
-  documents a character restriction on `idempotencyKey`, so this is treated as unconstrained; the
-  plan's implementation task should confirm this against a live server rather than assume it, and
-  the template's `README.md` should say plainly that this is what was checked, not silently
-  assumed.
+  documents a character restriction on `idempotencyKey`, so this was treated as unconstrained and
+  flagged for live-server confirmation. **RESOLVED in the round-2 review-response pass:** the
+  branch is reduced to a 16-hex-character SHA-256 digest before anything is derived from it, so no
+  branch character ever lands in the idempotency key — or anywhere else in model-facing text —
+  verbatim; the digest also bounds the key to comfortably under `crates/of-core/src/idempotency.rs`'s
+  200-byte `MAX_KEY_LEN` regardless of branch length. Confirmed against the live server that the
+  digest-based key behaves as an idempotency key (same-day replay returns the original job).
 - **A customer's repo uses a different remote name than `origin`, or a monorepo with multiple
   remotes.** Out of scope for the reference implementation, which reads `origin` only, matching
   the same assumption `otto-factory-worker`/`otto-factory-scanner`'s own `Step 1` already makes
@@ -448,7 +480,8 @@ claim, complete) is the strong default regardless of which shape carries it out.
   and observe both halves: that the script actually emits the `additionalContext` JSON (checkable
   directly by running the script by hand with a fake `SessionStart` stdin payload, no live session
   needed), and that a real Claude Code session, given that injected context, actually performs the
-  full tool-call sequence and a completed `"session marker"` job appears via `list_jobs`/`stats` — this
+  full tool-call sequence and a completed `"session marker — do not claim"` job appears via
+  `list_jobs`/`stats` — this
   second half is exactly the compliance-based step the design can't mechanically guarantee (see
   Risks), so it is the one part of this template that has to be watched happen, not just read from
   code. Then restart the session on the same branch the same day and confirm no second job is
@@ -487,9 +520,10 @@ claim, complete) is the strong default regardless of which shape carries it out.
   compliance-based design being the source of both the prompt-injection surface (closed by
   validating and data-fencing every interpolated value — see the Claude Code template's own
   Security section) and the `add_job`→`claim_jobs` race (narrowed, not closed, by the `agentType`
-  tag — see the correction above). Proceeding past review with those mitigations in place is a
-  judgment call the review-response pass made in the developer's stead; it is not a substitute for
-  the developer's own sign-off on the underlying compliance-based approach, which remains open.
+  tag — see the correction above). **RESOLVED on 2026-09-14:** the developer explicitly signed off
+  on the compliance-based approach as the shipped trade during PR #181's review, after the review
+  rounds above — recorded in the plan's Status block as well, so this burden does not re-open by
+  accident on a later read.
 - **Directory name (`client-skills/` vs. `skills/` vs. something else).** A defensible judgment
   call made to avoid colliding with `.github/skills/`'s existing meaning (see Assumptions) — the
   developer may prefer a different name; renaming before the plan is executed is cheap, renaming
@@ -502,9 +536,12 @@ claim, complete) is the strong default regardless of which shape carries it out.
   `in-progress` claim needing manual cleanup. If the developer's actual intent was closer to
   "show as *currently* working," not "show that work *started and immediately finished*," this
   design under-delivers and a different primitive (a lease, held for the session's duration, or a
-  `send_message` announcement with no job at all) would fit better. **Status: also not confirmed
-  before implementation, same as the bullet above — still open**, and worth confirming before this
-  design is treated as final, since it changes the reference implementation materially.
+  `send_message` announcement with no job at all) would fit better. **Status: not confirmed
+  before implementation. RESOLVED on 2026-09-14, same review as the bullet above:** the developer
+  accepted `add_job`→`claim_jobs`→`complete_job` as the intended primitive — the marker answers
+  "did work *start* here," not "is work *currently* happening" — with the pending-window race
+  accepted as disclosed, including the template README's "do not install alongside an unfiltered
+  `otto-factory-worker`" warning.
 - **Every session start costs the org's billable otto-factory allowance** (three calls for a
   genuinely new marker, **zero** for a same-day replay — `add_job`'s replay path is recorded via
   `Meter::record_replay`, always free regardless of `add_job`'s own classification; see

@@ -25,20 +25,41 @@ A follow-up review round (rust-pro, architect-reviewer, security-auditor, plus
 `pr-review-toolkit:comment-analyzer`) found the initial implementation's compliance-based
 instruction text vulnerable to prompt injection via the interpolated remote/branch values,
 plus a real `add_job`→`claim_jobs` race this repo's own `otto-factory-worker` could act in.
-Both were addressed in a review-response pass: a strict character allowlist on the remote
-and branch (reject and exit silently, same as "not a git repo"), the injected instruction
-restructured so those values are presented as explicitly labeled, fenced data rather than
-spliced into the imperative steps, the job's `title` changed from `"session: <branch>"` to a
-fixed literal `"session marker"`, an `agentType: "session-marker"` tag added as a partial
-(not complete) mitigation for the claim race, the settings snippet's default install path
-changed from a `$CLAUDE_PROJECT_DIR`-relative command to a user-level absolute path, and the
-"never narrate success or failure" instruction relaxed to "keep it to one short line, don't
-suppress a genuine failure." See the spec's Architecture and Risks sections for the full
-correction record, including two developer sign-off questions the spec's Risks section
-raises that remain genuinely open (the compliance-based mechanism itself, and whether
-`add_job`→`claim_jobs`→`complete_job` is the right primitive at all versus a lease or a
-`send_message` announcement) — addressing the security and architecture findings did not
-resolve those, and this plan does not claim otherwise.
+Three review-response passes addressed them: the injected instruction restructured so its
+values are presented as explicitly labeled, fenced data rather than spliced into the
+imperative steps; the remote validated against a real URL grammar (whole-string match, with
+an outright rejection of control characters to close the round-2 `grep -E` per-line-anchoring
+bypass) whose own capture groups are the one source of the host/owner; the branch reduced to
+a 16-hex-character SHA-256 digest that never reaches model-facing text in raw form; emission
+gated on an owner-scoped opt-in allowlist file (`~/.claude/otto-factory-repos`,
+`host/owner` pairs) checked before anything untrusted is used; the job's `title` changed to
+the fixed literal `"session marker — do not claim"` and an `agentType: "session-marker"` tag
+added as a partial (not complete) mitigation for the claim race; the settings snippet's
+default install path changed from a `$CLAUDE_PROJECT_DIR`-relative command to a user-level
+absolute path; and the "never narrate success or failure" instruction relaxed to "keep it to
+one short line, don't suppress a genuine failure."
+
+**A final close-out pass (2026-09-14) applied the remaining review findings and obtained the
+developer's sign-off on the two questions the spec's Risks section had held open.** The
+developer explicitly accepted, in review of PR #181: (1) the compliance-based mechanism
+itself (a model executing an injected instruction, with nothing mechanically enforcing it) as
+the shipped trade, and (2) `add_job`→`claim_jobs`→`complete_job` as the right primitive vs. a
+lease held for the session duration or a `send_message` announcement — with the documented
+`add_job`→`claim_jobs` pending-window race accepted as disclosed (mitigated by `agentType`
+and the title, and warned against in the template's README). The close-out also: guarded the
+`date` command under `set -e` so a failing `date` exits `0` silently like every other local
+failure; carried the `claim_jobs` response's `attempts` through to `complete_job` as
+`expectedAttempts` (the claim-generation fence from #161); documented the minimum MCP scopes
+(`repos:read` + `jobs:write`) in the template's install steps; aligned the shared contract's
+failure policy with the instruction's one-short-line acknowledgement; documented the
+cross-user idempotency behavior (`created_by` sits in the fingerprint, so a second developer
+same-branch-same-day silently has no marker) as a decided limitation; and corrected the
+"what was verified" record to distinguish the raw-`/` key probe from the shipped digest key.
+
+See the spec's Architecture, Error Handling, and Risks sections for the full correction
+record. The two sign-off questions are resolved: they were explicitly raised, explicitly
+answered by the developer during this PR's review, and recorded here so a future reader of
+the spec does not mistake them for still-open unknowns.
 
 **Spec:** `docs/specs/2026-09-11-agent-skills-directory-design.md` — read it first. This plan
 implements it exactly.
@@ -220,35 +241,53 @@ original draft — see the spec's Architecture and Risks sections for the correc
 - [x] Write `client-skills/claude-code/session-start-hook.sh` implementing the spec's
       Architecture steps 2-4 (the script's own deterministic half) exactly:
   1. `git remote get-url origin`, `git rev-parse --abbrev-ref HEAD`, and `date -u +%Y-%m-%d`;
-     exit `0` with no stdout if either git command fails.
-  2. **Validate both captured values against a strict allowlist** before either is used
-     anywhere: reject a remote outside `[A-Za-z0-9._:/@+~-]` or a branch outside
-     `[A-Za-z0-9._/-]`, or either exceeding a fixed length cap, exiting `0` with no stdout the
-     same as "not a git repo." Added during review-response in direct response to the
-     security-auditor's Critical finding — not in the original task text, but load-bearing.
-  3. On success, print one JSON object to stdout in the shape confirmed above, whose injected
-     text carries the captured remote URL, branch, and date inside a clearly labeled, fenced
-     *data* block — never spliced directly into the imperative instruction steps — with the
-     instruction template itself built from a **quoted** heredoc delimiter so it undergoes no
-     shell expansion at all, the two values substituted in afterwards via literal parameter
-     substitution rather than by re-opening the heredoc to interpolation.
+     exit `0` with no stdout if either git command fails (the `date` guard was added in the
+     final close-out pass so a failing `date` under `set -e` also exits `0` silently rather
+     than surfacing as a hook failure); the git calls run via `git -C`, gated on
+     `rev-parse --is-inside-work-tree`, never a `cd`.
+  2. **Validate the captured values structurally**, not with a flat character allowlist —
+     that was the round-1 defense and it defends the shell, not the model. The branch name
+     is reduced to a 16-hex-character SHA-256 digest before anything is derived from it, so
+     it never reaches model-facing text in raw form; the remote is checked against an actual
+     URL grammar (scheme, host, length-capped path segments, whole-string match via bash's
+     own `[[ =~ ]]`, with an outright rejection of any remote containing a control
+     character — closing the round-2 `grep -E` per-line-anchoring bypass), and its host and
+     owner are read from that same grammar match's capture groups — the one parser, never a
+     second, independently-written one. Any rejection exits `0` with no stdout, the same as
+     "not a git repo."
+  3. **Emission is gated before any untrusted byte is used**: the hook is inert by default
+     until the remote's `host/owner` pair (from step 2's own capture groups) matches an
+     entry in the developer's own opt-in allowlist file (`~/.claude/otto-factory-repos`),
+     checked before anything else is built — owner-scoped, not host-scoped (a bare hostname
+     arms the hook in every repo on that host).
+  4. On success, print one JSON object to stdout in the shape confirmed above, whose injected
+     text carries the remote URL, the branch **digest**, and date inside a clearly labeled,
+     fenced *data* block — never spliced directly into the imperative instruction steps —
+     with the instruction template itself built from a **quoted** heredoc delimiter so it
+     undergoes no shell expansion at all, the captured values substituted in afterwards via
+     literal parameter substitution rather than by re-opening the heredoc to interpolation.
 - [x] Draft the injected instruction text itself (embedded in the script's stdout, per the step
       above) so it tells the model, using its own already-authenticated otto-factory MCP tools,
       to perform exactly the spec's Architecture steps 5-9:
   1. Call `resolve_repo` with `remote` set to the "remote" value from the data block above; on
-     failure, do nothing further and say nothing about it.
+     failure, do nothing further.
   2. On success, keep the resolved `slug`. Call `add_job` with `repo: <slug>`,
-     `title: "session marker"` (a **fixed, literal** string — changed from `"session: <branch>"`
-     during review-response, since `title` is the field most likely to be read as prose by
-     another agent and the branch is attacker-influenceable), `agentType: "session-marker"`
+     `title: "session marker — do not claim"` (a **fixed, literal** string — changed from
+     `"session: <branch>"` during review-response, and from `"session marker"` to
+     `"session marker — do not claim"` in the round-2 pass, since `title` is the field most
+     likely to be read as prose by another agent and the branch is attacker-influenceable;
+     the final wording is also a loud signal in the ready pool), `agentType: "session-marker"`
      (added during review-response as a partial, constraint-2-compliant mitigation for the
      `add_job`→`claim_jobs` race — a hint only, never enforced), a **fixed, literal**
      `description` string, `metadata: {"kind": "session-marker", "source":
-     "client-skills/claude-code", "branch": "<branch>"}`, and
-     `idempotencyKey: "session-<slug>-<branch>-<yyyy-mm-dd>"` using the embedded date.
+     "client-skills/claude-code", "branch_digest": "<digest>"}` (the digest, never the raw
+     branch), and `idempotencyKey: "session-<slug>-<digest>-<yyyy-mm-dd>"` using the digest
+     from the data block and the embedded date.
   3. Branch on the returned job's `status`: `completed` → stop; `pending` → `claim_jobs` with
      `jobs: [<id>]`, then (only on a successful claim) `complete_job` with
-     `result: "session marker — no work performed"`; anything else → stop without calling
+     `result: "session marker — no work performed"` **and `expectedAttempts` set to the
+     `attempts` value carried by that claim_jobs response** (the claim-generation fence —
+     added in the final close-out pass); anything else → stop without calling
      `complete_job`.
   4. Keep any acknowledgement to at most one short line — **not** an unconditional vow of
      silence on success or failure as the original draft had it (the security-auditor's Medium
@@ -292,7 +331,8 @@ original draft — see the spec's Architecture and Risks sections for the correc
   - [ ] Install the hook, open a **real** Claude Code session in that repo, and confirm — by
         watching what the session actually does, not by reading the script — that the model
         follows through on the injected instruction: `list_jobs`/`stats` shows exactly one
-        completed `"session marker"` job. **Deliberately deferred, not run in this pass** — no
+        completed `"session marker — do not claim"` job. **Deliberately deferred, not run in this
+        pass** — no
         interactive Claude Code session was available to this implementation/review-response
         pass; disclosed in `client-skills/claude-code/README.md`'s "What was verified, and how"
         section rather than silently claimed. This is the one step that verifies compliance, not
