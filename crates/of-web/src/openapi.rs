@@ -533,8 +533,7 @@ fn entity_schemas() -> Value {
                             "type": "boolean",
                             "description":
                                 "Whether an unexpired lease is held on any resource in this \
-                                 repo right now — computed once for the whole list, never \
-                                 fetched per repo.",
+                                 repo right now.",
                         },
                     },
                     "required": ["hasActiveLease"],

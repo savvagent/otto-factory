@@ -48,6 +48,9 @@
   let error = $state<string | undefined>(undefined);
 
   let expanded = $state<string | undefined>(undefined);
+  // One boolean, not keyed per repo — correct only because `expanded` already
+  // allows a single row open at a time. `toggle()` resets this on every call,
+  // so it can never survive a switch to a different row's panel.
   let infoOpen = $state(false);
   let leases = $state<Record<string, Lease[] | 'loading' | 'failed'>>({});
   let bindings = $state<Record<string, TrackerBinding[] | 'loading' | 'failed'>>({});
@@ -384,14 +387,13 @@
                   >
                     i
                   </button>
-                  {#if infoOpen}
-                    <div
-                      id={`repos-lease-info-${repo.slug}`}
-                      class="absolute z-10 mt-1 w-64 rounded-md border border-edge bg-raised p-2 text-xs text-faint shadow-lg"
-                    >
-                      {m.repos_leases_info_detail()}
-                    </div>
-                  {/if}
+                  <div
+                    id={`repos-lease-info-${repo.slug}`}
+                    hidden={!infoOpen}
+                    class="absolute z-10 mt-1 w-64 rounded-md border border-edge bg-raised p-2 text-xs text-faint shadow-lg"
+                  >
+                    {m.repos_leases_info_detail()}
+                  </div>
                 </div>
               </div>
               <p class="mt-1 text-xs text-faint">{m.repos_leases_note()}</p>

@@ -137,8 +137,8 @@ pub(crate) async fn require_visible(
 }
 
 /// A repo plus whether anyone holds a live lease on it right now. Computed
-/// once for the whole page from the same live-lease read `list_leases`
-/// (below) already uses for a single repo, grouped once instead of fetched
+/// once for the whole page from the same live-lease read the `list_leases`
+/// handler already uses for a single repo, grouped once instead of fetched
 /// per row — avoiding one query per repo on every page load.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

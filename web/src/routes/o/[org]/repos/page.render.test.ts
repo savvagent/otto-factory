@@ -156,6 +156,17 @@ function rowToggles(root: HTMLElement) {
   ) as HTMLButtonElement[];
 }
 
+/**
+ * The info popover is always in the DOM once its row is expanded (so
+ * `aria-controls` never points at a nonexistent id) and toggles visibility
+ * via the `hidden` attribute rather than being mounted/unmounted — so
+ * "closed" is asserted via `.hidden`, not via absence from the DOM or from
+ * `container.textContent` (which includes hidden elements' text).
+ */
+function infoPanelFor(root: HTMLElement, slug: string) {
+  return root.querySelector(`#repos-lease-info-${slug}`) as HTMLElement | null;
+}
+
 describe('the repos page info affordance', () => {
   it('does not open on a bare focus event, opens on click, and closes on Escape or blur', async () => {
     vi.stubGlobal(
@@ -174,36 +185,35 @@ describe('the repos page info affordance', () => {
     ) as HTMLButtonElement;
     expect(infoButton).toBeTruthy();
     expect(infoButton.getAttribute('aria-controls')).toBe('repos-lease-info-api');
+    expect(infoPanelFor(container, 'api')?.hidden).toBe(true);
 
-    expect(container.textContent).not.toContain(leaseInfoDetail);
-
-    // A bare focus (no click) must not open the popover any more — that was
-    // finding 1's bug: a real click fires focus before click, so an
-    // onfocus-opens handler raced the onclick toggle and lost.
+    // A bare focus (no click) must not open the popover any more — a real
+    // click fires focus before click, so an onfocus-opens handler would race
+    // the onclick toggle and lose.
     infoButton.dispatchEvent(new FocusEvent('focus', { bubbles: true }));
     await settle();
     expect(infoButton.getAttribute('aria-expanded')).toBe('false');
-    expect(container.textContent).not.toContain(leaseInfoDetail);
+    expect(infoPanelFor(container, 'api')?.hidden).toBe(true);
 
     infoButton.click();
     await settle();
     expect(infoButton.getAttribute('aria-expanded')).toBe('true');
+    expect(infoPanelFor(container, 'api')?.hidden).toBe(false);
     expect(container.textContent).toContain(leaseInfoDetail);
-    expect(container.querySelector('#repos-lease-info-api')).toBeTruthy();
 
     infoButton.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     await settle();
     expect(infoButton.getAttribute('aria-expanded')).toBe('false');
-    expect(container.textContent).not.toContain(leaseInfoDetail);
+    expect(infoPanelFor(container, 'api')?.hidden).toBe(true);
 
     infoButton.click();
     await settle();
-    expect(container.textContent).toContain(leaseInfoDetail);
+    expect(infoPanelFor(container, 'api')?.hidden).toBe(false);
 
     infoButton.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
     await settle();
     expect(infoButton.getAttribute('aria-expanded')).toBe('false');
-    expect(container.textContent).not.toContain(leaseInfoDetail);
+    expect(infoPanelFor(container, 'api')?.hidden).toBe(true);
 
     unmount(instance);
   });
@@ -232,6 +242,7 @@ describe('the repos page info affordance', () => {
     await settle();
 
     expect(infoButton.getAttribute('aria-expanded')).toBe('true');
+    expect(infoPanelFor(container, 'api')?.hidden).toBe(false);
     expect(container.textContent).toContain(leaseInfoDetail);
 
     unmount(instance);
@@ -261,9 +272,9 @@ describe('the repos page info affordance', () => {
     firstInfoButton.click();
     await settle();
     expect(firstInfoButton.getAttribute('aria-expanded')).toBe('true');
+    expect(infoPanelFor(container, 'api')?.hidden).toBe(false);
     expect(container.textContent).toContain(leaseInfoDetail);
 
-    // Switch straight to the second row without collapsing the first.
     secondToggle.click();
     await settle();
 
@@ -273,8 +284,7 @@ describe('the repos page info affordance', () => {
     expect(secondInfoButton).toBeTruthy();
     expect(secondInfoButton.getAttribute('aria-controls')).toBe('repos-lease-info-quiet');
     expect(secondInfoButton.getAttribute('aria-expanded')).toBe('false');
-    expect(container.textContent).not.toContain(leaseInfoDetail);
-    expect(container.querySelector('#repos-lease-info-quiet')).toBeNull();
+    expect(infoPanelFor(container, 'quiet')?.hidden).toBe(true);
 
     unmount(instance);
   });

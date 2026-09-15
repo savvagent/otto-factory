@@ -115,8 +115,12 @@ Success criteria:
    heading, with a short explanatory sentence always visible beneath it — including when the
    lease list is empty.
 4. A separate, keyboard-reachable info affordance next to that heading reveals one further
-   sentence connecting "lease" to the `list_leases`/`acquire_lease` MCP tool names, opened by
-   click or focus and closed by Escape or losing focus.
+   sentence connecting "lease" to the `list_leases`/`acquire_lease` MCP tool names — a disclosure
+   button (`aria-expanded`/`aria-controls`) opened by click (equally reachable via Tab then
+   Enter/Space, since that is native `<button>` behavior) and closed by Escape or losing focus.
+   An earlier draft of this spec also opened it on bare focus, but a real mouse click fires
+   `focus` before `click`, so that handler raced the click toggle and lost — removed during
+   implementation once the code review below caught it.
 5. The word "lease" still appears in the expanded panel (the explainer sentence, the info
    affordance's sentence, and the lease-row fields all use it) — demoted from the entry point,
    never erased.
@@ -270,8 +274,8 @@ must actually be named, not merely accepted structurally.
         class="flex h-4 w-4 items-center justify-center rounded-full border border-edge text-[10px] text-faint hover:text-ink"
         aria-label={m.repos_leases_info_label()}
         aria-expanded={infoOpen}
+        aria-controls={`repos-lease-info-${repo.slug}`}
         onclick={() => (infoOpen = !infoOpen)}
-        onfocus={() => (infoOpen = true)}
         onblur={() => (infoOpen = false)}
         onkeydown={(e) => {
           if (e.key === 'Escape') infoOpen = false;
@@ -279,14 +283,13 @@ must actually be named, not merely accepted structurally.
       >
         i
       </button>
-      {#if infoOpen}
-        <div
-          role="tooltip"
-          class="absolute z-10 mt-1 w-64 rounded-md border border-edge bg-raised p-2 text-xs text-faint shadow-lg"
-        >
-          {m.repos_leases_info_detail()}
-        </div>
-      {/if}
+      <div
+        id={`repos-lease-info-${repo.slug}`}
+        hidden={!infoOpen}
+        class="absolute z-10 mt-1 w-64 rounded-md border border-edge bg-raised p-2 text-xs text-faint shadow-lg"
+      >
+        {m.repos_leases_info_detail()}
+      </div>
     </div>
   </div>
   <p class="mt-1 text-xs text-faint">{m.repos_leases_note()}</p>
@@ -298,12 +301,22 @@ must actually be named, not merely accepted structurally.
   rendered on the empty-state branch — exactly the ticket's complaint). `infoOpen` is one
   `$state<boolean>` per page instance; only one row can be expanded at a time already (`expanded`
   is a single value), so it does not need to be keyed per repo. `toggle()` resets it to `false`
-  when a row collapses, so a row re-expanded later does not resurrect a stale open popover.
+  unconditionally at the top, on every call — not only on collapse — so switching directly from
+  one expanded row to another never carries a stale open popover into the new row.
 
-  Closing on blur relies on the platform behavior that a click on a non-focusable element (this
-  popover's `<div>` has no focusable content) moves focus to `<body>`, which blurs the button —
-  covering "outside click" without a manual document-level listener. Escape is handled explicitly
-  because it does not blur the button on its own.
+  This is a disclosure widget, not a tooltip: the trigger's `aria-expanded`/`aria-controls` pair
+  is what a screen reader needs, so the popover carries no ARIA role of its own. It is rendered
+  unconditionally once its row is expanded and toggles visibility via the `hidden` attribute
+  rather than `{#if}`, so `aria-controls` always resolves to a real element instead of dangling
+  while collapsed. `onclick` is the sole open/close trigger — a native `<button>` already fires
+  `click` from Enter/Space while focused, so a keyboard user gets the same behavior as a mouse
+  click without a separate `onfocus` handler. (An `onfocus`-opens handler was tried first and
+  removed: a real mouse click fires `focus` before `click`, so the click's toggle immediately
+  undid what focus had just opened, and clicking the affordance never actually opened it.)
+  Closing on blur relies on the platform behavior that a click on a non-focusable element (the
+  popover has no focusable content) moves focus to `<body>`, which blurs the button — covering
+  "outside click" without a manual document-level listener. Escape is handled explicitly because
+  it does not blur the button on its own.
 
   New keys: `repos_leases_heading` ("Who's here"), `repos_leases_info_label` ("About leases" —
   the button's accessible name), `repos_leases_info_detail` (one sentence connecting "lease" to
