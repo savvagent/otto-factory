@@ -1,7 +1,11 @@
 # Repos page lease presence design
 
 > **Status:** IMPLEMENTED — gives the Repos page an at-a-glance "who's here" signal per repo and
-> explains the underlying lease concept in place, per issue #168. Shipped in PR #182.
+> explains the underlying lease concept in place, per issue #168. Shipped in
+> `savvagent/otto-factory#182` (merged as `9c6d879`). **Review changed the shape from the draft
+> below:** `hasActiveLease` is computed only when the caller passes `?includeLeaseStatus=true`
+> and is omitted otherwise — §2's `required` array, §3's non-optional `hasActiveLease`, and §3's
+> "none of them need a code change" are superseded by the Addendum at the end of this document.
 
 ## Premise corrections
 

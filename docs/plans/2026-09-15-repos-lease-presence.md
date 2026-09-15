@@ -10,10 +10,12 @@ keyboard-reachable info affordance — closing out `savvagent/otto-factory#168`.
 
 ## Status — 2026-09-15
 
-Done. Both tasks shipped in PR #182, plus a post-review addendum gating `hasActiveLease`
-behind `?includeLeaseStatus=true` (see that addendum below) after review found the
-unconditional read was polled every 30 seconds by the org overview page for callers that
-never used the field.
+Done. Both tasks shipped in `savvagent/otto-factory#182` (merged as `9c6d879`), plus a
+post-review addendum gating `hasActiveLease` behind `?includeLeaseStatus=true` (see that
+addendum below) after review found the unconditional read was polled every 30 seconds by
+the org overview page for callers that never used the field. Review also added a dedicated
+OpenAPI schema-shape test (`the_repo_list_item_schema_advertises_has_active_lease`) beyond
+what Task 1 originally scoped.
 
 ## Global Constraints
 
