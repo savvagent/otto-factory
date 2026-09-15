@@ -457,10 +457,11 @@ async fn add_passkey_finish_refuses_a_ceremony_started_by_another_account(pool: 
     // each already has exactly one `passkeys` row and one
     // `PASSKEY_REGISTERED` audit row before the mismatch attempt below —
     // the zero-row assertions this test cares about must be scoped to
-    // `other` and expect that pre-existing one, not a bare table count
-    // (which `add_passkey_finish_records_the_add_flow_and_its_ip` already
-    // gets right by filtering on `actor_user_id`; this test follows the
-    // same discipline).
+    // `owner`, the ceremony's real account, and expect that pre-existing
+    // one, not a bare table count (which
+    // `add_passkey_finish_records_the_add_flow_and_its_ip` already gets
+    // right by filtering on `actor_user_id`; this test follows the same
+    // discipline).
     let owner = onboard(&h, "owner@acme.test").await;
     let other = onboard(&h, "other@acme.test").await;
 
@@ -496,32 +497,37 @@ async fn add_passkey_finish_refuses_a_ceremony_started_by_another_account(pool: 
         .await;
     finished.expect(StatusCode::FORBIDDEN);
 
-    // Scoped to `other` (the caller the mismatch was attributed to, and
-    // the account a successful attach would have added a *second*
-    // credential/audit row to) — `other` already has exactly one of each
-    // from `onboard`'s own signup ceremony, and the assertion is that the
-    // refused attempt added no more, not that the table is empty.
+    // Scoped to `owner` — the account whose ceremony was substituted, and
+    // the account `finish_registration_tx` would have written the leaked
+    // credential/audit row under (it reads the account to write from the
+    // ceremony's own stored `user_id`, never from the caller who happened
+    // to call `finish`). Scoping this to `other` instead (an earlier draft
+    // of this test did) checks nothing: `other`'s own counts were never
+    // affected by the pre-fix bug either, so that version of this test
+    // passed unmodified against the vulnerable code.
     let passkey_count: i64 = sqlx::query_scalar("SELECT count(*) FROM passkeys WHERE user_id = $1")
-        .bind(other.user)
+        .bind(owner.user)
         .fetch_one(h.db.pool())
         .await
         .unwrap();
     assert_eq!(
         passkey_count, 1,
-        "a ceremony/caller mismatch must not leave a second credential behind on `other`"
+        "a ceremony/caller mismatch must not leave a second credential behind on `owner`, \
+         the ceremony's real account"
     );
 
     let audit_count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM audit_events WHERE action = $1 AND actor_user_id = $2",
     )
     .bind(of_core::audit::action::PASSKEY_REGISTERED)
-    .bind(other.user)
+    .bind(owner.user)
     .fetch_one(h.db.pool())
     .await
     .unwrap();
     assert_eq!(
         audit_count, 1,
-        "a refused request must not add a second row asserting `other` completed a registration"
+        "a refused request must not add a second row asserting `owner` completed a registration \
+         nobody but the ceremony's substituted caller attempted"
     );
 }
 
