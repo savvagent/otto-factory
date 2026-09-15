@@ -231,6 +231,16 @@ other call sites (`o/[org]/+page.svelte`, `o/[org]/queue/+page.svelte`,
 structurally assignable to `Repo[]` (a superset of its fields), so none of them need a code
 change — `hasActiveLease` is simply an extra field they never read.
 
+This does **not** extend to `web/src/routes/o/[org]/repos/+page.svelte` itself — the one file §4
+edits. Its `let repos = $state<Repo[]>([]);` (currently line 37) must become
+`let repos = $state<RepoListItem[]>([]);`, with `RepoListItem` added to the existing `import type
+{ Lease, Repo, Team, TrackerBinding, TrackerProvider } from '$lib/types';` line, because §4's
+template reads `repo.hasActiveLease` off exactly this array. Left as `Repo[]`, the assignment from
+`api.repos()` still compiles (an incoming `RepoListItem[]` is assignable into a `Repo[]`-typed
+variable), but `repo.hasActiveLease` inside the `{#each repos as repo}` block does not exist on
+`Repo` and fails `svelte-check`/`tsc` — i.e. `npm run check`. This is the one place the wider type
+must actually be named, not merely accepted structurally.
+
 ### 4. `+page.svelte`: presence pill, heading, explainer, info affordance
 
 - **Presence pill.** In the same `<div class="flex items-center gap-2">` that already renders
