@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.7.0](https://github.com/savvagent/otto-factory/compare/v0.6.0...v0.7.0) (2026-09-15)
+
+
+### Features
+
+* show at-a-glance lease presence and explain leases on the repos page ([#182](https://github.com/savvagent/otto-factory/issues/182)) ([9c6d879](https://github.com/savvagent/otto-factory/commit/9c6d879006d5116c886fe9dbffc8e91c6da1b75a))
+
+
+### Bug Fixes
+
+* **of-auth:** make passkey removal and clearing atomic with their audit writes ([#170](https://github.com/savvagent/otto-factory/issues/170)) ([83d9763](https://github.com/savvagent/otto-factory/commit/83d9763ddf6aaa4afb8982079f7858a90ad30d5c))
+
 ## [0.6.0](https://github.com/savvagent/otto-factory/compare/v0.5.0...v0.6.0) (2026-09-11)
 
 
