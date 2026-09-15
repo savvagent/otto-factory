@@ -248,6 +248,15 @@ impl RegistrationVia {
 /// can share *that* transaction rather than commit separately, before it,
 /// with nothing to roll it back if what follows fails. See
 /// `savvagent/otto-factory#132`.
+///
+/// `expected`, when `Some`, is checked against the ceremony's stored account
+/// immediately after `take_ceremony` and before anything is written; `None`
+/// skips the check entirely, for a caller (like `signup_finish`) with no
+/// independent identity to compare against.
+// Eight parameters, all load-bearing and independently documented above; a
+// bundling struct would not make any of the call sites clearer, only add a
+// type whose only job is to be immediately unpacked.
+#[allow(clippy::too_many_arguments)]
 pub async fn finish_registration(
     db: &Db,
     webauthn: &Webauthn,
@@ -255,11 +264,14 @@ pub async fn finish_registration(
     credential: &RegisterPublicKeyCredential,
     nickname: Option<&str>,
     via: RegistrationVia,
+    expected: Option<UserId>,
     ip: Option<&str>,
 ) -> Result<UserId> {
     let mut tx = db.begin_unpinned().await?;
-    let user_id =
-        finish_registration_tx(&mut tx, webauthn, ceremony, credential, nickname, via, ip).await?;
+    let user_id = finish_registration_tx(
+        &mut tx, webauthn, ceremony, credential, nickname, via, expected, ip,
+    )
+    .await?;
     tx.commit().await?;
     Ok(user_id)
 }
@@ -282,6 +294,12 @@ pub async fn finish_registration(
 /// [`Db::audit_global_on`] on it, which takes `&mut Unpinned` specifically
 /// and (per its own doc comment) also re-checks at call time that nothing
 /// has pinned the transaction to an org since it was opened.
+///
+/// `expected`, when `Some`, is checked against the ceremony's stored account
+/// immediately after `take_ceremony` and before anything is written; `None`
+/// skips the check entirely, for a caller (like `signup_finish`) with no
+/// independent identity to compare against.
+#[allow(clippy::too_many_arguments)]
 pub async fn finish_registration_tx(
     conn: &mut Unpinned,
     webauthn: &Webauthn,
@@ -289,11 +307,18 @@ pub async fn finish_registration_tx(
     credential: &RegisterPublicKeyCredential,
     nickname: Option<&str>,
     via: RegistrationVia,
+    expected: Option<UserId>,
     ip: Option<&str>,
 ) -> Result<UserId> {
     let (user_id, state): (Option<UserId>, PasskeyRegistration) =
         take_ceremony(conn.conn(), ceremony, "register").await?;
     let user_id = user_id.ok_or(AuthError::CeremonyExpired)?;
+
+    if let Some(expected) = expected {
+        if user_id != expected {
+            return Err(AuthError::CeremonyAccountMismatch);
+        }
+    }
 
     let passkey = webauthn
         .finish_passkey_registration(credential, &state)

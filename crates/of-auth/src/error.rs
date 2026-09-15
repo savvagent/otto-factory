@@ -65,6 +65,14 @@ pub enum AuthError {
     #[error("this org requires single sign-on")]
     SsoRequired,
 
+    /// The ceremony's stored account does not match what the caller expected — a
+    /// substituted or hijacked ceremony (see `finish_registration`'s `expected`
+    /// parameter). Checked before anything the ceremony completing would write,
+    /// so a mismatch fails before the credential insert and its audit row exist
+    /// at all, not just before they commit. `savvagent/otto-factory#109`.
+    #[error("that ceremony belongs to a different account")]
+    CeremonyAccountMismatch,
+
     // ---- rate limiting
     #[error("too many attempts; retry in {retry_after_secs}s")]
     RateLimited { retry_after_secs: i64 },
@@ -135,6 +143,7 @@ impl AuthError {
             AuthError::LastPasskey => {
                 "that is the only passkey on this account — register another first"
             }
+            AuthError::CeremonyAccountMismatch => "that ceremony belongs to a different account",
 
             AuthError::Expired | AuthError::AlreadyConsumed | AuthError::Revoked => {
                 "credential is no longer valid"
@@ -174,7 +183,9 @@ impl AuthError {
     pub fn status(&self) -> u16 {
         match self {
             AuthError::RateLimited { .. } => 429,
-            AuthError::NotAMember | AuthError::SsoRequired => 403,
+            AuthError::NotAMember | AuthError::SsoRequired | AuthError::CeremonyAccountMismatch => {
+                403
+            }
             AuthError::Config(_) | AuthError::Crypto(_) | AuthError::Core(_) | AuthError::Db(_) => {
                 500
             }
