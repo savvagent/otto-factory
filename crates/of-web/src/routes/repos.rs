@@ -137,10 +137,9 @@ pub(crate) async fn require_visible(
 }
 
 /// A repo plus whether anyone holds a live lease on it right now. Computed
-/// once for the whole page from the same live-lease read the per-repo panel
-/// already uses (`Tx::list_leases`), not fetched per row — the same N+1
-/// concern this module's doc comment already flags for why per-repo lease
-/// fetch is lazy today.
+/// once for the whole page from the same live-lease read `list_leases`
+/// (below) already uses for a single repo, grouped once instead of fetched
+/// per row — avoiding one query per repo on every page load.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RepoListItem {
