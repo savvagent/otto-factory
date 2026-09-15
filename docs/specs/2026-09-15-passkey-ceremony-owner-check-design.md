@@ -100,7 +100,13 @@ audit row are already durable by the time that check runs. This spec fixes only 
   `public()` doc comment already argues for collapsing distinct causes into one string where the
   distinction doesn't change what the caller should do (start over / use the right account) —
   the same reasoning applies here, and it keeps the new variant a plain unit variant rather than one
-  carrying a message string that would have to be threaded through call sites.
+  carrying a message string that would have to be threaded through call sites. This does change the
+  response body's `message` text for `add_passkey_finish`'s 403 — from today's bespoke "that
+  ceremony belongs to another account" to `public()`'s new "that ceremony belongs to a different
+  account" — a one-word wording drift. Only `code` is documented as the stable, machine-readable
+  contract (`CLAUDE.md`'s Style section); `message` is prose for a human/agent to read, not branch
+  on, so this is not a breaking change, just worth naming so a reviewer skimming only for the `code`
+  change isn't surprised by the body text also moving.
 - **No `Eq`/`PartialEq` gap.** `UserId` (`of_core::ids`, via the `uuid_id!` macro) already derives
   `PartialEq, Eq`, so `user_id != expected` needs no new trait bound anywhere in the call chain.
 
@@ -159,6 +165,14 @@ AuthError::CeremonyAccountMismatch => "ceremony_account_mismatch",
 ```
 
 ### 2. `crates/of-auth/src/passkeys.rs`: the check, before any write
+
+Both functions' existing doc comments (`finish_registration`'s and `finish_registration_tx`'s, at
+their current locations) get a line naming `expected` and the ordering guarantee it establishes —
+e.g. "`expected`, when `Some`, is checked against the ceremony's stored account immediately after
+`take_ceremony` and before anything is written; `None` skips the check entirely, for a caller (like
+`signup_finish`) with no independent identity to compare against." This makes the guarantee
+discoverable from the function itself, not only from `AuthError::CeremonyAccountMismatch`'s doc
+comment.
 
 ```rust
 pub async fn finish_registration(
