@@ -1355,6 +1355,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_repo_list_item_schema_advertises_has_active_lease() {
+        let doc = doc();
+        let repo_list_item = &doc["components"]["schemas"]["RepoListItem"];
+        let extension = &repo_list_item["allOf"][1];
+        assert_eq!(
+            extension["properties"]["hasActiveLease"]["type"], "boolean",
+            "RepoListItem schema is missing a boolean hasActiveLease property: {repo_list_item}"
+        );
+        assert!(
+            extension["required"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("hasActiveLease")),
+            "hasActiveLease is required on every RepoListItem this route returns: {repo_list_item}"
+        );
+    }
+
     /// One path serving several methods must render as one entry with several
     /// operations, not as the last one written.
     #[test]

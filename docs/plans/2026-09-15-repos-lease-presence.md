@@ -215,18 +215,23 @@ produces no new interface — this is the console-only presentation layer.
         stubbed `/leases` response for that repo is `[]` (the empty-list branch) — this is the
         regression the ticket exists to fix, so assert it explicitly rather than only in the
         non-empty case.
-      - the info-affordance button: focusing it shows the tooltip text
-        (`repos_leases_info_detail`'s value) in `container.textContent`; dispatching a
-        `keydown` with `key: 'Escape'` on it while open removes the tooltip text; blurring it
-        (dispatch a `focusout`/call `.blur()`) also removes it.
+      - the info-affordance button: a bare focus event must NOT open the popover (a real click
+        fires focus before click, so an earlier onfocus-opens draft raced the click toggle and
+        lost — the shipped version opens on click only, which a keyboard user reaches the same
+        way via Enter/Space on a focused button); clicking it shows the popover text
+        (`repos_leases_info_detail`'s value); dispatching a `keydown` with `key: 'Escape'` on it
+        while open closes it; blurring it (dispatch a `focusout`/call `.blur()`) also closes it;
+        and switching directly to a different row's toggle must not carry a stale open popover
+        into that row.
 - [ ] Run the new test file (`npx vitest run src/routes/o/[org]/repos/page.render.test.ts` from
       `web/`) and confirm it fails (the component has none of this yet).
 - [ ] Implement the changes in `web/src/routes/o/[org]/repos/+page.svelte` per spec §3–§4:
       - Add `RepoListItem` to the `$lib/types` import; retype `let repos = $state<Repo[]>([]);`
         to `$state<RepoListItem[]>([]);` (spec §3 — this is the one file where the wider type
         must be named, not merely accepted structurally).
-      - Add `let infoOpen = $state(false);`; reset it to `false` in `toggle()` when a row
-        collapses.
+      - Add `let infoOpen = $state(false);`; reset it to `false` unconditionally at the top of
+        `toggle()` on every call — not only when a row collapses — so switching directly from one
+        expanded row to another never carries a stale open popover into the new row.
       - Add the presence pill next to the slug (spec §4), gated on `repo.hasActiveLease`.
       - Add the heading + info-affordance button + always-visible explainer block at the top of
         the lease `<div>` (spec §4's template), and delete `repos_leases_note`'s old
