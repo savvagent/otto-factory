@@ -119,7 +119,7 @@ consume_by_state_hash}`, `of_core::orgs::{set_enforce_sso, lock_for_sso_guard}`.
 
 **`create_user_for_federation` is the single most security-critical function this task
 adds — it is the literal implementation of the "never `DO UPDATE`" fix from spec review
-round 3.** `crates/of-core/src/orgs.rs:326` already has `Db::upsert_user(email, name) ->
+round 3.** `crates/of-core/src/orgs.rs:329` already has `Db::upsert_user(email, name) ->
 Result<User>` doing `INSERT ... ON CONFLICT (lower(email)) DO UPDATE SET email =
 users.email ... RETURNING` — the exact "create or converge onto whoever already holds this
 row" shape the spec explicitly names as the near-miss this feature must never reuse.
@@ -332,11 +332,15 @@ this task's handler.
       a member of an `enforce_sso` org. Confirm the test file fails to compile (handlers
       don't exist yet).
 - [ ] Implement `POST /api/auth/sso/start` and `POST /api/me/sso/link/start` per spec §5:
-      resolve domain via `idp::resolve_for_domain`, generate `state`/`binding`/`nonce` (via
-      `of_auth::crypto::generate()` for the two hashed values, a plain random string for
-      `nonce`), `ceremonies::create`, set the binding cookie, build the authorization URL
-      via `of_auth::oidc::authorization_url`, return `{ redirect_url }`. The link-start
-      variant additionally requires an authenticated session and a non-null caller email.
+      resolve domain via `idp::resolve_for_domain`, generate `state`/`binding`/`nonce`.
+      `of_auth::crypto::generate(prefix: &str) -> Secret` takes a prefix argument (matching
+      the existing `prefix::{SESSION, PAT, ...}` convention in `crypto.rs`) — add two new
+      prefix constants (e.g. `prefix::SSO_STATE`, `prefix::SSO_BINDING`) rather than calling
+      it with no arguments. `nonce` is a plain random string, not run through this prefixed
+      generator (it's not a bearer token — spec §4/Assumptions). `ceremonies::create`, set
+      the binding cookie, build the authorization URL via `of_auth::oidc::authorization_url`,
+      return `{ redirect_url }`. The link-start variant additionally requires an
+      authenticated session and a non-null caller email.
 - [ ] Implement `GET /sso/callback` per spec §5's full walkthrough — **do not summarize or
       reorder these steps from memory; this list is the literal, complete order, and every
       branch below must be present, not just the ones that read as "the happy path":**
@@ -345,9 +349,17 @@ this task's handler.
       2. Hash the binding cookie and compare to the consumed ceremony's `binding_hash` →
          generic refusal on mismatch (the ceremony is already consumed at this point, so no
          separate "burn it" step is needed here).
-      3. Open a `Tx` pinned to `ceremony.org_id` → `get_connection`/`get_connection_secret`
-         → open the secret → `exchange_code` → `verify_id_token` → enforce `email_verified`
-         → enforce `resolve_for_domain` against `ceremony.org_id` still resolving.
+      3. **Do not hold a `Tx` open across the two outbound HTTP calls this step makes** — a
+         second review round caught that an earlier draft of this plan had the handler open
+         one `Tx` at the top and keep it open through `exchange_code` and `verify_id_token`
+         (which itself fetches JWKS), directly contradicting this same spec section's own
+         rule for the neighboring `.../verify` endpoint ("a DNS lookup has no place holding
+         a Postgres transaction open") and risking pool exhaustion under a slow/hanging IdP.
+         Instead: open a short, read-only `Tx` pinned to `ceremony.org_id` →
+         `get_connection`/`get_connection_secret` → open the secret → **release the `Tx`**.
+         Then, with no `Tx` open: `exchange_code` → `verify_id_token` → enforce
+         `email_verified` → `resolve_for_domain` (already an unscoped `&Db` call per spec
+         §2 — needs no `Tx` at all) against `ceremony.org_id` still resolving.
       4. `identities::resolve_user(idp_connection_id, subject)` — **what a match means
          depends on the ceremony kind; this is not "any match means success" for both (a
          mistake caught while writing this plan, fixed in the spec — re-read spec §5's
@@ -364,24 +376,31 @@ this task's handler.
       5. **Authenticated ceremony, step 4 returned `None`:** enforce the email-match-to-
          caller check (refuse on mismatch, naming it — spec §5). Once that holds:
          `identities::link(ceremony.user_id, idp_connection_id, subject)`.
-      6. **No match, anonymous ceremony (`ceremony.user_id.is_none()`):**
+      6. **No match, anonymous ceremony (`ceremony.user_id.is_none()`):** still no `Tx`
+         open — `resolve_by_email`, `create_user_for_federation`, and `link` are all
+         unscoped `&Db` calls per spec §2, same as step 4/5's `resolve_user`.
          `identities::resolve_by_email`. `Some(_)` → refuse (email collision, no session).
          `None` → `identities::create_user_for_federation` (Task 1's new function — **not**
          raw SQL in this handler, which would violate "every SQL statement lives in
          `of-core`", and **not** `Db::upsert_user`). `None` back from that call → refuse
          (lost the creation race). `Some(new_user_id)` → `identities::link(new_user_id,
-         idp_connection_id, subject)`, **then ensure `org_members` contains `(ceremony.org_id,
-         new_user_id, role: member)`** — reuse the existing `Tx::add_member` (`orgs.rs`) inside
-         this same already-open `Tx`. **This step is not optional and is easy to silently
-         drop because nothing about the happy path fails without it** — a federated user
-         would authenticate successfully but see no orgs in the console. This is the
+         idp_connection_id, subject)`, **then ensure `org_members` contains
+         `(ceremony.org_id, new_user_id, role: member)`** — this is the one point in steps
+         4–6 that needs a `Tx`: open a fresh, short `Tx` pinned to `ceremony.org_id` here,
+         call the existing `Tx::add_member` (`orgs.rs`) inside it, and commit. **This step is
+         not optional and is easy to silently drop because nothing about the happy path
+         fails without it** — a federated user would authenticate successfully but see no
+         orgs in the console. This is the
          concrete mechanism behind the spec's stated purpose for the whole feature
          ("self-service enterprise onboarding"); skipping it ships a callback that
          technically works and completely fails to do what an admin turned SSO on for.
-      7. On success (step 4's match, or step 5/6 reaching `identities::link`): commit,
-         `of_auth::sessions::create`, `session::set_cookie`, clear the binding cookie, `302`
-         redirect. On any refusal in steps 2–6: no commit, no session, clear the binding
-         cookie anyway (nothing left to protect once the ceremony's outcome is decided).
+      7. On success (step 4's match, or step 5/6 reaching `identities::link`, with step 6's
+         `Tx` already committed by that point if it ran): `of_auth::sessions::create`,
+         `session::set_cookie`, clear the binding cookie, `302` redirect — no `Tx` open at
+         this point for any branch, so there is nothing left to commit here specifically.
+         On any refusal in steps 2–6: no session, clear the binding cookie anyway (nothing
+         left to protect once the ceremony's outcome is decided; any `Tx` opened along the
+         way was already short-lived and released before reaching a refusal branch).
 - [ ] Implement the admin-only connection/domain/enforce endpoints (`PUT`/`DELETE
 .../connection`, `POST`/`GET`/`POST .../verify`/`DELETE .../domains[/{domain}]`, `PUT
 .../enforce`) per spec §5, each behind `OrgCtx::require_admin()`. `PUT .../connection`
