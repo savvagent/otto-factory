@@ -544,11 +544,23 @@ state_hash = $1` (see Assumptions — this is a deterministic-hash equality look
     this ceremony's caller cannot steal another account's IdP link by replaying a callback
     against it.
   - **Anonymous-ceremony (`ceremony.user_id.is_none()`)**: `identities::resolve_by_email`. `None`
-    → an idempotent `INSERT ... ON CONFLICT (lower(email)) DO UPDATE ... RETURNING` (the same
-    upsert shape this codebase already uses elsewhere for "create or converge," not a plain
-    `INSERT` — two concurrent first-time SSO logins for the same brand-new email converge on
-    one row instead of racing into a unique-violation error) for the verified email,
-    `identities::link` it, ensure
+    → `INSERT ... ON CONFLICT (lower(email)) DO NOTHING RETURNING` for the verified email
+    (**not** `DO UPDATE` — a third review round caught that `DO UPDATE ... RETURNING`, this
+    spec's own earlier wording, is `Db::upsert_user`'s "create or converge" shape, whose
+    whole point is to hand back whatever row already holds that email even when it wasn't
+    the caller's own insert that put it there; under this codebase's default `READ
+    COMMITTED` isolation, a `PATCH /api/me` landing in the window between
+    `resolve_by_email` returning `None` and this `INSERT` running would let `DO UPDATE`
+    silently converge onto — and then link this federated identity to — a row created by
+    exactly the race the "never link by email match" rule exists to prevent. `DO NOTHING`
+    is the correct shape here, matching `domains::claim` (§2) and `repos.rs`'s existing
+    "insert, and treat zero rows affected as a race loss to refuse, never a hint to adopt
+    the other row" pattern). If `rows_affected() == 0`, treat identically to
+    `resolve_by_email` returning `Some(_)` — refuse, no session opened; a concurrent writer
+    won the same race `resolve_by_email` would have caught a moment earlier, and adopting
+    that row would be the same mistake `DO UPDATE` almost was.
+
+    If the insert succeeds, `identities::link` the new row, ensure
     `org_members` contains `(org_id, new_user_id, role: member)` (insert-if-absent). `Some(_)`
     → **refuse. No session is opened.** Error message: "an account already exists for this
     email — sign in with your existing credentials, then link SSO from account settings."
@@ -717,6 +729,18 @@ post-ceremony passkey login step.
   verification available anywhere in this product. If that endpoint ever gains real
   ownership verification for email changes, this restriction could be relaxed in a later
   spec — not assumed here.
+- **Which exact `of_core` function owns each `SELECT 1 FROM orgs WHERE id = $1 FOR UPDATE`
+  lockout guard is left to the plan, not pinned here.** §5 describes the *behavior* three
+  endpoints need (lock the org row, then check "does a working SSO path still exist" before
+  writing); §2 names only `set_enforce_sso` as a new `of_core::orgs` function. The natural
+  homes are inside `set_enforce_sso` itself for the enable path, and a small shared helper
+  (or logic inside `idp::delete_connection`/`domains::delete`) for the two deletes — the
+  plan should name the exact split so an implementer isn't inventing three slightly
+  different shapes for the same guard. Not a design gap, just not yet pinned to a signature.
+- **The `__Host-of_sso_binding` cookie isn't explicitly cleared by the callback response.**
+  It becomes useless the moment its ceremony is consumed (single-use), so this is hygiene,
+  not a security gap — but the callback's `302` response should still clear it (`Max-Age=0`)
+  so a stale cookie doesn't linger in the browser past its purpose.
 - **`CLAUDE.md`'s list of RLS-exempt auth tables should be updated to include
   `sso_ceremonies`** once this ships, alongside `idp_connections`/`claimed_domains` — a
   documentation follow-up for the record-as-shipped step, not a code change.
