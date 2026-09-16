@@ -27,9 +27,10 @@ audit row are already durable by the time that check runs. This spec fixes only 
 **In:**
 
 - `crates/of-auth/src/passkeys.rs`: `finish_registration` and `finish_registration_tx` gain an
-  `expected: Option<UserId>` parameter, checked immediately after the ceremony's stored account is
-  read (`take_ceremony`) and before anything is written (`webauthn.finish_passkey_registration`, the
-  `passkeys` INSERT, the audit row).
+  `expected: Option<UserId>` parameter, checked after the ceremony's stored account is read
+  (`take_ceremony`) and after signature verification (`webauthn.finish_passkey_registration`), but
+  before either database write it guards (the `passkeys` INSERT, the audit row) — see the Addendum
+  for why the check waits for verification rather than running immediately after `take_ceremony`.
 - `crates/of-auth/src/error.rs`: a new `AuthError::CeremonyAccountMismatch` variant, with its own
   `status()` (403), `public()` message, and `auth_code()` entry — not a reuse of `CeremonyExpired`
   (see Assumptions for why a shared/generic status code was rejected).
@@ -308,7 +309,7 @@ note below.
   **bare object key** (`forbidden: () => m.error_forbidden()`), which that grep pattern cannot
   match at all. See the Addendum for what this actually meant and how it was fixed.
 
-## Addendum — console translation gap and an audit trail for the refusal (post-review)
+## Addendum — console translation gap, an audit trail for the refusal, and its ordering (post-review)
 
 Two things review found that this document's original text got wrong or left incomplete:
 
@@ -332,6 +333,19 @@ Two things review found that this document's original text got wrong or left inc
    rolled-back transaction, mirroring `claim_finish`'s existing `note_claim_refused` pattern for
    the identical reason: the write that would prove the attempt happened is exactly the write this
    fix prevents from being on the same transaction as the attempt.
+3. **Adding that audit write turned an ordering choice this document didn't discuss into a real
+   cost.** The `expected` check originally ran immediately after `take_ceremony`, before signature
+   verification — review (independently, twice) pointed out that this lets an authenticated caller
+   probe a live ceremony id with an unsigned, syntactically-valid credential body: the ceremony
+   survives the rollback either way, so nothing capped how many times this 403 could be produced
+   for free. Before item 2's fix that was merely an unusual reachability note; after it, each free
+   probe also appends an audit row, making the cost of an unbounded probe an unbounded log. **Fixed:**
+   the check now runs after `webauthn.finish_passkey_registration` succeeds, restoring the property
+   this path had before the fix — reaching it requires an authenticator to have actually signed the
+   challenge — and matching `claim_finish`'s own ordering (it checks after `finish_registration_tx`
+   returns, for the same reason). This does not weaken the fix itself: the check still runs before
+   both database writes it guards (the `passkeys` INSERT and the audit row), which is the actual
+   guarantee issue #109 asked for.
 
 **Out of scope for this PR, filed as a separate issue:** independent security review also found
 that WebAuthn registration ceremonies are discriminated only by `kind = "register"`, not by which

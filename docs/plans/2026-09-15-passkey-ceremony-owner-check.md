@@ -43,7 +43,7 @@ the new signature until `of-auth` ships it.
 | File | Responsibility |
 |---|---|
 | **Modify.** `crates/of-auth/src/error.rs` | New `AuthError::CeremonyAccountMismatch` variant: `status()` (403), `public()` message. |
-| **Modify.** `crates/of-auth/src/passkeys.rs` | `finish_registration`/`finish_registration_tx` gain `expected: Option<UserId>`, checked immediately after `take_ceremony`, before any write. Doc comments updated. |
+| **Modify.** `crates/of-auth/src/passkeys.rs` | `finish_registration`/`finish_registration_tx` gain `expected: Option<UserId>`, checked after `take_ceremony` and after signature verification, before either write it guards. Doc comments updated. |
 | **Modify.** `crates/of-auth/tests/passkeys.rs` | 7 existing call sites updated for the new parameter; one new test proving a mismatch returns `Err` before any `passkeys` row exists. |
 | **Modify.** `crates/of-web/src/error.rs` | `auth_code()` gains `AuthError::CeremonyAccountMismatch => "ceremony_account_mismatch"`. |
 | **Modify.** `crates/of-web/src/routes/auth.rs` | `signup_finish`/`claim_finish` pass `expected: None`; `add_passkey_finish` passes `Some(caller.user.id)` and drops its now-unreachable post-hoc check. |
@@ -327,11 +327,11 @@ Originally: no `web/` change in this plan, since nothing under `web/src` was bel
 below**: that check (a grep for the literal string `"forbidden"`) missed `web/src/lib/errors.ts`'s
 bare-object-key lookup, and a `web/` change was in fact required.
 
-## Addendum — console translation gap and an audit trail for the refusal (post-review) ✅
+## Addendum — console translation gap, an audit trail for the refusal, and its ordering (post-review) ✅
 
-Review of the PR found two gaps this plan's original two tasks didn't cover, both now fixed in the
-same PR (not deferred to a follow-up, since both are small and directly related to what Task 2
-shipped):
+Review of the PR found three gaps this plan's original two tasks didn't cover, all now fixed in
+the same PR (not deferred to a follow-up, since all three are small and directly related to what
+Task 2 shipped):
 
 - [x] **Console translation.** Added `error_ceremony_account_mismatch` to all six
       `web/messages/{en,es,de,fr,it,hi}.json` catalogs and a matching entry in
@@ -351,6 +351,16 @@ shipped):
       `crates/of-web/tests/console.rs`'s `add_passkey_finish_refuses_a_ceremony_started_by_another_account`)
       were extended to assert on the two account fields and, at the HTTP level, on the new audit
       row and the response's `error.code`.
+- [x] **Moved the check after signature verification.** Adding the audit write above turned an
+      unresolved ordering question into a real cost: the `expected` check originally ran
+      immediately after `take_ceremony`, before `webauthn.finish_passkey_registration`, which let
+      an authenticated caller probe a live ceremony id with an unsigned credential body — the
+      ceremony survives the rollback either way, so nothing capped how many times this 403 (now
+      also an audit row) could be produced. Moved the check to after signature verification
+      succeeds, restoring the pre-fix property that reaching this path requires an authenticator to
+      have actually signed the challenge, and matching `claim_finish`'s own ordering. The check
+      still runs before both writes it guards (the `passkeys` INSERT and the audit row), which is
+      the actual guarantee issue #109 needs — only its position relative to verification changed.
 
 Also filed as a separate, out-of-scope follow-up issue (not folded into this plan): registration
 ceremonies are discriminated only by `kind = "register"`, not by which flow created them, so

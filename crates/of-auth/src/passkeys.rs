@@ -336,7 +336,9 @@ pub async fn finish_registration(
 /// has pinned the transaction to an org since it was opened.
 ///
 /// `expected`, when `Some`, is checked against the ceremony's stored account
-/// immediately after `take_ceremony` and before anything is written — the
+/// after signature verification and before anything is written (see the
+/// inline comment at the check itself for why it waits for verification
+/// rather than running right after `take_ceremony`) — the
 /// [`AuthError::CeremonyAccountMismatch`] this returns on a mismatch carries
 /// both accounts precisely because nothing else records which two a hijack
 /// attempt named (see that variant's own doc comment). `None` skips the check
@@ -365,6 +367,23 @@ pub async fn finish_registration_tx(
         take_ceremony(conn.conn(), ceremony, "register").await?;
     let user_id = user_id.ok_or(AuthError::CeremonyExpired)?;
 
+    // Signature verification comes before the `expected` check, not after —
+    // deliberately, even though the check alone would already satisfy "before
+    // the credential insert and its audit row" on its own. Checking first
+    // would let anyone holding a live ceremony id (unguessable, but not
+    // secret from an authenticated caller who is simply the wrong account)
+    // probe it with an unsigned, unverified credential body: the ceremony
+    // survives the rollback either way (see below), so a check-first ordering
+    // would make this 403 — and, since this fix, the audit row it now writes
+    // — repeatable at HTTP-request cost with no proof of possession at all.
+    // Checking after verification restores the pre-fix property that
+    // reaching this path requires an authenticator to have actually signed
+    // the challenge, matching `claim_finish`'s own ordering (it checks after
+    // `finish_registration_tx` returns, for the same reason).
+    let passkey = webauthn
+        .finish_passkey_registration(credential, &state)
+        .map_err(webauthn_failed)?;
+
     if let Some(expected) = expected {
         if user_id != expected {
             return Err(AuthError::CeremonyAccountMismatch {
@@ -373,10 +392,6 @@ pub async fn finish_registration_tx(
             });
         }
     }
-
-    let passkey = webauthn
-        .finish_passkey_registration(credential, &state)
-        .map_err(webauthn_failed)?;
 
     let credential_id = passkey.cred_id().as_ref().to_vec();
     let encoded = serde_json::to_value(&passkey)
