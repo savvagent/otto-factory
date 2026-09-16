@@ -16,7 +16,15 @@ migrations, no email ever sent).
 
 ## Status — 2026-09-16
 
-Not started. All four tasks below are ⬜.
+Done. All four tasks below are ✅, shipped in #189. Reviewed by the mandatory trio
+(rust-pro, architect-reviewer, security-auditor) plus the pr-review-toolkit agents, in two
+rounds — an initial pass and a fresh blind security re-review after the resulting fix
+batch, since a meaningful amount of code changed between the two. Findings addressed
+included a total `enforce_sso` lockout hole, an SSRF via the OIDC client, missing
+`iss`/`aud` enforcement on `id_token` verification, a DOM XSS via an unvalidated
+`authorization_endpoint`, and several account-integrity gaps around domain re-claiming and
+IdP rebinding — see the PR's review-summary comments for the full list, including what was
+deliberately deferred as follow-up rather than blocking.
 
 ## Global Constraints
 
@@ -97,7 +105,7 @@ check`/`lint`/`test`/`build` and consumes whatever Task 3 exposed.
 
 ---
 
-## Task 1 — `of-core`: schema, CRUD, ceremonies, lockout guards ⬜
+## Task 1 — `of-core`: schema, CRUD, ceremonies, lockout guards ✅
 
 **Spec:** §1, §2, §3. Read them again before writing the migration — the `binding_hash`
 and `user_id` columns and the guard-1 test list are not optional additions, they are what
@@ -126,12 +134,12 @@ row" shape the spec explicitly names as the near-miss this feature must never re
 **Do not call `Db::upsert_user` from anywhere in this feature.** `identities.rs` needs its
 own, differently-shaped function instead (see the dedicated step below).
 
-- [ ] Write `crates/of-core/migrations/0031_sso_ceremonies.sql` exactly per spec §1:
+- [x] Write `crates/of-core/migrations/0031_sso_ceremonies.sql` exactly per spec §1:
       `sso_ceremonies` with `org_id`, `idp_connection_id`, nullable `user_id`, `state_hash`,
       `binding_hash`, plaintext `nonce`, `expires_at`, `consumed_at`, `created_at`; unique
       index on `state_hash`; index on `expires_at`. **Not** added to `0007_rls.sql`'s
       `tenant_tables` array — no RLS on this table, matching `webauthn_ceremonies`.
-- [ ] Write a failing test first in `crates/of-core/tests/oidc.rs` (new file, mirrors the
+- [x] Write a failing test first in `crates/of-core/tests/oidc.rs` (new file, mirrors the
       `#[sqlx::test]` shape in `crates/of-core/tests/trackers.rs`) covering: `idp::upsert_connection`
       replace-on-rebind (`ON CONFLICT (org_id) DO UPDATE`), `get_connection_secret` returning
       the sealed pair unopened, `domains::claim`'s `ON CONFLICT (domain) DO UPDATE ...
@@ -139,7 +147,7 @@ own, differently-shaped function instead (see the dedicated step below).
       `domains::mark_verified`, `identities::link`'s `ON CONFLICT (idp_connection_id,
       subject) DO NOTHING` converge-not-error behavior. Confirm it fails to compile (modules
       don't exist yet).
-- [ ] Implement `crates/of-core/src/idp.rs`, `domains.rs`, `identities.rs` per spec §2's
+- [x] Implement `crates/of-core/src/idp.rs`, `domains.rs`, `identities.rs` per spec §2's
       exact function list. `resolve_for_domain`, `resolve_user`/`resolve_by_email`, and
       `identities::link` are all unscoped (`&Db`, not `&mut Tx`) accessors — doc-comment
       each one naming it as a sanctioned unscoped read/write for its table (`user_identities`
@@ -148,7 +156,7 @@ own, differently-shaped function instead (see the dedicated step below).
       `domains::claim`'s verification token is generated via the workspace `rand` crate
       directly (`of-core` cannot depend on `of-auth`'s `crypto::generate()` — that's the
       wrong layering direction).
-- [ ] **Implement `identities::create_user_for_federation(db: &Db, email: &str) ->
+- [x] **Implement `identities::create_user_for_federation(db: &Db, email: &str) ->
       Result<Option<UserId>>`** — `INSERT INTO users (email) VALUES ($1) ON CONFLICT
       (lower(email)) DO NOTHING RETURNING id`. Returns `Ok(None)` when the conflict fires
       (someone else's row already holds this email — including a row that appeared in the
@@ -162,7 +170,7 @@ own, differently-shaped function instead (see the dedicated step below).
       there first, and the caller must treat that as a refusal, not a success."* This is the
       one function in the whole task where getting the SQL shape wrong reopens a closed
       security hole — do not simplify it during implementation.
-- [ ] Add a failing test for `create_user_for_federation` in `crates/of-core/tests/oidc.rs`
+- [x] Add a failing test for `create_user_for_federation` in `crates/of-core/tests/oidc.rs`
       before implementing it: (a) called against a brand-new email, returns `Some(_)` and
       the row exists; (b) called a second time against the same email (simulating the race
       the doc comment describes), returns `None` and does **not** alter the first row's
@@ -173,9 +181,9 @@ own, differently-shaped function instead (see the dedicated step below).
       `domains::claim` checks `rows_affected() == 0` after its `ON CONFLICT ... WHERE`
       statement and returns the new `Error::DomainAlreadyClaimed` (generic message, no org
       named — spec §2) in that case.
-- [ ] Add `pub mod idp; pub mod domains; pub mod identities;` to `crates/of-core/src/lib.rs`.
+- [x] Add `pub mod idp; pub mod domains; pub mod identities;` to `crates/of-core/src/lib.rs`.
       Run the Task 1 test file again; confirm it compiles and the cases above pass.
-- [ ] Implement `crates/of-core/src/ceremonies.rs`: `SsoCeremony` struct
+- [x] Implement `crates/of-core/src/ceremonies.rs`: `SsoCeremony` struct
       (`FromRow`/`Serialize`/`JsonSchema`, matching `TrackerBinding`'s derive list);
       `create(db: &Db, org_id, idp_connection_id, user_id: Option<UserId>, state_hash: &[u8],
       binding_hash: &[u8], nonce: &str, expires_at: DateTime<Utc>) -> Result<SsoCeremony>` —
@@ -190,12 +198,12 @@ own, differently-shaped function instead (see the dedicated step below).
       step regardless of outcome"). Doc-comment this ordering explicitly: the binding-cookie
       check happens in `of-web` *after* this function returns, and this function's job ends
       at "resolve and burn the ceremony," not "decide if the whole callback succeeds."
-- [ ] Write a failing test for `consume_by_state_hash`: a second call with the same
+- [x] Write a failing test for `consume_by_state_hash`: a second call with the same
       `state_hash` (simulating a replayed or racing callback) returns `None`, not the same
       row twice — confirms the `FOR UPDATE` + `consumed_at` write are atomic against a
       concurrent caller. Use two overlapping `tokio::spawn`ed calls against the same pool,
       not just two sequential calls, to actually exercise the race.
-- [ ] Implement `crates/of-core/src/orgs.rs` additions: `set_enforce_sso(tx: &mut Tx,
+- [x] Implement `crates/of-core/src/orgs.rs` additions: `set_enforce_sso(tx: &mut Tx,
       enforce: bool) -> Result<Org>` and a shared `lock_for_sso_guard(tx: &mut Tx) ->
       Result<()>` doing `SELECT 1 FROM orgs WHERE id = $1 FOR UPDATE` (bind `tx.org()`).
       `set_enforce_sso`, when `enforce == true`, calls `lock_for_sso_guard` first, then
@@ -204,7 +212,7 @@ own, differently-shaped function instead (see the dedicated step below).
       — refuse with a new `Error::SsoLockout` variant naming which piece is missing if
       either check fails. When `enforce == false`, no guard — just `UPDATE orgs SET
       enforce_sso = $2 WHERE id = tx.org()`.
-- [ ] Add the same `lock_for_sso_guard` + refusal shape to `idp::delete_connection` (refuse
+- [x] Add the same `lock_for_sso_guard` + refusal shape to `idp::delete_connection` (refuse
       while `org.enforce_sso == true`, no further condition — removing the only connection
       always breaks the SSO path) and to `domains::delete` (refuse while `org.enforce_sso ==
       true` **and** the domain being deleted is verified **and** it is the org's only
@@ -214,18 +222,18 @@ own, differently-shaped function instead (see the dedicated step below).
       statement — name this cross-module call explicitly in code comments, since `of-core`
       modules calling each other is normal within the crate but worth being clear about here
       given how security-load-bearing the ordering is.
-- [ ] Add `Error::DomainAlreadyClaimed` and `Error::SsoLockout { reason: String }` (or
+- [x] Add `Error::DomainAlreadyClaimed` and `Error::SsoLockout { reason: String }` (or
       similarly named — match this file's existing `#[error(...)]` + `code()`/`retriable()`
       pattern) to `crates/of-core/src/error.rs`. `retriable()` is `false` for both — retrying
       the identical call cannot succeed; the caller's request itself needs to change.
-- [ ] Cross-org negative tests in `crates/of-core/tests/isolation.rs`, guard-1 style (not
+- [x] Cross-org negative tests in `crates/of-core/tests/isolation.rs`, guard-1 style (not
       `rls_scopes_*` — comment each test explaining why, matching `resolve_connection_org`'s
       existing test comment): org A binds a connection / claims a domain / sets
       `enforce_sso`; a `Tx` pinned to org B cannot see, mutate, or flip any of it. Also:
       `resolve_for_domain`/`resolve_user` cross-org resolution test (each resolves only its
       own org/connection, per spec §3). Also: `domains::claim`'s cross-org collision
       (`Error::DomainAlreadyClaimed`, org A's row untouched).
-- [ ] Two of spec §3's remaining tests belong at this layer (the other two — the
+- [x] Two of spec §3's remaining tests belong at this layer (the other two — the
       binding-cookie mismatch and the authenticated-link email-match refusal — need an HTTP
       request/cookie and are Task 3's job instead): a domain reassigned mid-flight cannot
       retarget an in-flight ceremony (ceremony's stored `org_id` wins over a fresh
@@ -235,12 +243,12 @@ own, differently-shaped function instead (see the dedicated step below).
       guard: two concurrent `domains::delete` calls against the org's two verified domains —
       assert the second one (whichever loses the lock race) sees the updated count and
       refuses, never both succeeding.
-- [ ] `cargo test -p of-core --test isolation`, `cargo test -p of-core --test oidc`, `cargo
+- [x] `cargo test -p of-core --test isolation`, `cargo test -p of-core --test oidc`, `cargo
       test --workspace`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all
       --check`. All green before commit.
-- [ ] `cargo fmt --all`, then commit: `of-core: idp connections, claimed domains, sso ceremonies, and enforce_sso lockout guards`.
+- [x] `cargo fmt --all`, then commit: `of-core: idp connections, claimed domains, sso ceremonies, and enforce_sso lockout guards`.
 
-## Task 2 — `of-auth`: OIDC client + DNS verification ⬜
+## Task 2 — `of-auth`: OIDC client + DNS verification ✅
 
 **Spec:** §4. No dependency on Task 1's schema (pure client logic, no SQL) — sequenced
 second only because Task 3 needs both.
@@ -254,10 +262,10 @@ Consumes `of_core::crypto::Sealed` (for `exchange_code`'s opened-secret paramete
 the workspace `reqwest`/`jsonwebtoken` clients (already present) plus the new
 `hickory-resolver`.
 
-- [ ] Add `hickory-resolver` to `crates/of-auth/Cargo.toml` and the workspace
+- [x] Add `hickory-resolver` to `crates/of-auth/Cargo.toml` and the workspace
       `[workspace.dependencies]` table in the root `Cargo.toml` (pin a version; check for
       the current stable release rather than guessing a number).
-- [ ] Write failing recorded-fixture tests first in `crates/of-auth/tests/oidc.rs` (no live
+- [x] Write failing recorded-fixture tests first in `crates/of-auth/tests/oidc.rs` (no live
       network, matching `of-trackers`'s testing *convention* — mock the HTTP calls rather
       than hitting a real IdP). **`of-trackers`'s actual mock-HTTP-server harness
       (`TestServer`/`MockResponse`) lives in `crates/of-trackers/src/test_support.rs`,
@@ -272,7 +280,7 @@ the workspace `reqwest`/`jsonwebtoken` clients (already present) plus the new
       construction (exact query string shape per spec §4); code exchange happy path;
       `id_token` verification — valid signature/issuer/audience/nonce accepted, wrong
       issuer/audience/nonce/expired-token each rejected with a distinct, named failure.
-- [ ] Implement `oidc.rs` per spec §4's exact function list. `verify_id_token` fetches and
+- [x] Implement `oidc.rs` per spec §4's exact function list. `verify_id_token` fetches and
       short-lived-in-memory-caches the JWKS document (keyed by `jwks_uri` — a simple
       `tokio::sync::RwLock<HashMap<...>>` or similar, no need for a full cache crate).
       **Does not** itself enforce `email_verified` — that check is the caller's
@@ -280,16 +288,16 @@ the workspace `reqwest`/`jsonwebtoken` clients (already present) plus the new
       baked into this function. Leave a doc comment on `Claims` pointing at spec §4/§5 so a
       future reader doesn't "helpfully" move the check into this function and lose the
       caller-side placement's reasoning.
-- [ ] Implement `dns.rs`'s `verify_txt_record`: resolves `_otto-factory-verify.{domain}` TXT
+- [x] Implement `dns.rs`'s `verify_txt_record`: resolves `_otto-factory-verify.{domain}` TXT
       records, returns `Ok(true)` iff any record equals
       `format!("otto-factory-verify={expected_token}")`, `Ok(false)` on NXDOMAIN/timeout/no
       records, `Err` only on a genuine resolver-transport failure (per spec §4's exact
       Ok/Err split — do not conflate "not verified yet" with "operator problem").
-- [ ] `cargo test -p of-auth --test oidc`, `cargo test --workspace`, `cargo clippy
+- [x] `cargo test -p of-auth --test oidc`, `cargo test --workspace`, `cargo clippy
       --all-targets -- -D warnings`, `cargo fmt --all --check`.
-- [ ] `cargo fmt --all`, then commit: `of-auth: OIDC discovery/token-exchange/id_token verification and DNS TXT record checks`.
+- [x] `cargo fmt --all`, then commit: `of-auth: OIDC discovery/token-exchange/id_token verification and DNS TXT record checks`.
 
-## Task 3 — `of-web`: routes, ceremony lifecycle, `enforce_sso` at login ⬜
+## Task 3 — `of-web`: routes, ceremony lifecycle, `enforce_sso` at login ✅
 
 **Spec:** §5 in full — this is the task where the callback's exact check ordering
 (`state` → `binding_hash` → `email_verified` → domain-still-resolves →
@@ -304,12 +312,12 @@ this task's handler.
 **Interfaces produced:** the routes listed in spec §5. Consumes Task 1's `of_core::idp`/
 `domains`/`identities`/`ceremonies`/`orgs` and Task 2's `of_auth::oidc`/`dns`.
 
-- [ ] Add a `binding` cookie helper alongside the existing `set_cookie`/`COOKIE_NAME`
+- [x] Add a `binding` cookie helper alongside the existing `set_cookie`/`COOKIE_NAME`
       (`__Host-of_sso_binding`, `HttpOnly; Secure; Path=/; SameSite=Lax`, `Max-Age` matching
       the ceremony's 10-minute TTL) and a `clear_binding_cookie()` helper (`Max-Age=0`) for
       the callback response, per the spec's Risks & Open Questions note on not leaving a
       stale cookie behind.
-- [ ] Write failing route-level tests first in `crates/of-web/tests/sso.rs` (mirrors
+- [x] Write failing route-level tests first in `crates/of-web/tests/sso.rs` (mirrors
       `crates/of-web/tests/oauth_http.rs`'s or the passkey ceremony tests' shape — a real
       router, a real throwaway Postgres, no mocks): the full anonymous sign-in flow against
       a fixture IdP (reuse Task 2's fixture-server approach) ending in a session cookie;
@@ -331,7 +339,7 @@ this task's handler.
       connection / no verified domain — three separate cases); a passkey login refused for
       a member of an `enforce_sso` org. Confirm the test file fails to compile (handlers
       don't exist yet).
-- [ ] Implement `POST /api/auth/sso/start` and `POST /api/me/sso/link/start` per spec §5:
+- [x] Implement `POST /api/auth/sso/start` and `POST /api/me/sso/link/start` per spec §5:
       resolve domain via `idp::resolve_for_domain`, generate `state`/`binding`/`nonce`.
       `of_auth::crypto::generate(prefix: &str) -> Secret` takes a prefix argument (matching
       the existing `prefix::{SESSION, PAT, ...}` convention in `crypto.rs`) — add two new
@@ -341,7 +349,7 @@ this task's handler.
       the binding cookie, build the authorization URL via `of_auth::oidc::authorization_url`,
       return `{ redirect_url }`. The link-start variant additionally requires an
       authenticated session and a non-null caller email.
-- [ ] Implement `GET /sso/callback` per spec §5's full walkthrough — **do not summarize or
+- [x] Implement `GET /sso/callback` per spec §5's full walkthrough — **do not summarize or
       reorder these steps from memory; this list is the literal, complete order, and every
       branch below must be present, not just the ones that read as "the happy path":**
       1. Hash incoming `state` → `ceremonies::consume_by_state_hash` → generic refusal on
@@ -401,28 +409,28 @@ this task's handler.
          On any refusal in steps 2–6: no session, clear the binding cookie anyway (nothing
          left to protect once the ceremony's outcome is decided; any `Tx` opened along the
          way was already short-lived and released before reaching a refusal branch).
-- [ ] Implement the admin-only connection/domain/enforce endpoints (`PUT`/`DELETE
+- [x] Implement the admin-only connection/domain/enforce endpoints (`PUT`/`DELETE
 .../connection`, `POST`/`GET`/`POST .../verify`/`DELETE .../domains[/{domain}]`, `PUT
 .../enforce`) per spec §5, each behind `OrgCtx::require_admin()`. `PUT .../connection`
       calls `of_auth::oidc::fetch_discovery` before `idp::upsert_connection` and rejects
       (with the OIDC-side error surfaced) on a discovery fetch failure. `POST .../verify`
       reads the token in a short `Tx`, releases it, calls `dns::verify_txt_record` outside
       any `Tx`, then opens a second short `Tx` for `mark_verified` only on `true`.
-- [ ] Add the `enforce_sso` check to the passkey login path (`of_auth::login::with_passkey`
+- [x] Add the `enforce_sso` check to the passkey login path (`of_auth::login::with_passkey`
       or its `of-web` caller, per spec §5's "Passkey login enforcement" note — locate the
       exact resolved-`user_id`-before-session-mint point first, do not add a second lookup
       elsewhere): before minting a session, check whether `user_id` is in `org_members` for
       any org with `enforce_sso = true`; refuse with a message pointing at
       `/api/auth/sso/start` if so.
-- [ ] Add every new route to `crates/of-web/src/catalog.rs` with a summary/description
+- [x] Add every new route to `crates/of-web/src/catalog.rs` with a summary/description
       (the router and OpenAPI document are built from this one list — a route not in the
       catalog is not reachable, on purpose).
-- [ ] Run the Task 3 test file; confirm every case passes. `cargo test -p of-web`, `cargo
+- [x] Run the Task 3 test file; confirm every case passes. `cargo test -p of-web`, `cargo
       test --workspace`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all
       --check`.
-- [ ] `cargo fmt --all`, then commit: `of-web: enterprise SSO routes — connection/domain admin, sign-in and link ceremonies, enforce_sso login gate`.
+- [x] `cargo fmt --all`, then commit: `of-web: enterprise SSO routes — connection/domain admin, sign-in and link ceremonies, enforce_sso login gate`.
 
-## Task 4 — `web/`: console UI ⬜
+## Task 4 — `web/`: console UI ✅
 
 **Spec:** §6.
 
@@ -433,20 +441,20 @@ already uses for typed fetch calls (follow the existing pattern rather than inve
 — check how the tracker-connection settings page at
 `web/src/routes/o/[org]/settings/trackers` — or wherever that landed — calls its API).
 
-- [ ] Admin SSO settings page: connection form (issuer/client id/secret — secret field
+- [x] Admin SSO settings page: connection form (issuer/client id/secret — secret field
       write-only, cleared after submit, never populated from a `GET` response), domains
       list (add, see the exact TXT record name/value the API returned, verify, remove) each
       showing verified/pending status, `enforce_sso` toggle. Every lockout-refusal (`400`
       from any of the three guarded endpoints) surfaces its message inline rather than a
       generic toast — the whole point of naming the reason server-side is for a human to
       read it here.
-- [ ] Login page: collapsed "Sign in with SSO" section below the passkey button — email
+- [x] Login page: collapsed "Sign in with SSO" section below the passkey button — email
       field, `POST /api/auth/sso/start`, `window.location.assign(redirect_url)` on success;
       `sso_not_configured` surfaces inline, pointing back at the passkey button.
-- [ ] Account settings: "Link SSO identity" action — `POST /api/me/sso/link/start`, same
+- [x] Account settings: "Link SSO identity" action — `POST /api/me/sso/link/start`, same
       navigate-on-success pattern.
-- [ ] `npm run check && npm run lint && npm test && npm run build`. All green.
-- [ ] Commit: `web: enterprise SSO settings page, sign-in entry point, account-linking action`.
+- [x] `npm run check && npm run lint && npm test && npm run build`. All green.
+- [x] Commit: `web: enterprise SSO settings page, sign-in entry point, account-linking action`.
 
 ---
 
