@@ -159,9 +159,12 @@ variant, consumed by `of-web` in Task 2.
       assertions change — this is purely a signature-compatibility edit.
 - [ ] Run `cargo test -p of-auth --test passkeys` (the whole file) and confirm every test passes,
       including the new one and all 7 pre-existing call sites unchanged in behavior.
-- [ ] Run `cargo build --workspace` and confirm the *only* errors are in `crates/of-web/src/routes/auth.rs`
-      (missing arguments to `finish_registration`/`finish_registration_tx`) — i.e. the of-auth side
-      is fully consistent and Task 2 is the only remaining work.
+- [ ] Run `cargo build --workspace` and confirm the *only* errors are in `of-web`: missing arguments
+      to `finish_registration`/`finish_registration_tx` in `crates/of-web/src/routes/auth.rs`'s
+      three call sites, and a non-exhaustive match on `AuthError` in `crates/of-web/src/error.rs`'s
+      `auth_code()` (the new variant has no wildcard arm to fall back on, so the compiler catches
+      this one too, not just the call sites) — i.e. the of-auth side is fully consistent and Task 2
+      is the only remaining work.
 - [ ] `cargo clippy -p of-auth --all-targets -- -D warnings` and `cargo fmt --all`.
 - [ ] Commit: `git commit -m "of-auth: check ceremony ownership before any registration write"`.
 
