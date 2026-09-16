@@ -30,7 +30,11 @@ anyhow.workspace = true
 # directly has to be declared here too.
 tokio = { workspace = true, features = ["full"] }
 of-core.workspace = true
-of-auth.workspace = true
+# test-support relaxes of-auth::oidc's SSRF guard for loopback addresses
+# only, so this crate's own mock-IdP tests (crates/of-web/tests/sso.rs) can
+# run against a local server — never enabled by the production dependency
+# above. See that feature's doc comment in crates/of-auth/Cargo.toml.
+of-auth = { workspace = true, features = ["test-support"] }
 of-billing.workspace = true
 sqlx.workspace = true
 http.workspace = true

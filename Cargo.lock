@@ -1613,6 +1613,7 @@ dependencies = [
  "hmac",
  "http",
  "jsonwebtoken",
+ "of-auth",
  "of-core",
  "rand 0.8.8",
  "reqwest",

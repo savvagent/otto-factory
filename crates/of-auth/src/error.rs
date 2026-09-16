@@ -166,6 +166,18 @@ pub enum AuthError {
     /// operator-facing problem, not the domain's.
     #[error("DNS resolver failure while checking domain verification: {0}")]
     DnsResolverFailure(String),
+
+    /// A URL this server was about to fetch — the admin-supplied `issuer`,
+    /// or a `token_endpoint`/`jwks_uri` read back out of a stored discovery
+    /// document — is not `https`, or resolves to a loopback/link-local/
+    /// private/reserved address. Every one of these three URLs is either
+    /// typed by an org admin or served by a third party this server does
+    /// not control, so each is checked immediately before the connection
+    /// that would use it, not only once at bind time — an admin-configured
+    /// SSRF primitive against this server's own network would otherwise be
+    /// one `issuer` field away.
+    #[error("refusing to fetch {field} ({reason}) — it must be an https URL that does not resolve to a private, loopback, or link-local address")]
+    OidcUnsafeUrl { field: &'static str, reason: String },
 }
 
 impl AuthError {
@@ -236,6 +248,9 @@ impl AuthError {
             }
             AuthError::IdTokenInvalid(_) => {
                 "the identity provider's response could not be verified"
+            }
+            AuthError::OidcUnsafeUrl { .. } => {
+                "the identity provider's configuration points at a URL this server will not fetch"
             }
         }
     }

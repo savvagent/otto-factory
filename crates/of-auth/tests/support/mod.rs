@@ -308,7 +308,11 @@ ynzJxIA2o6yQD6H9ChWSA+8=
 
 /// The same key's public modulus/exponent, base64url (no padding) — the
 /// shape a JWKS document carries a public RSA key in.
-const TEST_RSA_N: &str = "ugbknjdMkW5662-o9VCfC6_dTS9goLdAm69dCIOT0i-C9Sx7lI6pnPofZCXbXIof47cNuMVXEWAcw32dB5UxBQ1ZyNl2FJY77p0o7OZIXtUpHTNe31zz-r9XuMgN_dNE7EWSbqToiTLjir0xPV8fMrZnJ-vyRSrSnpzUQdDoPVCzL2bt79NOEmSXeH6a4gTiPgKaYwBpcHs-b8MzeRmpHGd1x3ecwvTelFlV8qcpEO8LNDR2x6G7GKkpu6ZvWE9ubtA_lM639RaA6ifKyeUI0dyKwDYnTJ9a1MWMpZB1Km7W8RSkMcpG4Yd_721zSckaSn-3wronsJx1wCjWdSXsIQ";
+/// Public, by construction — the modulus half of a JWKS entry is what any
+/// caller (a legitimate verifier, or an attacker attempting alg confusion)
+/// already has. `pub(crate)` so `tests/oidc.rs`'s alg-confusion test can
+/// reuse it as the "attacker already knows this" HMAC secret guess.
+pub(crate) const TEST_RSA_N: &str = "ugbknjdMkW5662-o9VCfC6_dTS9goLdAm69dCIOT0i-C9Sx7lI6pnPofZCXbXIof47cNuMVXEWAcw32dB5UxBQ1ZyNl2FJY77p0o7OZIXtUpHTNe31zz-r9XuMgN_dNE7EWSbqToiTLjir0xPV8fMrZnJ-vyRSrSnpzUQdDoPVCzL2bt79NOEmSXeH6a4gTiPgKaYwBpcHs-b8MzeRmpHGd1x3ecwvTelFlV8qcpEO8LNDR2x6G7GKkpu6ZvWE9ubtA_lM639RaA6ifKyeUI0dyKwDYnTJ9a1MWMpZB1Km7W8RSkMcpG4Yd_721zSckaSn-3wronsJx1wCjWdSXsIQ";
 const TEST_RSA_E: &str = "AQAB";
 
 /// A discovery document pointing every endpoint at `server`'s mock routes —

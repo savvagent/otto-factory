@@ -9,6 +9,8 @@ mod support;
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use of_auth::error::AuthError;
 use of_auth::oidc;
 use serde_json::json;
@@ -309,6 +311,51 @@ async fn verify_id_token_rejects_wrong_audience() {
 }
 
 #[tokio::test]
+async fn verify_id_token_rejects_a_token_with_no_aud_claim() {
+    // jsonwebtoken's set_audience()/set_issuer() only compare a claim
+    // against the expected value when the claim is present at all — a token
+    // that omits `aud` entirely has nothing to compare and would otherwise
+    // verify. This is the missing-claim case set_required_spec_claims
+    // exists to close; a wrong-value `aud` is covered separately above.
+    let server = jwks_server().await;
+    let discovery = support::discovery_document(&server.base_url);
+
+    let claims = json!({
+        "iss": server.base_url,
+        "sub": "user-42",
+        "nonce": "nonce-1",
+        "exp": now() + 300,
+        // no "aud" at all
+    });
+    let id_token = support::sign_id_token(&claims);
+
+    let err = oidc::verify_id_token(&discovery, "client-1", &id_token, "nonce-1")
+        .await
+        .expect_err("a token with no aud claim at all must be refused, not silently accepted");
+    assert!(matches!(err, AuthError::IdTokenInvalid(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn verify_id_token_rejects_a_token_with_no_iss_claim() {
+    let server = jwks_server().await;
+    let discovery = support::discovery_document(&server.base_url);
+
+    let claims = json!({
+        "aud": "client-1",
+        "sub": "user-42",
+        "nonce": "nonce-1",
+        "exp": now() + 300,
+        // no "iss" at all
+    });
+    let id_token = support::sign_id_token(&claims);
+
+    let err = oidc::verify_id_token(&discovery, "client-1", &id_token, "nonce-1")
+        .await
+        .expect_err("a token with no iss claim at all must be refused, not silently accepted");
+    assert!(matches!(err, AuthError::IdTokenInvalid(_)), "got {err:?}");
+}
+
+#[tokio::test]
 async fn verify_id_token_rejects_wrong_nonce() {
     let server = jwks_server().await;
     let discovery = support::discovery_document(&server.base_url);
@@ -373,6 +420,52 @@ async fn verify_id_token_rejects_a_bad_signature() {
         .await
         .expect_err("a tampered signature must be refused");
     assert!(matches!(err, AuthError::IdTokenInvalid(_)));
+}
+
+#[tokio::test]
+async fn verify_id_token_rejects_the_classic_rs256_to_hs256_alg_confusion_attack() {
+    // The fixture JWKS advertises an RSA public key under TEST_KID, meant to
+    // *verify* RS256 signatures. The classic "alg confusion" attack forges a
+    // token by switching the header to HS256 and (ab)using that same public
+    // key's bytes as the HMAC secret — a naive verifier that picks its
+    // algorithm from the attacker-controlled header, then blindly looks up
+    // "the key for this kid" and treats it as generic key material, accepts
+    // it. This only fails safely because `jsonwebtoken` cross-checks the
+    // matched JWK's own key *family* (RSA here) against the header's claimed
+    // algorithm's family (HS256 is HMAC) and refuses the mismatch outright —
+    // `verify_id_token`'s own doc comment asserts this happens, but nothing
+    // in this crate had verified it against an actual forged token until
+    // now.
+    let server = jwks_server().await;
+    let discovery = support::discovery_document(&server.base_url);
+
+    let forged_secret = URL_SAFE_NO_PAD
+        .decode(support::TEST_RSA_N)
+        .expect("fixture RSA modulus is valid base64url");
+
+    let claims = json!({
+        "iss": server.base_url,
+        "aud": "client-1",
+        "sub": "attacker-controlled",
+        "nonce": "nonce-1",
+        "exp": now() + 300,
+    });
+    let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
+    header.kid = Some(support::TEST_KID.to_string());
+    let forged_token = jsonwebtoken::encode(
+        &header,
+        &claims,
+        &jsonwebtoken::EncodingKey::from_secret(&forged_secret),
+    )
+    .expect("encoding the forged HS256 token");
+
+    let err = oidc::verify_id_token(&discovery, "client-1", &forged_token, "nonce-1")
+        .await
+        .expect_err("an HS256 token signed with the RSA key's own public bytes must be refused");
+    assert!(
+        matches!(err, AuthError::IdTokenInvalid(_)),
+        "expected IdTokenInvalid, got {err:?}"
+    );
 }
 
 fn assert_id_token_invalid(err: &AuthError, expected_substring: &str) {

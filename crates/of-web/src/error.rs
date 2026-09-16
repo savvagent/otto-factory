@@ -302,6 +302,7 @@ fn auth_code(e: &AuthError) -> &'static str {
         // these say something specific an admin/operator can act on.
         AuthError::OidcDiscoveryField(_) => "oidc_discovery_incomplete",
         AuthError::IdTokenInvalid(_) => "id_token_invalid",
+        AuthError::OidcUnsafeUrl { .. } => "oidc_unsafe_url",
     }
 }
 
