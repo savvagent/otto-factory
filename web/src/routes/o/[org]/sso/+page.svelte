@@ -18,13 +18,10 @@
    * claimed/verified email domains that route sign-ins to it, and the
    * `enforceSso` switch that makes it mandatory.
    *
-   * **There is no `GET` for the connection.** Only `PUT .../sso/connection`'s
-   * own response ever carries an issuer or client id — see `$lib/api`'s
-   * `upsertSsoConnection` doc comment, which is the actual, deployed shape of
-   * this API. This page never claims to know whether a connection exists
-   * beyond what it was just told: the form is always blank on load, and the
-   * "connected to …" line only ever reflects this session's own most recent
-   * save, never something read back from a reload.
+   * The connection form loads whatever `GET .../sso/connection` reports —
+   * issuer and client id, never the secret (the server has no read path for
+   * it at all, so the secret field is always blank and write-only, on first
+   * load and after every save alike).
    *
    * Every lockout refusal (`sso_lockout`, from the connection delete, the
    * last-verified-domain delete, or turning `enforceSso` on) is shown with
@@ -66,8 +63,38 @@
   let connectionError = $state<string | undefined>(undefined);
   let removingConnection = $state(false);
   let connectionRemoveError = $state<string | undefined>(undefined);
-  /** Only ever set from this session's own save — see the module doc above. */
+  /**
+   * Set on load from `GET .../sso/connection` (undefined = nothing bound
+   * yet), and again from whatever `PUT`/`DELETE` themselves return — never
+   * guessed at locally.
+   */
   let savedConnection = $state<IdpConnection | undefined>(undefined);
+  let loadingConnection = $state(true);
+
+  $effect(() => {
+    const slug = org.slug;
+    if (!slug || !org.isAdmin) return;
+
+    loadingConnection = true;
+
+    void (async () => {
+      try {
+        const connection = await api.getSsoConnection(slug);
+        savedConnection = connection;
+        // A bound connection's issuer/client id are shown pre-filled so an
+        // admin can see what's configured without retyping it — the secret
+        // field is the one thing that never round-trips.
+        if (connection) {
+          issuer = connection.issuer;
+          clientId = connection.clientId;
+        }
+      } catch (e) {
+        connectionError = messageFor(e, m.sso_error_load());
+      } finally {
+        loadingConnection = false;
+      }
+    })();
+  });
 
   async function saveConnection(event: SubmitEvent) {
     event.preventDefault();
@@ -231,7 +258,9 @@
 
         {#if connectionError}<Alert>{connectionError}</Alert>{/if}
 
-        <Button type="submit" pending={savingConnection}>{m.sso_save_connection()}</Button>
+        <Button type="submit" disabled={loadingConnection} pending={savingConnection}>
+          {m.sso_save_connection()}
+        </Button>
       </form>
 
       <div class="mt-4 border-t border-edge/50 pt-3">

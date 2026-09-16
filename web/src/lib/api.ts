@@ -326,14 +326,14 @@ export const api = {
 
   // ------------------------------------------------------------------ sso
   /**
-   * Bind (or replace) this org's identity provider.
-   *
-   * There is no corresponding `GET`: the returned `IdpConnection` — issuer
-   * and client id, never the secret — is only ever seen right after a
-   * successful call to this one. A page that wants to show "connected"
-   * after a reload has nothing to read it back from; that is a property of
-   * the API surface, not something this call can paper over.
+   * This org's bound identity provider, if any — issuer and client id,
+   * never the secret (the server has no read path for it at all). A `204`
+   * (nothing bound) resolves to `undefined`, same as `request()`'s general
+   * "no content" handling.
    */
+  getSsoConnection: (org: string) =>
+    get<IdpConnection | undefined>(`/api/orgs/${seg(org)}/sso/connection`),
+  /** Bind (or replace) this org's identity provider. */
   upsertSsoConnection: (
     org: string,
     body: { issuer: string; clientId: string; clientSecret: string }
