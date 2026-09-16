@@ -225,6 +225,36 @@ Success:
 - **`sso_ceremonies` gains a nullable `user_id`**, set only by the authenticated
   "link my SSO identity" path (§ above) and left `NULL` for the anonymous "sign in with
   SSO" path — see §1/§5 for the two ceremonies' distinct handling at callback time.
+- **The callback needs a second secret binding it to the browser that started the ceremony
+  — the `state` parameter alone is not enough, and an earlier draft of this spec omitted
+  this entirely.** `state` travels in a URL (the redirect from the IdP), which means it
+  necessarily also travels through browser history, referrer headers, and — critically —
+  anything that captures and replays that exact URL. Without a second check, an attacker
+  can legitimately start and complete a ceremony as themselves, capture the resulting
+  `?code=...&state=...` callback URL *before* letting it load, and get a victim to load it
+  instead (a chat link, an `<img>` tag — `CLAUDE.md` already treats exactly this class of
+  URL, unfurled by a link preview, as hostile for the console's invitation links). Since the
+  ceremony's `org_id`/`user_id` are fixed server-side at creation time and nothing checks
+  them against the browser making the callback request, that victim's browser would end up
+  holding a session cookie for **the attacker's own account** (classic login CSRF) — or, for
+  the authenticated-link ceremony, would permanently link the attacker's real IdP identity
+  onto whatever account the ceremony names. This is also this design's own instance of the
+  rule `CLAUDE.md` already states for every other browser-facing endpoint in this codebase:
+  "no credential is ever spent on a `GET`" — this callback mints a session on an
+  unauthenticated `GET` with no confirmation, which needs the same browser-binding
+  discipline OAuth clients are expected to apply to `state` (RFC 6749 §10.12), not a
+  narrower defense. **Fix:** ceremony-start (`sso/start` and `sso/link/start`) additionally
+  sets a short-lived, `HttpOnly`, `Secure`, `Path=/`, `SameSite=Lax` cookie —
+  `__Host-of_sso_binding` — carrying a second random value distinct from `state`; the
+  ceremony row stores only its hash (`binding_hash`, generated/hashed via the same
+  `of_auth::crypto::generate()`/`hash()` pair as `state`). The callback reads this cookie
+  from the incoming request and requires it to match the ceremony's stored `binding_hash`
+  *in addition to* the URL-carried `state` resolving a ceremony at all — a captured-and-
+  replayed callback URL loaded in a different browser has no way to also present the
+  matching cookie. A missing or mismatched binding cookie is refused with the same generic
+  error as an invalid `state`, and — like a valid callback — still consumes the ceremony
+  (all of this happens inside one `SELECT ... FOR UPDATE`-then-consume `Tx` on the ceremony
+  row, so a mismatched attempt cannot be retried against the same ceremony either).
 - **`idp_connections.discovery` (existing `jsonb NOT NULL DEFAULT '{}'`) caches the fetched
   `/.well-known/openid-configuration` document indefinitely, refreshed on next use whenever
   it's missing the `authorization_endpoint`/`token_endpoint`/`jwks_uri` keys the flow
@@ -265,6 +295,12 @@ CREATE TABLE sso_ceremonies (
   user_id           uuid REFERENCES users (id) ON DELETE CASCADE,
   -- Single-use, bearer-shaped, hashed at rest — same convention as sessions/access_tokens.
   state_hash        bytea NOT NULL,
+  -- A second secret, distinct from state_hash, carried by an HttpOnly cookie set at
+  -- ceremony-start and checked at callback. state travels in a URL and can be captured
+  -- and replayed by an attacker into a victim's browser (login CSRF); this is what proves
+  -- the browser completing the callback is the same one that started the ceremony. See
+  -- the design spec's Assumptions for the full threat this closes.
+  binding_hash      bytea NOT NULL,
   -- Anti-replay on the returned id_token. Not a bearer credential (sent to the IdP as a
   -- plaintext query parameter); no confidentiality property to protect here.
   nonce             text NOT NULL,
@@ -383,6 +419,18 @@ holds, the same as it does for every other table in this spec.
   guard-1-only test, same bucket as `idp_connections`/`claimed_domains`, not a "policy
   already covers it" case. Assert org B's `Tx` cannot flip org A's flag (the `UPDATE`'s
   `WHERE id = tx.org()` is the only thing preventing it).
+- A domain reassigned mid-flight cannot retarget an in-flight ceremony: start a ceremony
+  for org A (which denormalizes `org_id` onto the `sso_ceremonies` row), then have org B
+  successfully claim-and-verify the same domain before the ceremony's callback runs;
+  assert the callback still resolves against org A (the ceremony's stored `org_id`), not a
+  fresh `resolve_for_domain` lookup that would now return org B.
+- A callback whose `state` resolves a real ceremony but whose `__Host-of_sso_binding`
+  cookie is missing or does not match `binding_hash` is refused, and the ceremony is
+  consumed by the attempt (cannot be retried against the same ceremony with a corrected
+  cookie).
+- The authenticated-link ceremony's email-match guard: a caller with `user_id = U` (email
+  `alice@acme.com`) whose IdP callback returns a domain-matching but different email
+  (`bob@acme.com`) is refused, and no `user_identities` row is created for `U`.
 
 ## §4 `of_auth` — the OIDC client and DNS verification
 
@@ -440,42 +488,67 @@ ceremony endpoints and `/oauth/authorize`:
   the domain, `of_core::idp::resolve_for_domain`. No match → `sso_not_configured` error
   ("no SSO configured for this address — sign in with a passkey instead"). Match → mint an
   `sso_ceremonies` row with `user_id = NULL` (the anonymous-ceremony kind — `state` via
-  `of_auth::crypto::generate()`, hashed for storage; `nonce` via the same generator, stored
-  plain), build the authorization URL via `of_auth::oidc::authorization_url`, return
-  `{ redirect_url: String }` for the console to navigate to. **Accepted, bounded
-  disclosure** (documented in Risks & Open Questions, parallel to the trackers spec's
-  JIRA-site-registration timing note): this reveals whether a domain has SSO configured,
-  not whether any specific account exists — the same class of leak "Continue with SSO"
-  flows in comparable products (Slack, Notion) accept by design.
+  `of_auth::crypto::generate()`, hashed for storage; a second, independent value generated
+  the same way for `binding_hash`; `nonce` via the same generator, stored plain), set the
+  `__Host-of_sso_binding` cookie (see Assumptions) to the plaintext binding value, build the
+  authorization URL via `of_auth::oidc::authorization_url`, return `{ redirect_url: String
+  }` for the console to navigate to. **Accepted, bounded disclosure** (documented in Risks &
+  Open Questions, parallel to the trackers spec's JIRA-site-registration timing note): this
+  reveals whether a domain has SSO configured, not whether any specific account exists — the
+  same class of leak "Continue with SSO" flows in comparable products (Slack, Notion) accept
+  by design.
 - `POST /api/me/sso/link/start` (session-cookie-gated — the caller must already be signed
   in) → the caller's own org memberships are irrelevant here; this only needs the caller's
   already-resolved `user_id`. If the caller's account has no verified email at all yet
   (`users.email IS NULL`), refuse — there is nothing to route to an IdP by. Otherwise, same
-  domain resolution as `sso/start`, but the minted `sso_ceremonies` row sets
-  `user_id = Some(caller's user_id)` (the authenticated-ceremony kind). Same response shape.
+  domain resolution and binding-cookie setup as `sso/start`, but the minted `sso_ceremonies`
+  row sets `user_id = Some(caller's user_id)` (the authenticated-ceremony kind). Same
+  response shape.
 - `GET /sso/callback?code=...&state=...` (unauthenticated) → hashes the incoming `state`
-  with `of_auth::crypto::hash()` and looks it up with `WHERE state_hash = $1` (see
-  Assumptions — this is a deterministic-hash equality lookup, the same shape `sessions`/
-  `access_tokens` already use for their own incoming bearer values), checks `expires_at` and
-  `consumed_at IS NULL`, marks it consumed in the same step (single-use). No match / expired
-  / already consumed → a plain error page, **not** a `404` (this endpoint is never queried
-  for an org's existence the way `OrgCtx` is; it's a malformed-or-replayed-request page). On
-  match: open a normal `Tx` pinned to the ceremony's stored `org_id`, `get_connection` +
-  `get_connection_secret`, open the sealed secret, `exchange_code`, `verify_id_token` with
-  the ceremony's stored `nonce`, enforce the `email_verified` rule (§4), and enforce that the
-  verified email's domain still resolves (via a fresh `resolve_for_domain` check against the
-  *ceremony's own* `org_id`) to this same org — a mismatch is a refusal, not a fallback to a
-  different org. Then, **the two ceremony kinds diverge**:
+  with `of_auth::crypto::hash()` and looks it up with `SELECT ... FOR UPDATE WHERE
+state_hash = $1` (see Assumptions — this is a deterministic-hash equality lookup, the same
+  shape `sessions`/`access_tokens` already use for their own incoming bearer values; the
+  `FOR UPDATE` is what makes "check, then mark consumed" atomic against a second concurrent
+  callback for the same ceremony), checks `expires_at` and `consumed_at IS NULL`, **hashes
+  the `__Host-of_sso_binding` cookie from the request and requires it to match the
+  ceremony's stored `binding_hash`** (see Assumptions — this is the browser-binding check
+  that closes the login-CSRF path a bare `state` check leaves open), marks the ceremony
+  consumed in the same step regardless of outcome (single-use, and a failed binding check
+  cannot be retried against the same ceremony). No `state` match / expired / already
+  consumed / binding mismatch → the same generic error page, **not** a `404` (this endpoint
+  is never queried for an org's existence the way `OrgCtx` is; it's a
+  malformed-or-replayed-request page — and deliberately not distinguishing *which* of these
+  four checks failed, since that distinction is only useful to an attacker probing the
+  endpoint). On match: open a normal `Tx` pinned to the ceremony's stored `org_id`,
+  `get_connection` + `get_connection_secret`, open the sealed secret, `exchange_code`,
+  `verify_id_token` with the ceremony's stored `nonce`, enforce the `email_verified` rule
+  (§4), and enforce that the verified email's domain still resolves (via a fresh
+  `resolve_for_domain` check against the *ceremony's own* `org_id`) to this same org — a
+  mismatch is a refusal, not a fallback to a different org. Then, **the two ceremony kinds
+  diverge**:
   - `identities::resolve_user(idp_connection_id, subject)` first, regardless of kind — a
     returning federated user (already linked, from either kind of ceremony originally) always
     resolves here and skips everything below.
-  - **Authenticated-ceremony (`ceremony.user_id.is_some()`)**: if the `(idp_connection_id,
-    subject)` pair is unlinked, `identities::link(ceremony.user_id, ...)` directly — no email
-    lookup at all. If that exact pair is already linked to a *different* user (someone else's
-    federated identity), refuse: this ceremony's caller cannot steal another account's IdP
-    link by replaying a callback against it.
+  - **Authenticated-ceremony (`ceremony.user_id.is_some()`)**: **first requires the verified
+    email to case-insensitively match the ceremony's own `user_id`'s current
+    `users.email`** — not just the same domain. Without this, a shared browser or a stale
+    IdP session (a kiosk, a leftover login from testing a different account) could silently
+    link a *different* person's real corporate identity onto the caller's account with no
+    confirmation step; matching domain alone was not enough to rule that out. A mismatch
+    refuses with a message naming the discrepancy (this is an authenticated caller, so
+    naming it is not an enumeration risk the way the anonymous path's errors are). Once that
+    holds: if the `(idp_connection_id, subject)` pair is unlinked, `identities::link(ceremony.user_id,
+    ...)` directly — no email-based *account resolution* happens here, only this one
+    equality check against the account already known from the session. If that exact pair
+    is already linked to a *different* user (someone else's federated identity), refuse:
+    this ceremony's caller cannot steal another account's IdP link by replaying a callback
+    against it.
   - **Anonymous-ceremony (`ceremony.user_id.is_none()`)**: `identities::resolve_by_email`. `None`
-    → create a new `users` row for the verified email, `identities::link` it, ensure
+    → an idempotent `INSERT ... ON CONFLICT (lower(email)) DO UPDATE ... RETURNING` (the same
+    upsert shape this codebase already uses elsewhere for "create or converge," not a plain
+    `INSERT` — two concurrent first-time SSO logins for the same brand-new email converge on
+    one row instead of racing into a unique-violation error) for the verified email,
+    `identities::link` it, ensure
     `org_members` contains `(org_id, new_user_id, role: member)` (insert-if-absent). `Some(_)`
     → **refuse. No session is opened.** Error message: "an account already exists for this
     email — sign in with your existing credentials, then link SSO from account settings."
@@ -489,10 +562,11 @@ client_secret }` → `fetch_discovery`, seal the secret, `upsert_connection`. Re
   operator that has never read the docs" convention — here the reader is a human admin, but
   the same honesty standard applies) if discovery fetch fails: a connection is never saved
   half-configured.
-- `DELETE /api/orgs/{org}/sso/connection` (`require_admin`) → refuses (`400`, naming the
-  reason) while `orgs.enforce_sso = true`: removing the org's only IdP while every member's
-  passkey login is refused would lock every member — including the admin issuing this
-  call — out entirely, with no path back in. `enforce_sso` must be turned off first.
+- `DELETE /api/orgs/{org}/sso/connection` (`require_admin`) → locks the org row (see the
+  `PUT .../sso/enforce` entry below for why), refuses (`400`, naming the reason) while
+  `orgs.enforce_sso = true`: removing the org's only IdP while every member's passkey login
+  is refused would lock every member — including the admin issuing this call — out
+  entirely, with no path back in. `enforce_sso` must be turned off first.
 - `POST /api/orgs/{org}/sso/domains` `{ domain }` (`require_admin`) → generates a
   verification token, `domains::claim`, returns the domain row **and** the exact TXT record
   name/value the console renders as setup instructions.
@@ -507,22 +581,40 @@ client_secret }` → `fetch_discovery`, seal the secret, `upsert_connection`. Re
   Postgres transaction open, same rule the tracker sync engine's outbound writes already
   follow), then — only on `true` — opens a second short `Tx` to `mark_verified`. `false` →
   `200` with `{ verified: false }`, not an error; the admin just hasn't propagated DNS yet.
-- `DELETE /api/orgs/{org}/sso/domains/{domain}` (`require_admin`) → refuses (`400`, same
-  reasoning as the connection delete above) when `orgs.enforce_sso = true` **and** this is
-  the org's only currently-verified domain — removing the last routable domain while
-  enforcement is on would strand every member who isn't already linked with no way to reach
-  the anonymous sign-in path either (the authenticated link-start path is also unreachable
-  for anyone not already signed in, which under `enforce_sso` is everyone who hasn't
-  federated yet). Deleting a non-last verified domain, or an unverified one, proceeds.
+- `DELETE /api/orgs/{org}/sso/domains/{domain}` (`require_admin`) → locks the org row (see
+  `PUT .../sso/enforce` below), refuses (`400`, same reasoning as the connection delete
+  above) when `orgs.enforce_sso = true` **and** this is the org's only currently-verified
+  domain — removing the last routable domain while enforcement is on would strand every
+  member who isn't already linked with no way to reach the anonymous sign-in path either
+  (the authenticated link-start path is also unreachable for anyone not already signed in,
+  which under `enforce_sso` is everyone who hasn't federated yet). Deleting a non-last
+  verified domain, or an unverified one, proceeds. The org-row lock is what stops two
+  concurrent deletes (starting from two verified domains) from each reading "not last" and
+  both succeeding — a plain read-then-delete without it is a real TOCTOU race, not a
+  theoretical one, since this is exactly the two-admin-at-once scenario the console makes
+  easy to trigger by accident.
 - `PUT /api/orgs/{org}/sso/enforce` `{ enforce_sso: bool }` (`require_admin`) →
-  `set_enforce_sso`. Refuses (`400`, naming the reason) when turning it on and the org has
-  no *verified* claimed domain and no bound `idp_connection` — turning on enforcement with
-  no way for any member to complete an IdP sign-in would lock every passkey-only member out
-  with no path back in, which is a self-inflicted lockout this endpoint can and should
-  refuse to create. This is the same three-way guard `DELETE .../connection` and
-  `DELETE .../domains/{domain}` enforce from the other direction — together they mean
-  `enforce_sso = true` can never coexist with "no working IdP path," checked at every edge
-  that could produce that state, not just the one that turns the flag on.
+  `set_enforce_sso`. **Corrected in this revision — an earlier draft's guard was an AND of
+  two negated conditions and only refused when both a connection and a verified domain were
+  simultaneously absent, which is backwards: `resolve_for_domain` is an inner join, so
+  *either* piece missing alone already makes SSO sign-in unreachable.** Refuses (`400`,
+  naming the reason) turning it on **unless the org has both** a bound `idp_connection`
+  **and** at least one verified `claimed_domains` row — turning on enforcement with no way
+  for any member to complete an IdP sign-in would lock every passkey-only member out with no
+  path back in, which is a self-inflicted lockout this endpoint can and should refuse to
+  create. This is the same guard `DELETE .../connection` and `DELETE .../domains/{domain}`
+  enforce from the other direction — together they mean `enforce_sso = true` can never
+  coexist with "no working IdP path," checked at every edge that could produce that state,
+  not just the one that turns the flag on. **All three of these checks (both deletes, and
+  this enable path) take `SELECT 1 FROM orgs WHERE id = $1 FOR UPDATE` at the top of their
+  transaction before evaluating "does this org still have a working path"** — the same
+  locked-read-then-write discipline `orgs.rs`'s existing `count_owners_for_update` already
+  uses for its own concurrent-admin-action race. Without it, two admins concurrently
+  deleting the org's two verified domains (or one deleting the sole connection while another
+  enables enforcement) can each read "still safe" before either commits, and both succeed —
+  landing the org in the locked-out state this whole guard exists to prevent. Locking the
+  `orgs` row is what serializes all three mutations against each other cleanly, since they
+  all answer the same underlying question about the same org.
 
 **Passkey login enforcement.** `of_auth::login::with_passkey` (or its `of-web` caller —
 whichever already has the resolved `user_id` in hand before minting a session) gains one
@@ -559,9 +651,15 @@ post-ceremony passkey login step.
   message, no confirmation of which org (§2).
 - `enforce_sso` turned on with no working IdP path for the org: refused at the API layer
   (§5), not silently accepted and discovered later as a lockout.
-- OIDC callback with a mismatched/expired/reused `state`: generic error page, no org/domain
-  information disclosed (this is the unauthenticated bootstrap path; treat it with the same
-  care as a bad bearer token).
+- OIDC callback with a mismatched/expired/reused `state`, or a missing/mismatched
+  `__Host-of_sso_binding` cookie: generic error page, no org/domain information disclosed
+  and no distinction surfaced between the four possible causes (this is the unauthenticated
+  bootstrap path; treat it with the same care as a bad bearer token). A cleared or absent
+  cookie (private browsing, a cross-browser copy-paste of the callback URL) fails the same
+  way a stolen/replayed one does — restart from `sso/start`.
+- Authenticated-link callback whose verified email doesn't match the caller's own stored
+  `users.email`: refused, naming the mismatch (safe to be specific here — the caller is
+  already authenticated, this isn't the anonymous enumeration surface).
 - `email_verified` false or absent: refused, pointing the person at their org's own sign-in
   instructions (whatever the IdP's own login support says) rather than at otto-factory,
   since otto-factory isn't what's misconfigured.
