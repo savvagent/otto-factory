@@ -27,6 +27,8 @@ subtle.workspace = true
 totp-rs.workspace = true
 webauthn-rs = { version = "0.5.4", features = ["danger-allow-state-serialisation", "resident-key-support", "conditional-ui"] }
 webauthn-rs-proto = "0.5.5"
+jsonwebtoken.workspace = true
+hickory-resolver.workspace = true
 
 [dev-dependencies]
 # Integration tests link of-auth as an external crate, so anything they use

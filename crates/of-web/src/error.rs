@@ -288,9 +288,20 @@ fn auth_code(e: &AuthError) -> &'static str {
         AuthError::UnsupportedGrantType(_) => "unsupported_grant_type",
         AuthError::InvalidScope(_) => "invalid_scope",
 
-        AuthError::Config(_) | AuthError::Crypto(_) | AuthError::Core(_) | AuthError::Db(_) => {
-            "internal_error"
-        }
+        AuthError::Config(_)
+        | AuthError::Crypto(_)
+        | AuthError::Core(_)
+        | AuthError::Db(_)
+        | AuthError::OidcHttp { .. }
+        | AuthError::OidcApi { .. }
+        | AuthError::DnsResolverFailure(_) => "internal_error",
+
+        // enterprise OIDC federation (spec §4): a discovery document missing
+        // a required endpoint, or an id_token that fails verification —
+        // separate codes because, unlike the credential failures above,
+        // these say something specific an admin/operator can act on.
+        AuthError::OidcDiscoveryField(_) => "oidc_discovery_incomplete",
+        AuthError::IdTokenInvalid(_) => "id_token_invalid",
     }
 }
 

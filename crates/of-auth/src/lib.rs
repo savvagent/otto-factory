@@ -30,9 +30,11 @@
 //! primitive is hand-written — see [`crypto`] for what is used where.
 
 pub mod crypto;
+pub mod dns;
 pub mod error;
 pub mod login;
 pub mod oauth;
+pub mod oidc;
 pub mod passkeys;
 pub mod ratelimit;
 pub mod sessions;
