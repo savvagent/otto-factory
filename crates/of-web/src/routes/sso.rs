@@ -253,7 +253,19 @@ pub async fn callback(
             response = session::with_cookie(response, session::set_cookie(&token));
             session::with_cookie(response, session::clear_binding_cookie())
         }
-        Err(Outcome::Refuse(message)) => refusal_response(message),
+        Err(Outcome::Refuse(message)) => {
+            // Every refusal branch in callback_inner funnels through here —
+            // a single log line for all of them, uniform coverage even for
+            // the branches that don't have their own tracing::warn! below.
+            // The browser's response deliberately collapses several distinct
+            // causes into one generic message (spec §5); this log line does
+            // not — an operator troubleshooting "SSO stopped working," or
+            // investigating a suspected identity-theft attempt, needs to
+            // tell them apart even though a caller probing the endpoint must
+            // not be able to.
+            tracing::warn!(message, "SSO callback refused");
+            refusal_response(message)
+        }
         Err(Outcome::Error(e)) => {
             session::with_cookie(e.into_response(), session::clear_binding_cookie())
         }
@@ -331,7 +343,14 @@ async fn callback_inner(
         &redirect,
     )
     .await
-    .map_err(|_| Outcome::Refuse(GENERIC_REFUSAL))?;
+    .map_err(|e| {
+        // The browser gets the same generic refusal every other cause in
+        // this family does (spec §5); an operator troubleshooting "SSO
+        // stopped working for this org" has nothing else to go on unless
+        // the real cause is logged here.
+        tracing::warn!(org_id = %ceremony.org_id, error = %e, "SSO code exchange failed");
+        Outcome::Refuse(GENERIC_REFUSAL)
+    })?;
 
     let claims = oidc::verify_id_token(
         &connection.discovery,
@@ -340,7 +359,10 @@ async fn callback_inner(
         &ceremony.nonce,
     )
     .await
-    .map_err(|_| Outcome::Refuse(GENERIC_REFUSAL))?;
+    .map_err(|e| {
+        tracing::warn!(org_id = %ceremony.org_id, error = %e, "SSO id_token verification failed");
+        Outcome::Refuse(GENERIC_REFUSAL)
+    })?;
 
     // The one hard security rule from spec §4: never trust an email claim
     // that was not asserted as verified.
@@ -376,8 +398,22 @@ async fn callback_inner(
         // Authenticated ceremony, linked to a DIFFERENT account: refuse.
         // This is the identity-theft guard — this ceremony's caller cannot
         // steal another account's IdP link by replaying a callback against
-        // it. The single most important line in this whole function.
-        (Some(_), Some(_)) => return Err(Outcome::Refuse(IDENTITY_LINKED_ELSEWHERE)),
+        // it. The single most important line in this whole function, so it
+        // gets its own structured log line rather than relying only on the
+        // generic one every Outcome::Refuse produces (callback()) — an
+        // attempt against this specific branch is exactly the kind of event
+        // an operator wants to be able to find without wading through every
+        // ordinary "link expired" refusal.
+        (Some(caller_uid), Some(other_uid)) => {
+            tracing::warn!(
+                org_id = %ceremony.org_id,
+                idp_connection_id = %ceremony.idp_connection_id,
+                caller_user_id = %caller_uid,
+                already_linked_to = %other_uid,
+                "SSO identity-theft guard fired: an authenticated link ceremony resolved to a different account's identity"
+            );
+            return Err(Outcome::Refuse(IDENTITY_LINKED_ELSEWHERE));
+        }
         // Step 5: authenticated ceremony, not yet linked.
         (Some(caller_uid), None) => {
             link_authenticated(
@@ -444,6 +480,13 @@ async fn link_authenticated(
     // `(Some(_), Some(_))` arm refuses, just narrowed to this race window.
     let identity = identities::link(&state.db, caller_user_id, idp_connection_id, subject).await?;
     if identity.user_id != caller_user_id {
+        tracing::warn!(
+            idp_connection_id = %idp_connection_id,
+            caller_user_id = %caller_user_id,
+            already_linked_to = %identity.user_id,
+            "SSO identity-theft guard fired in the linking race window: a concurrent callback \
+             linked this identity to a different account first"
+        );
         return Err(Outcome::Refuse(IDENTITY_LINKED_ELSEWHERE));
     }
     Ok(caller_user_id)
