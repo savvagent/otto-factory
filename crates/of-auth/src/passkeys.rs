@@ -296,6 +296,14 @@ pub async fn finish_registration(
             // its trace survives that rollback; writing it on `tx` would roll
             // back with the attempt it is trying to record.
             drop(tx);
+            // Attributed to `ceremony_account` — the account a real signature
+            // just backed ownership of — rather than `caller_account`, which
+            // is only an identity the request's own session asserted.
+            // `claim_finish`'s `note_claim_refused` makes the identical
+            // choice for the identical reason (see its own call site): the
+            // verified party is the more trustworthy subject for the event,
+            // and `caller_account` is still named in `detail` so the trail
+            // shows who was attempting the substitution.
             let entry = Entry::new(action::PASSKEY_REGISTRATION_REFUSED)
                 .actor(ceremony_account)
                 .detail(serde_json::json!({ "attemptedBy": caller_account.to_string() }))

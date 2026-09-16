@@ -571,11 +571,14 @@ async fn a_forced_audit_failure_rolls_back_the_credential(pool: PgPool) {
     );
 }
 
-/// `expected`, when `Some`, must be checked before anything is written — a
-/// mismatch must not leave a live credential or an audit row for a request
-/// the caller never actually authorized. `savvagent/otto-factory#109`.
+/// `expected`, when `Some`, must be checked before either write it guards —
+/// a mismatch must not leave a live credential or a `PASSKEY_REGISTERED`
+/// success row for a request the caller never actually authorized. It
+/// deliberately does leave a `PASSKEY_REGISTRATION_REFUSED` row instead (see
+/// `finish_registration`'s own doc comment) and must leave the ceremony
+/// itself intact, restorable by its real owner. `savvagent/otto-factory#109`.
 #[sqlx::test(migrations = "../of-core/migrations")]
-async fn a_ceremony_account_mismatch_writes_nothing(pool: PgPool) {
+async fn a_ceremony_account_mismatch_writes_a_refusal_but_no_credential(pool: PgPool) {
     let db = Db::from_pool(pool);
     let webauthn = rp();
     let mut auth = authenticator();
@@ -640,6 +643,35 @@ async fn a_ceremony_account_mismatch_writes_nothing(pool: PgPool) {
     assert_eq!(
         audit_count, 0,
         "a rejected request must not leave a row asserting it succeeded"
+    );
+
+    // The transaction rolled back, so `take_ceremony`'s DELETE rolled back
+    // with it — the ceremony survives for its real owner to retry, exactly
+    // as #132 already established for this function's other failure paths.
+    let ceremony_survives: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM webauthn_ceremonies WHERE id = $1)")
+            .bind(ceremony.id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    assert!(
+        ceremony_survives,
+        "a ceremony/caller mismatch must not burn the real owner's in-flight ceremony"
+    );
+
+    // The refusal itself is still traced, on a connection independent of the
+    // rolled-back transaction — see `finish_registration`'s own doc comment
+    // for why this is a deliberate exception to "nothing is written."
+    let refusal: (of_core::ids::UserId, serde_json::Value) =
+        sqlx::query_as("SELECT actor_user_id, detail FROM audit_events WHERE action = $1")
+            .bind(of_core::audit::action::PASSKEY_REGISTRATION_REFUSED)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    assert_eq!(refusal.0, owner);
+    assert_eq!(
+        refusal.1["attemptedBy"],
+        serde_json::json!(other.to_string())
     );
 }
 

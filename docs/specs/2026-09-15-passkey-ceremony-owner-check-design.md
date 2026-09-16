@@ -143,37 +143,46 @@ Success criteria:
 /// parameter). Checked before anything the ceremony completing would write,
 /// so a mismatch fails before the credential insert and its audit row exist
 /// at all, not just before they commit. `savvagent/otto-factory#109`.
+///
+/// Carries both accounts (post-review addition — see the Addendum) so
+/// `finish_registration` can write a trace of a hijack attempt on a
+/// connection independent of the transaction this error rolls back.
 #[error("that ceremony belongs to a different account")]
-CeremonyAccountMismatch,
+CeremonyAccountMismatch {
+    ceremony_account: UserId,
+    caller_account: UserId,
+},
 ```
 
 Add to `status()`'s existing 403 arm:
 
 ```rust
-AuthError::NotAMember | AuthError::SsoRequired | AuthError::CeremonyAccountMismatch => 403,
+AuthError::NotAMember | AuthError::SsoRequired | AuthError::CeremonyAccountMismatch { .. } => 403,
 ```
 
 Add to `public()`:
 
 ```rust
-AuthError::CeremonyAccountMismatch => "that ceremony belongs to a different account",
+AuthError::CeremonyAccountMismatch { .. } => "that ceremony belongs to a different account",
 ```
 
 Add to `of-web`'s `auth_code()` (`crates/of-web/src/error.rs`):
 
 ```rust
-AuthError::CeremonyAccountMismatch => "ceremony_account_mismatch",
+AuthError::CeremonyAccountMismatch { .. } => "ceremony_account_mismatch",
 ```
 
 ### 2. `crates/of-auth/src/passkeys.rs`: the check, before any write
 
 Both functions' existing doc comments (`finish_registration`'s and `finish_registration_tx`'s, at
 their current locations) get a line naming `expected` and the ordering guarantee it establishes —
-e.g. "`expected`, when `Some`, is checked against the ceremony's stored account immediately after
-`take_ceremony` and before anything is written; `None` skips the check entirely, for a caller (like
+e.g. "`expected`, when `Some`, is checked against the ceremony's stored account after signature
+verification and before anything is written; `None` skips the check entirely, for a caller (like
 `signup_finish`) with no independent identity to compare against." This makes the guarantee
 discoverable from the function itself, not only from `AuthError::CeremonyAccountMismatch`'s doc
-comment.
+comment. (Corrected by the Addendum: the check runs *after* signature verification, not
+immediately after `take_ceremony` — see item 3 there for why, and `finish_registration`'s own body
+below now also writes a refusal audit row on mismatch, per item 2.)
 
 ```rust
 pub async fn finish_registration(
@@ -187,12 +196,29 @@ pub async fn finish_registration(
     ip: Option<&str>,
 ) -> Result<UserId> {
     let mut tx = db.begin_unpinned().await?;
-    let user_id = finish_registration_tx(
-        &mut tx, webauthn, ceremony, credential, nickname, via, expected, ip,
-    )
-    .await?;
-    tx.commit().await?;
-    Ok(user_id)
+    match finish_registration_tx(&mut tx, webauthn, ceremony, credential, nickname, via, expected, ip)
+        .await
+    {
+        Ok(user_id) => {
+            tx.commit().await?;
+            Ok(user_id)
+        }
+        // Post-review addition (Addendum item 2): a best-effort refusal
+        // audit row, on a connection independent of `tx` (which rolls back
+        // here) — see `finish_registration`'s actual doc comment for why.
+        Err(AuthError::CeremonyAccountMismatch { ceremony_account, caller_account }) => {
+            drop(tx);
+            let entry = Entry::new(action::PASSKEY_REGISTRATION_REFUSED)
+                .actor(ceremony_account)
+                .detail(serde_json::json!({ "attemptedBy": caller_account.to_string() }))
+                .from_request(ip, None);
+            if let Err(e) = db.audit_global(entry).await {
+                tracing::error!(error = %e, "failed to write audit event for a refused passkey registration");
+            }
+            Err(AuthError::CeremonyAccountMismatch { ceremony_account, caller_account })
+        }
+        Err(e) => Err(e),
+    }
 }
 
 pub async fn finish_registration_tx(
@@ -209,15 +235,22 @@ pub async fn finish_registration_tx(
         take_ceremony(conn.conn(), ceremony, "register").await?;
     let user_id = user_id.ok_or(AuthError::CeremonyExpired)?;
 
-    if let Some(expected) = expected {
-        if user_id != expected {
-            return Err(AuthError::CeremonyAccountMismatch);
-        }
-    }
-
+    // Verification before the `expected` check, not after — deliberately,
+    // per Addendum item 3: checking first would let the check (and, since
+    // item 2, the audit row it writes) be probed with an unsigned credential
+    // body, since the ceremony survives the rollback either way.
     let passkey = webauthn
         .finish_passkey_registration(credential, &state)
         .map_err(webauthn_failed)?;
+
+    if let Some(expected) = expected {
+        if user_id != expected {
+            return Err(AuthError::CeremonyAccountMismatch {
+                ceremony_account: user_id,
+                caller_account: expected,
+            });
+        }
+    }
     // ...unchanged from here: the INSERT and the audit write.
 }
 ```

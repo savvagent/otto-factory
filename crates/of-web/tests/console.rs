@@ -447,8 +447,10 @@ async fn add_passkey_finish_records_the_add_flow_and_its_ip(pool: PgPool) {
 
 /// The `add_passkey_finish` half of `savvagent/otto-factory#109`: a ceremony
 /// started by one account, finished while authenticated as a different one,
-/// must be refused before the credential and its audit row exist — not
-/// after they've already committed.
+/// must be refused before the credential and its `PASSKEY_REGISTERED`
+/// success audit row exist — not after they've already committed. A
+/// `PASSKEY_REGISTRATION_REFUSED` row is written for the refusal itself,
+/// deliberately — see `finish_registration`'s own doc comment.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn add_passkey_finish_refuses_a_ceremony_started_by_another_account(pool: PgPool) {
     let h = common::harness(pool);

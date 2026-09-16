@@ -42,12 +42,14 @@ the new signature until `of-auth` ships it.
 
 | File | Responsibility |
 |---|---|
-| **Modify.** `crates/of-auth/src/error.rs` | New `AuthError::CeremonyAccountMismatch` variant: `status()` (403), `public()` message. |
-| **Modify.** `crates/of-auth/src/passkeys.rs` | `finish_registration`/`finish_registration_tx` gain `expected: Option<UserId>`, checked after `take_ceremony` and after signature verification, before either write it guards. Doc comments updated. |
-| **Modify.** `crates/of-auth/tests/passkeys.rs` | 7 existing call sites updated for the new parameter; one new test proving a mismatch returns `Err` before any `passkeys` row exists. |
-| **Modify.** `crates/of-web/src/error.rs` | `auth_code()` gains `AuthError::CeremonyAccountMismatch => "ceremony_account_mismatch"`. |
+| **Modify.** `crates/of-auth/src/error.rs` | New `AuthError::CeremonyAccountMismatch { ceremony_account, caller_account }` variant: `status()` (403), `public()` message. Struct variant, not unit — see the Addendum. |
+| **Modify.** `crates/of-auth/src/passkeys.rs` | `finish_registration`/`finish_registration_tx` gain `expected: Option<UserId>`, checked after `take_ceremony` and after signature verification, before either write it guards. `finish_registration` also writes a best-effort refusal audit row on mismatch (see Addendum). Doc comments updated. |
+| **Modify.** `crates/of-auth/tests/passkeys.rs` | 7 existing call sites updated for the new parameter; one new test proving a mismatch returns `Err` before any `passkeys`/`PASSKEY_REGISTERED` row exists, the ceremony survives, and a refusal row is written instead. |
+| **Modify.** `crates/of-core/src/audit.rs` | New `action::PASSKEY_REGISTRATION_REFUSED` constant (see Addendum). |
+| **Modify.** `crates/of-web/src/error.rs` | `auth_code()` gains `AuthError::CeremonyAccountMismatch { .. } => "ceremony_account_mismatch"`. |
 | **Modify.** `crates/of-web/src/routes/auth.rs` | `signup_finish`/`claim_finish` pass `expected: None`; `add_passkey_finish` passes `Some(caller.user.id)` and drops its now-unreachable post-hoc check. |
-| **Modify.** `crates/of-web/tests/console.rs` | New `#[sqlx::test]`: a ceremony/caller mismatch on `POST /api/me/passkeys/finish` returns 403 and writes neither a `passkeys` row nor a `PASSKEY_REGISTERED` audit row. |
+| **Modify.** `crates/of-web/tests/console.rs` | New `#[sqlx::test]`: a ceremony/caller mismatch on `POST /api/me/passkeys/finish` returns 403 and writes neither a `passkeys` row nor a second `PASSKEY_REGISTERED` audit row beyond `onboard`'s own. |
+| **Modify.** `web/src/lib/errors.ts`, `web/messages/{en,es,de,fr,it,hi}.json` | Console translation for the new `ceremony_account_mismatch` code (see Addendum). |
 
 ## Task Order & Rationale
 
@@ -71,11 +73,14 @@ variant, consumed by `of-web` in Task 2.
       start-ceremony → do_registration → assert-zero-rows pattern this test reuses), add:
 
       ```rust
-      /// `expected`, when `Some`, must be checked before anything is written — a
-      /// mismatch must not leave a live credential or an audit row for a request
-      /// the caller never actually authorized. `savvagent/otto-factory#109`.
+      /// `expected`, when `Some`, must be checked before either write it guards —
+      /// a mismatch must not leave a live credential or a `PASSKEY_REGISTERED`
+      /// success row for a request the caller never actually authorized. It
+      /// deliberately does leave a `PASSKEY_REGISTRATION_REFUSED` row instead
+      /// (post-review addition — see the Addendum) and must leave the ceremony
+      /// itself intact, restorable by its real owner. `savvagent/otto-factory#109`.
       #[sqlx::test(migrations = "../of-core/migrations")]
-      async fn a_ceremony_account_mismatch_writes_nothing(pool: PgPool) {
+      async fn a_ceremony_account_mismatch_writes_a_refusal_but_no_credential(pool: PgPool) {
           let db = Db::from_pool(pool);
           let webauthn = rp();
           let mut auth = authenticator();
@@ -111,10 +116,17 @@ variant, consumed by `of-web` in Task 2.
           )
           .await;
 
-          assert!(
-              matches!(result, Err(AuthError::CeremonyAccountMismatch)),
-              "expected a CeremonyAccountMismatch, got {result:?}"
-          );
+          match result {
+              Err(AuthError::CeremonyAccountMismatch { ceremony_account, caller_account }) => {
+                  assert_eq!(ceremony_account, owner);
+                  assert_eq!(caller_account, other);
+              }
+              unexpected => panic!("expected a CeremonyAccountMismatch, got {unexpected:?}"),
+          }
+          // Post-review addition: also assert the ceremony survives
+          // (`SELECT EXISTS(... FROM webauthn_ceremonies WHERE id = $1)`) and
+          // that a `PASSKEY_REGISTRATION_REFUSED` row exists for `owner` with
+          // `caller_account`/`other` named in its detail — see the Addendum.
 
           let passkey_count: i64 = sqlx::query_scalar("SELECT count(*) FROM passkeys")
               .fetch_one(db.pool())
@@ -139,7 +151,7 @@ variant, consumed by `of-web` in Task 2.
       }
       ```
 
-- [ ] Run `cargo test -p of-auth --test passkeys a_ceremony_account_mismatch_writes_nothing` and
+- [ ] Run `cargo test -p of-auth --test passkeys a_ceremony_account_mismatch_writes_a_refusal_but_no_credential` and
       confirm it fails to compile (the `expected` parameter and `AuthError::CeremonyAccountMismatch`
       don't exist yet).
 - [ ] In `crates/of-auth/src/error.rs`, add the new variant per spec §1: the `#[error(...)]` unit
@@ -347,7 +359,7 @@ Task 2 shipped):
       same reason: the one write that would prove a hijack attempt happened is exactly the write
       this fix prevents from ever committing. New action constant:
       `of_core::audit::action::PASSKEY_REGISTRATION_REFUSED`. Both new tests
-      (`crates/of-auth/tests/passkeys.rs`'s `a_ceremony_account_mismatch_writes_nothing` and
+      (`crates/of-auth/tests/passkeys.rs`'s `a_ceremony_account_mismatch_writes_a_refusal_but_no_credential` and
       `crates/of-web/tests/console.rs`'s `add_passkey_finish_refuses_a_ceremony_started_by_another_account`)
       were extended to assert on the two account fields and, at the HTTP level, on the new audit
       row and the response's `error.code`.
