@@ -54,6 +54,7 @@ const KNOWN: Record<string, () => string> = {
   team_in_use: () => m.error_team_in_use(),
   not_a_member: () => m.error_not_a_member(),
   already_a_member: () => m.error_already_a_member(),
+  domain_already_claimed: () => m.error_domain_already_claimed(),
   invite_invalid: () => m.error_invite_invalid(),
   invite_wrong_account: () => m.error_invite_wrong_account(),
   invalid_argument: () => m.error_invalid_argument(),
@@ -73,6 +74,7 @@ const KNOWN: Record<string, () => string> = {
   credential_expired: () => m.error_credential_expired(),
   wrong_audience: () => m.error_wrong_audience(),
   sso_required: () => m.error_sso_required(),
+  sso_not_configured: () => m.error_sso_not_configured(),
   rate_limited: () => m.error_rate_limited(),
   invalid_request: () => m.error_invalid_request(),
   invalid_client: () => m.error_invalid_client(),
@@ -80,6 +82,13 @@ const KNOWN: Record<string, () => string> = {
   unsupported_grant_type: () => m.error_unsupported_grant_type(),
   invalid_scope: () => m.error_invalid_scope(),
   tracker_unreachable: () => m.error_tracker_unreachable(),
+  // `sso_lockout` is deliberately absent. `Error::SsoLockout { reason }`'s
+  // `reason` names which specific piece is missing (no connection, no
+  // verified domain, enforce_sso already on) — a fixed translated sentence
+  // here would discard exactly the detail the server wrote it to carry.
+  // `messageFor`'s fallback (`KNOWN[code]?.() ?? error.message`) already
+  // does the right thing for a code with no entry: show the server's own
+  // English sentence, which is the console's own §6 requirement.
 
   // ---- webauthn, thrown in this bundle ----
   no_passkey_created: () => m.error_no_passkey_created(),

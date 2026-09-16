@@ -68,6 +68,7 @@
     { href: `/o/${slug}/members`, label: m.orgnav_members() },
     { href: `/o/${slug}/teams`, label: m.orgnav_teams() },
     ...(context.isAdmin ? [{ href: `/o/${slug}/trackers`, label: m.orgnav_trackers() }] : []),
+    ...(context.isAdmin ? [{ href: `/o/${slug}/sso`, label: m.orgnav_sso() }] : []),
     { href: `/o/${slug}/connect`, label: m.orgnav_connect() },
     { href: `/o/${slug}/usage`, label: m.orgnav_usage() },
     ...(context.isAdmin ? [{ href: `/o/${slug}/audit`, label: m.orgnav_audit() }] : [])

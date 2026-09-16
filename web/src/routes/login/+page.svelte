@@ -9,6 +9,7 @@
   import * as webauthn from '$lib/webauthn';
   import Alert from '$lib/components/Alert.svelte';
   import Button from '$lib/components/Button.svelte';
+  import Field from '$lib/components/Field.svelte';
 
   /**
    * Sign in.
@@ -27,6 +28,35 @@
   let pending = $state(false);
   let error = $state<string | undefined>(undefined);
   let supported = $state(true);
+
+  /**
+   * Sign in with SSO — collapsed by default, below the passkey button.
+   *
+   * `POST /api/auth/sso/start` resolves the identity provider purely from
+   * the email's domain; there is no account lookup, so it needs no session
+   * either. `sso_not_configured` is the one error this form expects and has
+   * a translated sentence for (see `$lib/errors`), and that sentence itself
+   * points back at the passkey button above rather than naming a second
+   * place to go.
+   */
+  let ssoOpen = $state(false);
+  let ssoEmail = $state('');
+  let ssoPending = $state(false);
+  let ssoError = $state<string | undefined>(undefined);
+
+  async function signInWithSso(event: SubmitEvent) {
+    event.preventDefault();
+    ssoPending = true;
+    ssoError = undefined;
+    try {
+      const started = await api.ssoStart(ssoEmail.trim());
+      window.location.assign(started.redirectUrl);
+    } catch (e) {
+      ssoError = messageFor(e, m.error_could_not_sign_in());
+    } finally {
+      ssoPending = false;
+    }
+  }
 
   $effect(() => {
     supported = webauthn.isSupported();
@@ -101,6 +131,34 @@
 
     <div class="mt-5">
       <Button {pending} onclick={signIn}>{m.login_submit()}</Button>
+    </div>
+
+    <div class="mt-4">
+      <button
+        type="button"
+        class="text-xs text-muted underline hover:text-ink"
+        onclick={() => (ssoOpen = !ssoOpen)}
+      >
+        {m.login_sso_toggle()}
+      </button>
+
+      {#if ssoOpen}
+        <form class="mt-3 space-y-3" onsubmit={signInWithSso}>
+          <Field label={m.login_sso_email_label()}>
+            <input
+              class="of-input"
+              type="email"
+              required
+              autocomplete="email"
+              bind:value={ssoEmail}
+            />
+          </Field>
+
+          {#if ssoError}<Alert>{ssoError}</Alert>{/if}
+
+          <Button type="submit" pending={ssoPending}>{m.login_sso_submit()}</Button>
+        </form>
+      {/if}
     </div>
   {/if}
 
