@@ -392,3 +392,40 @@ export interface ProtectedResourceMetadata {
   scopes_supported: string[];
   bearer_methods_supported: string[];
 }
+
+/**
+ * An org's bound identity provider, minus its secret.
+ *
+ * Returned by both `GET` and `PUT .../sso/connection`. `clientSecret` is
+ * never a field here at all: it is sealed at rest and no endpoint ever
+ * returns it, matching `TrackerConnection`'s `hasCredentials`-not-the-secret
+ * convention one step further.
+ */
+export interface IdpConnection {
+  id: string;
+  orgId: string;
+  issuer: string;
+  clientId: string;
+  /** The provider's discovery document. Not rendered; kept for shape fidelity. */
+  discovery: unknown;
+  createdAt: string;
+}
+
+/**
+ * A domain this org has claimed, verified or not — with the exact DNS TXT
+ * record the console tells an admin to publish to prove control of it.
+ */
+export interface ClaimedDomain {
+  orgId: string;
+  domain: string;
+  verificationToken: string;
+  verifiedAt: string | null;
+  createdAt: string;
+  txtRecordName: string;
+  txtRecordValue: string;
+}
+
+/** `POST /api/auth/sso/start` and `POST /api/me/sso/link/start` both answer this. */
+export interface SsoStartResponse {
+  redirectUrl: string;
+}

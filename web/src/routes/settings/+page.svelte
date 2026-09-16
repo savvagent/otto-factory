@@ -34,6 +34,28 @@
   let profileSaved = $state(false);
 
   /**
+   * Link this account to whatever identity an org's SSO ceremony resolves
+   * to. The authenticated counterpart to the login page's "Sign in with
+   * SSO" — `POST /api/me/sso/link/start`, then a redirect just like it,
+   * never a session opened here directly.
+   */
+  let ssoBusy = $state(false);
+  let ssoError = $state<string | undefined>(undefined);
+
+  async function linkSso() {
+    ssoBusy = true;
+    ssoError = undefined;
+    try {
+      const started = await api.ssoLinkStart();
+      window.location.assign(started.redirectUrl);
+    } catch (e) {
+      ssoError = messageFor(e, m.error_that_did_not_work());
+    } finally {
+      ssoBusy = false;
+    }
+  }
+
+  /**
    * The language picker.
    *
    * `''` is "match my browser" — the account stores no choice and detection
@@ -228,6 +250,11 @@
         <Button pending={busy === 'add'} onclick={addPasskey}>{m.settings_add_passkey()}</Button>
       </div>
     {/if}
+  </Card>
+
+  <Card title={m.settings_sso_title()} description={m.settings_sso_description()}>
+    {#if ssoError}<div class="mb-3"><Alert>{ssoError}</Alert></div>{/if}
+    <Button pending={ssoBusy} onclick={linkSso}>{m.settings_sso_link_button()}</Button>
   </Card>
 
   <Card title={m.settings_profile_title()} description={m.settings_profile_description()}>

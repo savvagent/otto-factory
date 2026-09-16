@@ -28,6 +28,11 @@ pub mod prefix {
     pub const MAGIC: &str = "of_ml_";
     pub const INVITE: &str = "of_inv_";
     pub const RECOVERY: &str = "of_rc_";
+    /// Enterprise OIDC federation (`sso_ceremonies.state_hash`) — see
+    /// `docs/specs/2026-09-16-oidc-federation-design.md` §5.
+    pub const SSO_STATE: &str = "of_sst_";
+    /// The `__Host-of_sso_binding` cookie value (`sso_ceremonies.binding_hash`).
+    pub const SSO_BINDING: &str = "of_ssb_";
 }
 
 /// A freshly minted credential: the plaintext to hand out **once**, and the
@@ -68,6 +73,20 @@ pub fn generate(prefix: &str) -> Secret {
     let plaintext = format!("{prefix}{}", URL_SAFE_NO_PAD.encode(buf));
     let hash = hash(&plaintext);
     Secret { plaintext, hash }
+}
+
+/// A plain random string with no prefix and no matching hash — for the OIDC
+/// `nonce` (`sso_ceremonies.nonce`), which is not a bearer credential: it is
+/// sent to the IdP as a plaintext query parameter and stored in plaintext,
+/// its only job anti-replay on the returned `id_token`. Deliberately not
+/// [`generate`] — a prefixed, `of_ss...`-shaped value handed to a third-party
+/// IdP as `nonce` would be a strange thing for that IdP to log back, and
+/// there is no hash to keep in step with a [`Secret`] here in the first
+/// place.
+pub fn generate_nonce() -> String {
+    let mut buf = [0u8; TOKEN_BYTES];
+    rand::thread_rng().fill_bytes(&mut buf);
+    URL_SAFE_NO_PAD.encode(buf)
 }
 
 /// Hash a credential for storage.

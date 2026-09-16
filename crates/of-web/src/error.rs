@@ -150,7 +150,8 @@ impl From<CoreError> for ApiError {
             | LeaseNotHeld(_)
             | AlreadyClaimed { .. }
             | TicketAlreadyLinked { .. }
-            | IdempotencyKeyConflict { .. } => StatusCode::CONFLICT,
+            | IdempotencyKeyConflict { .. }
+            | DomainAlreadyClaimed => StatusCode::CONFLICT,
 
             // Gone, not Not Found: the link was real, and saying so is what
             // tells the holder to ask for a new one rather than re-check the URL.
@@ -158,9 +159,15 @@ impl From<CoreError> for ApiError {
 
             InviteWrongAccount { .. } => StatusCode::FORBIDDEN,
 
-            WrongStatus { .. } | DependencyCycle(..) | Invalid(_) | NotAMember(_) => {
-                StatusCode::BAD_REQUEST
-            }
+            // enterprise OIDC federation (spec §5): every lockout guard
+            // (`set_enforce_sso`'s enable path, `idp::delete_connection`,
+            // `domains::delete`) refuses with 400, naming the reason, so the
+            // admin who tripped it knows what to fix before retrying.
+            WrongStatus { .. }
+            | DependencyCycle(..)
+            | Invalid(_)
+            | NotAMember(_)
+            | SsoLockout { .. } => StatusCode::BAD_REQUEST,
 
             // Retriable, not the caller's fault — the same distinction
             // retriable() already draws at the MCP layer. 503, not 500: this
@@ -213,6 +220,26 @@ impl From<AuthError> for ApiError {
         }
         if let AuthError::Core(inner) = e {
             return ApiError::from(inner);
+        }
+
+        // Unlike Config/Crypto/Db above, these keep their own status/message
+        // (502 for an upstream failure, 400 for a refused URL — see
+        // AuthError::status()'s own comment) rather than collapsing to a
+        // generic 500, because the message itself is operator-facing
+        // diagnostic text an admin binding a connection or verifying a
+        // domain can act on. That's exactly why they still need a log line:
+        // a silent-failure review found none of the four had one at all,
+        // unlike every other admin-facing failure path in this crate —
+        // "the response tells the admin something specific" was mistaken
+        // for "so nothing needs to be logged," and the two are independent.
+        if matches!(
+            e,
+            AuthError::OidcHttp { .. }
+                | AuthError::OidcApi { .. }
+                | AuthError::DnsResolverFailure(_)
+                | AuthError::OidcUnsafeUrl { .. }
+        ) {
+            tracing::warn!(error = %e, "SSO admin-configuration request failed");
         }
 
         let retry_after = match e {
@@ -281,9 +308,21 @@ fn auth_code(e: &AuthError) -> &'static str {
         AuthError::UnsupportedGrantType(_) => "unsupported_grant_type",
         AuthError::InvalidScope(_) => "invalid_scope",
 
-        AuthError::Config(_) | AuthError::Crypto(_) | AuthError::Core(_) | AuthError::Db(_) => {
-            "internal_error"
-        }
+        AuthError::Config(_)
+        | AuthError::Crypto(_)
+        | AuthError::Core(_)
+        | AuthError::Db(_)
+        | AuthError::OidcHttp { .. }
+        | AuthError::OidcApi { .. }
+        | AuthError::DnsResolverFailure(_) => "internal_error",
+
+        // enterprise OIDC federation (spec §4): a discovery document missing
+        // a required endpoint, or an id_token that fails verification —
+        // separate codes because, unlike the credential failures above,
+        // these say something specific an admin/operator can act on.
+        AuthError::OidcDiscoveryField(_) => "oidc_discovery_incomplete",
+        AuthError::IdTokenInvalid(_) => "id_token_invalid",
+        AuthError::OidcUnsafeUrl { .. } => "oidc_unsafe_url",
     }
 }
 

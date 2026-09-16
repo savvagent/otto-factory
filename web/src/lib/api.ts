@@ -25,6 +25,8 @@
 import type {
   AuditEvent,
   BrowserSession,
+  ClaimedDomain,
+  IdpConnection,
   Passkey,
   User,
   RegistrationChallenge,
@@ -48,6 +50,7 @@ import type {
   RepoListItem,
   Role,
   SessionOpened,
+  SsoStartResponse,
   Team,
   TeamMember,
   TrackerBinding,
@@ -181,6 +184,13 @@ export const api = {
   logout: () => post<void>('/api/auth/logout'),
 
   /**
+   * The anonymous "sign in with SSO" entry point. Resolves the identity
+   * provider purely from the email's domain — no account is looked up, so it
+   * works from a signed-out browser.
+   */
+  ssoStart: (email: string) => post<SsoStartResponse>('/api/auth/sso/start', { email }),
+
+  /**
    * The rp_id every passkey on this deployment is bound to.
    *
    * Public, and it discloses nothing: the same value is in every challenge this
@@ -218,6 +228,13 @@ export const api = {
    */
   setProfile: (profile: { email?: string; name?: string; locale?: string | null }) =>
     patch<User>('/api/me', profile),
+
+  /**
+   * The authenticated counterpart to `ssoStart`. Links the signed-in
+   * account to whatever identity the resulting ceremony resolves to — the
+   * only self-service way a passkey-only account gains a federated identity.
+   */
+  ssoLinkStart: () => post<SsoStartResponse>('/api/me/sso/link/start'),
 
   // ----------------------------------------------------------------- orgs
   orgs: () => get<Membership[]>('/api/orgs'),
@@ -306,6 +323,38 @@ export const api = {
     ),
   unbindRepo: (org: string, repo: string, provider: TrackerProvider) =>
     del<void>(`/api/orgs/${seg(org)}/repos/${seg(repo)}/tracker-bindings/${seg(provider)}`),
+
+  // ------------------------------------------------------------------ sso
+  /**
+   * This org's bound identity provider, if any — issuer and client id,
+   * never the secret (the server has no read path for it at all). A `204`
+   * (nothing bound) resolves to `undefined`, same as `request()`'s general
+   * "no content" handling.
+   */
+  getSsoConnection: (org: string) =>
+    get<IdpConnection | undefined>(`/api/orgs/${seg(org)}/sso/connection`),
+  /** Bind (or replace) this org's identity provider. */
+  upsertSsoConnection: (
+    org: string,
+    body: { issuer: string; clientId: string; clientSecret: string }
+  ) => put<IdpConnection>(`/api/orgs/${seg(org)}/sso/connection`, body),
+  /** Refused with `sso_lockout` while `enforceSso` is on. */
+  deleteSsoConnection: (org: string) => del<void>(`/api/orgs/${seg(org)}/sso/connection`),
+
+  ssoDomains: (org: string) => get<ClaimedDomain[]>(`/api/orgs/${seg(org)}/sso/domains`),
+  /** Returns the exact TXT record name/value to publish. */
+  claimSsoDomain: (org: string, domain: string) =>
+    post<ClaimedDomain>(`/api/orgs/${seg(org)}/sso/domains`, { domain }),
+  /** A synchronous DNS lookup. `{verified: false}` is not an error. */
+  verifySsoDomain: (org: string, domain: string) =>
+    post<{ verified: boolean }>(`/api/orgs/${seg(org)}/sso/domains/${seg(domain)}/verify`),
+  /** Refused with `sso_lockout` while it's the org's only verified domain and `enforceSso` is on. */
+  deleteSsoDomain: (org: string, domain: string) =>
+    del<void>(`/api/orgs/${seg(org)}/sso/domains/${seg(domain)}`),
+
+  /** Refused with `sso_lockout` when turning this on with no working SSO path yet. */
+  setEnforceSso: (org: string, enforceSso: boolean) =>
+    put<Org>(`/api/orgs/${seg(org)}/sso/enforce`, { enforceSso }),
 
   // ---------------------------------------------------------------- queue
   jobs: (

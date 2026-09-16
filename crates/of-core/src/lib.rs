@@ -17,11 +17,15 @@
 //!    one of the two is genuinely in force. See [`isolation`].
 
 pub mod audit;
+pub mod ceremonies;
 pub mod crypto;
 pub mod db;
+pub mod domains;
 pub mod error;
 pub mod i18n;
 pub mod idempotency;
+pub mod identities;
+pub mod idp;
 pub mod ids;
 pub mod invites;
 pub mod isolation;

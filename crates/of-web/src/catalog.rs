@@ -22,7 +22,7 @@
 use axum::extract::DefaultBodyLimit;
 use axum::routing::{delete, get, patch, post, put, MethodRouter};
 
-use crate::routes::{auth, jobs, orgs, repos, teams, tokens, trackers, usage, webhooks};
+use crate::routes::{auth, jobs, orgs, repos, sso, teams, tokens, trackers, usage, webhooks};
 use crate::state::AppState;
 use crate::{oauth, openapi};
 
@@ -318,6 +318,21 @@ pub fn catalog() -> Vec<Endpoint> {
             .auth(Auth::Public)
             .summary("Revoke a token")
             .describe("RFC 7009. Always 200, even for a token that never existed."),
+        // ---------------------------------------------------- enterprise sso
+        Endpoint::get("/sso/callback", sso::callback)
+            .auth(Auth::Public)
+            .status(303)
+            .summary("The identity provider's redirect back")
+            .describe(
+                "Server-rendered, not a console page: it mints the same __Host-of_session \
+                 cookie passkey login does and redirects, or answers a generic failure page \
+                 on any of several refusal paths (an invalid/expired/reused state, a missing \
+                 or mismatched __Host-of_sso_binding binding cookie, an unverified email, or \
+                 an email collision) — deliberately not distinguished to the caller, since \
+                 this is the unauthenticated bootstrap surface. No credential is spent by \
+                 reaching this URL alone; the binding cookie is what stops a captured-and-\
+                 replayed callback URL from opening a session in a different browser.",
+            ),
         // ------------------------------------------------------------ auth
         Endpoint::post("/api/auth/signup/start", auth::signup_start)
             .auth(Auth::Public)
@@ -395,6 +410,17 @@ pub fn catalog() -> Vec<Endpoint> {
             .status(204)
             .summary("End this session")
             .describe("Succeeds even for a caller holding a cookie that resolves to nothing."),
+        Endpoint::post("/api/auth/sso/start", sso::sso_start)
+            .auth(Auth::Public)
+            .takes("SsoStartRequest")
+            .returns("SsoStartResponse")
+            .summary("Begin signing in through an org's identity provider")
+            .describe(
+                "Resolves the identity provider purely from the email's domain — no account \
+                 is looked up. sso_not_configured means no org has claimed and verified this \
+                 domain; sign in with a passkey instead. Sets a short-lived binding cookie the \
+                 callback requires, and returns a redirectUrl to navigate the browser to.",
+            ),
         // -------------------------------------------------------------- me
         Endpoint::get("/api/me", auth::me)
             .returns("Me")
@@ -434,6 +460,17 @@ pub fn catalog() -> Vec<Endpoint> {
             .takes("RenameKeyRequest")
             .status(204)
             .summary("Name an authenticator"),
+        Endpoint::post("/api/me/sso/link/start", sso::sso_link_start)
+            .returns("SsoStartResponse")
+            .summary("Link this account to an org's identity provider")
+            .describe(
+                "The authenticated counterpart to /api/auth/sso/start. Requires the account \
+                 to already have an email (PATCH /api/me first if it does not); the ceremony \
+                 carries this account's own user id, so the callback links to it by \
+                 construction rather than by any email match. This is the self-service path \
+                 for an existing passkey account whose email collides with what the anonymous \
+                 sign-in path refuses.",
+            ),
         Endpoint::patch("/api/me", auth::set_profile)
             .takes("ProfileRequest")
             .returns("User")
@@ -689,6 +726,86 @@ pub fn catalog() -> Vec<Endpoint> {
             .returns("LeaseList")
             .summary("Who is in this repo right now")
             .describe("The console's answer to \"why is my agent waiting?\"."),
+        // ---------------------------------------------------- enterprise sso
+        Endpoint::get("/api/orgs/{org}/sso/connection", sso::get_connection)
+            .auth(Auth::OrgAdmin)
+            .returns("IdpConnection")
+            .summary("This org's bound identity provider, if any")
+            .describe(
+                "204 with no body when nothing is bound. Never the secret: IdpConnection \
+                 carries only issuer, clientId, and the cached discovery document — \
+                 clientSecret is sealed at rest and has no read path at all.",
+            ),
+        Endpoint::put("/api/orgs/{org}/sso/connection", sso::upsert_connection)
+            .auth(Auth::OrgAdmin)
+            .takes("SsoConnectionRequest")
+            .returns("IdpConnection")
+            .summary("Bind (or replace) this org's identity provider")
+            .describe(
+                "Fetches the issuer's discovery document before writing anything, and \
+                 rejects if it is unreachable or missing authorization_endpoint/\
+                 token_endpoint/jwks_uri — a connection is never saved half-configured. \
+                 clientSecret is write-only: it is sealed at rest and never returned by any \
+                 endpoint. Binding a second IdP replaces the first, one connection per org.",
+            ),
+        Endpoint::delete("/api/orgs/{org}/sso/connection", sso::delete_connection)
+            .auth(Auth::OrgAdmin)
+            .status(204)
+            .summary("Remove this org's identity provider")
+            .describe(
+                "Refused while enforce_sso is on: removing the org's only IdP while every \
+                 member's passkey login is refused would lock everyone out, including the \
+                 admin issuing this call, with no path back in. Turn off enforce_sso first.",
+            ),
+        Endpoint::get("/api/orgs/{org}/sso/domains", sso::list_domains)
+            .auth(Auth::OrgAdmin)
+            .returns("ClaimedDomainList")
+            .summary("This org's claimed email domains, verified or not"),
+        Endpoint::post("/api/orgs/{org}/sso/domains", sso::claim_domain)
+            .auth(Auth::OrgAdmin)
+            .takes("ClaimDomainRequest")
+            .returns("ClaimedDomain")
+            .status(201)
+            .summary("Claim an email domain and mint its verification token")
+            .describe(
+                "A domain is globally unique — claimed by at most one org at a time. \
+                 Re-claiming a domain this org already holds mints a fresh token and resets \
+                 verification. Returns the exact TXT record name and value to publish.",
+            ),
+        Endpoint::post(
+            "/api/orgs/{org}/sso/domains/{domain}/verify",
+            sso::verify_domain,
+        )
+        .auth(Auth::OrgAdmin)
+        .returns("VerifyDomainResponse")
+        .summary("Check the domain's DNS TXT record")
+        .describe(
+            "A synchronous, admin-initiated DNS lookup — not a background poller. \
+             {verified: false} is not an error; it means DNS has not propagated yet, and the \
+             admin can retry.",
+        ),
+        Endpoint::delete("/api/orgs/{org}/sso/domains/{domain}", sso::delete_domain)
+            .auth(Auth::OrgAdmin)
+            .status(204)
+            .summary("Release a claimed domain")
+            .describe(
+                "Refused while enforce_sso is on and this is the org's only verified domain — \
+                 removing the last routable SSO path would strand every member who is not \
+                 already linked. Deleting a non-last verified domain, or an unverified one, \
+                 always proceeds.",
+            ),
+        Endpoint::put("/api/orgs/{org}/sso/enforce", sso::set_enforce)
+            .auth(Auth::OrgAdmin)
+            .takes("EnforceSsoRequest")
+            .returns("Org")
+            .summary("Require single sign-on for this org's members")
+            .describe(
+                "Refuses to turn this on unless the org already has both a bound identity \
+                 provider and at least one verified domain — enabling it with no working IdP \
+                 path would lock every passkey-only member out with no way back in. Once on, \
+                 no member of this org can complete a passkey sign-in; they must authenticate \
+                 through the org's IdP.",
+            ),
         // ----------------------------------------------------------- queue
         Endpoint::get("/api/orgs/{org}/jobs", jobs::list_jobs)
             .auth(Auth::OrgMember)

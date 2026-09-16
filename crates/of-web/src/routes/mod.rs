@@ -9,6 +9,7 @@ pub mod auth;
 pub mod jobs;
 pub mod orgs;
 pub mod repos;
+pub mod sso;
 pub mod teams;
 pub mod tokens;
 pub mod trackers;
