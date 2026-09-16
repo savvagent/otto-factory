@@ -501,6 +501,15 @@ struct IdTokenClaims {
     email_verified: Option<bool>,
     #[serde(default)]
     nonce: Option<String>,
+    // `aud` and `azp` are read only for the OIDC Core §3.1.3.7 steps 3-5
+    // check below — `jsonwebtoken`'s own `set_audience` only checks that
+    // `client_id` is *one of* possibly several audiences, which is not the
+    // same requirement. `aud` is untyped because the claim is legally either
+    // a bare string or an array of strings.
+    #[serde(default)]
+    aud: Option<Value>,
+    #[serde(default)]
+    azp: Option<String>,
 }
 
 struct CachedJwks {
@@ -624,6 +633,20 @@ pub async fn verify_id_token(
     if token_data.claims.nonce.as_deref() != Some(expected_nonce) {
         return Err(AuthError::IdTokenInvalid(
             "nonce did not match this sign-in attempt".into(),
+        ));
+    }
+
+    // OIDC Core §3.1.3.7 steps 3-5: a multi-valued `aud` is only acceptable
+    // when `azp` is present and equals `client_id` — `set_audience` above
+    // already confirmed `client_id` is *among* the audiences, but a token
+    // minted for several relying parties at once, one of which is us, is
+    // not proof this token was issued *for* this sign-in unless `azp` says
+    // so explicitly.
+    let aud_is_multi_valued =
+        matches!(&token_data.claims.aud, Some(Value::Array(values)) if values.len() > 1);
+    if aud_is_multi_valued && token_data.claims.azp.as_deref() != Some(client_id) {
+        return Err(AuthError::IdTokenInvalid(
+            "aud names more than one audience and azp does not identify this client".into(),
         ));
     }
 

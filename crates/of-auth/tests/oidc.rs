@@ -391,6 +391,51 @@ async fn verify_id_token_rejects_a_token_with_no_aud_claim() {
 }
 
 #[tokio::test]
+async fn verify_id_token_rejects_a_multi_audience_token_with_no_matching_azp() {
+    // OIDC Core §3.1.3.7 steps 3-5: `set_audience` above only confirms
+    // `client_id` is *one of* possibly several audiences. A token minted
+    // for several relying parties at once needs `azp` to say which one it
+    // was actually issued for.
+    let server = jwks_server().await;
+    let discovery = support::discovery_document(&server.base_url);
+
+    let claims = json!({
+        "iss": server.base_url,
+        "aud": ["client-1", "some-other-client"],
+        "sub": "user-42",
+        "nonce": "nonce-1",
+        "exp": now() + 300,
+        // no "azp"
+    });
+    let id_token = support::sign_id_token(&claims);
+
+    let err = oidc::verify_id_token(&discovery, "client-1", &id_token, "nonce-1")
+        .await
+        .expect_err("a multi-audience token with no azp must be refused");
+    assert_id_token_invalid(&err, "azp");
+}
+
+#[tokio::test]
+async fn verify_id_token_accepts_a_multi_audience_token_with_a_matching_azp() {
+    let server = jwks_server().await;
+    let discovery = support::discovery_document(&server.base_url);
+
+    let claims = json!({
+        "iss": server.base_url,
+        "aud": ["client-1", "some-other-client"],
+        "azp": "client-1",
+        "sub": "user-42",
+        "nonce": "nonce-1",
+        "exp": now() + 300,
+    });
+    let id_token = support::sign_id_token(&claims);
+
+    oidc::verify_id_token(&discovery, "client-1", &id_token, "nonce-1")
+        .await
+        .expect("a multi-audience token naming client-1 as azp must verify");
+}
+
+#[tokio::test]
 async fn verify_id_token_rejects_a_token_with_no_iss_claim() {
     let server = jwks_server().await;
     let discovery = support::discovery_document(&server.base_url);
