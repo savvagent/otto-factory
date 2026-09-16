@@ -74,6 +74,13 @@ fn normalize_domain(domain: &str) -> Result<String> {
 /// account/organization identity, not a bounded disclosure like the JIRA
 /// site-registration precedent, so nothing beyond "you were refused" is
 /// confirmed.
+///
+/// Re-claiming this org's own *only verified* domain while `enforce_sso` is
+/// on is refused the same way [`delete`] refuses removing it: a re-claim
+/// resets `verified_at` to `NULL`, which would strand every member who isn't
+/// already federated exactly as deleting the row would — same outcome, no
+/// reason to guard one path and not the other. See [`delete`]'s doc comment
+/// for the locking rationale, which applies identically here.
 pub async fn claim(
     tx: &mut Tx<'_>,
     domain: &str,
@@ -81,6 +88,41 @@ pub async fn claim(
 ) -> Result<ClaimedDomain> {
     let org_id = tx.org();
     let domain = normalize_domain(domain)?;
+
+    crate::orgs::lock_for_sso_guard(tx).await?;
+
+    if crate::orgs::enforce_sso_flag(tx).await? {
+        let target_verified: Option<bool> = sqlx::query_scalar(
+            "SELECT verified_at IS NOT NULL FROM claimed_domains \
+             WHERE org_id = $1 AND domain = $2",
+        )
+        .bind(org_id)
+        .bind(&domain)
+        .fetch_optional(tx.conn())
+        .await?;
+
+        if target_verified == Some(true) {
+            let other_verified: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM claimed_domains \
+                 WHERE org_id = $1 AND domain <> $2 AND verified_at IS NOT NULL",
+            )
+            .bind(org_id)
+            .bind(&domain)
+            .fetch_one(tx.conn())
+            .await?;
+
+            if other_verified == 0 {
+                return Err(Error::SsoLockout {
+                    reason: "cannot re-claim this org's only verified domain while \
+                             enforce_sso is on — re-claiming resets verification and \
+                             would strand every member who isn't already federated, the \
+                             same way removing it would. Turn off enforce_sso first, or \
+                             verify another domain before re-claiming this one."
+                        .to_string(),
+                });
+            }
+        }
+    }
 
     let row: Option<ClaimedDomain> = sqlx::query_as(&format!(
         "INSERT INTO claimed_domains (org_id, domain, verification_token, verified_at) \

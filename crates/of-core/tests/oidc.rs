@@ -88,6 +88,112 @@ async fn idp_connections_round_trip_and_rebind_replaces(pool: PgPool) {
     tx.commit().await.unwrap();
 }
 
+/// A rebind that changes `issuer`/`client_id` must clear stale
+/// `user_identities` pins on the preserved connection row — a security
+/// review found `upsert_connection` kept them, which would let a `sub` at
+/// the *new* IdP that happens to collide with an old pin resolve straight
+/// onto that account (`sub` is only unique within an issuer).
+#[sqlx::test]
+async fn rebinding_to_a_different_issuer_clears_stale_identity_pins(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+    let other = db.upsert_user("other@acme.com", None).await.unwrap().id;
+    let cipher = Cipher::from_base64_key(&B64.encode([7u8; 32])).unwrap();
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let conn_a = idp::upsert_connection(
+        &mut tx,
+        "https://idp-a.test",
+        "client-a",
+        sealed(&cipher, b"secret-a"),
+        serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    identities::link(&db, other, conn_a.id, "shared-sub")
+        .await
+        .unwrap();
+    assert_eq!(
+        identities::resolve_user(&db, conn_a.id, "shared-sub")
+            .await
+            .unwrap(),
+        Some(other)
+    );
+
+    // Rebind to a different issuer — same org, same connection row (the
+    // `id` is preserved by ON CONFLICT), but a different IdP.
+    let mut tx = db.begin(t.org).await.unwrap();
+    let conn_b = idp::upsert_connection(
+        &mut tx,
+        "https://idp-b.test",
+        "client-b",
+        sealed(&cipher, b"secret-b"),
+        serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(conn_b.id, conn_a.id);
+
+    // The stale pin is gone: a principal at the new IdP presenting the same
+    // `sub` string is a stranger, not `other`.
+    assert_eq!(
+        identities::resolve_user(&db, conn_b.id, "shared-sub")
+            .await
+            .unwrap(),
+        None
+    );
+}
+
+/// Rebinding with the *same* issuer and client_id (e.g. re-saving after a
+/// client secret rotation) must not disturb existing pins — only a change to
+/// which IdP is bound clears them.
+#[sqlx::test]
+async fn rebinding_with_the_same_issuer_and_client_id_keeps_identity_pins(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+    let other = db.upsert_user("other@acme.com", None).await.unwrap().id;
+    let cipher = Cipher::from_base64_key(&B64.encode([8u8; 32])).unwrap();
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let conn_a = idp::upsert_connection(
+        &mut tx,
+        "https://idp.test",
+        "client",
+        sealed(&cipher, b"secret-old"),
+        serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    identities::link(&db, other, conn_a.id, "stable-sub")
+        .await
+        .unwrap();
+
+    // Rotate the secret only — issuer and client_id unchanged.
+    let mut tx = db.begin(t.org).await.unwrap();
+    idp::upsert_connection(
+        &mut tx,
+        "https://idp.test",
+        "client",
+        sealed(&cipher, b"secret-new"),
+        serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    assert_eq!(
+        identities::resolve_user(&db, conn_a.id, "stable-sub")
+            .await
+            .unwrap(),
+        Some(other)
+    );
+}
+
 #[test]
 fn generate_verification_token_is_unique_and_url_safe() {
     let a = domains::generate_verification_token();
@@ -657,6 +763,59 @@ async fn delete_connection_and_delete_last_domain_are_refused_while_enforced(poo
     orgs::set_enforce_sso(&mut tx, false, t.user).await.unwrap();
     domains::delete(&mut tx, "acme.com").await.unwrap();
     idp::delete_connection(&mut tx).await.unwrap();
+    tx.commit().await.unwrap();
+}
+
+/// Re-claiming resets `verified_at` to `NULL` the same way `delete` removes
+/// the row — a security review found `claim` took no lockout guard at all,
+/// so re-POSTing the org's only verified domain silently produced the exact
+/// stranded state `delete`'s own guard exists to prevent.
+#[sqlx::test]
+async fn reclaiming_the_only_verified_domain_is_refused_while_enforced(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+    let cipher = Cipher::from_base64_key(&B64.encode([5u8; 32])).unwrap();
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let connection = idp::upsert_connection(
+        &mut tx,
+        "https://idp.test",
+        "client",
+        sealed(&cipher, b"secret"),
+        serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+    domains::claim(&mut tx, "acme.com", "token").await.unwrap();
+    domains::mark_verified(&mut tx, "acme.com").await.unwrap();
+    tx.commit().await.unwrap();
+
+    identities::link(&db, t.user, connection.id, "owner-sub")
+        .await
+        .unwrap();
+    let mut tx = db.begin(t.org).await.unwrap();
+    orgs::set_enforce_sso(&mut tx, true, t.user).await.unwrap();
+    tx.commit().await.unwrap();
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let err = domains::claim(&mut tx, "acme.com", "new-token")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::SsoLockout { .. }));
+    tx.rollback().await.unwrap();
+
+    // Still verified — the refused claim must not have reset it.
+    let mut tx = db.begin(t.org).await.unwrap();
+    let remaining = domains::list(&mut tx).await.unwrap();
+    tx.commit().await.unwrap();
+    assert!(remaining[0].verified_at.is_some());
+
+    // Claiming a *second* domain (not the last verified one) still works —
+    // only re-claiming the sole verified domain is guarded.
+    let mut tx = db.begin(t.org).await.unwrap();
+    domains::claim(&mut tx, "acme.dev", "token-2")
+        .await
+        .unwrap();
     tx.commit().await.unwrap();
 }
 

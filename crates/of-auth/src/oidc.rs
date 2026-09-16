@@ -343,6 +343,33 @@ pub fn authorization_url(
     let endpoint = discovery_str(discovery, "authorization_endpoint")?;
     let mut url = Url::parse(endpoint)
         .map_err(|_| AuthError::OidcDiscoveryField("authorization_endpoint"))?;
+    // Every other discovery URL is fetched server-side and goes through
+    // require_safe_url. This one never is — it's handed straight to the
+    // browser as `window.location.assign(...)` (see settings/+page.svelte
+    // and login/+page.svelte) — so an admin-supplied `javascript:` or
+    // `data:` URI here is a DOM XSS in the console origin, not an SSRF.
+    // require_discovery_fields rejects a non-https scheme at bind time too;
+    // this check is what protects every sign-in against a connection that
+    // predates that check, or a discovery document that changed since.
+    //
+    // No DNS resolution here (this function is sync, unlike require_safe_url) —
+    // the test-support relaxation below matches on the host already being a
+    // loopback IP *literal*, which is what the crate's own mock server binds
+    // to, rather than repeating require_safe_url's async lookup.
+    if url.scheme() != "https" {
+        let is_test_loopback = cfg!(feature = "test-support")
+            && url
+                .host_str()
+                .and_then(|h| h.parse::<IpAddr>().ok())
+                .is_some_and(|ip| ip.is_loopback());
+        if !is_test_loopback {
+            return Err(AuthError::OidcUnsafeUrl {
+                field: "authorization_endpoint",
+                reason: "scheme must be https — this URL is navigated to directly by the browser"
+                    .to_string(),
+            });
+        }
+    }
     url.query_pairs_mut()
         .append_pair("response_type", "code")
         .append_pair("scope", "openid email profile")
@@ -399,15 +426,33 @@ pub async fn exchange_code(
 
     let status = response.status();
     if !status.is_success() {
-        let mut body = response_body_snippet("exchanging the authorization code", response).await;
-        // Redacted, not merely truncated: a non-conformant token endpoint
-        // that echoes the submitted form back in its error body would
-        // otherwise put the plaintext client secret into whatever logs
-        // this error's Display text reaches (of-web's callback handler
-        // logs the full AuthError on this exact failure).
+        // Redaction happens *before* truncation, and against both the raw
+        // and the form-urlencoded forms of the secret: a non-conformant
+        // token endpoint that echoes the submitted form back in its error
+        // body would otherwise put the plaintext client secret into
+        // whatever logs this error's Display text reaches (of-web's
+        // callback handler logs the full AuthError on this exact failure).
+        // response_body_snippet truncates to MAX_ERROR_BODY_BYTES first,
+        // which would leave a secret straddling that boundary as an
+        // unmatched partial substring — read the same bound directly
+        // instead, redact, then truncate.
+        let bytes = read_capped(
+            "exchanging the authorization code",
+            response,
+            MAX_ERROR_BODY_BYTES.max(4096),
+        )
+        .await
+        .unwrap_or_default();
+        let mut body = String::from_utf8_lossy(&bytes).into_owned();
         if !client_secret.is_empty() {
             body = body.replace(client_secret, "[redacted]");
+            let percent_encoded: String =
+                url::form_urlencoded::byte_serialize(client_secret.as_bytes()).collect();
+            if percent_encoded != client_secret {
+                body = body.replace(&percent_encoded, "[redacted]");
+            }
         }
+        let body = truncate(&body, MAX_ERROR_BODY_BYTES);
         return Err(AuthError::OidcApi {
             action: "exchanging the authorization code",
             status: status.as_u16(),

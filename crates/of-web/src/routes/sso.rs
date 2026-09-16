@@ -630,7 +630,7 @@ pub struct ConnectionRequest {
 /// (`authorization_url`, `exchange_code`, `verify_id_token`) need one of the
 /// four; missing any of them, `issuer` included, means a connection that
 /// binds successfully and then fails every subsequent sign-in.
-fn require_discovery_fields(discovery: &serde_json::Value) -> ApiResult<()> {
+fn require_discovery_fields(discovery: &serde_json::Value, issuer: &str) -> ApiResult<()> {
     // `issuer` too, not just the three endpoint fields: `verify_id_token`
     // (`of_auth::oidc::discovery_str(discovery, "issuer")`) needs it on
     // every callback, and a review pass found this function's own doc
@@ -648,15 +648,31 @@ fn require_discovery_fields(discovery: &serde_json::Value) -> ApiResult<()> {
     .into_iter()
     .filter(|field| !discovery.get(field).is_some_and(|v| v.is_string()))
     .collect();
-    if missing.is_empty() {
-        Ok(())
-    } else {
-        Err(ApiError::bad_request(format!(
+    if !missing.is_empty() {
+        return Err(ApiError::bad_request(format!(
             "the identity provider's discovery document is missing required field(s): {}. \
              Fix the issuer's /.well-known/openid-configuration and try again.",
             missing.join(", ")
-        )))
+        )));
     }
+
+    // OIDC Discovery §4.3: the returned `issuer` must equal the issuer the
+    // document was fetched from. `verify_id_token` pins `iss` to whatever
+    // this document claims, so without this check a discovery document
+    // could name an issuer string entirely disconnected from what the admin
+    // configured and what's stored in `idp_connections.issuer`.
+    let doc_issuer = discovery
+        .get("issuer")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if doc_issuer.trim_end_matches('/') != issuer.trim_end_matches('/') {
+        return Err(ApiError::bad_request(format!(
+            "the identity provider's discovery document declares issuer \"{doc_issuer}\", \
+             which does not match the configured issuer \"{issuer}\"."
+        )));
+    }
+
+    Ok(())
 }
 
 /// `PUT /api/orgs/{org}/sso/connection` — bind or replace this org's IdP.
@@ -672,7 +688,7 @@ pub async fn upsert_connection(
     ctx.require_admin()?;
 
     let discovery = oidc::fetch_discovery(&req.issuer).await?;
-    require_discovery_fields(&discovery)?;
+    require_discovery_fields(&discovery, &req.issuer)?;
     let sealed = state.cipher.seal(req.client_secret.as_bytes())?;
 
     let mut tx = state.db.begin(ctx.org.id).await?;

@@ -43,6 +43,16 @@ pub struct IdpConnection {
 /// no concatenation step: `idp_connections` already has two columns for it,
 /// unlike `tracker_connections`' single-`TEXT` `encode_sealed` convention,
 /// which exists only because that table has one column to work with.
+///
+/// A rebind that changes `issuer` or `client_id` also clears every
+/// `user_identities` row pinned to this connection — [`delete_connection`]'s
+/// doc comment states the underlying principle ("the org no longer vouches
+/// for that IdP") and this is the same fact under a different SQL statement:
+/// `ON CONFLICT ... DO UPDATE` preserves `idp_connections.id`, so without
+/// this, every existing pin would silently survive a switch to a completely
+/// different IdP. `sub` is only unique *within* an issuer, so a principal at
+/// the new IdP whose `sub` collides with a stale pin from the old one would
+/// otherwise resolve straight onto that account.
 pub async fn upsert_connection(
     tx: &mut Tx<'_>,
     issuer: &str,
@@ -51,7 +61,14 @@ pub async fn upsert_connection(
     discovery: serde_json::Value,
 ) -> Result<IdpConnection> {
     let org_id = tx.org();
-    let connection = sqlx::query_as(&format!(
+
+    let existing: Option<(uuid::Uuid, String, String)> =
+        sqlx::query_as("SELECT id, issuer, client_id FROM idp_connections WHERE org_id = $1")
+            .bind(org_id)
+            .fetch_optional(tx.conn())
+            .await?;
+
+    let connection: IdpConnection = sqlx::query_as(&format!(
         "INSERT INTO idp_connections \
          (org_id, issuer, client_id, client_secret_ct, client_secret_nonce, discovery) \
          VALUES ($1, $2, $3, $4, $5, $6) \
@@ -71,6 +88,15 @@ pub async fn upsert_connection(
     .bind(discovery)
     .fetch_one(tx.conn())
     .await?;
+
+    if let Some((id, old_issuer, old_client_id)) = existing {
+        if old_issuer != issuer || old_client_id != client_id {
+            sqlx::query("DELETE FROM user_identities WHERE idp_connection_id = $1")
+                .bind(id)
+                .execute(tx.conn())
+                .await?;
+        }
+    }
 
     Ok(connection)
 }
