@@ -90,12 +90,36 @@ pub struct SsoStartResponse {
 ///
 /// Unauthenticated: resolves the IdP purely from the email's domain. No
 /// account is looked up and no session is required, which is what lets a
-/// signed-out visitor reach it from the login page.
+/// signed-out visitor reach it from the login page. Throttled by source IP,
+/// the same shape `signup_start`/`claim_start` already use — a review pass
+/// found this was the one public account-touching auth endpoint with no
+/// throttle at all, despite writing an `sso_ceremonies` row per call and
+/// being the endpoint the design spec itself names as a bounded "does this
+/// domain have SSO configured" oracle. Unbounded, that bound stops holding.
 pub async fn sso_start(
     State(state): State<AppState>,
+    parts: Parts,
     Json(req): Json<SsoStartRequest>,
 ) -> ApiResult<Response> {
+    throttle_by_source(&state, &parts, "sso_start").await?;
     start_ceremony(&state, &req.email, None).await
+}
+
+/// Shared with [`sso_start`]'s throttle: keys on source IP, same as
+/// `of_web::routes::auth::throttle_by_source` (not reused directly — that
+/// one is private to its module and hardcodes the `signup:` bucket prefix;
+/// this takes the prefix so the same shape serves more than one endpoint
+/// without the two throttles sharing a counter).
+async fn throttle_by_source(state: &AppState, parts: &Parts, prefix: &str) -> ApiResult<()> {
+    let Some(ip) = client_ip(parts, &state.config) else {
+        // Nothing trustworthy to key on. Deliberately not a shared "unknown"
+        // bucket: the first attacker to trip it would lock out everyone else.
+        return Ok(());
+    };
+
+    let bucket = format!("{prefix}:{ip}");
+    of_auth::ratelimit::check_and_charge(&state.db, &bucket).await?;
+    Ok(())
 }
 
 /// `POST /api/me/sso/link/start` — the authenticated "link my SSO identity"
@@ -212,6 +236,8 @@ const EMAIL_COLLISION: &str = "An account already exists for this email address.
      your existing credentials, then link single sign-on from account settings.";
 const IDENTITY_LINKED_ELSEWHERE: &str = "That identity provider account is already linked to a \
      different otto-factory account.";
+const ACCOUNT_DISABLED: &str = "This account has been disabled. Contact your organization's \
+     admin.";
 
 #[derive(Debug, Deserialize)]
 pub struct CallbackParams {
@@ -437,6 +463,39 @@ async fn callback_inner(
             .await?
         }
     };
+
+    // Step 7: success — but not for a disabled account. `login::with_passkey`
+    // checks this immediately after resolving user_id and before minting a
+    // session (a disabled account's credential still produces a valid
+    // signature/assertion; the refusal has to come from an account-level
+    // check no credential can answer). This callback previously minted a
+    // session unconditionally once user_id was resolved, skipping that
+    // check entirely — the case this matters for is a *returning* federated
+    // user (identities::resolve_user finds an existing link) whose account
+    // was disabled by an admin sometime after they linked; a brand-new user
+    // (the create_user_for_federation path) can't already be disabled, so
+    // this is specifically about honoring a disable decision on the next
+    // sign-in attempt, the same way the passkey path already does.
+    // `sessions::resolve` would still refuse the resulting session on its
+    // very next use (it re-checks `disabled_at` itself), so this was never
+    // a way *in* — but the audit trail recorded a `LOGIN_SUCCEEDED` for a
+    // sign-in that would immediately dead-end on the next request, instead
+    // of the `LOGIN_FAILED` a disabled account's attempt should produce.
+    let account = state
+        .db
+        .get_user(user_id)
+        .await?
+        .ok_or(Outcome::Refuse(GENERIC_REFUSAL))?;
+    if account.disabled_at.is_some() {
+        let entry = Entry::new(action::LOGIN_FAILED)
+            .actor(user_id)
+            .from_request(client_ip(parts, &state.config).as_deref(), None)
+            .detail(serde_json::json!({ "method": "sso", "reason": "account disabled" }));
+        if let Err(e) = state.db.audit_global(entry).await {
+            tracing::error!(error = %e, "failed to write audit event for a refused SSO sign-in");
+        }
+        return Err(Outcome::Refuse(ACCOUNT_DISABLED));
+    }
 
     // Step 7: success.
     let new_session = sessions::create(&state.db, user_id).await?;

@@ -248,6 +248,63 @@ async fn the_full_anonymous_sso_sign_in_flow_opens_a_session_and_joins_the_org(p
 }
 
 #[sqlx::test(migrations = "../of-core/migrations")]
+async fn callback_refuses_a_disabled_account(pool: PgPool) {
+    // login::with_passkey refuses a disabled account before minting a
+    // session; this callback previously skipped that check entirely for a
+    // *returning* federated user (a brand-new user can't already be
+    // disabled) — sessions::resolve would still refuse the resulting
+    // session on its very next use, so this was never a way in, but the
+    // audit trail recorded a false LOGIN_SUCCEEDED instead of a
+    // LOGIN_FAILED for an attempt that should be refused outright.
+    let (h, _org_id, _admin, idp) = org_with_sso(pool, "acme", "acme.test").await;
+
+    // First sign-in links alice's federated identity.
+    let (state, nonce, binding) = start_anonymous(&h, "alice@acme.test").await;
+    let id_token = support::sign_id_token(&id_token_claims(
+        &idp.server.base_url,
+        "alice-sub",
+        "alice@acme.test",
+        true,
+        &nonce,
+    ));
+    let first = complete_callback(&h, &idp, &state, Some(&binding), &id_token).await;
+    first.expect(StatusCode::SEE_OTHER);
+
+    sqlx::query("UPDATE users SET disabled_at = now() WHERE email = 'alice@acme.test'")
+        .execute(h.db.pool())
+        .await
+        .unwrap();
+
+    // A second sign-in attempt, now that the account is disabled.
+    let (state, nonce, binding) = start_anonymous(&h, "alice@acme.test").await;
+    let id_token = support::sign_id_token(&id_token_claims(
+        &idp.server.base_url,
+        "alice-sub",
+        "alice@acme.test",
+        true,
+        &nonce,
+    ));
+    let second = complete_callback(&h, &idp, &state, Some(&binding), &id_token).await;
+    second.expect(StatusCode::BAD_REQUEST);
+    assert!(
+        second.session_cookie().is_none(),
+        "a disabled account must never get a session, even briefly"
+    );
+
+    let failed_reason: Option<serde_json::Value> = sqlx::query_scalar(
+        "SELECT detail FROM audit_events WHERE action = 'auth.login.failed' \
+         ORDER BY created_at DESC LIMIT 1",
+    )
+    .fetch_optional(h.db.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        failed_reason.as_ref().and_then(|d| d.get("reason")),
+        Some(&serde_json::json!("account disabled"))
+    );
+}
+
+#[sqlx::test(migrations = "../of-core/migrations")]
 async fn sso_start_refuses_an_unclaimed_domain(pool: PgPool) {
     let h = harness(pool);
     let reply = Call::post("/api/auth/sso/start")
