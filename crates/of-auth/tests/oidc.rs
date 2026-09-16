@@ -228,6 +228,47 @@ async fn verify_id_token_accepts_a_valid_token() {
 }
 
 #[tokio::test]
+async fn verify_id_token_reuses_a_cached_jwks_document() {
+    // Deliberately deviates from `jwks_server()`'s helper: only ONE response
+    // is queued, so a second live fetch would fail the request outright
+    // (the mock server answers an unqueued request with 500). Two
+    // successful verifications against this server is only possible if the
+    // second call served the JWKS document from `oidc`'s cache instead of
+    // fetching it again — proving the cache is actually consulted, not just
+    // present and unused (a regression that quietly deleted the caching
+    // would still compile and would still pass every other test here, since
+    // none of them call `verify_id_token` twice against one server).
+    let server = TestServer::start().await;
+    server.push(MockResponse::json(200, support::jwks_document()));
+    let discovery = support::discovery_document(&server.base_url);
+
+    for nonce in ["nonce-1", "nonce-2"] {
+        let claims = json!({
+            "iss": server.base_url,
+            "aud": "client-1",
+            "sub": "user-42",
+            "nonce": nonce,
+            "exp": now() + 300,
+        });
+        let id_token = support::sign_id_token(&claims);
+
+        oidc::verify_id_token(&discovery, "client-1", &id_token, nonce)
+            .await
+            .expect("cached JWKS still verifies a second, freshly signed token");
+    }
+
+    let jwks_requests = server
+        .requests()
+        .into_iter()
+        .filter(|r| r.path == "/jwks")
+        .count();
+    assert_eq!(
+        jwks_requests, 1,
+        "the second verify_id_token call should have hit the cache, not refetched the JWKS document"
+    );
+}
+
+#[tokio::test]
 async fn verify_id_token_rejects_wrong_issuer() {
     let server = jwks_server().await;
     let discovery = support::discovery_document(&server.base_url);

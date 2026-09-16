@@ -28,7 +28,8 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// An operator-facing error body is diagnostic text, not something to echo
 /// back whole — bounded the same way `of_trackers`'s `MAX_ERROR_BODY_BYTES`
-/// bounds a GitHub/JIRA error body.
+/// bounds a GitHub/JIRA error body (a byte bound, not a `char` count — see
+/// [`truncate`]).
 const MAX_ERROR_BODY_BYTES: usize = 256;
 
 /// How long a fetched JWKS document is trusted before this module fetches it
@@ -37,21 +38,53 @@ const MAX_ERROR_BODY_BYTES: usize = 256;
 /// side propagates without otto-factory needing a restart.
 const JWKS_CACHE_TTL: Duration = Duration::from_secs(300);
 
-fn http_client() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .timeout(HTTP_TIMEOUT)
-        .build()
-        .map_err(|source| AuthError::OidcHttp {
-            action: "building the HTTP client",
-            source,
-        })
+/// `reqwest::Client` owns a connection pool and TLS context and is meant to
+/// be built once and reused — matching `of_trackers`'s GitHub/JIRA clients,
+/// which store their client on the client struct rather than rebuilding it
+/// per call. This module has no long-lived client struct of its own (every
+/// function here is a free function taking a discovery document), so the
+/// client lives in a `OnceLock` instead — same lifetime, same reuse, no
+/// per-call rebuild of the pool.
+///
+/// Infallible: `Client::builder().build()` only fails on an invalid TLS
+/// backend configuration, which is fixed at compile time by this workspace's
+/// `reqwest` feature flags and so cannot fail differently across calls or
+/// environments. On that unreachable path this falls back to
+/// `reqwest::Client::new()` (the same infallible default `build()` uses
+/// internally) rather than propagating a fabricated error or panicking —
+/// the only thing lost in that case is the custom timeout, not correctness.
+fn http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(HTTP_TIMEOUT)
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
 }
 
 async fn response_body_snippet(response: reqwest::Response) -> String {
     match response.text().await {
-        Ok(body) => body.chars().take(MAX_ERROR_BODY_BYTES).collect(),
+        Ok(body) => truncate(&body, MAX_ERROR_BODY_BYTES),
         Err(_) => String::new(),
     }
+}
+
+/// Truncates `input` to at most `max_bytes` bytes, backing off to the
+/// nearest preceding UTF-8 character boundary so a multi-byte character is
+/// never split — mirrors `of_trackers`'s identical helper (`github.rs`/
+/// `jira.rs`) used for the same purpose (bounding an echoed third-party
+/// error body).
+fn truncate(input: &str, max_bytes: usize) -> String {
+    if input.len() <= max_bytes {
+        return input.to_string();
+    }
+
+    let mut end = max_bytes;
+    while !input.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &input[..end])
 }
 
 /// Reads a required string field out of a cached discovery document.
@@ -77,7 +110,7 @@ pub async fn fetch_discovery(issuer: &str) -> Result<Value> {
         "{}/.well-known/openid-configuration",
         issuer.trim_end_matches('/')
     );
-    let client = http_client()?;
+    let client = http_client();
     let response = client
         .get(&url)
         .send()
@@ -156,7 +189,7 @@ pub async fn exchange_code(
     redirect_uri: &str,
 ) -> Result<TokenResponse> {
     let token_endpoint = discovery_str(discovery, "token_endpoint")?;
-    let client = http_client()?;
+    let client = http_client();
     let response = client
         .post(token_endpoint)
         .form(&[
@@ -253,7 +286,7 @@ async fn fetch_jwks(jwks_uri: &str) -> Result<JwkSet> {
         }
     }
 
-    let client = http_client()?;
+    let client = http_client();
     let response = client
         .get(jwks_uri)
         .send()
