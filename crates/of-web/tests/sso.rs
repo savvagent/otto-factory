@@ -176,6 +176,26 @@ async fn org_with_sso(
     (h, org_id, admin, idp)
 }
 
+/// Completes the authenticated "link my SSO identity" ceremony for `admin`,
+/// against their own `ADMIN_EMAIL`. `set_enforce_sso`'s enable-path guard
+/// (spec: closing the admin's-own-lockout case) requires the caller to
+/// already have a linked identity before `PUT .../sso/enforce` with
+/// `enforceSso: true` succeeds — every test that flips enforcement on calls
+/// this first, the same way a real admin would from account settings before
+/// locking their own passkey out.
+async fn link_admin_identity(h: &Harness, admin: &Account, idp: &FixtureIdp) {
+    let (state, nonce, binding) = start_link(h, admin).await;
+    let id_token = support::sign_id_token(&id_token_claims(
+        &idp.server.base_url,
+        "admin-sub",
+        ADMIN_EMAIL,
+        true,
+        &nonce,
+    ));
+    let reply = complete_callback(h, idp, &state, Some(&binding), &id_token).await;
+    reply.expect(StatusCode::SEE_OTHER);
+}
+
 // ------------------------------------------------------------- the flows
 
 #[sqlx::test(migrations = "../of-core/migrations")]
@@ -551,8 +571,35 @@ async fn enforce_sso_cannot_be_turned_on_with_no_working_sso_path(pool: PgPool) 
 }
 
 #[sqlx::test(migrations = "../of-core/migrations")]
-async fn deleting_the_only_connection_is_refused_while_enforce_sso_is_on(pool: PgPool) {
+async fn enforce_sso_cannot_be_turned_on_by_an_admin_who_has_not_linked_their_own_identity(
+    pool: PgPool,
+) {
+    // Infrastructure (a bound connection, a verified domain) is fully in
+    // place — org_with_sso does exactly that — but nobody has completed the
+    // authenticated link ceremony yet. This is the lockout a third review
+    // round found: without this guard, flipping enforceSso here would
+    // refuse passkey login for every member, including the admin issuing
+    // this exact call, with literally no path back into the org for anyone.
     let (h, _org_id, admin, _idp) = org_with_sso(pool, "acme", "acme.test").await;
+
+    let reply = Call::put("/api/orgs/acme/sso/enforce")
+        .with_session(&admin.session)
+        .json(serde_json::json!({ "enforceSso": true }))
+        .send(&h.router)
+        .await;
+    reply.expect(StatusCode::BAD_REQUEST);
+    assert_eq!(reply.error_code(), Some("sso_lockout"));
+    let message = reply.body["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("you have not linked"),
+        "the refusal should name the actual missing piece: {message:?}"
+    );
+}
+
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn deleting_the_only_connection_is_refused_while_enforce_sso_is_on(pool: PgPool) {
+    let (h, _org_id, admin, idp) = org_with_sso(pool, "acme", "acme.test").await;
+    link_admin_identity(&h, &admin, &idp).await;
 
     let enable = Call::put("/api/orgs/acme/sso/enforce")
         .with_session(&admin.session)
@@ -571,7 +618,8 @@ async fn deleting_the_only_connection_is_refused_while_enforce_sso_is_on(pool: P
 
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn deleting_the_last_verified_domain_is_refused_while_enforce_sso_is_on(pool: PgPool) {
-    let (h, _org_id, admin, _idp) = org_with_sso(pool, "acme", "acme.test").await;
+    let (h, _org_id, admin, idp) = org_with_sso(pool, "acme", "acme.test").await;
+    link_admin_identity(&h, &admin, &idp).await;
 
     let enable = Call::put("/api/orgs/acme/sso/enforce")
         .with_session(&admin.session)
@@ -590,7 +638,13 @@ async fn deleting_the_last_verified_domain_is_refused_while_enforce_sso_is_on(po
 
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn passkey_login_is_refused_for_a_member_of_an_enforce_sso_org(pool: PgPool) {
-    let (h, _org_id, mut admin, _idp) = org_with_sso(pool, "acme", "acme.test").await;
+    let (h, _org_id, mut admin, idp) = org_with_sso(pool, "acme", "acme.test").await;
+    // set_enforce_sso's enable guard requires the caller to already be
+    // linked (closing the admin's-own-lockout case) — the admin's *passkey*
+    // still stops working the moment enforcement is on, same as any other
+    // member; only their now-linked SSO identity keeps working. That
+    // distinction is exactly what this test asserts.
+    link_admin_identity(&h, &admin, &idp).await;
 
     let enable = Call::put("/api/orgs/acme/sso/enforce")
         .with_session(&admin.session)
@@ -600,8 +654,10 @@ async fn passkey_login_is_refused_for_a_member_of_an_enforce_sso_org(pool: PgPoo
     enable.expect(StatusCode::OK);
 
     // The admin is themselves a member of the now-enforce_sso org — their
-    // own passkey stops working too, with no carve-out for the person who
-    // just flipped the flag.
+    // passkey stops working too, with no carve-out for the person who just
+    // flipped the flag. They are not locked out of the org itself (they
+    // linked their SSO identity first, per the guard above), only out of
+    // this specific credential.
     let reply = sign_in(&h, &mut admin).await;
     reply.expect(StatusCode::FORBIDDEN);
     assert_eq!(reply.error_code(), Some("sso_required"));
@@ -614,7 +670,8 @@ async fn passkey_login_is_not_refused_for_a_member_of_a_different_unenforced_org
     // join accidentally matching an unrelated org's flag. A bystander who
     // never touches the enforce_sso org at all must keep signing in
     // normally.
-    let (h, _acme_id, _admin, _idp) = org_with_sso(pool.clone(), "acme", "acme.test").await;
+    let (h, _acme_id, _admin, idp) = org_with_sso(pool.clone(), "acme", "acme.test").await;
+    link_admin_identity(&h, &_admin, &idp).await;
 
     let enable = Call::put("/api/orgs/acme/sso/enforce")
         .with_session(&_admin.session)

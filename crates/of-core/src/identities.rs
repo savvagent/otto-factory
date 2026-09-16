@@ -16,7 +16,7 @@
 //! session's explicit link action (`of-web`, Task 3) — never a fresh email
 //! lookup used to pick a link target.
 
-use crate::db::Db;
+use crate::db::{Db, Tx};
 use crate::error::Result;
 use crate::ids::UserId;
 use serde::Serialize;
@@ -71,6 +71,34 @@ pub async fn resolve_by_email(db: &Db, email: &str) -> Result<Option<UserId>> {
         .await?;
 
     Ok(user_id)
+}
+
+/// Whether `user_id` already has a federated identity linked for
+/// `idp_connection_id` — used by [`crate::orgs::set_enforce_sso`]'s
+/// enable-path guard to require that the admin turning enforcement on has
+/// already proven they can sign back in through it (see that function's doc
+/// comment for the lockout this closes).
+///
+/// Takes `&mut Tx<'_>`, unlike this module's other accessors, because its
+/// one caller already holds a `Tx` (from [`lock_for_sso_guard`]) and has no
+/// separate `Db` handle to reach for — `user_identities` still has no
+/// `org_id` to scope, so this applies no org predicate any more than
+/// [`resolve_user`] does; it simply runs on whichever connection the caller
+/// already has open rather than acquiring a second one from the pool.
+pub(crate) async fn is_linked(
+    tx: &mut Tx<'_>,
+    user_id: UserId,
+    idp_connection_id: uuid::Uuid,
+) -> Result<bool> {
+    let linked: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM user_identities WHERE user_id = $1 AND idp_connection_id = $2)",
+    )
+    .bind(user_id)
+    .bind(idp_connection_id)
+    .fetch_one(tx.conn())
+    .await?;
+
+    Ok(linked)
 }
 
 /// First-use pinning of an IdP subject to a user.

@@ -583,13 +583,44 @@ pub(crate) async fn enforce_sso_flag(tx: &mut Tx<'_>) -> Result<bool> {
 /// Turn `enforce_sso` on or off for the caller's own org.
 ///
 /// Turning it **on** is refused (`Error::SsoLockout`, naming which piece is
-/// missing) unless the org has both a bound `idp_connection` **and** at
-/// least one verified `claimed_domains` row — `idp::resolve_for_domain` is an
-/// inner join, so *either* piece missing alone already makes SSO sign-in
-/// unreachable, and turning on enforcement with no way for any member to
-/// complete an IdP sign-in would lock every passkey-only member out with no
-/// path back in. Turning it **off** has no guard — disabling enforcement can
-/// never itself produce a lockout.
+/// missing) unless the org has a bound `idp_connection`, at least one
+/// verified `claimed_domains` row, **and** `caller` (the admin making this
+/// call) already has a `user_identities` row linked to that connection.
+///
+/// **Why the third condition, and why it's about `caller` specifically, not
+/// "does anyone in the org have a link."** A third-round review of this
+/// feature traced what happens to an *existing* passkey member once
+/// enforcement is on with nobody yet linked: passkey login is refused
+/// (`login::with_passkey`'s `enforce_sso` check); the anonymous SSO path
+/// refuses them too, because their email already has an account
+/// (`EMAIL_COLLISION` — correctly, per the never-link-by-email invariant);
+/// and the one path that *would* work, the authenticated "link my identity"
+/// ceremony, needs a session they can no longer obtain. That includes the
+/// admin who flips the switch — their current session keeps working until
+/// it lapses, but nothing in the product can turn `enforce_sso` back off
+/// once it does, because reaching this very endpoint again needs a session
+/// too. The first two conditions (a bound connection, a verified domain)
+/// only prove *some* working IdP path exists; they say nothing about
+/// whether *any specific person* can reach it. Requiring the caller
+/// specifically — not "some member" — is what turns this from "prove the
+/// org has infrastructure" into "prove at least one person, right now,
+/// making this exact call, can still get back in after it succeeds": since
+/// `caller` already holds a session in order to be calling this endpoint at
+/// all, requiring them to link first (`POST /api/me/sso/link/start`, while
+/// they still have that session) is always reachable before they flip the
+/// switch, and guarantees the org is never left with zero working sign-ins.
+/// It does not, by itself, guarantee every *other* existing member has a
+/// path back in — an admin still needs to walk them through linking (or
+/// remove-then-relink-then-readd) afterward — but it closes the one case
+/// that has no recovery at all: everyone, including whoever turned it on,
+/// locked out simultaneously with nobody left who can reach the console to
+/// undo it.
+///
+/// `idp::resolve_for_domain` is an inner join, so either of the first two
+/// conditions missing alone already makes SSO sign-in unreachable for
+/// everyone, caller included — that case is still named first. Turning it
+/// **off** has no guard — disabling enforcement can never itself produce a
+/// lockout.
 ///
 /// `orgs` carries no RLS policy at all — it is the tenant, not tenant-scoped
 /// data (`0029_org_job_counters.sql`'s own comment; absent from
@@ -597,30 +628,50 @@ pub(crate) async fn enforce_sso_flag(tx: &mut Tx<'_>) -> Result<bool> {
 /// is guard 1: `UPDATE orgs SET enforce_sso = $2 WHERE id = tx.org()` — the
 /// caller cannot name a different org's row because `Tx` is pinned to the
 /// caller's own org id and `orgs.id` (not `org_id`) is the match column.
-pub async fn set_enforce_sso(tx: &mut Tx<'_>, enforce: bool) -> Result<Org> {
+pub async fn set_enforce_sso(tx: &mut Tx<'_>, enforce: bool, caller: UserId) -> Result<Org> {
     if enforce {
         lock_for_sso_guard(tx).await?;
 
-        let has_connection = crate::idp::get_connection(tx).await?.is_some();
         let has_verified_domain = crate::domains::list(tx)
             .await?
             .iter()
             .any(|d| d.verified_at.is_some());
 
-        if !has_connection || !has_verified_domain {
-            let reason = match (has_connection, has_verified_domain) {
-                (false, false) => {
-                    "no IdP connection is bound and no domain is verified for this org"
-                }
-                (false, true) => "no IdP connection is bound for this org",
-                (true, false) => "no domain is verified for this org",
-                (true, true) => unreachable!("checked above by the enclosing if"),
+        // let-else, not an Option<T> plus a later unwrap/expect: a prior
+        // draft of this function paired a bool flag with an unreachable!()
+        // arm for "both present" — correct, but fragile to a future edit
+        // reordering the checks. Binding `connection` here means there is
+        // no later point where its presence needs re-proving to the
+        // compiler by anything other than the type itself.
+        let Some(connection) = crate::idp::get_connection(tx).await? else {
+            let reason = if has_verified_domain {
+                "no IdP connection is bound for this org"
+            } else {
+                "no IdP connection is bound and no domain is verified for this org"
             };
             return Err(Error::SsoLockout {
                 reason: format!(
                     "cannot turn on enforce_sso: {reason} — bind a connection and verify \
                      a domain first, or SSO sign-in would be unreachable for every member."
                 ),
+            });
+        };
+        if !has_verified_domain {
+            return Err(Error::SsoLockout {
+                reason: "cannot turn on enforce_sso: no domain is verified for this org — \
+                    verify a domain first, or SSO sign-in would be unreachable for every \
+                    member."
+                    .to_string(),
+            });
+        }
+
+        if !crate::identities::is_linked(tx, caller, connection.id).await? {
+            return Err(Error::SsoLockout {
+                reason: "cannot turn on enforce_sso: you have not linked your own account to \
+                    this org's identity provider yet — passkey login will stop working for \
+                    everyone immediately, including you, with no way back in. Link your SSO \
+                    identity from account settings first, then turn this on."
+                    .to_string(),
             });
         }
     }

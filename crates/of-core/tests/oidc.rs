@@ -495,13 +495,15 @@ async fn set_enforce_sso_refuses_with_no_connection_or_verified_domain(pool: PgP
 
     // Nothing bound at all.
     let mut tx = db.begin(t.org).await.unwrap();
-    let err = orgs::set_enforce_sso(&mut tx, true).await.unwrap_err();
+    let err = orgs::set_enforce_sso(&mut tx, true, t.user)
+        .await
+        .unwrap_err();
     assert!(matches!(err, Error::SsoLockout { .. }));
     tx.rollback().await.unwrap();
 
     // A connection, but no verified domain.
     let mut tx = db.begin(t.org).await.unwrap();
-    idp::upsert_connection(
+    let connection = idp::upsert_connection(
         &mut tx,
         "https://idp.test",
         "client",
@@ -511,14 +513,109 @@ async fn set_enforce_sso_refuses_with_no_connection_or_verified_domain(pool: PgP
     .await
     .unwrap();
     domains::claim(&mut tx, "acme.com", "token").await.unwrap();
-    let err = orgs::set_enforce_sso(&mut tx, true).await.unwrap_err();
+    let err = orgs::set_enforce_sso(&mut tx, true, t.user)
+        .await
+        .unwrap_err();
     assert!(matches!(err, Error::SsoLockout { .. }));
-
-    // Verifying the domain is what finally allows it.
     domains::mark_verified(&mut tx, "acme.com").await.unwrap();
-    let org = orgs::set_enforce_sso(&mut tx, true).await.unwrap();
+    tx.commit().await.unwrap();
+
+    // Verifying the domain is what finally allows it — but only once the
+    // caller has also linked their own identity (see the dedicated test
+    // below for that condition in isolation). identities::link is unscoped
+    // (&Db, its own separate connection), so it needs the connection row
+    // already committed and visible outside the Tx that created it.
+    identities::link(&db, t.user, connection.id, "owner-sub")
+        .await
+        .unwrap();
+    let mut tx = db.begin(t.org).await.unwrap();
+    let org = orgs::set_enforce_sso(&mut tx, true, t.user).await.unwrap();
     assert!(org.enforce_sso);
     tx.commit().await.unwrap();
+}
+
+#[sqlx::test]
+async fn set_enforce_sso_refuses_when_the_caller_has_not_linked_their_own_identity(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+    let cipher = Cipher::from_base64_key(&B64.encode([9u8; 32])).unwrap();
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let connection = idp::upsert_connection(
+        &mut tx,
+        "https://idp.test",
+        "client",
+        sealed(&cipher, b"secret"),
+        serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+    domains::claim(&mut tx, "acme.com", "token").await.unwrap();
+    domains::mark_verified(&mut tx, "acme.com").await.unwrap();
+
+    // Infrastructure is fully in place, but the caller hasn't linked their
+    // own account to it yet — this is the lockout the third condition
+    // exists to prevent: turning enforcement on right now would refuse
+    // passkey login for everyone, including this exact caller, with no way
+    // back in.
+    let err = orgs::set_enforce_sso(&mut tx, true, t.user)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::SsoLockout { .. }));
+    tx.commit().await.unwrap();
+
+    // Once the caller links, the same call succeeds. identities::link is
+    // unscoped (&Db), so the connection row it references must already be
+    // committed and visible outside the Tx that created it.
+    identities::link(&db, t.user, connection.id, "owner-sub")
+        .await
+        .unwrap();
+    let mut tx = db.begin(t.org).await.unwrap();
+    let org = orgs::set_enforce_sso(&mut tx, true, t.user).await.unwrap();
+    assert!(org.enforce_sso);
+    tx.commit().await.unwrap();
+}
+
+#[sqlx::test]
+async fn set_enforce_sso_does_not_require_a_different_admins_link(pool: PgPool) {
+    // A second admin's own linked identity does not satisfy the guard for
+    // the caller turning enforcement on — the whole point is that *this*
+    // caller can get back in, not merely that someone in the org can.
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+    let cipher = Cipher::from_base64_key(&B64.encode([11u8; 32])).unwrap();
+    let other_admin = db
+        .upsert_user("other-admin@acme.test", Some("Other Admin"))
+        .await
+        .unwrap();
+    db.add_member(t.org, other_admin.id, of_core::orgs::Role::Admin)
+        .await
+        .unwrap();
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let connection = idp::upsert_connection(
+        &mut tx,
+        "https://idp.test",
+        "client",
+        sealed(&cipher, b"secret"),
+        serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+    domains::claim(&mut tx, "acme.com", "token").await.unwrap();
+    domains::mark_verified(&mut tx, "acme.com").await.unwrap();
+    tx.commit().await.unwrap();
+
+    identities::link(&db, other_admin.id, connection.id, "other-sub")
+        .await
+        .unwrap();
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let err = orgs::set_enforce_sso(&mut tx, true, t.user)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::SsoLockout { .. }));
+    tx.rollback().await.unwrap();
 }
 
 #[sqlx::test]
@@ -528,7 +625,7 @@ async fn delete_connection_and_delete_last_domain_are_refused_while_enforced(poo
     let cipher = Cipher::from_base64_key(&B64.encode([4u8; 32])).unwrap();
 
     let mut tx = db.begin(t.org).await.unwrap();
-    idp::upsert_connection(
+    let connection = idp::upsert_connection(
         &mut tx,
         "https://idp.test",
         "client",
@@ -539,7 +636,13 @@ async fn delete_connection_and_delete_last_domain_are_refused_while_enforced(poo
     .unwrap();
     domains::claim(&mut tx, "acme.com", "token").await.unwrap();
     domains::mark_verified(&mut tx, "acme.com").await.unwrap();
-    orgs::set_enforce_sso(&mut tx, true).await.unwrap();
+    tx.commit().await.unwrap();
+
+    identities::link(&db, t.user, connection.id, "owner-sub")
+        .await
+        .unwrap();
+    let mut tx = db.begin(t.org).await.unwrap();
+    orgs::set_enforce_sso(&mut tx, true, t.user).await.unwrap();
     tx.commit().await.unwrap();
 
     let mut tx = db.begin(t.org).await.unwrap();
@@ -551,7 +654,7 @@ async fn delete_connection_and_delete_last_domain_are_refused_while_enforced(poo
 
     // Turning enforcement off first is what unblocks both.
     let mut tx = db.begin(t.org).await.unwrap();
-    orgs::set_enforce_sso(&mut tx, false).await.unwrap();
+    orgs::set_enforce_sso(&mut tx, false, t.user).await.unwrap();
     domains::delete(&mut tx, "acme.com").await.unwrap();
     idp::delete_connection(&mut tx).await.unwrap();
     tx.commit().await.unwrap();
@@ -564,7 +667,7 @@ async fn delete_a_non_last_verified_domain_is_never_refused(pool: PgPool) {
     let cipher = Cipher::from_base64_key(&B64.encode([2u8; 32])).unwrap();
 
     let mut tx = db.begin(t.org).await.unwrap();
-    idp::upsert_connection(
+    let connection = idp::upsert_connection(
         &mut tx,
         "https://idp.test",
         "client",
@@ -581,7 +684,13 @@ async fn delete_a_non_last_verified_domain_is_never_refused(pool: PgPool) {
         .await
         .unwrap();
     domains::mark_verified(&mut tx, "acme.dev").await.unwrap();
-    orgs::set_enforce_sso(&mut tx, true).await.unwrap();
+    tx.commit().await.unwrap();
+
+    identities::link(&db, t.user, connection.id, "owner-sub")
+        .await
+        .unwrap();
+    let mut tx = db.begin(t.org).await.unwrap();
+    orgs::set_enforce_sso(&mut tx, true, t.user).await.unwrap();
     tx.commit().await.unwrap();
 
     let mut tx = db.begin(t.org).await.unwrap();
@@ -608,7 +717,7 @@ async fn concurrent_domain_deletes_never_both_leave_zero_verified_domains(pool: 
     let cipher = Cipher::from_base64_key(&B64.encode([1u8; 32])).unwrap();
 
     let mut tx = db.begin(t.org).await.unwrap();
-    idp::upsert_connection(
+    let connection = idp::upsert_connection(
         &mut tx,
         "https://idp.test",
         "client",
@@ -625,7 +734,13 @@ async fn concurrent_domain_deletes_never_both_leave_zero_verified_domains(pool: 
         .await
         .unwrap();
     domains::mark_verified(&mut tx, "acme.dev").await.unwrap();
-    orgs::set_enforce_sso(&mut tx, true).await.unwrap();
+    tx.commit().await.unwrap();
+
+    identities::link(&db, t.user, connection.id, "owner-sub")
+        .await
+        .unwrap();
+    let mut tx = db.begin(t.org).await.unwrap();
+    orgs::set_enforce_sso(&mut tx, true, t.user).await.unwrap();
     tx.commit().await.unwrap();
 
     let org = t.org;

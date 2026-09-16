@@ -1554,7 +1554,7 @@ async fn set_enforce_sso_cannot_flip_another_orgs_flag(pool: PgPool) {
     let cipher = Cipher::from_base64_key(&B64.encode([13u8; 32])).unwrap();
 
     let mut tx = db.begin(b.org).await.unwrap();
-    idp::upsert_connection(
+    let connection = idp::upsert_connection(
         &mut tx,
         "https://idp.globex.test",
         "client-b",
@@ -1567,7 +1567,13 @@ async fn set_enforce_sso_cannot_flip_another_orgs_flag(pool: PgPool) {
         .await
         .unwrap();
     domains::mark_verified(&mut tx, "globex.com").await.unwrap();
-    orgs::set_enforce_sso(&mut tx, true).await.unwrap();
+    tx.commit().await.unwrap();
+
+    identities::link(&db, b.user, connection.id, "b-owner-sub")
+        .await
+        .unwrap();
+    let mut tx = db.begin(b.org).await.unwrap();
+    orgs::set_enforce_sso(&mut tx, true, b.user).await.unwrap();
     tx.commit().await.unwrap();
 
     let a_org = db.get_org(a.org).await.unwrap().unwrap();

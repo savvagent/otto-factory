@@ -814,7 +814,7 @@ pub async fn set_enforce(
     ctx.require_admin()?;
 
     let mut tx = state.db.begin(ctx.org.id).await?;
-    let org = of_core::orgs::set_enforce_sso(&mut tx, req.enforce_sso).await?;
+    let org = of_core::orgs::set_enforce_sso(&mut tx, req.enforce_sso, ctx.user.id).await?;
     tx.audit(
         Entry::new(action::ENFORCE_SSO_CHANGED)
             .actor(ctx.user.id)
