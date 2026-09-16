@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.8.0](https://github.com/savvagent/otto-factory/compare/v0.7.0...v0.8.0) (2026-09-16)
+
+
+### Features
+
+* add enterprise OIDC federation ([#189](https://github.com/savvagent/otto-factory/issues/189)) ([ad1b916](https://github.com/savvagent/otto-factory/commit/ad1b91663ac5585a95dc63c41179da3fa7c40c96))
+
+
+### Bug Fixes
+
+* check passkey ceremony ownership before writing a credential or audit row ([#185](https://github.com/savvagent/otto-factory/issues/185)) ([aaa9a27](https://github.com/savvagent/otto-factory/commit/aaa9a273942894f064e23c489bd7729e24738fd7))
+
 ## [0.7.0](https://github.com/savvagent/otto-factory/compare/v0.6.0...v0.7.0) (2026-09-15)
 
 
