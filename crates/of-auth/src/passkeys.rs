@@ -248,6 +248,23 @@ impl RegistrationVia {
 /// can share *that* transaction rather than commit separately, before it,
 /// with nothing to roll it back if what follows fails. See
 /// `savvagent/otto-factory#132`.
+///
+/// `expected` is forwarded to [`finish_registration_tx`], which documents it
+/// and the ordering guarantee it establishes. This wrapper additionally
+/// writes a best-effort [`action::PASSKEY_REGISTRATION_REFUSED`] audit row on
+/// a mismatch, on a connection independent of the rolled-back transaction —
+/// see the inline comment at that call for why it has to be a separate
+/// connection. `claim_finish` (which calls [`finish_registration_tx`]
+/// directly, not through this wrapper) does not get this for free; it writes
+/// its own richer trace instead (`note_claim_refused`), which is why it
+/// always passes `expected: None` here despite having an independent
+/// identity to check — see its own doc comment.
+// Eight parameters, all load-bearing — `via` and `expected` documented above
+// (the two that aren't self-explanatory by name and type), the rest
+// self-explanatory (`db`, `webauthn`, `ceremony`, `credential`, `nickname`,
+// `ip`). A bundling struct would not make any of the call sites clearer, only
+// add a type whose only job is to be immediately unpacked.
+#[allow(clippy::too_many_arguments)]
 pub async fn finish_registration(
     db: &Db,
     webauthn: &Webauthn,
@@ -255,13 +272,56 @@ pub async fn finish_registration(
     credential: &RegisterPublicKeyCredential,
     nickname: Option<&str>,
     via: RegistrationVia,
+    expected: Option<UserId>,
     ip: Option<&str>,
 ) -> Result<UserId> {
     let mut tx = db.begin_unpinned().await?;
-    let user_id =
-        finish_registration_tx(&mut tx, webauthn, ceremony, credential, nickname, via, ip).await?;
-    tx.commit().await?;
-    Ok(user_id)
+    match finish_registration_tx(
+        &mut tx, webauthn, ceremony, credential, nickname, via, expected, ip,
+    )
+    .await
+    {
+        Ok(user_id) => {
+            tx.commit().await?;
+            Ok(user_id)
+        }
+        Err(AuthError::CeremonyAccountMismatch {
+            ceremony_account,
+            caller_account,
+        }) => {
+            // `tx` drops here uncommitted, rolling back the ceremony's own
+            // consumption along with everything else — nothing about this
+            // attempt is otherwise durable. Writing the refusal itself on a
+            // fresh connection (`db.audit_global`, not `tx`) is the only way
+            // its trace survives that rollback; writing it on `tx` would roll
+            // back with the attempt it is trying to record.
+            drop(tx);
+            // Attributed to `ceremony_account` — the account a real signature
+            // just backed ownership of — rather than `caller_account`, which
+            // is only an identity the request's own session asserted.
+            // `claim_finish`'s `note_claim_refused` makes the identical
+            // choice for the identical reason (see its own call site): the
+            // verified party is the more trustworthy subject for the event,
+            // and `caller_account` is still named in `detail` so the trail
+            // shows who was attempting the substitution.
+            let entry = Entry::new(action::PASSKEY_REGISTRATION_REFUSED)
+                .actor(ceremony_account)
+                .detail(serde_json::json!({ "attemptedBy": caller_account.to_string() }))
+                .from_request(ip, None);
+            if let Err(e) = db.audit_global(entry).await {
+                tracing::error!(
+                    error = %e,
+                    ceremony_account = %ceremony_account,
+                    "failed to write audit event for a refused passkey registration"
+                );
+            }
+            Err(AuthError::CeremonyAccountMismatch {
+                ceremony_account,
+                caller_account,
+            })
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// The connection-taking half of [`finish_registration`], for a caller that
@@ -282,6 +342,25 @@ pub async fn finish_registration(
 /// [`Db::audit_global_on`] on it, which takes `&mut Unpinned` specifically
 /// and (per its own doc comment) also re-checks at call time that nothing
 /// has pinned the transaction to an org since it was opened.
+///
+/// `expected`, when `Some`, is checked against the ceremony's stored account
+/// after signature verification and before anything is written (see the
+/// inline comment at the check itself for why it waits for verification
+/// rather than running right after `take_ceremony`) — the
+/// [`AuthError::CeremonyAccountMismatch`] this returns on a mismatch carries
+/// both accounts precisely because nothing else records which two a hijack
+/// attempt named (see that variant's own doc comment). `None` skips the check
+/// entirely: `signup_finish` has no independent identity to compare against
+/// at all; `claim_finish` has one (the claimed account) but checks it itself,
+/// after this returns, so it can attribute a refusal to the ceremony's real
+/// owner rather than to the account merely claimed (see `claim_finish`'s own
+/// doc comment) — a distinction this function's own error type does not
+/// carry enough context to make on its own. A caller other than
+/// [`finish_registration`] that passes `expected: Some(_)` directly to this
+/// function is responsible for its own trace of a rejected attempt, the way
+/// `claim_finish` is — this function's own rollback leaves nothing else
+/// durable to find one in.
+#[allow(clippy::too_many_arguments)]
 pub async fn finish_registration_tx(
     conn: &mut Unpinned,
     webauthn: &Webauthn,
@@ -289,15 +368,38 @@ pub async fn finish_registration_tx(
     credential: &RegisterPublicKeyCredential,
     nickname: Option<&str>,
     via: RegistrationVia,
+    expected: Option<UserId>,
     ip: Option<&str>,
 ) -> Result<UserId> {
     let (user_id, state): (Option<UserId>, PasskeyRegistration) =
         take_ceremony(conn.conn(), ceremony, "register").await?;
     let user_id = user_id.ok_or(AuthError::CeremonyExpired)?;
 
+    // Signature verification comes before the `expected` check, not after —
+    // deliberately, even though the check alone would already satisfy "before
+    // the credential insert and its audit row" on its own. Checking first
+    // would let anyone holding a live ceremony id (unguessable, but not
+    // secret from an authenticated caller who is simply the wrong account)
+    // probe it with an unsigned, unverified credential body: the ceremony
+    // survives the rollback either way (see below), so a check-first ordering
+    // would make this 403 — and, since this fix, the audit row it now writes
+    // — repeatable at HTTP-request cost with no proof of possession at all.
+    // Checking after verification restores the pre-fix property that
+    // reaching this path requires an authenticator to have actually signed
+    // the challenge, matching `claim_finish`'s own ordering (it checks after
+    // `finish_registration_tx` returns, for the same reason).
     let passkey = webauthn
         .finish_passkey_registration(credential, &state)
         .map_err(webauthn_failed)?;
+
+    if let Some(expected) = expected {
+        if user_id != expected {
+            return Err(AuthError::CeremonyAccountMismatch {
+                ceremony_account: user_id,
+                caller_account: expected,
+            });
+        }
+    }
 
     let credential_id = passkey.cred_id().as_ref().to_vec();
     let encoded = serde_json::to_value(&passkey)

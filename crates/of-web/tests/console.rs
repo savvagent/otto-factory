@@ -445,6 +445,110 @@ async fn add_passkey_finish_records_the_add_flow_and_its_ip(pool: PgPool) {
     assert_eq!(row.1.as_deref(), Some("203.0.113.7"));
 }
 
+/// The `add_passkey_finish` half of `savvagent/otto-factory#109`: a ceremony
+/// started by one account, finished while authenticated as a different one,
+/// must be refused before the credential and its `PASSKEY_REGISTERED`
+/// success audit row exist — not after they've already committed. A
+/// `PASSKEY_REGISTRATION_REFUSED` row is written for the refusal itself,
+/// deliberately — see `finish_registration`'s own doc comment.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn add_passkey_finish_refuses_a_ceremony_started_by_another_account(pool: PgPool) {
+    let h = common::harness(pool);
+
+    // `onboard` itself drives a real signup ceremony for each account, so
+    // each already has exactly one `passkeys` row and one
+    // `PASSKEY_REGISTERED` audit row before the mismatch attempt below —
+    // the zero-row assertions this test cares about must be scoped to
+    // `owner`, the ceremony's real account, and expect that pre-existing
+    // one, not a bare table count (which
+    // `add_passkey_finish_records_the_add_flow_and_its_ip` already gets
+    // right by filtering on `actor_user_id`; this test follows the same
+    // discipline).
+    let owner = onboard(&h, "owner@acme.test").await;
+    let other = onboard(&h, "other@acme.test").await;
+
+    // The ceremony is started while authenticated as `owner` ...
+    let started = Call::post("/api/me/passkeys/start")
+        .with_session(&owner.session)
+        .send(&h.router)
+        .await;
+    started.expect(StatusCode::OK);
+
+    let mut challenge: webauthn_rs::prelude::CreationChallengeResponse =
+        serde_json::from_value(started.body["challenge"].clone()).unwrap();
+    if let Some(selection) = challenge.public_key.authenticator_selection.as_mut() {
+        selection.require_resident_key = false;
+        selection.resident_key = None;
+    }
+    let mut device = common::authenticator();
+    let credential = device
+        .do_registration(
+            webauthn_rs::prelude::Url::parse(common::PUBLIC_URL).unwrap(),
+            challenge,
+        )
+        .expect("the authenticator refused the registration challenge");
+
+    // ... but finished while authenticated as `other`.
+    let finished = Call::post("/api/me/passkeys/finish")
+        .with_session(&other.session)
+        .json(serde_json::json!({
+            "ceremonyId": started.body["ceremonyId"].as_str().unwrap(),
+            "credential": credential,
+        }))
+        .send(&h.router)
+        .await;
+    finished.expect(StatusCode::FORBIDDEN);
+    assert_eq!(finished.error_code(), Some("ceremony_account_mismatch"));
+
+    // Scoped to `owner` — the account whose ceremony was substituted, and
+    // the account `finish_registration_tx` would have written the leaked
+    // credential/audit row under (it reads the account to write from the
+    // ceremony's own stored `user_id`, never from the caller who happened
+    // to call `finish`). Scoping this to `other` instead (an earlier draft
+    // of this test did) checks nothing: `other`'s own counts were never
+    // affected by the pre-fix bug either, so that version of this test
+    // passed unmodified against the vulnerable code.
+    let passkey_count: i64 = sqlx::query_scalar("SELECT count(*) FROM passkeys WHERE user_id = $1")
+        .bind(owner.user)
+        .fetch_one(h.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        passkey_count, 1,
+        "a ceremony/caller mismatch must not leave a second credential behind on `owner`, \
+         the ceremony's real account"
+    );
+
+    let audit_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_events WHERE action = $1 AND actor_user_id = $2",
+    )
+    .bind(of_core::audit::action::PASSKEY_REGISTERED)
+    .bind(owner.user)
+    .fetch_one(h.db.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        audit_count, 1,
+        "a refused request must not add a second row asserting `owner` completed a registration \
+         nobody but the ceremony's substituted caller attempted"
+    );
+
+    // The refusal itself still leaves a trace — on a separate connection from
+    // the one that rolled back — naming both the ceremony's real account and
+    // who attempted to finish it.
+    let refusal: (of_core::ids::UserId, serde_json::Value) =
+        sqlx::query_as("SELECT actor_user_id, detail FROM audit_events WHERE action = $1")
+            .bind(of_core::audit::action::PASSKEY_REGISTRATION_REFUSED)
+            .fetch_one(h.db.pool())
+            .await
+            .unwrap();
+    assert_eq!(refusal.0, owner.user);
+    assert_eq!(
+        refusal.1["attemptedBy"],
+        serde_json::json!(other.user.to_string())
+    );
+}
+
 /// `signalAllAcceptedCredentials` names the credentials that still exist, and a
 /// browser matches them by credential id — so a list that carries only a row's
 /// UUID leaves a deleted passkey being offered in the picker forever. The

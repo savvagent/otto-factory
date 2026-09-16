@@ -58,6 +58,7 @@
   "error_forbidden": "आपकी भूमिका इसकी अनुमति नहीं देती।",
   "error_invalid_credentials": "यह काम नहीं आया। पुनः प्रयास करें।",
   "error_ceremony_expired": "इसमें बहुत समय लग गया। फिर से शुरू करें।",
+  "error_ceremony_account_mismatch": "यह पासकी प्रक्रिया किसी और खाते से जुड़ी है।",
   "error_credential_already_registered": "वह प्रमाणक पहले से इस खाते में पंजीकृत है।",
   "error_unknown_credential": "वह पासकी यहाँ पंजीकृत नहीं है। कोई दूसरी आज़माएँ।",
   "error_last_passkey": "यह खाते की एकमात्र पासकी है। इसे हटाने से पहले दूसरी जोड़ें।",

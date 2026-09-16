@@ -56,6 +56,13 @@ pub mod action {
     pub const PASSKEY_CLEARED: &str = "auth.passkey.cleared";
     pub const PASSKEY_REMOVED: &str = "auth.passkey.removed";
     pub const PASSKEY_RENAMED: &str = "auth.passkey.renamed";
+    /// A registration ceremony refused for belonging to a different account
+    /// than the caller expected — a substituted or hijacked ceremony.
+    /// Best-effort, written outside the rolled-back transaction (see
+    /// `of_auth::passkeys::finish_registration`), so a hijack attempt leaves a
+    /// trace even though nothing about the attempt itself is ever durable
+    /// (`savvagent/otto-factory#109`).
+    pub const PASSKEY_REGISTRATION_REFUSED: &str = "auth.passkey.registration_refused";
     /// A `claim/finish` request that rolled back — a ceremony/claim ownership
     /// mismatch, or a failure partway through registration. Best-effort,
     /// written outside the rolled-back transaction (see

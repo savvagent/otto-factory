@@ -60,6 +60,7 @@
   "error_forbidden": "Tu rol no permite eso.",
   "error_invalid_credentials": "No funcionó. Inténtalo de nuevo.",
   "error_ceremony_expired": "Ha tardado demasiado. Empieza de nuevo.",
+  "error_ceremony_account_mismatch": "Esa ceremonia de clave de acceso pertenece a otra cuenta.",
   "error_credential_already_registered": "Ese autenticador ya está registrado en esta cuenta.",
   "error_unknown_credential": "Esa clave de acceso no está registrada aquí. Prueba con otra.",
   "error_last_passkey": "Esta es la única clave de acceso de la cuenta. Añade otra antes de quitar esta.",

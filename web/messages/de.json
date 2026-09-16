@@ -58,6 +58,7 @@
   "error_forbidden": "Deine Rolle erlaubt das nicht.",
   "error_invalid_credentials": "Das hat nicht geklappt. Versuche es erneut.",
   "error_ceremony_expired": "Das hat zu lange gedauert. Beginne von vorn.",
+  "error_ceremony_account_mismatch": "Dieser Passkey-Vorgang gehört zu einem anderen Konto.",
   "error_credential_already_registered": "Dieser Authentifikator ist bereits für dieses Konto registriert.",
   "error_unknown_credential": "Dieser Passkey ist hier nicht registriert. Probiere einen anderen.",
   "error_last_passkey": "Das ist der einzige Passkey des Kontos. Füge einen weiteren hinzu, bevor du diesen entfernst.",

@@ -60,6 +60,7 @@
   "error_forbidden": "Votre rôle ne le permet pas.",
   "error_invalid_credentials": "Cela n'a pas fonctionné. Réessayez.",
   "error_ceremony_expired": "Cela a pris trop de temps. Recommencez.",
+  "error_ceremony_account_mismatch": "Cette procédure de clé d'accès appartient à un autre compte.",
   "error_credential_already_registered": "Cet authentificateur est déjà enregistré sur ce compte.",
   "error_unknown_credential": "Cette clé d'accès n'est pas enregistrée ici. Essayez-en une autre.",
   "error_last_passkey": "C'est la seule clé d'accès du compte. Ajoutez-en une autre avant de supprimer celle-ci.",

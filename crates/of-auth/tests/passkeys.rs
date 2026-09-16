@@ -97,6 +97,7 @@ async fn register_new(db: &Db, auth: &mut WebauthnAuthenticator<SoftToken>) -> U
         Some("laptop"),
         passkeys::RegistrationVia::Signup,
         None,
+        None,
     )
     .await
     .unwrap()
@@ -124,6 +125,7 @@ async fn register_additional(db: &Db, user: UserId) -> WebauthnAuthenticator<Sof
         &credential,
         Some("phone"),
         passkeys::RegistrationVia::Add,
+        None,
         None,
     )
     .await
@@ -213,6 +215,7 @@ async fn a_second_passkey_also_opens_the_account(pool: PgPool) {
         &credential,
         Some("phone"),
         passkeys::RegistrationVia::Add,
+        None,
         None,
     )
     .await
@@ -491,6 +494,7 @@ async fn registration_records_which_flow_wrote_it(pool: PgPool) {
         &credential,
         None,
         passkeys::RegistrationVia::Claim,
+        None,
         Some("203.0.113.7"),
     )
     .await
@@ -546,6 +550,7 @@ async fn a_forced_audit_failure_rolls_back_the_credential(pool: PgPool) {
         Some("laptop"),
         passkeys::RegistrationVia::Signup,
         None,
+        None,
     )
     .await;
 
@@ -563,6 +568,110 @@ async fn a_forced_audit_failure_rolls_back_the_credential(pool: PgPool) {
         passkey_count, 0,
         "the credential insert must roll back with the failed audit write — \
          a live credential with no audit row is exactly the gap #108 closes"
+    );
+}
+
+/// `expected`, when `Some`, must be checked before either write it guards —
+/// a mismatch must not leave a live credential or a `PASSKEY_REGISTERED`
+/// success row for a request the caller never actually authorized. It
+/// deliberately does leave a `PASSKEY_REGISTRATION_REFUSED` row instead (see
+/// `finish_registration`'s own doc comment) and must leave the ceremony
+/// itself intact, restorable by its real owner. `savvagent/otto-factory#109`.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_ceremony_account_mismatch_writes_a_refusal_but_no_credential(pool: PgPool) {
+    let db = Db::from_pool(pool);
+    let webauthn = rp();
+    let mut auth = authenticator();
+
+    // Two accounts: the ceremony belongs to `owner`, but the caller
+    // claims to be `other` — the substitution this check exists to catch.
+    // `create_unclaimed_user` is the same primitive `start_registration`
+    // itself uses to back a signup ceremony with `user: None` — a real,
+    // signable-into account, with no ceremony/session plumbing needed to
+    // get one for this test.
+    let owner = db.create_unclaimed_user().await.unwrap().id;
+    let other = db.create_unclaimed_user().await.unwrap().id;
+
+    let ceremony = passkeys::start_registration(&db, &webauthn, Some(owner))
+        .await
+        .unwrap();
+    let credential = auth
+        .do_registration(
+            Url::parse(ORIGIN).unwrap(),
+            for_soft_token(ceremony.challenge),
+        )
+        .expect("the authenticator refused the registration challenge");
+
+    let result = passkeys::finish_registration(
+        &db,
+        &webauthn,
+        ceremony.id,
+        &credential,
+        Some("laptop"),
+        passkeys::RegistrationVia::Add,
+        Some(other),
+        None,
+    )
+    .await;
+
+    match result {
+        Err(AuthError::CeremonyAccountMismatch {
+            ceremony_account,
+            caller_account,
+        }) => {
+            assert_eq!(ceremony_account, owner, "the ceremony's real account");
+            assert_eq!(caller_account, other, "who the caller expected to be");
+        }
+        unexpected => panic!("expected a CeremonyAccountMismatch, got {unexpected:?}"),
+    }
+
+    let passkey_count: i64 = sqlx::query_scalar("SELECT count(*) FROM passkeys")
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        passkey_count, 0,
+        "a ceremony/caller mismatch must not leave a credential behind"
+    );
+
+    let audit_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM audit_events WHERE action = $1")
+            .bind(of_core::audit::action::PASSKEY_REGISTERED)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        audit_count, 0,
+        "a rejected request must not leave a row asserting it succeeded"
+    );
+
+    // The transaction rolled back, so `take_ceremony`'s DELETE rolled back
+    // with it — the ceremony survives for its real owner to retry, exactly
+    // as #132 already established for this function's other failure paths.
+    let ceremony_survives: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM webauthn_ceremonies WHERE id = $1)")
+            .bind(ceremony.id)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    assert!(
+        ceremony_survives,
+        "a ceremony/caller mismatch must not burn the real owner's in-flight ceremony"
+    );
+
+    // The refusal itself is still traced, on a connection independent of the
+    // rolled-back transaction — see `finish_registration`'s own doc comment
+    // for why this is a deliberate exception to "nothing is written."
+    let refusal: (of_core::ids::UserId, serde_json::Value) =
+        sqlx::query_as("SELECT actor_user_id, detail FROM audit_events WHERE action = $1")
+            .bind(of_core::audit::action::PASSKEY_REGISTRATION_REFUSED)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    assert_eq!(refusal.0, owner);
+    assert_eq!(
+        refusal.1["attemptedBy"],
+        serde_json::json!(other.to_string())
     );
 }
 
@@ -600,6 +709,7 @@ async fn a_forced_audit_failure_also_restores_the_ceremony(pool: PgPool) {
         &credential,
         Some("laptop"),
         passkeys::RegistrationVia::Signup,
+        None,
         None,
     )
     .await;
@@ -1009,6 +1119,7 @@ async fn a_second_key_on_one_account_is_named_like_the_first(pool: PgPool) {
         &credential,
         None,
         passkeys::RegistrationVia::Signup,
+        None,
         None,
     )
     .await

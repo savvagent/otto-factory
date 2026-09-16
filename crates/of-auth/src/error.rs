@@ -65,6 +65,29 @@ pub enum AuthError {
     #[error("this org requires single sign-on")]
     SsoRequired,
 
+    /// The ceremony's stored account does not match what the caller expected — a
+    /// substituted or hijacked ceremony (see
+    /// [`crate::passkeys::finish_registration_tx`]'s `expected` parameter).
+    /// Checked before anything the ceremony completing
+    /// would write, so a mismatch fails before the credential insert and its
+    /// audit row exist at all, not just before they commit.
+    /// `savvagent/otto-factory#109`.
+    ///
+    /// Carries both accounts rather than being a unit variant: the credential
+    /// insert and its audit row are exactly what this error prevents, so
+    /// nothing else records which two accounts a hijack attempt named —
+    /// `finish_registration`'s caller uses these two fields to write a
+    /// best-effort trace of the attempt on a connection independent of the
+    /// transaction this error rolls back.
+    #[error("that ceremony belongs to a different account")]
+    CeremonyAccountMismatch {
+        /// The account the ceremony actually belongs to — the one a
+        /// successful attach would have added a credential to.
+        ceremony_account: of_core::ids::UserId,
+        /// Who the caller expected to be finishing it.
+        caller_account: of_core::ids::UserId,
+    },
+
     // ---- rate limiting
     #[error("too many attempts; retry in {retry_after_secs}s")]
     RateLimited { retry_after_secs: i64 },
@@ -114,11 +137,13 @@ impl AuthError {
     /// The arms below are exceptions for **two different reasons**, and the
     /// distinction matters when adding a third: most of them say *what to do*
     /// rather than whether an account exists, and are only reachable behind a
-    /// resolved session or token anyway. `UnknownCredential` is the one that is
-    /// not — [`passkeys::finish_authentication`] returns it to an unauthenticated
-    /// caller, and it is safe for a narrower reason of its own: it is decided
-    /// from `passkeys` alone, before any `users` row is read, so it says a
-    /// credential is not stored here without saying whose it would have been.
+    /// resolved session or token anyway — `CeremonyAccountMismatch` is one of
+    /// these (only reachable from `add_passkey_finish`, behind `CurrentUser`).
+    /// `UnknownCredential` is the one that is not — [`passkeys::finish_authentication`]
+    /// returns it to an unauthenticated caller, and it is safe for a narrower
+    /// reason of its own: it is decided from `passkeys` alone, before any
+    /// `users` row is read, so it says a credential is not stored here
+    /// without saying whose it would have been.
     pub fn public(&self) -> &'static str {
         match self {
             AuthError::UnknownUser
@@ -134,6 +159,9 @@ impl AuthError {
             AuthError::UnknownCredential => "no such passkey",
             AuthError::LastPasskey => {
                 "that is the only passkey on this account — register another first"
+            }
+            AuthError::CeremonyAccountMismatch { .. } => {
+                "that ceremony belongs to a different account"
             }
 
             AuthError::Expired | AuthError::AlreadyConsumed | AuthError::Revoked => {
@@ -174,7 +202,9 @@ impl AuthError {
     pub fn status(&self) -> u16 {
         match self {
             AuthError::RateLimited { .. } => 429,
-            AuthError::NotAMember | AuthError::SsoRequired => 403,
+            AuthError::NotAMember
+            | AuthError::SsoRequired
+            | AuthError::CeremonyAccountMismatch { .. } => 403,
             AuthError::Config(_) | AuthError::Crypto(_) | AuthError::Core(_) | AuthError::Db(_) => {
                 500
             }
