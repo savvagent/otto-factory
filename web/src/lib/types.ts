@@ -396,9 +396,8 @@ export interface ProtectedResourceMetadata {
 /**
  * An org's bound identity provider, minus its secret.
  *
- * There is no `GET` for this — only `PUT .../sso/connection`'s own response
- * returns one, and only for the request that just wrote it. `clientSecret`
- * is never a field here at all: it is sealed at rest and no endpoint ever
+ * Returned by both `GET` and `PUT .../sso/connection`. `clientSecret` is
+ * never a field here at all: it is sealed at rest and no endpoint ever
  * returns it, matching `TrackerConnection`'s `hasCredentials`-not-the-secret
  * convention one step further.
  */
