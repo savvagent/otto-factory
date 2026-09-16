@@ -431,6 +431,12 @@ holds, the same as it does for every other table in this spec.
 - The authenticated-link ceremony's email-match guard: a caller with `user_id = U` (email
   `alice@acme.com`) whose IdP callback returns a domain-matching but different email
   (`bob@acme.com`) is refused, and no `user_identities` row is created for `U`.
+- The authenticated-link ceremony's identity-theft guard: `(idp_connection_id, subject)` is
+  already linked to user `V`; a *different* signed-in caller `U` starts an authenticated-
+  link ceremony and its callback resolves to that same `(idp_connection_id, subject)` pair
+  — refused, and no session is opened for `V`'s account. This is the case the "skips
+  everything below" short-circuit would otherwise silently mishandle; assert it explicitly
+  rather than trusting the anonymous-ceremony repeat-login test to cover it by resemblance.
 
 ## §4 `of_auth` — the OIDC client and DNS verification
 
@@ -526,23 +532,33 @@ state_hash = $1` (see Assumptions — this is a deterministic-hash equality look
   `resolve_for_domain` check against the *ceremony's own* `org_id`) to this same org — a
   mismatch is a refusal, not a fallback to a different org. Then, **the two ceremony kinds
   diverge**:
-  - `identities::resolve_user(idp_connection_id, subject)` first, regardless of kind — a
-    returning federated user (already linked, from either kind of ceremony originally) always
-    resolves here and skips everything below.
-  - **Authenticated-ceremony (`ceremony.user_id.is_some()`)**: **first requires the verified
-    email to case-insensitively match the ceremony's own `user_id`'s current
+  - `identities::resolve_user(idp_connection_id, subject)` first, always — but **what a
+    match means depends on the ceremony kind, and this is not "skip to success" for both**
+    (an earlier draft of this section said "skips everything below" unconditionally, which
+    is wrong for the authenticated kind — corrected here):
+    - **Anonymous-ceremony (`ceremony.user_id.is_none()`)**: any match is a returning
+      federated user — log in as that resolved `user_id` and skip everything below. This is
+      the ordinary repeat-login case; there is no caller identity to compare it against.
+    - **Authenticated-ceremony (`ceremony.user_id.is_some()`)**: a match is compared against
+      `ceremony.user_id`. `Some(ceremony.user_id)` (already linked to self) → idempotent,
+      treat as success, skip to the session-minting step. **`Some(other_id)` where
+      `other_id != ceremony.user_id` → refuse: this ceremony's caller cannot steal another
+      account's IdP link by replaying a callback against it.** This is the check an earlier
+      draft placed *after* an "if the pair is unlinked" branch that resolve_user's own
+      unconditional short-circuit had already made unreachable — moving it here, into the
+      match arm itself, is what actually makes it reachable. `None` (truly unlinked) →
+      continue to the email-match check below.
+  - **Authenticated-ceremony, `resolve_user` returned `None`**: **first requires the
+    verified email to case-insensitively match the ceremony's own `user_id`'s current
     `users.email`** — not just the same domain. Without this, a shared browser or a stale
     IdP session (a kiosk, a leftover login from testing a different account) could silently
     link a *different* person's real corporate identity onto the caller's account with no
     confirmation step; matching domain alone was not enough to rule that out. A mismatch
     refuses with a message naming the discrepancy (this is an authenticated caller, so
     naming it is not an enumeration risk the way the anonymous path's errors are). Once that
-    holds: if the `(idp_connection_id, subject)` pair is unlinked, `identities::link(ceremony.user_id,
-    ...)` directly — no email-based *account resolution* happens here, only this one
-    equality check against the account already known from the session. If that exact pair
-    is already linked to a *different* user (someone else's federated identity), refuse:
-    this ceremony's caller cannot steal another account's IdP link by replaying a callback
-    against it.
+    holds: `identities::link(ceremony.user_id, idp_connection_id, subject)` directly — no
+    email-based *account resolution* happens here, only this one equality check against the
+    account already known from the session.
   - **Anonymous-ceremony (`ceremony.user_id.is_none()`)**: `identities::resolve_by_email`. `None`
     → `INSERT ... ON CONFLICT (lower(email)) DO NOTHING RETURNING` for the verified email
     (**not** `DO UPDATE` — a third review round caught that `DO UPDATE ... RETURNING`, this
