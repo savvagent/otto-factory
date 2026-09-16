@@ -247,6 +247,40 @@ async fn exchange_code_redacts_the_client_secret_from_a_non_conformant_error_bod
     }
 }
 
+#[tokio::test]
+async fn exchange_code_redacts_the_authorization_code_from_a_non_conformant_error_body() {
+    // A compromised or non-conformant token endpoint echoing the submitted
+    // `code` back is just as much a leak as echoing the client secret — the
+    // code is single-use, but still a bearer-shaped credential.
+    let server = TestServer::start().await;
+    let discovery = support::discovery_document(&server.base_url);
+    server.push(MockResponse::text(
+        400,
+        "invalid_grant: code=the-spent-authorization-code was already redeemed",
+    ));
+
+    let err = oidc::exchange_code(
+        &discovery,
+        "client-1",
+        "irrelevant-secret",
+        "the-spent-authorization-code",
+        "https://otto.example/sso/callback",
+    )
+    .await
+    .expect_err("a rejected exchange must still error");
+
+    match err {
+        AuthError::OidcApi { body, .. } => {
+            assert!(
+                !body.contains("the-spent-authorization-code"),
+                "the code must be redacted from the logged body: {body:?}"
+            );
+            assert!(body.contains("[redacted]"));
+        }
+        other => panic!("expected AuthError::OidcApi, got {other:?}"),
+    }
+}
+
 // ---- verify_id_token ---------------------------------------------------------
 
 /// Every id_token test below starts a fresh `TestServer` (a fresh, unique

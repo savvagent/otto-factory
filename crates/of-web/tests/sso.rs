@@ -248,6 +248,71 @@ async fn the_full_anonymous_sso_sign_in_flow_opens_a_session_and_joins_the_org(p
 }
 
 #[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_returning_federated_user_with_no_membership_row_is_reprovisioned(pool: PgPool) {
+    // `identities::link`'s write and the org_members write are two separate
+    // statements against two different connections — a first sign-in that
+    // linked the identity but failed partway through provisioning
+    // membership must not leave that user permanently authenticatable but
+    // never a member of the org on every subsequent login.
+    let (h, org_id, _admin, idp) = org_with_sso(pool, "acme", "acme.test").await;
+
+    let (state, nonce, binding) = start_anonymous(&h, "carol@acme.test").await;
+    let id_token = support::sign_id_token(&id_token_claims(
+        &idp.server.base_url,
+        "carol-sub",
+        "carol@acme.test",
+        true,
+        &nonce,
+    ));
+    let reply = complete_callback(&h, &idp, &state, Some(&binding), &id_token).await;
+    reply.expect(StatusCode::SEE_OTHER);
+
+    let user_id: uuid::Uuid =
+        sqlx::query_scalar("SELECT id FROM users WHERE email = 'carol@acme.test'")
+            .fetch_one(h.db.pool())
+            .await
+            .unwrap();
+
+    // Simulate the membership half of that first sign-in never landing.
+    h.db.remove_member(org_id, of_core::ids::UserId::from(user_id))
+        .await
+        .unwrap();
+    let gone: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM org_members WHERE org_id = $1 AND user_id = $2")
+            .bind(org_id)
+            .bind(user_id)
+            .fetch_one(h.db.pool())
+            .await
+            .unwrap();
+    assert_eq!(gone, 0);
+
+    // A second sign-in resolves via Step 4 (`identities::resolve_user`
+    // already finds the link), skipping `link_anonymous` entirely.
+    let (state2, nonce2, binding2) = start_anonymous(&h, "carol@acme.test").await;
+    let id_token2 = support::sign_id_token(&id_token_claims(
+        &idp.server.base_url,
+        "carol-sub",
+        "carol@acme.test",
+        true,
+        &nonce2,
+    ));
+    let reply2 = complete_callback(&h, &idp, &state2, Some(&binding2), &id_token2).await;
+    reply2.expect(StatusCode::SEE_OTHER);
+
+    let role: String =
+        sqlx::query_scalar("SELECT role::text FROM org_members WHERE org_id = $1 AND user_id = $2")
+            .bind(org_id)
+            .bind(user_id)
+            .fetch_one(h.db.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        role, "member",
+        "a returning federated user must be reprovisioned as a member, not left permanently orphaned"
+    );
+}
+
+#[sqlx::test(migrations = "../of-core/migrations")]
 async fn callback_refuses_a_disabled_account(pool: PgPool) {
     // login::with_passkey refuses a disabled account before minting a
     // session; this callback previously skipped that check entirely for a
@@ -358,6 +423,77 @@ async fn binding_a_connection_refuses_a_discovery_document_missing_issuer(pool: 
         .send(&h.router)
         .await;
     after.expect(StatusCode::NO_CONTENT);
+}
+
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn binding_a_connection_refuses_an_unparseable_endpoint_url(pool: PgPool) {
+    // Present-and-a-string is not the same as "a URL" — a connection with
+    // an empty or malformed authorization_endpoint would otherwise bind
+    // successfully and only fail on the first sign-in attempt.
+    let h = harness(pool);
+    let admin = onboard(&h, ADMIN_EMAIL).await;
+    org_with_owner(&h, "acme", &admin).await;
+
+    let server = TestServer::start().await;
+    server.push(MockResponse::json(
+        200,
+        serde_json::json!({
+            "issuer": server.base_url,
+            "authorization_endpoint": "not a url",
+            "token_endpoint": format!("{}/token", server.base_url),
+            "jwks_uri": format!("{}/jwks", server.base_url),
+        }),
+    ));
+
+    let reply = Call::put("/api/orgs/acme/sso/connection")
+        .with_session(&admin.session)
+        .json(serde_json::json!({
+            "issuer": server.base_url,
+            "clientId": "client-1",
+            "clientSecret": "shh-its-a-secret",
+        }))
+        .send(&h.router)
+        .await;
+    reply.expect(StatusCode::BAD_REQUEST);
+    let message = reply.body["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("authorization_endpoint"),
+        "the refusal should name the invalid field: {message:?}"
+    );
+}
+
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn binding_a_connection_refuses_a_discovery_document_with_a_mismatched_issuer(pool: PgPool) {
+    // OIDC Discovery §4.3: the document's own `issuer` must equal the
+    // issuer it was fetched from — otherwise `verify_id_token` pins `iss`
+    // to a value with no relationship to what the admin configured.
+    let h = harness(pool);
+    let admin = onboard(&h, ADMIN_EMAIL).await;
+    org_with_owner(&h, "acme", &admin).await;
+
+    let server = TestServer::start().await;
+    server.push(MockResponse::json(
+        200,
+        serde_json::json!({
+            "issuer": "https://a-completely-different-issuer.test",
+            "authorization_endpoint": format!("{}/authorize", server.base_url),
+            "token_endpoint": format!("{}/token", server.base_url),
+            "jwks_uri": format!("{}/jwks", server.base_url),
+        }),
+    ));
+
+    let reply = Call::put("/api/orgs/acme/sso/connection")
+        .with_session(&admin.session)
+        .json(serde_json::json!({
+            "issuer": server.base_url,
+            "clientId": "client-1",
+            "clientSecret": "shh-its-a-secret",
+        }))
+        .send(&h.router)
+        .await;
+    reply.expect(StatusCode::BAD_REQUEST);
+    let message = reply.body["error"]["message"].as_str().unwrap();
+    assert!(message.contains("does not match"), "got: {message:?}");
 }
 
 #[sqlx::test(migrations = "../of-core/migrations")]
@@ -531,6 +667,18 @@ async fn callback_refuses_an_unverified_email_claim(pool: PgPool) {
 
     reply.expect(StatusCode::BAD_REQUEST);
     assert!(reply.session_cookie().is_none());
+
+    // A refusal must clear the binding cookie exactly like a success or an
+    // internal-error outcome does — its ceremony is already consumed
+    // (single-use), so a stale copy left past a refusal is the same hygiene
+    // gap those other two outcomes already close.
+    let cleared = reply
+        .headers
+        .get_all(http::header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .any(|v| v.starts_with("__Host-of_sso_binding=") && v.contains("Max-Age=0"));
+    assert!(cleared, "refusal must clear the binding cookie");
 }
 
 #[sqlx::test(migrations = "../of-core/migrations")]

@@ -427,15 +427,17 @@ pub async fn exchange_code(
     let status = response.status();
     if !status.is_success() {
         // Redaction happens *before* truncation, and against both the raw
-        // and the form-urlencoded forms of the secret: a non-conformant
-        // token endpoint that echoes the submitted form back in its error
-        // body would otherwise put the plaintext client secret into
-        // whatever logs this error's Display text reaches (of-web's
-        // callback handler logs the full AuthError on this exact failure).
-        // response_body_snippet truncates to MAX_ERROR_BODY_BYTES first,
-        // which would leave a secret straddling that boundary as an
-        // unmatched partial substring — read the same bound directly
-        // instead, redact, then truncate.
+        // and the form-urlencoded forms of every credential-bearing value
+        // submitted in the request — not just the client secret: a
+        // non-conformant or compromised token endpoint that echoes the
+        // submitted form back in its error body would otherwise put the
+        // plaintext client secret, or the (single-use, but still
+        // bearer-shaped) authorization code, into whatever logs this
+        // error's Display text reaches (of-web's callback handler logs the
+        // full AuthError on this exact failure). response_body_snippet
+        // truncates to MAX_ERROR_BODY_BYTES first, which would leave a
+        // secret straddling that boundary as an unmatched partial substring
+        // — read the same bound directly instead, redact, then truncate.
         let bytes = read_capped(
             "exchanging the authorization code",
             response,
@@ -444,11 +446,14 @@ pub async fn exchange_code(
         .await
         .unwrap_or_default();
         let mut body = String::from_utf8_lossy(&bytes).into_owned();
-        if !client_secret.is_empty() {
-            body = body.replace(client_secret, "[redacted]");
+        for secret in [client_secret, code] {
+            if secret.is_empty() {
+                continue;
+            }
+            body = body.replace(secret, "[redacted]");
             let percent_encoded: String =
-                url::form_urlencoded::byte_serialize(client_secret.as_bytes()).collect();
-            if percent_encoded != client_secret {
+                url::form_urlencoded::byte_serialize(secret.as_bytes()).collect();
+            if percent_encoded != secret {
                 body = body.replace(&percent_encoded, "[redacted]");
             }
         }

@@ -290,7 +290,7 @@ pub async fn callback(
             // tell them apart even though a caller probing the endpoint must
             // not be able to.
             tracing::warn!(message, "SSO callback refused");
-            refusal_response(message)
+            session::with_cookie(refusal_response(message), session::clear_binding_cookie())
         }
         Err(Outcome::Error(e)) => {
             session::with_cookie(e.into_response(), session::clear_binding_cookie())
@@ -464,6 +464,18 @@ async fn callback_inner(
         }
     };
 
+    // A returning federated user (the `(None, Some(uid))` arm above) skips
+    // `link_anonymous` entirely, including its `org_members` write —
+    // `identities::link` and that write are two separate statements against
+    // two different connections (see `link_anonymous`'s own doc comment), so
+    // a first sign-in that linked the identity but failed partway through
+    // provisioning membership would otherwise leave this user permanently
+    // authenticatable but never a member of the org. Reconciled on every
+    // anonymous-ceremony success, not just the first one.
+    if ceremony.user_id.is_none() {
+        ensure_anonymous_membership(state, ceremony.org_id, user_id).await?;
+    }
+
     // Step 7: success — but not for a disabled account. `login::with_passkey`
     // checks this immediately after resolving user_id and before minting a
     // session (a disabled account's credential still produces a valid
@@ -595,6 +607,25 @@ async fn link_anonymous(
     // Not optional: without this, a federated user authenticates
     // successfully but sees no orgs in the console — the concrete mechanism
     // behind "self-service enterprise onboarding" (spec's Goal).
+    ensure_anonymous_membership(state, org_id, user_id).await?;
+
+    Ok(user_id)
+}
+
+/// Ensures `user_id` has at least `Role::Member` access to `org_id`,
+/// without touching the role of an existing membership row —
+/// `Tx::add_member`'s `ON CONFLICT ... DO UPDATE SET role = EXCLUDED.role`
+/// would silently demote an admin or owner back to `Member` if this were
+/// called unconditionally on every sign-in, so this checks first and only
+/// writes when there is no membership row at all.
+async fn ensure_anonymous_membership(
+    state: &AppState,
+    org_id: OrgId,
+    user_id: UserId,
+) -> Result<(), Outcome> {
+    if state.db.member_role(org_id, user_id).await?.is_some() {
+        return Ok(());
+    }
     let mut tx = state.db.begin(org_id).await?;
     tx.add_member(user_id, Role::Member).await?;
     tx.audit(
@@ -605,8 +636,7 @@ async fn link_anonymous(
     )
     .await?;
     tx.commit().await?;
-
-    Ok(user_id)
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -653,6 +683,27 @@ fn require_discovery_fields(discovery: &serde_json::Value, issuer: &str) -> ApiR
             "the identity provider's discovery document is missing required field(s): {}. \
              Fix the issuer's /.well-known/openid-configuration and try again.",
             missing.join(", ")
+        )));
+    }
+
+    // Present-and-a-string (the check above) still allows "" or "not a
+    // url" through — this connection would bind successfully and then fail
+    // on the very next sign-in attempt, exactly the "never saved
+    // half-configured" promise this function exists to keep. `issuer` isn't
+    // checked as a URL here: it's compared against the configured issuer
+    // string below instead, which is the stronger check.
+    let unparseable: Vec<&str> = ["authorization_endpoint", "token_endpoint", "jwks_uri"]
+        .into_iter()
+        .filter(|field| {
+            let value = discovery.get(field).and_then(serde_json::Value::as_str);
+            value.is_none_or(|v| url::Url::parse(v).is_err())
+        })
+        .collect();
+    if !unparseable.is_empty() {
+        return Err(ApiError::bad_request(format!(
+            "the identity provider's discovery document has an invalid URL for field(s): {}. \
+             Fix the issuer's /.well-known/openid-configuration and try again.",
+            unparseable.join(", ")
         )));
     }
 
