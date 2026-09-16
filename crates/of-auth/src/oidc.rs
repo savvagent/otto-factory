@@ -13,8 +13,10 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
+use futures::StreamExt;
 use jsonwebtoken::jwk::JwkSet;
 use jsonwebtoken::{DecodingKey, Validation};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use url::Url;
@@ -203,9 +205,62 @@ fn is_v4_publicly_routable(v4: &Ipv4Addr) -> bool {
     true
 }
 
-async fn response_body_snippet(response: reqwest::Response) -> String {
-    match response.text().await {
-        Ok(body) => truncate(&body, MAX_ERROR_BODY_BYTES),
+/// The largest response body this client will buffer into memory from a
+/// discovery document, a token-endpoint response, or a JWKS document. Every
+/// one of these three URLs is admin- or IdP-controlled (§4/Assumptions in
+/// the design spec makes the same point about *where* they're dialed from);
+/// without a cap, a hostile or compromised IdP could push an unbounded body
+/// at this process on every sign-in attempt through the unauthenticated
+/// `/sso/callback` path. 1 MiB is generously larger than any real discovery
+/// document, token response, or JWKS this design ever needs to parse.
+const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+
+/// Reads `response`'s body up to `max_bytes`, refusing (not silently
+/// truncating) if the server sends more. Streamed rather than
+/// `response.bytes()`/`response.text()`'s "buffer it all, then look" shape
+/// — a `Content-Length` header is untrusted input from the same server this
+/// cap exists to bound, so the limit has to be enforced as bytes actually
+/// arrive, not checked against a header the server is free to omit or lie
+/// about.
+async fn read_capped(
+    action: &'static str,
+    response: reqwest::Response,
+    max_bytes: usize,
+) -> Result<Vec<u8>> {
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|source| AuthError::OidcHttp { action, source })?;
+        if body.len() + chunk.len() > max_bytes {
+            // Not a real HTTP status — reused to mean "the response body
+            // itself was the problem, not the transport or the IdP's own
+            // status code."
+            return Err(AuthError::OidcApi {
+                action,
+                status: 0,
+                body: format!("response exceeded {max_bytes} bytes"),
+            });
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+async fn read_json_capped<T: DeserializeOwned>(
+    action: &'static str,
+    response: reqwest::Response,
+) -> Result<T> {
+    let bytes = read_capped(action, response, MAX_RESPONSE_BYTES).await?;
+    serde_json::from_slice(&bytes).map_err(|source| AuthError::OidcApi {
+        action,
+        status: 0,
+        body: format!("could not parse the response as JSON: {source}"),
+    })
+}
+
+async fn response_body_snippet(action: &'static str, response: reqwest::Response) -> String {
+    match read_capped(action, response, MAX_ERROR_BODY_BYTES.max(4096)).await {
+        Ok(bytes) => truncate(&String::from_utf8_lossy(&bytes), MAX_ERROR_BODY_BYTES),
         Err(_) => String::new(),
     }
 }
@@ -263,7 +318,7 @@ pub async fn fetch_discovery(issuer: &str) -> Result<Value> {
 
     let status = response.status();
     if !status.is_success() {
-        let body = response_body_snippet(response).await;
+        let body = response_body_snippet("fetching the discovery document", response).await;
         return Err(AuthError::OidcApi {
             action: "fetching the discovery document",
             status: status.as_u16(),
@@ -271,13 +326,7 @@ pub async fn fetch_discovery(issuer: &str) -> Result<Value> {
         });
     }
 
-    response
-        .json::<Value>()
-        .await
-        .map_err(|source| AuthError::OidcHttp {
-            action: "parsing the discovery document",
-            source,
-        })
+    read_json_capped("parsing the discovery document", response).await
 }
 
 /// Builds the authorization-code redirect URL from a cached discovery
@@ -350,7 +399,15 @@ pub async fn exchange_code(
 
     let status = response.status();
     if !status.is_success() {
-        let body = response_body_snippet(response).await;
+        let mut body = response_body_snippet("exchanging the authorization code", response).await;
+        // Redacted, not merely truncated: a non-conformant token endpoint
+        // that echoes the submitted form back in its error body would
+        // otherwise put the plaintext client secret into whatever logs
+        // this error's Display text reaches (of-web's callback handler
+        // logs the full AuthError on this exact failure).
+        if !client_secret.is_empty() {
+            body = body.replace(client_secret, "[redacted]");
+        }
         return Err(AuthError::OidcApi {
             action: "exchanging the authorization code",
             status: status.as_u16(),
@@ -358,13 +415,7 @@ pub async fn exchange_code(
         });
     }
 
-    response
-        .json::<TokenResponse>()
-        .await
-        .map_err(|source| AuthError::OidcHttp {
-            action: "parsing the token response",
-            source,
-        })
+    read_json_capped("parsing the token response", response).await
 }
 
 /// Claims extracted from a verified `id_token` — exactly the fields this
@@ -448,7 +499,7 @@ async fn fetch_jwks(jwks_uri: &str) -> Result<JwkSet> {
 
     let status = response.status();
     if !status.is_success() {
-        let body = response_body_snippet(response).await;
+        let body = response_body_snippet("fetching the JWKS document", response).await;
         return Err(AuthError::OidcApi {
             action: "fetching the JWKS document",
             status: status.as_u16(),
@@ -456,13 +507,7 @@ async fn fetch_jwks(jwks_uri: &str) -> Result<JwkSet> {
         });
     }
 
-    let jwks: JwkSet = response
-        .json()
-        .await
-        .map_err(|source| AuthError::OidcHttp {
-            action: "parsing the JWKS document",
-            source,
-        })?;
+    let jwks: JwkSet = read_json_capped("parsing the JWKS document", response).await?;
 
     jwks_cache()
         .write()

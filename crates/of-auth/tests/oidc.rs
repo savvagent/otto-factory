@@ -59,6 +59,27 @@ async fn fetch_discovery_surfaces_a_non_2xx_status_as_oidc_api() {
     }
 }
 
+#[tokio::test]
+async fn fetch_discovery_refuses_a_response_over_the_byte_cap() {
+    // An admin- or IdP-controlled URL must not be able to push an unbounded
+    // body into this process's memory — every one of fetch_discovery,
+    // exchange_code, and fetch_jwks shares the same capped reader, so this
+    // one case stands in for all three.
+    let server = TestServer::start().await;
+    let oversized = "x".repeat(2 * 1024 * 1024); // 2 MiB, over the 1 MiB cap
+    server.push(MockResponse::json(200, serde_json::json!(oversized)));
+
+    let err = oidc::fetch_discovery(&server.base_url)
+        .await
+        .expect_err("an oversized response must be refused, not buffered in full");
+    match err {
+        AuthError::OidcApi { body, .. } => {
+            assert!(body.contains("exceeded"), "got: {body:?}");
+        }
+        other => panic!("expected AuthError::OidcApi, got {other:?}"),
+    }
+}
+
 // ---- authorization_url -----------------------------------------------------
 
 #[test]
@@ -187,6 +208,40 @@ async fn exchange_code_surfaces_a_rejected_authorization_code() {
         AuthError::OidcApi { status, body, .. } => {
             assert_eq!(status, 400);
             assert!(body.contains("invalid_grant"));
+        }
+        other => panic!("expected AuthError::OidcApi, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn exchange_code_redacts_the_client_secret_from_a_non_conformant_error_body() {
+    // A non-conformant token endpoint might echo the submitted form back in
+    // its error body — this must never let the plaintext secret reach
+    // whatever logs this error's Display text ends up in.
+    let server = TestServer::start().await;
+    let discovery = support::discovery_document(&server.base_url);
+    server.push(MockResponse::text(
+        400,
+        "invalid_request: client_secret=super-secret-value was rejected",
+    ));
+
+    let err = oidc::exchange_code(
+        &discovery,
+        "client-1",
+        "super-secret-value",
+        "spent-code",
+        "https://otto.example/sso/callback",
+    )
+    .await
+    .expect_err("a rejected exchange must still error");
+
+    match err {
+        AuthError::OidcApi { body, .. } => {
+            assert!(
+                !body.contains("super-secret-value"),
+                "the secret must be redacted from the logged body: {body:?}"
+            );
+            assert!(body.contains("[redacted]"));
         }
         other => panic!("expected AuthError::OidcApi, got {other:?}"),
     }
