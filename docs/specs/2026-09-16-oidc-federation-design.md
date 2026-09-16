@@ -12,10 +12,11 @@
 An org admin binds an IdP (issuer, client id, client secret), claims one or more email
 domains, and proves control of each via a DNS TXT record. Once a domain is verified, a
 person signing in with an email at that domain is redirected to the bound IdP instead of
-the passkey ceremony; on return, their IdP-asserted identity is pinned to a user row (by
-subject, and — on first use — resolved/created by verified email) and a normal console
-session is opened. An admin can additionally set `enforce_sso`, which refuses passkey
-login for anyone who is a member of that org.
+the passkey ceremony; on return, their IdP-asserted identity is pinned to a user row by
+subject — on first use, a brand-new user row when no account exists for that email, never
+a silent link to a pre-existing one — and a normal console session is opened. An admin can
+additionally set `enforce_sso`, which refuses passkey login for anyone who is a member of
+that org.
 
 Success:
 
@@ -26,9 +27,10 @@ Success:
   with a normal `__Host-of_session` cookie, the same session primitive passkey login uses.
 - `enforce_sso` is settable by an org admin and is enforced at passkey login: a member of
   an `enforce_sso` org cannot complete a passkey sign-in.
-- First-time federated sign-in links to an existing user row by verified email when one
-  exists, otherwise creates one, and in both cases ensures the person is an `org_members`
-  row in the federating org.
+- First-time federated sign-in creates a new user row when no existing row holds that
+  email, and in that case provisions `org_members` in the federating org. When a row
+  already holds that email, sign-in is refused rather than silently linked (see
+  Assumptions) — linking is only ever done from an authenticated session.
 - `cargo test --workspace`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all
   --check`, and the `web/` gates are green. Every new tenant-adjacent write carries an
   explicit `org_id` predicate; every table this spec adds or touches that is deliberately
@@ -88,10 +90,13 @@ Success:
   `email`/`email_verified`/`sub` claim extraction.
 - A server-rendered callback endpoint that mints the same session primitive passkey login
   uses (`of_auth::sessions::create` + the `__Host-of_session` cookie).
-- First-use identity pinning to `user_identities`, with account linking by verified email
-  and automatic `org_members` provisioning into the federating org.
+- First-use identity pinning to `user_identities` — new-account creation with automatic
+  `org_members` provisioning for a previously-unseen email, or explicit linking from an
+  already-authenticated session; never a silent link to a pre-existing, unauthenticated
+  account by email match (see Assumptions).
 - Console UI: an org-admin "SSO" settings page (bind/replace/remove IdP, claim/verify/remove
-  domains, toggle `enforce_sso`), and a "sign in with SSO" entry point on the login page.
+  domains, toggle `enforce_sso`), a "sign in with SSO" entry point on the login page, and an
+  authenticated "link SSO identity" action in account settings.
 
 **Out:**
 
@@ -129,13 +134,46 @@ Success:
   of us" is the entire value proposition of claiming a domain). This mirrors how invitation
   acceptance already inserts an `org_members` row; the IdP assertion (email domain match,
   once the domain is verified) stands in for the invitation.
-- **Account linking by email requires `email_verified: true` in the ID token or userinfo
-  response**, never linked on an unverified claim. Requesting the `email` scope is not
-  sufficient on its own — some IdPs return an email without asserting it. Without this
-  check, a misconfigured or malicious IdP could assert an arbitrary email and take over an
-  existing passkey account through the federation path. This is the one place this feature
-  could open an account-takeover hole if skipped, and it is the single highest-priority
-  check in the whole design.
+- **`email_verified: true` in the ID token or userinfo response is required before the
+  callback trusts an email claim at all**, never trusted on an unverified claim. Requesting
+  the `email` scope is not sufficient on its own — some IdPs return an email without
+  asserting it. This defends against a misconfigured or malicious *IdP*.
+- **A malicious *local user* is a separate, more concrete threat this codebase already
+  makes exploitable, and `email_verified` alone does not close it.** `PATCH /api/me`
+  (`crates/of-core/src/orgs.rs`'s `Db::set_profile`) lets any signed-in passkey account set
+  its own `users.email` to an arbitrary address with **zero ownership proof** — there is no
+  mail-based verification anywhere in this product (`CLAUDE.md`: "no email is ever sent").
+  Left unaddressed, this is a pre-hijacking attack with no email-based fix available: an
+  attacker registers a passkey account, sets its email to `alice@acme.com` before Acme ever
+  binds SSO, and waits. When Acme later federates and the real Alice authenticates through
+  Acme's IdP with a genuinely verified `alice@acme.com`, resolving by email match would find
+  the attacker's row, link the federated identity to it, and grant *the attacker's own
+  passkey-controlled account* membership in Acme's org under Alice's name — full
+  impersonation, and the attacker never touches the IdP at all.
+
+  **The fix: a federated identity is never linked to a pre-existing user row by email match,
+  under any circumstance — including an existing `org_members` row for the same org** (an
+  "already a member of this org" carve-out was considered and rejected: the same `PATCH
+  /api/me` hole lets an attacker who *legitimately* joined the org under their own email
+  later rewrite it to `alice@acme.com` too, so org membership is not evidence of email
+  ownership either). The only two paths that ever create a `user_identities` row are:
+
+  1. **No existing `users` row holds the verified email** — safe to create a new user row
+     and auto-provision `org_members` (the clean bootstrap case; nothing to hijack).
+  2. **An already-authenticated session explicitly starts a "link my SSO identity" ceremony**
+     (a new `POST /api/me/sso/link/start`, session-cookie-gated) — the ceremony carries the
+     caller's own already-known `user_id`, so the callback links to *that* row by construction,
+     never by an email lookup. Proof of ownership here comes from holding a working session
+     (a passkey the person already controls), not from the email claim.
+
+  Case 3 — a verified federated email collides with an existing `users` row that has
+  *no* linked identity and the caller has no session — is refused outright: **no session is
+  opened**, with a message directing the person to sign in with their existing credentials
+  first and link SSO from account settings. This is a real, accepted UX cost (an org
+  federating for the first time can't have existing passkey-holding members "just work" on
+  their first SSO attempt; each must explicitly link once) traded for closing an account-
+  takeover path this product has no other way to close, given it never sends mail. Recorded
+  in Risks & Open Questions, not silently accepted.
 - **The OIDC callback also re-checks that the verified email's domain still matches a
   claimed-and-verified domain routed to *this* `idp_connection`** — not just "some org's
   IdP accepted this person." A user typing `alice@acme.com` at the SSO entry point starts a
@@ -171,13 +209,22 @@ Success:
   make the OIDC row stash unrelated data in `webauthn_ceremonies.state`'s opaque `jsonb`.
   A separate table with exactly the columns this flow needs is simpler to reason about, and
   costs one migration.
-- **The `state` value is a single-use, bearer-shaped, short-TTL token and is hashed at
-  rest**, reusing `of_auth::crypto::generate()`/`hash()`/`verify()` exactly as `sessions`,
-  `access_tokens`, and `account_claims` already do for every other single-use or bearer
-  token in this codebase. The `nonce` is not a bearer credential (it is sent to the IdP as
-  a plaintext query parameter and its only job is anti-replay on the returned `id_token`),
-  so it is stored in plaintext — there is no confidentiality property to protect, only
-  integrity, and the ceremony row itself already provides that.
+- **The `state` value is a single-use, bearer-shaped token, hashed at rest, with a 10-minute
+  TTL** — matching the "ten single-use codes"-era links' own TTL convention recorded in this
+  repo's history for the last comparable single-use token. Generated via
+  `of_auth::crypto::generate()`, and looked up at the callback the same way `sessions` and
+  `access_tokens` already resolve *their* incoming bearer values: hash the incoming `state`
+  with `of_auth::crypto::hash()` and look it up with a plain `WHERE state_hash = $1` (a
+  deterministic-hash equality lookup is exactly what those two precedents already do — this
+  spec's earlier draft called this a "constant-time-verify" case and it is not; corrected
+  here to match the actual precedent instead of inventing a stricter one). The `nonce` is
+  not a bearer credential (it is sent to the IdP as a plaintext query parameter and its only
+  job is anti-replay on the returned `id_token`), so it is stored in plaintext — there is no
+  confidentiality property to protect, only integrity, and the ceremony row itself already
+  provides that.
+- **`sso_ceremonies` gains a nullable `user_id`**, set only by the authenticated
+  "link my SSO identity" path (§ above) and left `NULL` for the anonymous "sign in with
+  SSO" path — see §1/§5 for the two ceremonies' distinct handling at callback time.
 - **`idp_connections.discovery` (existing `jsonb NOT NULL DEFAULT '{}'`) caches the fetched
   `/.well-known/openid-configuration` document indefinitely, refreshed on next use whenever
   it's missing the `authorization_endpoint`/`token_endpoint`/`jwks_uri` keys the flow
@@ -210,6 +257,12 @@ CREATE TABLE sso_ceremonies (
   id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   org_id            uuid NOT NULL REFERENCES orgs (id) ON DELETE CASCADE,
   idp_connection_id uuid NOT NULL REFERENCES idp_connections (id) ON DELETE CASCADE,
+  -- Set only by the authenticated "link my SSO identity" path (an existing session
+  -- proving account ownership); NULL for the anonymous "sign in with SSO" path. The
+  -- callback links to this user_id directly when set, and never resolves by email at
+  -- all in that case — see the design spec's Assumptions on why an email match alone
+  -- must never establish or extend account access.
+  user_id           uuid REFERENCES users (id) ON DELETE CASCADE,
   -- Single-use, bearer-shaped, hashed at rest — same convention as sessions/access_tokens.
   state_hash        bytea NOT NULL,
   -- Anti-replay on the returned id_token. Not a bearer credential (sent to the IdP as a
@@ -283,15 +336,33 @@ now() WHERE org_id = $1 AND domain = $2`. Called only after the DNS lookup (done
 - `UserIdentity { id, user_id, idp_connection_id, subject, created_at }`.
 - `resolve_user(db: &Db, idp_connection_id, subject) -> Result<Option<UserId>>` — unscoped,
   same bootstrap class as `resolve_for_domain`; `user_identities` carries no `org_id` at
-  all, so there is no tenant boundary to pin here in the first place.
+  all, so there is no tenant boundary to pin here in the first place. Used on every
+  callback, first thing: a returning federated user (this pair already linked) always takes
+  this path regardless of which ceremony kind they came through.
+- `resolve_by_email(db: &Db, email: &str) -> Result<Option<UserId>>` — unscoped, used
+  **only** by the anonymous-ceremony callback path to decide "create a new user" (`None`)
+  vs. "refuse, this email already belongs to someone" (`Some`). **Never used to choose whom
+  to link an identity to** — see the Assumptions bullet on why an email match must never by
+  itself establish or extend access. Its one caller treats `Some(_)` strictly as a refusal
+  signal, not as a target to link.
 - `link(db: &Db, user_id, idp_connection_id, subject) -> Result<UserIdentity>` — first-use
   pinning, `ON CONFLICT (idp_connection_id, subject) DO NOTHING` then re-read (a duplicate
   callback for the same ceremony, or a race between two tabs, converges rather than errors
   — same tolerance `create_from_ticket` already uses for the analogous webhook-redelivery
-  case in the trackers design).
+  case in the trackers design). Called with a `user_id` the caller already resolved through
+  one of the two sanctioned paths in §5 — `link` itself does no email resolution.
 
-**`of_core::orgs`** gains one function: `set_enforce_sso(tx, enforce: bool) ->
-Result<Org>` — a normal `Tx`-scoped, RLS-covered write (`orgs` is already a tenant table).
+**`of_core::orgs`** gains one function: `set_enforce_sso(tx, enforce: bool) -> Result<Org>`.
+**Correction to an earlier draft of this section:** `orgs` is **not** an RLS-covered tenant
+table — it is the tenant itself. It is absent from `0007_rls.sql`'s `tenant_tables` array,
+and `crates/of-core/migrations/0029_org_job_counters.sql` says so explicitly: *"orgs is not
+one of 0007_rls.sql's tenant_tables — it is the tenant, not tenant-scoped data, and carries
+no org-scoping RLS policy."* `set_enforce_sso`'s only protection is guard 1: `UPDATE orgs
+SET enforce_sso = $2 WHERE id = tx.org()` — the caller cannot name a different org's row
+because `Tx` is pinned to the caller's own org id and `orgs.id` (not `org_id`) is the match
+column. This puts `orgs` writes in the same guard-1-only bucket as `idp_connections`/
+`claimed_domains`, not the RLS-covered bucket — §3's test for this needs to prove guard 1
+holds, the same as it does for every other table in this spec.
 
 ## §3 Cross-org / bootstrap coverage tests
 
@@ -308,10 +379,10 @@ Result<Org>` — a normal `Tx`-scoped, RLS-covered write (`orgs` is already a te
   `resolve_connection_org`'s cross-org test already uses.
 - `domains::claim`'s cross-org collision: org A claims `acme.com`; org B's `claim` for the
   same domain returns `Error::DomainAlreadyClaimed` and leaves org A's row untouched.
-- `set_enforce_sso`: ordinary `rls_scopes_*` coverage already exists for `orgs` generally;
-  no new policy needed (this is a new column write on an already-RLS-governed table), but a
-  functional test that org B's `Tx` cannot flip org A's flag (guard 1: the `UPDATE`'s
-  `WHERE org_id = $1` already prevents it; assert it).
+- `set_enforce_sso`: **`orgs` carries no RLS policy at all** (§2's correction) — this is a
+  guard-1-only test, same bucket as `idp_connections`/`claimed_domains`, not a "policy
+  already covers it" case. Assert org B's `Tx` cannot flip org A's flag (the `UPDATE`'s
+  `WHERE id = tx.org()` is the only thing preventing it).
 
 ## §4 `of_auth` — the OIDC client and DNS verification
 
@@ -365,42 +436,63 @@ already makes). No credential of otto-factory's own is needed to do a TXT lookup
 New unauthenticated routes in `catalog.rs`, matching the shape of the existing passkey
 ceremony endpoints and `/oauth/authorize`:
 
-- `POST /api/auth/sso/start` `{ email: String }` → normalizes, extracts the domain,
-  `of_core::idp::resolve_for_domain`. No match → `404`-shaped `sso_not_configured` error
+- `POST /api/auth/sso/start` `{ email: String }` (unauthenticated) → normalizes, extracts
+  the domain, `of_core::idp::resolve_for_domain`. No match → `sso_not_configured` error
   ("no SSO configured for this address — sign in with a passkey instead"). Match → mint an
-  `sso_ceremonies` row (`state` via `of_auth::crypto::generate()`, hashed for storage;
-  `nonce` via the same generator, stored plain), build the authorization URL via
-  `of_auth::oidc::authorization_url`, return `{ redirect_url: String }` for the console to
-  navigate to. **Accepted, bounded disclosure** (documented in Risks & Open Questions,
-  parallel to the trackers spec's JIRA-site-registration timing note): this reveals whether
-  a domain has SSO configured, not whether any specific account exists — the same class of
-  leak "Continue with SSO" flows in comparable products (Slack, Notion) accept by design.
-- `GET /sso/callback?code=...&state=...` → looks up `sso_ceremonies` by hashing the
-  incoming `state` and comparing (never a raw equality query against the hash column — same
-  constant-time-verify convention `of_auth::crypto::verify` already provides), checks
-  `expires_at` and `consumed_at IS NULL`, marks it consumed in the same step (single-use).
-  No match / expired / already consumed → a plain error page, **not** a `404`
-  (this endpoint is never queried for an org's existence the way `OrgCtx` is; it's a
-  malformed-or-replayed-request page). On match: open a normal `Tx` pinned to the
-  ceremony's stored `org_id`, `get_connection` + `get_connection_secret`, open the sealed
-  secret, `exchange_code`, `verify_id_token` with the ceremony's stored `nonce`, enforce the
-  `email_verified` rule (§4), and enforce that the verified email's domain still resolves
-  (via a fresh `resolve_for_domain` check against the *ceremony's own* `org_id`, per the
-  Assumptions bullet on re-validating at callback time) to this same org — a mismatch is a
-  refusal, not a fallback to a different org. Then: `identities::resolve_user` by
-  `(idp_connection_id, subject)`; if none, resolve or create a `users` row by
-  `lower(email)` (reusing the existing case-insensitive unique index) and `identities::link`
-  it. Ensure `org_members` contains `(org_id, user_id, role: member)` (insert-if-absent,
-  matching invitation acceptance's existing tolerance for "already a member"). Commit.
-  `of_auth::sessions::create` + `session::set_cookie`, `302` to the console's org (or
-  general) landing page.
+  `sso_ceremonies` row with `user_id = NULL` (the anonymous-ceremony kind — `state` via
+  `of_auth::crypto::generate()`, hashed for storage; `nonce` via the same generator, stored
+  plain), build the authorization URL via `of_auth::oidc::authorization_url`, return
+  `{ redirect_url: String }` for the console to navigate to. **Accepted, bounded
+  disclosure** (documented in Risks & Open Questions, parallel to the trackers spec's
+  JIRA-site-registration timing note): this reveals whether a domain has SSO configured,
+  not whether any specific account exists — the same class of leak "Continue with SSO"
+  flows in comparable products (Slack, Notion) accept by design.
+- `POST /api/me/sso/link/start` (session-cookie-gated — the caller must already be signed
+  in) → the caller's own org memberships are irrelevant here; this only needs the caller's
+  already-resolved `user_id`. If the caller's account has no verified email at all yet
+  (`users.email IS NULL`), refuse — there is nothing to route to an IdP by. Otherwise, same
+  domain resolution as `sso/start`, but the minted `sso_ceremonies` row sets
+  `user_id = Some(caller's user_id)` (the authenticated-ceremony kind). Same response shape.
+- `GET /sso/callback?code=...&state=...` (unauthenticated) → hashes the incoming `state`
+  with `of_auth::crypto::hash()` and looks it up with `WHERE state_hash = $1` (see
+  Assumptions — this is a deterministic-hash equality lookup, the same shape `sessions`/
+  `access_tokens` already use for their own incoming bearer values), checks `expires_at` and
+  `consumed_at IS NULL`, marks it consumed in the same step (single-use). No match / expired
+  / already consumed → a plain error page, **not** a `404` (this endpoint is never queried
+  for an org's existence the way `OrgCtx` is; it's a malformed-or-replayed-request page). On
+  match: open a normal `Tx` pinned to the ceremony's stored `org_id`, `get_connection` +
+  `get_connection_secret`, open the sealed secret, `exchange_code`, `verify_id_token` with
+  the ceremony's stored `nonce`, enforce the `email_verified` rule (§4), and enforce that the
+  verified email's domain still resolves (via a fresh `resolve_for_domain` check against the
+  *ceremony's own* `org_id`) to this same org — a mismatch is a refusal, not a fallback to a
+  different org. Then, **the two ceremony kinds diverge**:
+  - `identities::resolve_user(idp_connection_id, subject)` first, regardless of kind — a
+    returning federated user (already linked, from either kind of ceremony originally) always
+    resolves here and skips everything below.
+  - **Authenticated-ceremony (`ceremony.user_id.is_some()`)**: if the `(idp_connection_id,
+    subject)` pair is unlinked, `identities::link(ceremony.user_id, ...)` directly — no email
+    lookup at all. If that exact pair is already linked to a *different* user (someone else's
+    federated identity), refuse: this ceremony's caller cannot steal another account's IdP
+    link by replaying a callback against it.
+  - **Anonymous-ceremony (`ceremony.user_id.is_none()`)**: `identities::resolve_by_email`. `None`
+    → create a new `users` row for the verified email, `identities::link` it, ensure
+    `org_members` contains `(org_id, new_user_id, role: member)` (insert-if-absent). `Some(_)`
+    → **refuse. No session is opened.** Error message: "an account already exists for this
+    email — sign in with your existing credentials, then link SSO from account settings."
+    (See Assumptions for why this refusal, not a silent link, is the correct behavior.)
+  - Whichever branch succeeds: commit, `of_auth::sessions::create` + `session::set_cookie`,
+    `302` to the console's org (or general) landing page. The refusal branch commits nothing
+    and opens no session.
 - `PUT /api/orgs/{org}/sso/connection` (`OrgCtx::require_admin`) `{ issuer, client_id,
 client_secret }` → `fetch_discovery`, seal the secret, `upsert_connection`. Rejects (with
   the OIDC-side error surfaced verbatim, per this repo's "errors are written for an LLM/an
   operator that has never read the docs" convention — here the reader is a human admin, but
   the same honesty standard applies) if discovery fetch fails: a connection is never saved
   half-configured.
-- `DELETE /api/orgs/{org}/sso/connection` (`require_admin`).
+- `DELETE /api/orgs/{org}/sso/connection` (`require_admin`) → refuses (`400`, naming the
+  reason) while `orgs.enforce_sso = true`: removing the org's only IdP while every member's
+  passkey login is refused would lock every member — including the admin issuing this
+  call — out entirely, with no path back in. `enforce_sso` must be turned off first.
 - `POST /api/orgs/{org}/sso/domains` `{ domain }` (`require_admin`) → generates a
   verification token, `domains::claim`, returns the domain row **and** the exact TXT record
   name/value the console renders as setup instructions.
@@ -415,13 +507,22 @@ client_secret }` → `fetch_discovery`, seal the secret, `upsert_connection`. Re
   Postgres transaction open, same rule the tracker sync engine's outbound writes already
   follow), then — only on `true` — opens a second short `Tx` to `mark_verified`. `false` →
   `200` with `{ verified: false }`, not an error; the admin just hasn't propagated DNS yet.
-- `DELETE /api/orgs/{org}/sso/domains/{domain}` (`require_admin`).
+- `DELETE /api/orgs/{org}/sso/domains/{domain}` (`require_admin`) → refuses (`400`, same
+  reasoning as the connection delete above) when `orgs.enforce_sso = true` **and** this is
+  the org's only currently-verified domain — removing the last routable domain while
+  enforcement is on would strand every member who isn't already linked with no way to reach
+  the anonymous sign-in path either (the authenticated link-start path is also unreachable
+  for anyone not already signed in, which under `enforce_sso` is everyone who hasn't
+  federated yet). Deleting a non-last verified domain, or an unverified one, proceeds.
 - `PUT /api/orgs/{org}/sso/enforce` `{ enforce_sso: bool }` (`require_admin`) →
   `set_enforce_sso`. Refuses (`400`, naming the reason) when turning it on and the org has
   no *verified* claimed domain and no bound `idp_connection` — turning on enforcement with
   no way for any member to complete an IdP sign-in would lock every passkey-only member out
   with no path back in, which is a self-inflicted lockout this endpoint can and should
-  refuse to create.
+  refuse to create. This is the same three-way guard `DELETE .../connection` and
+  `DELETE .../domains/{domain}` enforce from the other direction — together they mean
+  `enforce_sso = true` can never coexist with "no working IdP path," checked at every edge
+  that could produce that state, not just the one that turns the flag on.
 
 **Passkey login enforcement.** `of_auth::login::with_passkey` (or its `of-web` caller —
 whichever already has the resolved `user_id` in hand before minting a session) gains one
@@ -442,7 +543,14 @@ post-ceremony passkey login step.
   connection form (issuer/client id/secret — the secret field is write-only, never
   round-tripped back from the API), a domains list (add, see TXT instructions, verify,
   remove) each showing `verified` / `pending` status, and the `enforce_sso` toggle with the
-  lockout-refusal error surfaced inline if the API refuses it.
+  lockout-refusal error surfaced inline if the API refuses it. The connection- and
+  domain-delete actions surface the same lockout-refusal shape.
+- **An authenticated "Link SSO identity" action** in account settings (wherever the
+  passkey list already lives) — calls `POST /api/me/sso/link/start`, same
+  `window.location.assign(redirect_url)` pattern as the login page. This is the UI for the
+  authenticated-ceremony path (§5), and the only self-service way an existing passkey
+  account gains a federated identity once its email collides with something the anonymous
+  path refuses.
 - **`/sso/callback`** needs **no console page** — it's a server response, per §5/Assumptions.
 
 ## Error Handling & Edge Cases
@@ -459,15 +567,27 @@ post-ceremony passkey login step.
   since otto-factory isn't what's misconfigured.
 - Discovery document missing `authorization_endpoint`/`token_endpoint`/`jwks_uri`: refused
   at bind time (`PUT .../sso/connection`), never silently deferred to first login attempt.
-- A user's existing passkey account gets linked to a federated identity: no passkey is
-  removed or disabled by this — the account can still sign in either way, unless its org
-  turns on `enforce_sso`, in which case only the federated path works for that org's
-  purposes (the passkey itself is untouched and still works for any other org the person
-  belongs to that isn't `enforce_sso`).
+- A user's existing passkey account explicitly links a federated identity (the
+  authenticated path): no passkey is removed or disabled by this — the account can still
+  sign in either way, unless its org turns on `enforce_sso`, in which case only the
+  federated path works for that org's purposes (the passkey itself is untouched and still
+  works for any other org the person belongs to that isn't `enforce_sso`).
+- A verified federated email collides with an existing, unlinked `users` row (the anonymous
+  path): refused outright, no session opened. Directed at the authenticated link path
+  instead. This includes the case where that existing row is already a member of the
+  federating org via an earlier invitation — membership does not substitute for the
+  ownership proof a session provides (see Assumptions).
+- A pending invitation for an email specified a role above `member` (e.g. `admin`): the
+  anonymous federated-signup path still only ever provisions `role: member` for a brand-new
+  user row. The invitation is not consulted or reconciled by this feature. Accepted, minor
+  gap — it under-provisions rather than over-provisions, and an admin can promote the new
+  member afterward the same way they would anyone else.
 - Deleting an `idp_connection` cascades `sso_ceremonies` (in-flight ceremonies for it become
   meaningless) and — via `user_identities.idp_connection_id ON DELETE CASCADE` — existing
   identity pins; those users keep their `users`/`org_members` rows, they simply have no
   federated identity to sign in with until the org re-binds an IdP or removes `enforce_sso`.
+  Refused outright while `enforce_sso = true` (§5) rather than left to produce this state
+  for every member simultaneously.
 
 ## Risks & Open Questions
 
@@ -491,3 +611,14 @@ post-ceremony passkey login step.
   `webauthn_ceremonies`, which also has none today (only an index on `expires_at` for a
   future one). Out of scope for this spec; a follow-up housekeeping task, not a correctness
   gap (expired/consumed rows are simply never matched again).
+- **No pre-existing-account collision is ever resolved automatically**, by design (see
+  Assumptions) — an org's first wave of federated sign-ins for people who already hold
+  passkey accounts under matching emails each need one explicit "link SSO identity" action
+  from an authenticated session, rather than "just working" on first SSO attempt. This is
+  the accepted cost of closing the `PATCH /api/me` pre-hijacking path with no mail-based
+  verification available anywhere in this product. If that endpoint ever gains real
+  ownership verification for email changes, this restriction could be relaxed in a later
+  spec — not assumed here.
+- **`CLAUDE.md`'s list of RLS-exempt auth tables should be updated to include
+  `sso_ceremonies`** once this ships, alongside `idp_connections`/`claimed_domains` — a
+  documentation follow-up for the record-as-shipped step, not a code change.
