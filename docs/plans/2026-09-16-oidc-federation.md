@@ -83,7 +83,7 @@ UPDATE`-then-consume transaction on the ceremony row.
 | **Create.** `web/src/routes/o/[org]/settings/sso/+page.svelte` | admin SSO settings page (spec §6) |
 | **Modify.** `web/src/routes/login/+page.svelte` (or equivalent) | "Sign in with SSO" entry point |
 | **Modify.** account-settings page (wherever the passkey list lives) | "Link SSO identity" action |
-| **Modify.** `crates/of-core/migrations/0007_rls.sql`'s companion doc, `CLAUDE.md` | recorded at ship time (Task 5 / record-as-shipped), not during Tasks 1–4 |
+| **Modify.** `CLAUDE.md` (its prose list of RLS-exempt auth tables — **never `0007_rls.sql` itself**, which is not touched by this feature at all) | recorded at ship time (record-as-shipped step, not during Tasks 1–4) |
 
 ## Task Order & Rationale
 
@@ -112,10 +112,19 @@ closed rounds 1 and 2 of the spec's own critique.
 **Interfaces produced:** `of_core::idp::{IdpConnection, upsert_connection, get_connection,
 get_connection_secret, delete_connection, resolve_for_domain}`,
 `of_core::domains::{ClaimedDomain, claim, list, delete, mark_verified}`,
-`of_core::identities::{UserIdentity, resolve_user, resolve_by_email, link}`,
-`of_core::ceremonies::{SsoCeremony, create, consume_by_state_hash}`,
-`of_core::orgs::{set_enforce_sso, lock_for_sso_guard}`. Consumes `of_core::crypto::{Cipher,
-Sealed}` (already exists).
+`of_core::identities::{UserIdentity, resolve_user, resolve_by_email, link,
+create_user_for_federation}`, `of_core::ceremonies::{SsoCeremony, create,
+consume_by_state_hash}`, `of_core::orgs::{set_enforce_sso, lock_for_sso_guard}`. Consumes
+`of_core::crypto::{Cipher, Sealed}` (already exists).
+
+**`create_user_for_federation` is the single most security-critical function this task
+adds — it is the literal implementation of the "never `DO UPDATE`" fix from spec review
+round 3.** `crates/of-core/src/orgs.rs:326` already has `Db::upsert_user(email, name) ->
+Result<User>` doing `INSERT ... ON CONFLICT (lower(email)) DO UPDATE SET email =
+users.email ... RETURNING` — the exact "create or converge onto whoever already holds this
+row" shape the spec explicitly names as the near-miss this feature must never reuse.
+**Do not call `Db::upsert_user` from anywhere in this feature.** `identities.rs` needs its
+own, differently-shaped function instead (see the dedicated step below).
 
 - [ ] Write `crates/of-core/migrations/0031_sso_ceremonies.sql` exactly per spec §1:
       `sso_ceremonies` with `org_id`, `idp_connection_id`, nullable `user_id`, `state_hash`,
@@ -131,12 +140,36 @@ Sealed}` (already exists).
       subject) DO NOTHING` converge-not-error behavior. Confirm it fails to compile (modules
       don't exist yet).
 - [ ] Implement `crates/of-core/src/idp.rs`, `domains.rs`, `identities.rs` per spec §2's
-      exact function list. `resolve_for_domain` and `resolve_user`/`resolve_by_email` are
-      the only unscoped (`&Db`, not `&mut Tx`) accessors — doc-comment each one naming it as
-      the single sanctioned unscoped read for its table, matching `resolve_connection_org`'s
-      existing doc-comment convention in `trackers.rs`. `domains::claim`'s verification
-      token is generated via the workspace `rand` crate directly (`of-core` cannot depend on
-      `of-auth`'s `crypto::generate()` — that's the wrong layering direction).
+      exact function list. `resolve_for_domain`, `resolve_user`/`resolve_by_email`, and
+      `identities::link` are all unscoped (`&Db`, not `&mut Tx`) accessors — doc-comment
+      each one naming it as a sanctioned unscoped read/write for its table (`user_identities`
+      and this bootstrap-domain-resolution path carry no `org_id` to pin a `Tx` to), matching
+      `resolve_connection_org`'s existing doc-comment convention in `trackers.rs`.
+      `domains::claim`'s verification token is generated via the workspace `rand` crate
+      directly (`of-core` cannot depend on `of-auth`'s `crypto::generate()` — that's the
+      wrong layering direction).
+- [ ] **Implement `identities::create_user_for_federation(db: &Db, email: &str) ->
+      Result<Option<UserId>>`** — `INSERT INTO users (email) VALUES ($1) ON CONFLICT
+      (lower(email)) DO NOTHING RETURNING id`. Returns `Ok(None)` when the conflict fires
+      (someone else's row already holds this email — including a row that appeared in the
+      race window between the caller's `resolve_by_email` check and this insert), never
+      falling back to that row. Doc comment, verbatim intent: *"Never replace this with
+      `Db::upsert_user` — that function's `DO UPDATE` hands back a pre-existing row on
+      purpose, which is the exact account-takeover shape spec review round 3 closed for
+      federated sign-in. `Db::upsert_user` stays correct for its own callers (admin-driven
+      invite flows, where converging onto an existing account is the intended behavior);
+      this function's contract is the opposite: a conflict here is proof someone else got
+      there first, and the caller must treat that as a refusal, not a success."* This is the
+      one function in the whole task where getting the SQL shape wrong reopens a closed
+      security hole — do not simplify it during implementation.
+- [ ] Add a failing test for `create_user_for_federation` in `crates/of-core/tests/oidc.rs`
+      before implementing it: (a) called against a brand-new email, returns `Some(_)` and
+      the row exists; (b) called a second time against the same email (simulating the race
+      the doc comment describes), returns `None` and does **not** alter the first row's
+      other fields; (c) two concurrent calls for the same brand-new email (two overlapping
+      `tokio::spawn`ed calls, same pattern as `consume_by_state_hash`'s race test below) —
+      exactly one returns `Some`, the other `None`, never both `Some` with two different
+      user ids.
       `domains::claim` checks `rows_affected() == 0` after its `ON CONFLICT ... WHERE`
       statement and returns the new `Error::DomainAlreadyClaimed` (generic message, no org
       named — spec §2) in that case.
@@ -192,14 +225,16 @@ Sealed}` (already exists).
       `resolve_for_domain`/`resolve_user` cross-org resolution test (each resolves only its
       own org/connection, per spec §3). Also: `domains::claim`'s cross-org collision
       (`Error::DomainAlreadyClaimed`, org A's row untouched).
-- [ ] The three remaining spec §3 tests in `crates/of-core/tests/oidc.rs`: a domain
-      reassigned mid-flight cannot retarget an in-flight ceremony (ceremony's stored
-      `org_id` wins over a fresh `resolve_for_domain`, tested at the `of-core` layer as "the
-      ceremony row still names org A after org B claims-and-verifies the same domain" — the
-      *callback's* use of this fact is Task 3's test, this task only proves the data layer
-      supports it); the TOCTOU guard: two concurrent `domains::delete` calls against the
-      org's two verified domains — assert the second one (whichever loses the lock race)
-      sees the updated count and refuses, never both succeeding.
+- [ ] Two of spec §3's remaining tests belong at this layer (the other two — the
+      binding-cookie mismatch and the authenticated-link email-match refusal — need an HTTP
+      request/cookie and are Task 3's job instead): a domain reassigned mid-flight cannot
+      retarget an in-flight ceremony (ceremony's stored `org_id` wins over a fresh
+      `resolve_for_domain`, tested at the `of-core` layer as "the ceremony row still names
+      org A after org B claims-and-verifies the same domain" — the *callback's* use of this
+      fact is Task 3's test, this task only proves the data layer supports it); the TOCTOU
+      guard: two concurrent `domains::delete` calls against the org's two verified domains —
+      assert the second one (whichever loses the lock race) sees the updated count and
+      refuses, never both succeeding.
 - [ ] `cargo test -p of-core --test isolation`, `cargo test -p of-core --test oidc`, `cargo
       test --workspace`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all
       --check`. All green before commit.
@@ -223,10 +258,17 @@ the workspace `reqwest`/`jsonwebtoken` clients (already present) plus the new
       `[workspace.dependencies]` table in the root `Cargo.toml` (pin a version; check for
       the current stable release rather than guessing a number).
 - [ ] Write failing recorded-fixture tests first in `crates/of-auth/tests/oidc.rs` (no live
-      network, matching `of-trackers`'s existing testing convention for its GitHub/JIRA
-      clients — use a local mock HTTP server, e.g. the same crate/approach `of-trackers`'s
-      fixture tests already use, check `crates/of-trackers/tests/` for the pattern before
-      picking a new one): discovery document fetch and field extraction; authorization URL
+      network, matching `of-trackers`'s testing *convention* — mock the HTTP calls rather
+      than hitting a real IdP). **`of-trackers`'s actual mock-HTTP-server harness
+      (`TestServer`/`MockResponse`) lives in `crates/of-trackers/src/test_support.rs`,
+      exercised by `#[cfg(test)] mod tests` blocks inside `src/github.rs`/`src/jira.rs` —
+      not in `crates/of-trackers/tests/`, which only has pure fixture-JSON sync-logic tests
+      with no HTTP mocking at all. `test_support` is crate-private (no `pub`), so `of-auth`
+      cannot import it across the crate boundary.** Read `test_support.rs` for the shape,
+      then write `of-auth`'s own small equivalent (a `#[cfg(test)]`-only local mock server
+      module, or a lightweight crate already in the workspace if one fits — check before
+      adding a new dependency) rather than assuming an off-the-shelf shared module exists.
+      Cover: discovery document fetch and field extraction; authorization URL
       construction (exact query string shape per spec §4); code exchange happy path;
       `id_token` verification — valid signature/issuer/audience/nonce accepted, wrong
       issuer/audience/nonce/expired-token each rejected with a distinct, named failure.
@@ -272,9 +314,15 @@ this task's handler.
       router, a real throwaway Postgres, no mocks): the full anonymous sign-in flow against
       a fixture IdP (reuse Task 2's fixture-server approach) ending in a session cookie;
       `sso_not_configured` for an unclaimed domain; the full authenticated-link flow;
-      email-match refusal on the authenticated-link path; email-collision refusal on the
-      anonymous path (pre-seed a `users` row, assert no session opens and no
-      `user_identities` row is created); `email_verified: false` refusal; a replayed
+      email-match refusal on the authenticated-link path; identity-theft refusal on the
+      authenticated-link path (pre-link `(idp_connection_id, subject)` to user `V`, have a
+      *different* signed-in user `U` start and complete an authenticated-link ceremony that
+      resolves to that same pair — assert refusal and that no session opens for `V`); an
+      org_members row created for a brand-new anonymous federated signup (not just the
+      `users`/`user_identities` rows — this is the step most likely to be silently dropped,
+      per Task 1/3's own warnings); email-collision refusal on the anonymous path (pre-seed
+      a `users` row, assert no session opens and no `user_identities` row is created);
+      `email_verified: false` refusal; a replayed
       `state` (second callback with the same `state_hash`) refusal; a mismatched/missing
       binding-cookie refusal (drop or corrupt the cookie before the second request); domain
       reassigned mid-flight still resolves to the original org; each of the three lockout
@@ -289,22 +337,51 @@ this task's handler.
       `nonce`), `ceremonies::create`, set the binding cookie, build the authorization URL
       via `of_auth::oidc::authorization_url`, return `{ redirect_url }`. The link-start
       variant additionally requires an authenticated session and a non-null caller email.
-- [ ] Implement `GET /sso/callback` per spec §5's full walkthrough, in order: hash incoming
-      `state` → `ceremonies::consume_by_state_hash` → generic refusal on `None` → hash the
-      binding cookie and compare to the consumed ceremony's `binding_hash` → generic
-      refusal on mismatch (the ceremony is already consumed at this point, so no separate
-      "burn it" step is needed here) → open a `Tx` pinned to `ceremony.org_id` →
-      `get_connection`/`get_connection_secret` → open the secret → `exchange_code` →
-      `verify_id_token` → enforce `email_verified` → enforce `resolve_for_domain` against
-      `ceremony.org_id` still resolving → `identities::resolve_user` → branch on
-      `ceremony.user_id`: authenticated path enforces the email-match-to-caller check before
-      `identities::link`; anonymous path does the `DO NOTHING RETURNING` insert (this is
-      `of_core::identities`'s job — confirm Task 1 exposed it as such, not left as raw SQL
-      in this handler, which would violate "every SQL statement lives in `of-core`") and
-      refuses on `rows_affected() == 0` or `resolve_by_email` returning `Some`. On success:
-      commit, `of_auth::sessions::create`, `session::set_cookie`, clear the binding cookie,
-      `302` redirect. On any refusal: no commit, no session, clear the binding cookie
-      anyway (nothing left to protect once the ceremony's outcome is decided).
+- [ ] Implement `GET /sso/callback` per spec §5's full walkthrough — **do not summarize or
+      reorder these steps from memory; this list is the literal, complete order, and every
+      branch below must be present, not just the ones that read as "the happy path":**
+      1. Hash incoming `state` → `ceremonies::consume_by_state_hash` → generic refusal on
+         `None`.
+      2. Hash the binding cookie and compare to the consumed ceremony's `binding_hash` →
+         generic refusal on mismatch (the ceremony is already consumed at this point, so no
+         separate "burn it" step is needed here).
+      3. Open a `Tx` pinned to `ceremony.org_id` → `get_connection`/`get_connection_secret`
+         → open the secret → `exchange_code` → `verify_id_token` → enforce `email_verified`
+         → enforce `resolve_for_domain` against `ceremony.org_id` still resolving.
+      4. `identities::resolve_user(idp_connection_id, subject)` — **what a match means
+         depends on the ceremony kind; this is not "any match means success" for both (a
+         mistake caught while writing this plan, fixed in the spec — re-read spec §5's
+         corrected bullet, do not implement from an older mental model of it):**
+         - **Anonymous ceremony (`ceremony.user_id.is_none()`)**: any match is a returning
+           federated user — skip straight to the success step (7) with that `user_id`.
+         - **Authenticated ceremony (`ceremony.user_id.is_some()`)**: compare the match
+           against `ceremony.user_id`. `Some(ceremony.user_id)` → idempotent, skip to step 7
+           with `ceremony.user_id`. **`Some(other_id)` where `other_id != ceremony.user_id`
+           → refuse — this ceremony's caller cannot steal another account's IdP link by
+           replaying a callback against it. This exact branch is the one a naive
+           "any match short-circuits to success" implementation silently skips; it is the
+           single most important line in this whole step.** `None` → continue to step 5.
+      5. **Authenticated ceremony, step 4 returned `None`:** enforce the email-match-to-
+         caller check (refuse on mismatch, naming it — spec §5). Once that holds:
+         `identities::link(ceremony.user_id, idp_connection_id, subject)`.
+      6. **No match, anonymous ceremony (`ceremony.user_id.is_none()`):**
+         `identities::resolve_by_email`. `Some(_)` → refuse (email collision, no session).
+         `None` → `identities::create_user_for_federation` (Task 1's new function — **not**
+         raw SQL in this handler, which would violate "every SQL statement lives in
+         `of-core`", and **not** `Db::upsert_user`). `None` back from that call → refuse
+         (lost the creation race). `Some(new_user_id)` → `identities::link(new_user_id,
+         idp_connection_id, subject)`, **then ensure `org_members` contains `(ceremony.org_id,
+         new_user_id, role: member)`** — reuse the existing `Tx::add_member` (`orgs.rs`) inside
+         this same already-open `Tx`. **This step is not optional and is easy to silently
+         drop because nothing about the happy path fails without it** — a federated user
+         would authenticate successfully but see no orgs in the console. This is the
+         concrete mechanism behind the spec's stated purpose for the whole feature
+         ("self-service enterprise onboarding"); skipping it ships a callback that
+         technically works and completely fails to do what an admin turned SSO on for.
+      7. On success (step 4's match, or step 5/6 reaching `identities::link`): commit,
+         `of_auth::sessions::create`, `session::set_cookie`, clear the binding cookie, `302`
+         redirect. On any refusal in steps 2–6: no commit, no session, clear the binding
+         cookie anyway (nothing left to protect once the ceremony's outcome is decided).
 - [ ] Implement the admin-only connection/domain/enforce endpoints (`PUT`/`DELETE
 .../connection`, `POST`/`GET`/`POST .../verify`/`DELETE .../domains[/{domain}]`, `PUT
 .../enforce`) per spec §5, each behind `OrgCtx::require_admin()`. `PUT .../connection`
