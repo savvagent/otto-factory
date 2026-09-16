@@ -727,6 +727,15 @@ pub fn catalog() -> Vec<Endpoint> {
             .summary("Who is in this repo right now")
             .describe("The console's answer to \"why is my agent waiting?\"."),
         // ---------------------------------------------------- enterprise sso
+        Endpoint::get("/api/orgs/{org}/sso/connection", sso::get_connection)
+            .auth(Auth::OrgAdmin)
+            .returns("IdpConnection")
+            .summary("This org's bound identity provider, if any")
+            .describe(
+                "204 with no body when nothing is bound. Never the secret: IdpConnection \
+                 carries only issuer, clientId, and the cached discovery document — \
+                 clientSecret is sealed at rest and has no read path at all.",
+            ),
         Endpoint::put("/api/orgs/{org}/sso/connection", sso::upsert_connection)
             .auth(Auth::OrgAdmin)
             .takes("SsoConnectionRequest")

@@ -612,6 +612,27 @@ pub async fn upsert_connection(
     Ok(Json(connection))
 }
 
+/// `GET /api/orgs/{org}/sso/connection` — this org's bound IdP, if any.
+///
+/// Never the secret: `idp::IdpConnection` has no `client_secret_ct`/
+/// `client_secret_nonce` field to begin with (spec §2 — a separate accessor,
+/// `get_connection_secret`, is the only path to the sealed pair, and this
+/// handler never calls it). `204 No Content` when nothing is bound, matching
+/// the "declared but not configured" shape this settings page otherwise
+/// renders as an empty state.
+pub async fn get_connection(State(state): State<AppState>, ctx: OrgCtx) -> ApiResult<Response> {
+    ctx.require_admin()?;
+
+    let mut tx = state.db.begin(ctx.org.id).await?;
+    let connection = idp::get_connection(&mut tx).await?;
+    tx.commit().await?;
+
+    Ok(match connection {
+        Some(connection) => Json(connection).into_response(),
+        None => http::StatusCode::NO_CONTENT.into_response(),
+    })
+}
+
 /// `DELETE /api/orgs/{org}/sso/connection`.
 ///
 /// The lockout guard (refusing while `enforce_sso` is on) lives inside

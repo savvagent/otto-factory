@@ -635,3 +635,33 @@ async fn passkey_login_is_not_refused_for_a_member_of_a_different_unenforced_org
         "a member of an unrelated, non-enforce_sso org must still sign in with a passkey"
     );
 }
+
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn get_connection_returns_no_content_until_one_is_bound_then_never_the_secret(pool: PgPool) {
+    let h = harness(pool);
+    let admin = onboard(&h, ADMIN_EMAIL).await;
+    org_with_owner(&h, "acme", &admin).await;
+
+    let before = Call::get("/api/orgs/acme/sso/connection")
+        .with_session(&admin.session)
+        .send(&h.router)
+        .await;
+    before.expect(StatusCode::NO_CONTENT);
+
+    let idp = FixtureIdp::start().await;
+    bind_connection(&h, "acme", &admin, &idp).await;
+
+    let after = Call::get("/api/orgs/acme/sso/connection")
+        .with_session(&admin.session)
+        .send(&h.router)
+        .await;
+    after.expect(StatusCode::OK);
+    assert_eq!(after.body["issuer"], idp.server.base_url);
+    assert_eq!(after.body["clientId"], "client-1");
+    assert!(
+        after.body.get("clientSecret").is_none()
+            && after.body.get("client_secret_ct").is_none()
+            && after.body.get("clientSecretCt").is_none(),
+        "the connection's secret must never be readable through this endpoint"
+    );
+}
