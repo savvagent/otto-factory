@@ -439,6 +439,31 @@ impl Db {
         Ok(rows)
     }
 
+    /// Whether `user` belongs to any org that currently has `enforce_sso =
+    /// true` — the one check passkey login gains for enterprise OIDC
+    /// federation (spec §5, "Passkey login enforcement").
+    ///
+    /// Unscoped and unpinned, the same bootstrap class as
+    /// [`Db::member_role`]: at login time the caller's org is not yet known
+    /// (they may belong to several, only some of which enforce SSO), so
+    /// there is no [`OrgId`] to pin a [`Tx`] to — this is exactly the
+    /// question that has to be answered *before* any org-scoped work can
+    /// begin. `enforce_sso` is scoped to org membership, not to which
+    /// address the account holds (`CLAUDE.md`/the design spec's Premise
+    /// corrections), so this is a membership join, not a domain check.
+    pub async fn is_member_of_sso_enforced_org(&self, user: UserId) -> Result<bool> {
+        let enforced: bool = sqlx::query_scalar(
+            "SELECT EXISTS ( \
+               SELECT 1 FROM org_members m JOIN orgs o ON o.id = m.org_id \
+               WHERE m.user_id = $1 AND o.enforce_sso \
+             )",
+        )
+        .bind(user)
+        .fetch_one(self.pool())
+        .await?;
+        Ok(enforced)
+    }
+
     pub async fn list_org_members(&self, org: OrgId) -> Result<Vec<OrgMember>> {
         let rows = sqlx::query_as(
             "SELECT u.id, u.email, u.name, u.label, u.created_at, u.disabled_at, \

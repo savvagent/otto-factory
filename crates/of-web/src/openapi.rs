@@ -157,6 +157,8 @@ fn tag_for(path: &str) -> &'static str {
         "oauth"
     } else if path.starts_with("/webhooks") {
         "trackers"
+    } else if path.starts_with("/sso") || path.contains("/sso/") {
+        "sso"
     } else if path.starts_with("/api/auth") {
         "auth"
     } else if path.starts_with("/api/me") {
@@ -189,6 +191,7 @@ fn components() -> Value {
         entity_schemas(),
         queue_schemas(),
         tracker_schemas(),
+        sso_schemas(),
         response_schemas(),
         request_schemas(),
     ] {
@@ -338,6 +341,117 @@ fn tracker_schemas() -> Value {
                 },
             },
             "required": ["externalRef"],
+        },
+    })
+}
+
+/// Enterprise OIDC federation — connection/domain admin, and the two sign-in
+/// ceremonies. Its own group for the same reason [`tracker_schemas`] is: the
+/// entity literal is already at the `json!` recursion limit.
+fn sso_schemas() -> Value {
+    let uuid = json!({ "type": "string", "format": "uuid" });
+    let timestamp = json!({ "type": "string", "format": "date-time" });
+
+    let idp_connection = json!({
+        "type": "object",
+        "description":
+            "One org's bound identity provider. The client secret is never returned by any \
+             endpoint — it is sealed at rest and opened only for the duration of a token \
+             exchange.",
+        "properties": {
+            "id": uuid,
+            "orgId": uuid,
+            "issuer": { "type": "string" },
+            "clientId": { "type": "string" },
+            "discovery": {
+                "type": "object",
+                "description": "The fetched /.well-known/openid-configuration document, cached.",
+            },
+            "createdAt": timestamp,
+        },
+        "required": ["id", "orgId", "issuer", "clientId", "discovery", "createdAt"],
+    });
+
+    let claimed_domain = json!({
+        "type": "object",
+        "description":
+            "A globally-unique email domain claimed by this org, with the exact TXT record \
+             to publish. verifiedAt is null until the DNS lookup succeeds.",
+        "properties": {
+            "orgId": uuid,
+            "domain": { "type": "string" },
+            "verificationToken": { "type": "string" },
+            "verifiedAt": { "type": ["string", "null"], "format": "date-time" },
+            "createdAt": timestamp,
+            "txtRecordName": {
+                "type": "string",
+                "description": "The TXT record name to publish, e.g. _otto-factory-verify.acme.com.",
+            },
+            "txtRecordValue": {
+                "type": "string",
+                "description": "The exact TXT record value to publish.",
+            },
+        },
+        "required": [
+            "orgId",
+            "domain",
+            "verificationToken",
+            "createdAt",
+            "txtRecordName",
+            "txtRecordValue",
+        ],
+    });
+
+    json!({
+        "SsoStartRequest": {
+            "type": "object",
+            "description":
+                "Only used by /api/auth/sso/start — /api/me/sso/link/start takes no body, \
+                 it derives the domain from the caller's own account email.",
+            "properties": { "email": { "type": "string" } },
+            "required": ["email"],
+        },
+        "SsoStartResponse": {
+            "type": "object",
+            "properties": {
+                "redirectUrl": {
+                    "type": "string",
+                    "description": "Navigate the browser here to begin the IdP's authorization-code flow.",
+                },
+            },
+            "required": ["redirectUrl"],
+        },
+        "SsoConnectionRequest": {
+            "type": "object",
+            "properties": {
+                "issuer": { "type": "string" },
+                "clientId": { "type": "string" },
+                "clientSecret": {
+                    "type": "string",
+                    "description": "Write-only. Never round-tripped back from any endpoint.",
+                },
+            },
+            "required": ["issuer", "clientId", "clientSecret"],
+        },
+        "IdpConnection": idp_connection,
+        "ClaimDomainRequest": {
+            "type": "object",
+            "properties": { "domain": { "type": "string" } },
+            "required": ["domain"],
+        },
+        "ClaimedDomain": claimed_domain,
+        "ClaimedDomainList": { "type": "array", "items": reference("ClaimedDomain") },
+        "VerifyDomainResponse": {
+            "type": "object",
+            "description":
+                "false is not an error — DNS has not propagated yet, and the admin can retry.",
+            "properties": { "verified": { "type": "boolean" } },
+            "required": ["verified"],
+        },
+        "EnforceSsoRequest": {
+            "type": "object",
+            "properties": { "enforceSso": { "type": "boolean" } },
+            "required": ["enforceSso"],
         },
     })
 }

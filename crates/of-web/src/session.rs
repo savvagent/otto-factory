@@ -112,6 +112,67 @@ pub fn token_from(parts: &Parts) -> Option<String> {
     None
 }
 
+/// The enterprise OIDC federation login-CSRF binding cookie.
+///
+/// `state` (in the callback URL) alone is replayable — it travels through
+/// browser history, referrer headers, and a captured-and-replayed callback
+/// URL — so `sso/start`/`sso/link/start` additionally set this cookie, and
+/// the callback requires it to match the ceremony's stored `binding_hash`
+/// *in addition to* `state` resolving a ceremony at all. See
+/// `docs/specs/2026-09-16-oidc-federation-design.md`'s Assumptions on the
+/// login-CSRF hole this closes. Same attribute shape as [`COOKIE_NAME`] and
+/// for the same reasons — `HttpOnly`/`Secure`/`Path=/`/`SameSite=Lax`, the
+/// `__Host-` prefix — except this cookie's `Max-Age` is the ceremony's own
+/// short TTL, not the session's, because it protects nothing once the
+/// ceremony it names has expired or been consumed.
+pub const BINDING_COOKIE_NAME: &str = "__Host-of_sso_binding";
+
+/// Build the `Set-Cookie` value for a freshly started SSO ceremony.
+///
+/// `max_age_secs` is the ceremony's own TTL (the design's 10-minute window),
+/// passed in rather than hard-coded here so the cookie's lifetime and the
+/// ceremony row's `expires_at` cannot drift into two different constants.
+pub fn set_binding_cookie(token: &str, max_age_secs: i64) -> HeaderValue {
+    HeaderValue::from_str(&format!(
+        "{BINDING_COOKIE_NAME}={token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age={max_age_secs}"
+    ))
+    .expect("binding cookie value is ASCII by construction")
+}
+
+/// Build the `Set-Cookie` value that clears the binding cookie.
+///
+/// The callback clears this on every outcome, success or refusal alike: the
+/// cookie is useless the moment its ceremony is consumed (single-use), and a
+/// stale copy lingering in the browser past its purpose is hygiene, not a
+/// security gap (spec's Risks & Open Questions) — but worth cleaning up
+/// anyway so it does not sit there until its own `Max-Age` expires.
+pub fn clear_binding_cookie() -> HeaderValue {
+    HeaderValue::from_static(
+        "__Host-of_sso_binding=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0",
+    )
+}
+
+/// Pull the binding cookie's value out of a `Cookie` header. Mirrors
+/// [`token_from`] exactly, against [`BINDING_COOKIE_NAME`] instead of
+/// [`COOKIE_NAME`].
+pub fn binding_token_from(parts: &Parts) -> Option<String> {
+    for header in parts.headers.get_all(COOKIE) {
+        let Ok(raw) = header.to_str() else { continue };
+        for pair in raw.split(';') {
+            let Some((name, value)) = pair.split_once('=') else {
+                continue;
+            };
+            if name.trim() == BINDING_COOKIE_NAME {
+                let value = value.trim();
+                if !value.is_empty() {
+                    return Some(value.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Attach a `Set-Cookie` to a response.
 pub fn with_cookie(
     mut response: axum::response::Response,
@@ -352,5 +413,43 @@ mod tests {
             );
         }
         assert!(clear.contains("Max-Age=0"));
+    }
+
+    /// The binding cookie needs the same protections as the session cookie —
+    /// it is what closes the login-CSRF hole on `/sso/callback` — and its
+    /// own `Max-Age` must be the caller-supplied ceremony TTL, not the
+    /// session's.
+    #[test]
+    fn the_binding_cookie_carries_every_attribute_that_protects_it() {
+        let cookie = set_binding_cookie("of_ssb_abc", 600);
+        let cookie = cookie.to_str().unwrap();
+
+        assert!(cookie.starts_with("__Host-of_sso_binding=of_ssb_abc"));
+        assert!(cookie.contains("HttpOnly"));
+        assert!(cookie.contains("Secure"));
+        assert!(cookie.contains("Path=/"));
+        assert!(cookie.contains("SameSite=Lax"));
+        assert!(cookie.contains("Max-Age=600"));
+        assert!(!cookie.to_lowercase().contains("domain="));
+    }
+
+    #[test]
+    fn clearing_the_binding_cookie_matches_the_cookie_it_clears() {
+        let set = set_binding_cookie("of_ssb_abc", 600);
+        let clear = clear_binding_cookie();
+        let (set, clear) = (set.to_str().unwrap(), clear.to_str().unwrap());
+
+        for attribute in ["Path=/", "HttpOnly", "Secure", "SameSite=Lax"] {
+            assert!(set.contains(attribute));
+            assert!(clear.contains(attribute));
+        }
+        assert!(clear.contains("Max-Age=0"));
+    }
+
+    #[test]
+    fn the_binding_token_is_found_among_other_cookies() {
+        let parts = parts_with("theme=dark; __Host-of_sso_binding=of_ssb_abc; locale=en");
+        assert_eq!(binding_token_from(&parts), Some("of_ssb_abc".into()));
+        assert_eq!(binding_token_from(&parts_with("theme=dark")), None);
     }
 }

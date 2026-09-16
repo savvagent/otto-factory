@@ -1758,6 +1758,7 @@ dependencies = [
  "chrono",
  "hmac",
  "http",
+ "jsonwebtoken",
  "of-auth",
  "of-billing",
  "of-core",
