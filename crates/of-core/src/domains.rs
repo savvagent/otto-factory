@@ -187,10 +187,21 @@ pub async fn delete(tx: &mut Tx<'_>, domain: &str) -> Result<()> {
         }
     }
 
-    sqlx::query("DELETE FROM claimed_domains WHERE org_id = $1 AND domain = $2")
+    let result = sqlx::query("DELETE FROM claimed_domains WHERE org_id = $1 AND domain = $2")
         .bind(org_id)
         .bind(&domain)
         .execute(tx.conn())
         .await?;
+
+    // Mirrors mark_verified's own rule, above: a domain this org never
+    // claimed (a typo, already-released, or — since `domain` is a global
+    // primary key — actually owned by a different org) is a refusal, not a
+    // silent no-op. Without this, a caller sees 204/success and an audit
+    // row for a deletion that never happened.
+    if result.rows_affected() == 0 {
+        return Err(Error::Invalid(format!(
+            "domain {domain:?} is not claimed by this org"
+        )));
+    }
     Ok(())
 }

@@ -24,7 +24,7 @@ use http::StatusCode;
 use of_core::ids::OrgId;
 use serde_json::Value;
 use sqlx::PgPool;
-use support::FixtureIdp;
+use support::{FixtureIdp, MockResponse, TestServer};
 
 const ADMIN_EMAIL: &str = "admin@acme.test";
 
@@ -256,6 +256,51 @@ async fn sso_start_refuses_an_unclaimed_domain(pool: PgPool) {
         .await;
     reply.expect(StatusCode::BAD_REQUEST);
     assert_eq!(reply.error_code(), Some("sso_not_configured"));
+}
+
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn binding_a_connection_refuses_a_discovery_document_missing_issuer(pool: PgPool) {
+    // require_discovery_fields originally checked only the three *endpoint*
+    // fields, missing `issuer` — which every one of authorization_url,
+    // exchange_code, and verify_id_token also needs. Without this check, a
+    // connection with no issuer in its cached discovery document binds
+    // successfully and then fails every subsequent sign-in attempt.
+    let h = harness(pool);
+    let admin = onboard(&h, ADMIN_EMAIL).await;
+    org_with_owner(&h, "acme", &admin).await;
+
+    let server = TestServer::start().await;
+    server.push(MockResponse::json(
+        200,
+        serde_json::json!({
+            "authorization_endpoint": format!("{}/authorize", server.base_url),
+            "token_endpoint": format!("{}/token", server.base_url),
+            "jwks_uri": format!("{}/jwks", server.base_url),
+            // no "issuer"
+        }),
+    ));
+
+    let reply = Call::put("/api/orgs/acme/sso/connection")
+        .with_session(&admin.session)
+        .json(serde_json::json!({
+            "issuer": server.base_url,
+            "clientId": "client-1",
+            "clientSecret": "shh-its-a-secret",
+        }))
+        .send(&h.router)
+        .await;
+    reply.expect(StatusCode::BAD_REQUEST);
+    let message = reply.body["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("issuer"),
+        "the refusal should name the missing field: {message:?}"
+    );
+
+    let after = Call::get("/api/orgs/acme/sso/connection")
+        .with_session(&admin.session)
+        .send(&h.router)
+        .await;
+    after.expect(StatusCode::NO_CONTENT);
 }
 
 #[sqlx::test(migrations = "../of-core/migrations")]

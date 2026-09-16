@@ -1417,8 +1417,14 @@ async fn claimed_domains_are_invisible_and_unmutable_across_orgs(pool: PgPool) {
 
     let mut tx = db.begin(b.org).await.unwrap();
     assert!(domains::list(&mut tx).await.unwrap().is_empty());
-    domains::delete(&mut tx, "acme.com").await.unwrap();
-    tx.commit().await.unwrap();
+    // domains::delete now checks rows_affected() itself (a later fix — a
+    // domain another org holds is a refusal, not a silent no-op, matching
+    // mark_verified's existing rule), so guard 1 shows up twice here: the
+    // delete statement's own WHERE org_id = $1 matches nothing, and that's
+    // now surfaced as Error::Invalid rather than swallowed.
+    let err = domains::delete(&mut tx, "acme.com").await.unwrap_err();
+    assert!(matches!(err, Error::Invalid(_)));
+    tx.rollback().await.unwrap();
 
     let mut tx = db.begin(a.org).await.unwrap();
     let still_there = domains::list(&mut tx).await.unwrap();

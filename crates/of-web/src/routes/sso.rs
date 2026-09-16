@@ -562,15 +562,33 @@ pub struct ConnectionRequest {
     pub client_secret: String,
 }
 
-/// The three discovery fields the OIDC flow needs — checked here, at bind
-/// time, so a connection is never saved half-configured
+/// The four discovery fields the OIDC flow needs (`issuer`,
+/// `authorization_endpoint`, `token_endpoint`, `jwks_uri`) — checked here,
+/// at bind time, so a connection is never saved half-configured
 /// (`of_auth::oidc::discovery_str`'s own doc comment names this handler as
-/// the one expected to do it).
+/// the one expected to do it). A review pass found `issuer` missing from an
+/// earlier draft of this check — every other of this design's callers
+/// (`authorization_url`, `exchange_code`, `verify_id_token`) need one of the
+/// four; missing any of them, `issuer` included, means a connection that
+/// binds successfully and then fails every subsequent sign-in.
 fn require_discovery_fields(discovery: &serde_json::Value) -> ApiResult<()> {
-    let missing: Vec<&str> = ["authorization_endpoint", "token_endpoint", "jwks_uri"]
-        .into_iter()
-        .filter(|field| !discovery.get(field).is_some_and(|v| v.is_string()))
-        .collect();
+    // `issuer` too, not just the three endpoint fields: `verify_id_token`
+    // (`of_auth::oidc::discovery_str(discovery, "issuer")`) needs it on
+    // every callback, and a review pass found this function's own doc
+    // comment already claimed it checked "all three" endpoints plus
+    // issuer's absence would otherwise only surface as `oidc_discovery_incomplete`
+    // failing every future sign-in — exactly the "never saved half-configured"
+    // promise this function exists to keep, missed for the one field that
+    // isn't an *endpoint*.
+    let missing: Vec<&str> = [
+        "issuer",
+        "authorization_endpoint",
+        "token_endpoint",
+        "jwks_uri",
+    ]
+    .into_iter()
+    .filter(|field| !discovery.get(field).is_some_and(|v| v.is_string()))
+    .collect();
     if missing.is_empty() {
         Ok(())
     } else {

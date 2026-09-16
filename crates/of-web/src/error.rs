@@ -222,6 +222,26 @@ impl From<AuthError> for ApiError {
             return ApiError::from(inner);
         }
 
+        // Unlike Config/Crypto/Db above, these keep their own status/message
+        // (502 for an upstream failure, 400 for a refused URL — see
+        // AuthError::status()'s own comment) rather than collapsing to a
+        // generic 500, because the message itself is operator-facing
+        // diagnostic text an admin binding a connection or verifying a
+        // domain can act on. That's exactly why they still need a log line:
+        // a silent-failure review found none of the four had one at all,
+        // unlike every other admin-facing failure path in this crate —
+        // "the response tells the admin something specific" was mistaken
+        // for "so nothing needs to be logged," and the two are independent.
+        if matches!(
+            e,
+            AuthError::OidcHttp { .. }
+                | AuthError::OidcApi { .. }
+                | AuthError::DnsResolverFailure(_)
+                | AuthError::OidcUnsafeUrl { .. }
+        ) {
+            tracing::warn!(error = %e, "SSO admin-configuration request failed");
+        }
+
         let retry_after = match e {
             AuthError::RateLimited { retry_after_secs } => Some(retry_after_secs),
             _ => None,
