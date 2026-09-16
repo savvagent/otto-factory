@@ -606,3 +606,32 @@ async fn passkey_login_is_refused_for_a_member_of_an_enforce_sso_org(pool: PgPoo
     reply.expect(StatusCode::FORBIDDEN);
     assert_eq!(reply.error_code(), Some("sso_required"));
 }
+
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn passkey_login_is_not_refused_for_a_member_of_a_different_unenforced_org(pool: PgPool) {
+    // `is_member_of_sso_enforced_org` joins org_members to orgs filtered on
+    // enforce_sso — the false-positive shape this guards against is that
+    // join accidentally matching an unrelated org's flag. A bystander who
+    // never touches the enforce_sso org at all must keep signing in
+    // normally.
+    let (h, _acme_id, _admin, _idp) = org_with_sso(pool.clone(), "acme", "acme.test").await;
+
+    let enable = Call::put("/api/orgs/acme/sso/enforce")
+        .with_session(&_admin.session)
+        .json(serde_json::json!({ "enforceSso": true }))
+        .send(&h.router)
+        .await;
+    enable.expect(StatusCode::OK);
+
+    let owner = onboard(&h, "owner@other.test").await;
+    let other_id = org_with_owner(&h, "other", &owner).await;
+    let mut bystander = onboard(&h, "bystander@other.test").await;
+    common::add_member(&h, other_id, bystander.user, of_core::orgs::Role::Member).await;
+
+    let reply = sign_in(&h, &mut bystander).await;
+    reply.expect(StatusCode::OK);
+    assert!(
+        reply.session_cookie().is_some(),
+        "a member of an unrelated, non-enforce_sso org must still sign in with a passkey"
+    );
+}

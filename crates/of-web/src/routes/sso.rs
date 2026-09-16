@@ -435,7 +435,17 @@ async fn link_authenticated(
         return Err(Outcome::Refuse(EMAIL_MISMATCH));
     }
 
-    identities::link(&state.db, caller_user_id, idp_connection_id, subject).await?;
+    // `link`'s `ON CONFLICT (idp_connection_id, subject) DO NOTHING` returns
+    // the *existing* row on a race, which is not necessarily `caller_user_id`
+    // — a concurrent callback could have linked this exact pair to a
+    // different account in the window since the `resolve_user` check above.
+    // Trust the row `link` actually reports, not the id this call intended;
+    // a mismatch is the same identity-theft shape the main match's
+    // `(Some(_), Some(_))` arm refuses, just narrowed to this race window.
+    let identity = identities::link(&state.db, caller_user_id, idp_connection_id, subject).await?;
+    if identity.user_id != caller_user_id {
+        return Err(Outcome::Refuse(IDENTITY_LINKED_ELSEWHERE));
+    }
     Ok(caller_user_id)
 }
 
@@ -468,23 +478,33 @@ async fn link_anonymous(
         return Err(Outcome::Refuse(EMAIL_COLLISION));
     };
 
-    identities::link(&state.db, new_user_id, idp_connection_id, subject).await?;
+    // `link`'s `ON CONFLICT (idp_connection_id, subject) DO NOTHING` returns
+    // the *existing* row on a race, which may not be the row we just
+    // created — a concurrent callback could have linked this exact pair
+    // first. Use the id `link` actually reports as the winner, not
+    // `new_user_id` unconditionally, or a session/org_members row could be
+    // minted for a freshly-created account that `user_identities` doesn't
+    // actually point at. The loser (`new_user_id`, if it differs) is left as
+    // a harmless identity-less user row — the same one-shot race-debris
+    // tolerance `identities::link`'s own doc comment already accepts.
+    let identity = identities::link(&state.db, new_user_id, idp_connection_id, subject).await?;
+    let user_id = identity.user_id;
 
     // Not optional: without this, a federated user authenticates
     // successfully but sees no orgs in the console — the concrete mechanism
     // behind "self-service enterprise onboarding" (spec's Goal).
     let mut tx = state.db.begin(org_id).await?;
-    tx.add_member(new_user_id, Role::Member).await?;
+    tx.add_member(user_id, Role::Member).await?;
     tx.audit(
         Entry::new(action::MEMBER_JOINED)
-            .actor(new_user_id)
-            .target("user", new_user_id.to_string())
+            .actor(user_id)
+            .target("user", user_id.to_string())
             .detail(serde_json::json!({ "via": "sso" })),
     )
     .await?;
     tx.commit().await?;
 
-    Ok(new_user_id)
+    Ok(user_id)
 }
 
 // ---------------------------------------------------------------------------
