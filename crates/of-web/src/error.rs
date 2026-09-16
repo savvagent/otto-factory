@@ -150,7 +150,8 @@ impl From<CoreError> for ApiError {
             | LeaseNotHeld(_)
             | AlreadyClaimed { .. }
             | TicketAlreadyLinked { .. }
-            | IdempotencyKeyConflict { .. } => StatusCode::CONFLICT,
+            | IdempotencyKeyConflict { .. }
+            | DomainAlreadyClaimed => StatusCode::CONFLICT,
 
             // Gone, not Not Found: the link was real, and saying so is what
             // tells the holder to ask for a new one rather than re-check the URL.
@@ -158,9 +159,15 @@ impl From<CoreError> for ApiError {
 
             InviteWrongAccount { .. } => StatusCode::FORBIDDEN,
 
-            WrongStatus { .. } | DependencyCycle(..) | Invalid(_) | NotAMember(_) => {
-                StatusCode::BAD_REQUEST
-            }
+            // enterprise OIDC federation (spec §5): every lockout guard
+            // (`set_enforce_sso`'s enable path, `idp::delete_connection`,
+            // `domains::delete`) refuses with 400, naming the reason, so the
+            // admin who tripped it knows what to fix before retrying.
+            WrongStatus { .. }
+            | DependencyCycle(..)
+            | Invalid(_)
+            | NotAMember(_)
+            | SsoLockout { .. } => StatusCode::BAD_REQUEST,
 
             // Retriable, not the caller's fault — the same distinction
             // retriable() already draws at the MCP layer. 503, not 500: this

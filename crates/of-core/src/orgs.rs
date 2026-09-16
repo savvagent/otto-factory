@@ -506,3 +506,107 @@ impl Tx<'_> {
         Ok(())
     }
 }
+
+// ------------------------------------------------------ enterprise OIDC SSO
+
+/// Lock this org's row for the rest of the transaction, before evaluating
+/// whether a working SSO path still exists.
+///
+/// Three call sites share this: [`set_enforce_sso`]'s enable path,
+/// `idp::delete_connection`, and `domains::delete`. All three answer the same
+/// underlying question — "does this org still have a working SSO path" —
+/// about the same row, and without locking it, two concurrent admin actions
+/// (two deletes against the org's two verified domains, say, or one delete
+/// racing one enable) can each read "still safe" before either commits, and
+/// both writes land — landing the org in the exact locked-out state this
+/// guard exists to prevent (`enforce_sso = true` with no bound connection or
+/// no verified domain). This is the same locked-read-then-write discipline
+/// [`Tx::count_owners_for_update`] already uses for its own concurrent-
+/// admin-action race; a plain read-then-write without it is a real TOCTOU
+/// race, not a theoretical one, since two admins acting on the same org's SSO
+/// settings at once is exactly the scenario the console makes easy to
+/// trigger by accident.
+///
+/// Only locks — callers read whatever they need (e.g. [`enforce_sso_flag`])
+/// in a second statement inside the same, now-locked transaction.
+pub async fn lock_for_sso_guard(tx: &mut Tx<'_>) -> Result<()> {
+    sqlx::query("SELECT 1 FROM orgs WHERE id = $1 FOR UPDATE")
+        .bind(tx.org())
+        .execute(tx.conn())
+        .await?;
+    Ok(())
+}
+
+/// Read `enforce_sso` for the caller's own org.
+///
+/// `pub(crate)` rather than `pub`: every caller of this is expected to have
+/// called [`lock_for_sso_guard`] first, in the same transaction, so the value
+/// read here cannot change out from under the decision it feeds — a bare
+/// unlocked read would reopen the exact TOCTOU window that guard exists to
+/// close. Keeping it crate-private means `idp::delete_connection` and
+/// `domains::delete` (both call this after their own `lock_for_sso_guard`)
+/// are the only callers, rather than a public accessor someone could reach
+/// for without the lock.
+pub(crate) async fn enforce_sso_flag(tx: &mut Tx<'_>) -> Result<bool> {
+    let enforce_sso: bool = sqlx::query_scalar("SELECT enforce_sso FROM orgs WHERE id = $1")
+        .bind(tx.org())
+        .fetch_one(tx.conn())
+        .await?;
+    Ok(enforce_sso)
+}
+
+/// Turn `enforce_sso` on or off for the caller's own org.
+///
+/// Turning it **on** is refused (`Error::SsoLockout`, naming which piece is
+/// missing) unless the org has both a bound `idp_connection` **and** at
+/// least one verified `claimed_domains` row — `idp::resolve_for_domain` is an
+/// inner join, so *either* piece missing alone already makes SSO sign-in
+/// unreachable, and turning on enforcement with no way for any member to
+/// complete an IdP sign-in would lock every passkey-only member out with no
+/// path back in. Turning it **off** has no guard — disabling enforcement can
+/// never itself produce a lockout.
+///
+/// `orgs` carries no RLS policy at all — it is the tenant, not tenant-scoped
+/// data (`0029_org_job_counters.sql`'s own comment; absent from
+/// `0007_rls.sql`'s `tenant_tables` array). This function's only protection
+/// is guard 1: `UPDATE orgs SET enforce_sso = $2 WHERE id = tx.org()` — the
+/// caller cannot name a different org's row because `Tx` is pinned to the
+/// caller's own org id and `orgs.id` (not `org_id`) is the match column.
+pub async fn set_enforce_sso(tx: &mut Tx<'_>, enforce: bool) -> Result<Org> {
+    if enforce {
+        lock_for_sso_guard(tx).await?;
+
+        let has_connection = crate::idp::get_connection(tx).await?.is_some();
+        let has_verified_domain = crate::domains::list(tx)
+            .await?
+            .iter()
+            .any(|d| d.verified_at.is_some());
+
+        if !has_connection || !has_verified_domain {
+            let reason = match (has_connection, has_verified_domain) {
+                (false, false) => {
+                    "no IdP connection is bound and no domain is verified for this org"
+                }
+                (false, true) => "no IdP connection is bound for this org",
+                (true, false) => "no domain is verified for this org",
+                (true, true) => unreachable!("checked above by the enclosing if"),
+            };
+            return Err(Error::SsoLockout {
+                reason: format!(
+                    "cannot turn on enforce_sso: {reason} — bind a connection and verify \
+                     a domain first, or SSO sign-in would be unreachable for every member."
+                ),
+            });
+        }
+    }
+
+    let org: Org = sqlx::query_as(&format!(
+        "UPDATE orgs SET enforce_sso = $2 WHERE id = $1 RETURNING {ORG_COLS}"
+    ))
+    .bind(tx.org())
+    .bind(enforce)
+    .fetch_one(tx.conn())
+    .await?;
+
+    Ok(org)
+}

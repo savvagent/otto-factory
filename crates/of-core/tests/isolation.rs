@@ -14,13 +14,18 @@
 
 mod common;
 
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine;
 use common::{db, job, tenant};
+use of_core::crypto::Cipher;
+use of_core::error::Error;
 use of_core::ids::{JobId, OrgId};
 use of_core::jobs::JobFilter;
 use of_core::messages::{InboxQuery, NewMessage};
-use of_core::orgs::Role;
+use of_core::orgs::{self, Role};
 use of_core::repos::{RepoPatch, RepoRef};
 use of_core::trackers::{resolve_binding, upsert_binding, upsert_connection, Provider};
+use of_core::{domains, identities, idp};
 use sqlx::PgPool;
 
 #[sqlx::test]
@@ -1347,4 +1352,227 @@ async fn audit_rows_cannot_be_erased_from_a_request(pool: PgPool) {
         .unwrap();
     tx.commit().await.unwrap();
     assert_eq!(remaining, 1);
+}
+
+// ------------------------------------------------------ enterprise OIDC SSO
+//
+// idp_connections, claimed_domains, and orgs.enforce_sso all carry no
+// org_id-based RLS policy at all (CLAUDE.md's own bootstrap-before-org-known
+// list; orgs is the tenant itself, not tenant-scoped data). These are guard-1
+// tests, not rls_scopes_* ones -- there is no policy to probe here, only the
+// explicit org_id/id predicate every statement in idp.rs/domains.rs/orgs.rs
+// carries. Matches resolve_connection_org's existing test comment convention
+// in tests/trackers.rs.
+
+/// Org A binds an IdP connection; a Tx pinned to org B cannot see it through
+/// get_connection, and calling delete_connection from org B's Tx only ever
+/// names org B's own (nonexistent) connection -- org A's row is untouched.
+#[sqlx::test]
+async fn idp_connections_are_invisible_and_unmutable_across_orgs(pool: PgPool) {
+    let db = db(pool);
+    let a = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+    let b = tenant(&db, "globex", "git@github.com:globex/api.git").await;
+    let cipher = Cipher::from_base64_key(&B64.encode([11u8; 32])).unwrap();
+
+    let mut tx = db.begin(a.org).await.unwrap();
+    let conn_a = idp::upsert_connection(
+        &mut tx,
+        "https://idp.acme.test",
+        "client-a",
+        cipher.seal(b"secret-a").unwrap(),
+        serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    let mut tx = db.begin(b.org).await.unwrap();
+    assert!(idp::get_connection(&mut tx).await.unwrap().is_none());
+    // Org B has no connection of its own (enforce_sso is off), so this is a
+    // no-op against org B's own row -- it must not reach org A's.
+    idp::delete_connection(&mut tx).await.unwrap();
+    tx.commit().await.unwrap();
+
+    let mut tx = db.begin(a.org).await.unwrap();
+    let still_there = idp::get_connection(&mut tx).await.unwrap().unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(still_there.id, conn_a.id);
+}
+
+/// Org A claims a domain; a Tx pinned to org B cannot see it through
+/// domains::list, and naming it by domain string through domains::delete
+/// affects zero rows -- the WHERE org_id = $1 AND domain = $2 predicate is
+/// what stops it, not the domain string being unguessable.
+#[sqlx::test]
+async fn claimed_domains_are_invisible_and_unmutable_across_orgs(pool: PgPool) {
+    let db = db(pool);
+    let a = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+    let b = tenant(&db, "globex", "git@github.com:globex/api.git").await;
+
+    let mut tx = db.begin(a.org).await.unwrap();
+    domains::claim(&mut tx, "acme.com", "token-a")
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let mut tx = db.begin(b.org).await.unwrap();
+    assert!(domains::list(&mut tx).await.unwrap().is_empty());
+    domains::delete(&mut tx, "acme.com").await.unwrap();
+    tx.commit().await.unwrap();
+
+    let mut tx = db.begin(a.org).await.unwrap();
+    let still_there = domains::list(&mut tx).await.unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(still_there.len(), 1);
+    assert_eq!(still_there[0].domain, "acme.com");
+}
+
+/// A domain already held by org A cannot be claimed by org B -- the
+/// `ON CONFLICT (domain) DO UPDATE ... WHERE claimed_domains.org_id = $1`
+/// shape blocks the update for a foreign conflict and domains::claim turns
+/// that into Error::DomainAlreadyClaimed, generic, naming no org. Org A's
+/// row (including its verification_token) is left exactly as it was.
+#[sqlx::test]
+async fn domains_claim_collision_across_orgs_is_refused(pool: PgPool) {
+    let db = db(pool);
+    let a = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+    let b = tenant(&db, "globex", "git@github.com:globex/api.git").await;
+
+    let mut tx = db.begin(a.org).await.unwrap();
+    let original = domains::claim(&mut tx, "shared.test", "token-a")
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let mut tx = db.begin(b.org).await.unwrap();
+    let err = domains::claim(&mut tx, "shared.test", "token-b")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::DomainAlreadyClaimed));
+    tx.rollback().await.unwrap();
+
+    let mut tx = db.begin(a.org).await.unwrap();
+    let still_theirs = domains::list(&mut tx).await.unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(still_theirs.len(), 1);
+    assert_eq!(
+        still_theirs[0].verification_token,
+        original.verification_token
+    );
+}
+
+/// idp::resolve_for_domain and identities::resolve_user are the two
+/// unscoped, bootstrap-before-org-known accessors this feature adds. Each
+/// must resolve only its own org/connection -- a shared subject string
+/// linked under two different connections must not cross-resolve, and a
+/// domain claimed by one org must never resolve to the other's connection.
+#[sqlx::test]
+async fn resolve_for_domain_and_resolve_user_resolve_only_their_own_org(pool: PgPool) {
+    let db = db(pool);
+    let a = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+    let b = tenant(&db, "globex", "git@github.com:globex/api.git").await;
+    let cipher = Cipher::from_base64_key(&B64.encode([12u8; 32])).unwrap();
+
+    let mut tx = db.begin(a.org).await.unwrap();
+    let conn_a = idp::upsert_connection(
+        &mut tx,
+        "https://idp.acme.test",
+        "client-a",
+        cipher.seal(b"secret-a").unwrap(),
+        serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+    domains::claim(&mut tx, "acme.com", "token-a")
+        .await
+        .unwrap();
+    domains::mark_verified(&mut tx, "acme.com").await.unwrap();
+    tx.commit().await.unwrap();
+
+    let mut tx = db.begin(b.org).await.unwrap();
+    let conn_b = idp::upsert_connection(
+        &mut tx,
+        "https://idp.globex.test",
+        "client-b",
+        cipher.seal(b"secret-b").unwrap(),
+        serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+    domains::claim(&mut tx, "globex.com", "token-b")
+        .await
+        .unwrap();
+    domains::mark_verified(&mut tx, "globex.com").await.unwrap();
+    tx.commit().await.unwrap();
+
+    let (org, conn) = idp::resolve_for_domain(&db, "acme.com")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(org, a.org);
+    assert_eq!(conn.id, conn_a.id);
+
+    let (org, conn) = idp::resolve_for_domain(&db, "globex.com")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(org, b.org);
+    assert_eq!(conn.id, conn_b.id);
+
+    identities::link(&db, a.user, conn_a.id, "shared-subject")
+        .await
+        .unwrap();
+    identities::link(&db, b.user, conn_b.id, "shared-subject")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        identities::resolve_user(&db, conn_a.id, "shared-subject")
+            .await
+            .unwrap(),
+        Some(a.user)
+    );
+    assert_eq!(
+        identities::resolve_user(&db, conn_b.id, "shared-subject")
+            .await
+            .unwrap(),
+        Some(b.user)
+    );
+}
+
+/// orgs carries no RLS policy at all -- it is the tenant, not tenant-scoped
+/// data (0029_org_job_counters.sql's own comment). set_enforce_sso's only
+/// protection is `UPDATE orgs SET enforce_sso = $2 WHERE id = tx.org()`:
+/// there is no argument through which a Tx pinned to org B could even name
+/// org A's row. This proves the point by construction -- org B flips its own
+/// flag (after satisfying its own guard) and org A's is left untouched.
+#[sqlx::test]
+async fn set_enforce_sso_cannot_flip_another_orgs_flag(pool: PgPool) {
+    let db = db(pool);
+    let a = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+    let b = tenant(&db, "globex", "git@github.com:globex/api.git").await;
+    let cipher = Cipher::from_base64_key(&B64.encode([13u8; 32])).unwrap();
+
+    let mut tx = db.begin(b.org).await.unwrap();
+    idp::upsert_connection(
+        &mut tx,
+        "https://idp.globex.test",
+        "client-b",
+        cipher.seal(b"secret-b").unwrap(),
+        serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+    domains::claim(&mut tx, "globex.com", "token-b")
+        .await
+        .unwrap();
+    domains::mark_verified(&mut tx, "globex.com").await.unwrap();
+    orgs::set_enforce_sso(&mut tx, true).await.unwrap();
+    tx.commit().await.unwrap();
+
+    let a_org = db.get_org(a.org).await.unwrap().unwrap();
+    assert!(
+        !a_org.enforce_sso,
+        "org B's change must not reach org A's row"
+    );
 }
