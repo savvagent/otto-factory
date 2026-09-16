@@ -496,6 +496,7 @@ async fn add_passkey_finish_refuses_a_ceremony_started_by_another_account(pool: 
         .send(&h.router)
         .await;
     finished.expect(StatusCode::FORBIDDEN);
+    assert_eq!(finished.error_code(), Some("ceremony_account_mismatch"));
 
     // Scoped to `owner` — the account whose ceremony was substituted, and
     // the account `finish_registration_tx` would have written the leaked
@@ -528,6 +529,21 @@ async fn add_passkey_finish_refuses_a_ceremony_started_by_another_account(pool: 
         audit_count, 1,
         "a refused request must not add a second row asserting `owner` completed a registration \
          nobody but the ceremony's substituted caller attempted"
+    );
+
+    // The refusal itself still leaves a trace — on a separate connection from
+    // the one that rolled back — naming both the ceremony's real account and
+    // who attempted to finish it.
+    let refusal: (of_core::ids::UserId, serde_json::Value) =
+        sqlx::query_as("SELECT actor_user_id, detail FROM audit_events WHERE action = $1")
+            .bind(of_core::audit::action::PASSKEY_REGISTRATION_REFUSED)
+            .fetch_one(h.db.pool())
+            .await
+            .unwrap();
+    assert_eq!(refusal.0, owner.user);
+    assert_eq!(
+        refusal.1["attemptedBy"],
+        serde_json::json!(other.user.to_string())
     );
 }
 

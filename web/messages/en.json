@@ -58,6 +58,7 @@
   "error_forbidden": "Your role does not allow that.",
   "error_invalid_credentials": "That did not work. Try again.",
   "error_ceremony_expired": "That took too long. Start again.",
+  "error_ceremony_account_mismatch": "That passkey ceremony belongs to a different account.",
   "error_credential_already_registered": "That authenticator is already registered to this account.",
   "error_unknown_credential": "That passkey is not registered here. Try a different one.",
   "error_last_passkey": "This is the only passkey on the account. Add another before removing this one.",

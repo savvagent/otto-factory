@@ -611,10 +611,16 @@ async fn a_ceremony_account_mismatch_writes_nothing(pool: PgPool) {
     )
     .await;
 
-    assert!(
-        matches!(result, Err(AuthError::CeremonyAccountMismatch)),
-        "expected a CeremonyAccountMismatch, got {result:?}"
-    );
+    match result {
+        Err(AuthError::CeremonyAccountMismatch {
+            ceremony_account,
+            caller_account,
+        }) => {
+            assert_eq!(ceremony_account, owner, "the ceremony's real account");
+            assert_eq!(caller_account, other, "who the caller expected to be");
+        }
+        unexpected => panic!("expected a CeremonyAccountMismatch, got {unexpected:?}"),
+    }
 
     let passkey_count: i64 = sqlx::query_scalar("SELECT count(*) FROM passkeys")
         .fetch_one(db.pool())

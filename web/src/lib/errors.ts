@@ -65,6 +65,7 @@ const KNOWN: Record<string, () => string> = {
   forbidden: () => m.error_forbidden(),
   invalid_credentials: () => m.error_invalid_credentials(),
   ceremony_expired: () => m.error_ceremony_expired(),
+  ceremony_account_mismatch: () => m.error_ceremony_account_mismatch(),
   credential_already_registered: () => m.error_credential_already_registered(),
   unknown_credential: () => m.error_unknown_credential(),
   last_passkey: () => m.error_last_passkey(),

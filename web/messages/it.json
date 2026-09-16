@@ -60,6 +60,7 @@
   "error_forbidden": "Il tuo ruolo non lo consente.",
   "error_invalid_credentials": "Non ha funzionato. Riprova.",
   "error_ceremony_expired": "Ci è voluto troppo tempo. Ricomincia.",
+  "error_ceremony_account_mismatch": "Questa procedura passkey appartiene a un altro account.",
   "error_credential_already_registered": "Quell'autenticatore è già registrato su questo account.",
   "error_unknown_credential": "Quella passkey non è registrata qui. Provane un'altra.",
   "error_last_passkey": "Questa è l'unica passkey dell'account. Aggiungine un'altra prima di rimuovere questa.",

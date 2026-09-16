@@ -230,33 +230,56 @@ keeps its existing route, method, and response shapes (403 on mismatch, 204 on s
               .send(&h.router)
               .await;
           finished.expect(StatusCode::FORBIDDEN);
+          assert_eq!(finished.error_code(), Some("ceremony_account_mismatch"));
 
-          // Scoped to `other` (the caller the mismatch was attributed to, and
-          // the account a successful attach would have added a *second*
-          // credential/audit row to) — `other` already has exactly one of each
-          // from `onboard`'s own signup ceremony, and the assertion is that the
-          // refused attempt added no more, not that the table is empty.
+          // Scoped to `owner` — the account whose ceremony was substituted,
+          // and the account `finish_registration_tx` would have written the
+          // leaked credential/audit row under (it reads the account to write
+          // from the ceremony's own stored `user_id`, never from the caller
+          // who happened to call `finish`). Scoping this to `other` instead
+          // — an earlier draft of both this test and this plan did — checks
+          // nothing: `other`'s own counts were never affected by the pre-fix
+          // bug either, so that version passed unmodified against the
+          // vulnerable code (verified empirically during review).
           let passkey_count: i64 = sqlx::query_scalar("SELECT count(*) FROM passkeys WHERE user_id = $1")
-              .bind(other.user)
+              .bind(owner.user)
               .fetch_one(h.db.pool())
               .await
               .unwrap();
           assert_eq!(
               passkey_count, 1,
-              "a ceremony/caller mismatch must not leave a second credential behind on `other`"
+              "a ceremony/caller mismatch must not leave a second credential behind on `owner`, \
+               the ceremony's real account"
           );
 
           let audit_count: i64 = sqlx::query_scalar(
               "SELECT count(*) FROM audit_events WHERE action = $1 AND actor_user_id = $2",
           )
           .bind(of_core::audit::action::PASSKEY_REGISTERED)
-          .bind(other.user)
+          .bind(owner.user)
           .fetch_one(h.db.pool())
           .await
           .unwrap();
           assert_eq!(
               audit_count, 1,
-              "a refused request must not add a second row asserting `other` completed a registration"
+              "a refused request must not add a second row asserting `owner` completed a \
+               registration nobody but the ceremony's substituted caller attempted"
+          );
+
+          // Post-review addition: the refusal itself still leaves a trace,
+          // on a connection independent of the one that rolled back, naming
+          // both the ceremony's real account and who attempted to finish it.
+          let refusal: (of_core::ids::UserId, serde_json::Value) = sqlx::query_as(
+              "SELECT actor_user_id, detail FROM audit_events WHERE action = $1",
+          )
+          .bind(of_core::audit::action::PASSKEY_REGISTRATION_REFUSED)
+          .fetch_one(h.db.pool())
+          .await
+          .unwrap();
+          assert_eq!(refusal.0, owner.user);
+          assert_eq!(
+              refusal.1["attemptedBy"],
+              serde_json::json!(other.user.to_string())
           );
       }
       ```
@@ -292,10 +315,42 @@ keeps its existing route, method, and response shapes (403 on mismatch, 204 on s
 
 ## Final gate (both tasks)
 
-- [ ] `cargo test --workspace`
-- [ ] `cargo clippy --all-targets -- -D warnings`
-- [ ] `cargo fmt --all --check`
+- [x] `cargo test --workspace`
+- [x] `cargo clippy --all-targets -- -D warnings`
+- [x] `cargo fmt --all --check`
 
-No `web/` change in this plan — nothing under `web/src` reads `AuthError`'s `code` string for this
-specific path (confirmed in the spec's Risks section), so `npm run check`/`lint`/`test`/`build` are
-not gated on this change. State this explicitly at close-out rather than skip it.
+Originally: no `web/` change in this plan, since nothing under `web/src` was believed to read
+`AuthError`'s `code` string for this specific path. **Corrected post-review — see the addendum
+below**: that check (a grep for the literal string `"forbidden"`) missed `web/src/lib/errors.ts`'s
+bare-object-key lookup, and a `web/` change was in fact required.
+
+## Addendum — console translation gap and an audit trail for the refusal (post-review) ✅
+
+Review of the PR found two gaps this plan's original two tasks didn't cover, both now fixed in the
+same PR (not deferred to a follow-up, since both are small and directly related to what Task 2
+shipped):
+
+- [x] **Console translation.** Added `error_ceremony_account_mismatch` to all six
+      `web/messages/{en,es,de,fr,it,hi}.json` catalogs and a matching entry in
+      `web/src/lib/errors.ts`'s `KNOWN` map, so `add_passkey_finish`'s 403 stays translated in
+      every locale instead of falling back to the server's English message (which is what
+      happened for the new, more specific `code` this plan introduced). Verified with
+      `npm run check` (message-catalog completeness), `npm run lint`, and `npm test`.
+- [x] **An audit trail for the refusal.** `AuthError::CeremonyAccountMismatch` changed from a unit
+      variant to `{ ceremony_account, caller_account }`, and `finish_registration` (the wrapper,
+      not `finish_registration_tx`) now writes a best-effort `auth.passkey.registration_refused`
+      audit row on a connection independent of the rolled-back transaction when it catches this
+      specific error — mirroring `claim_finish`'s existing `note_claim_refused` pattern, for the
+      same reason: the one write that would prove a hijack attempt happened is exactly the write
+      this fix prevents from ever committing. New action constant:
+      `of_core::audit::action::PASSKEY_REGISTRATION_REFUSED`. Both new tests
+      (`crates/of-auth/tests/passkeys.rs`'s `a_ceremony_account_mismatch_writes_nothing` and
+      `crates/of-web/tests/console.rs`'s `add_passkey_finish_refuses_a_ceremony_started_by_another_account`)
+      were extended to assert on the two account fields and, at the HTTP level, on the new audit
+      row and the response's `error.code`.
+
+Also filed as a separate, out-of-scope follow-up issue (not folded into this plan): registration
+ceremonies are discriminated only by `kind = "register"`, not by which flow created them, so
+`signup_finish` can redeem a ceremony started by `claim_start` or `add_passkey_start`. Pre-existing,
+not introduced or worsened by this plan's changes — see the spec's own Addendum for the full
+description.

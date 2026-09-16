@@ -221,8 +221,12 @@ pub async fn finish_registration_tx(
 }
 ```
 
-`take_ceremony`'s `DELETE ... RETURNING` still runs first and is unconditional — the ceremony is
-consumed (single-use) whether or not `expected` matches, exactly as today.
+`take_ceremony`'s `DELETE ... RETURNING` still runs first, unconditionally. It does **not**,
+however, mean the ceremony is consumed on a mismatch: `finish_registration` propagates the error
+with `?` before `tx.commit()`, so the whole transaction — the DELETE included — rolls back with
+everything else, exactly the property `#132` established for this transaction. A mismatch leaves
+the ceremony exactly as redeemable as it was before the attempt; see the corrected Error Handling
+note below.
 
 ### 3. `crates/of-web/src/routes/auth.rs`: the three call sites
 
@@ -268,10 +272,15 @@ consumed (single-use) whether or not `expected` matches, exactly as today.
   "wins" after writes have started. Unaffected by this change; already true today.
 - **`expected` is `Some` but the ceremony's stored `user_id` genuinely matches.** No behavior change
   from today — proceeds exactly as before.
-- **A caller retries after a `CeremonyAccountMismatch`.** The ceremony row is already gone
-  (`take_ceremony` deleted it on the first attempt), so a retry with the same `ceremony_id` hits
-  `AuthError::CeremonyExpired`, not a second mismatch — same as any other single-use ceremony
-  failure today.
+- **A caller retries after a `CeremonyAccountMismatch`.** Corrected from an earlier draft of this
+  spec, which claimed the ceremony was already consumed at this point — it is not.
+  `finish_registration`'s `?` propagates the error before `tx.commit()`, so the transaction
+  (including `take_ceremony`'s DELETE) rolls back, and the ceremony survives exactly as `#132`'s
+  fix intends: `crates/of-auth/tests/passkeys.rs`'s `a_forced_audit_failure_also_restores_the_ceremony`
+  proves the identical mechanism on this same function. A retry with the same `ceremony_id` — by
+  the ceremony's real owner, say, after a substitution attempt was refused — hits the `expected`
+  check again with the ceremony intact, not `AuthError::CeremonyExpired`. This is the better
+  behavior: a hijack attempt does not get to burn the legitimate owner's in-flight ceremony.
 
 ## Testing Approach
 
@@ -292,8 +301,44 @@ consumed (single-use) whether or not `expected` matches, exactly as today.
 
 ## Risks & Open Questions
 
-- **Checked, not a risk**: the `code` value for this 403 changes from `"forbidden"` to
-  `"ceremony_account_mismatch"` for `add_passkey_finish` specifically (see Assumptions).
-  `grep -rn "'forbidden'\|\"forbidden\"" web/src` finds exactly one hit
-  (`web/src/lib/poll-fatal.test.ts:40`), a generic `fatalApiFailure`-for-any-403 test unrelated to
-  this endpoint or its code string. Nothing in `web/src` branches on `"forbidden"` specifically.
+- **This grep-based check was wrong, and the addendum below is the correction.** An earlier draft
+  claimed `grep -rn "'forbidden'\|\"forbidden\"" web/src` (one hit, an unrelated generic-403 test)
+  proved nothing in `web/src` cared about the `code` string changing. Review caught that this is
+  the wrong tool for the job: `web/src/lib/errors.ts`'s `KNOWN` map branches on the code via a
+  **bare object key** (`forbidden: () => m.error_forbidden()`), which that grep pattern cannot
+  match at all. See the Addendum for what this actually meant and how it was fixed.
+
+## Addendum — console translation gap and an audit trail for the refusal (post-review)
+
+Two things review found that this document's original text got wrong or left incomplete:
+
+1. **The console silently lost translation for this exact error.** Before this change,
+   `add_passkey_finish`'s 403 carried `code: "forbidden"`, which `web/src/lib/errors.ts`'s `KNOWN`
+   map already translates (`m.error_forbidden()`, in all six locales). The new
+   `"ceremony_account_mismatch"` code had no entry, so `messageFor()` fell through to the server's
+   English `message` for every non-English locale — a real regression, reachable in an ordinary
+   (non-attack) scenario: two open tabs, sign out of one account and into another, then finish the
+   stale tab's pending ceremony. **Fixed:** added `error_ceremony_account_mismatch` to all six
+   `web/messages/*.json` catalogs and a matching entry in `errors.ts`'s `KNOWN` map.
+2. **A hijack attempt left no trace anywhere.** `CeremonyAccountMismatch` was originally a unit
+   variant: the function that raises it discards both the ceremony's real account and the caller's
+   claimed one the moment it constructs the error, and since the whole point of the fix is that
+   nothing commits on this path, a genuine substitution attempt against `add_passkey_finish`
+   produced neither a `passkeys` row, an audit row, nor a log line — nothing an operator or the
+   ceremony's real owner could ever find. **Fixed:** `CeremonyAccountMismatch` now carries
+   `{ ceremony_account, caller_account }`; `finish_registration` (not `finish_registration_tx` —
+   see that function's own doc comment for why the wrapper is where this belongs) writes a
+   best-effort `auth.passkey.registration_refused` audit row on a connection independent of the
+   rolled-back transaction, mirroring `claim_finish`'s existing `note_claim_refused` pattern for
+   the identical reason: the write that would prove the attempt happened is exactly the write this
+   fix prevents from being on the same transaction as the attempt.
+
+**Out of scope for this PR, filed as a separate issue:** independent security review also found
+that WebAuthn registration ceremonies are discriminated only by `kind = "register"`, not by which
+flow (signup / add-passkey / claim) created them — so `POST /api/auth/signup/finish`, which is
+unauthenticated and always passes `expected: None`, can redeem a ceremony started by `claim_start`
+or `add_passkey_start`. This is pre-existing (not introduced by this PR, and not made worse by it),
+but it is the same threat model issue #109 is about, reachable through the one endpoint this PR
+does not touch. Closing it needs ceremonies to carry which flow minted them (e.g. a `kind` per flow,
+or a separate `flow` column), which is a larger, separate design — tracked as its own issue rather
+than folded into this one.
