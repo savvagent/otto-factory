@@ -1,7 +1,6 @@
 # Enterprise OIDC federation design
 
-> **Status:** DRAFT — schema exists (`crates/of-core/migrations/0005_auth.sql`); nothing else
-> does. This spec covers the whole feature in one task.
+> **Status:** IMPLEMENTED — shipped in #189.
 > **Implements:** the "Enterprises — OIDC federation" paragraph of
 > `docs/specs/2026-09-01-otto-factory-design.md`'s Authentication section.
 > **Depends on:** milestone 1 (passkey auth, sessions, `OrgCtx`) — merged. The promoted

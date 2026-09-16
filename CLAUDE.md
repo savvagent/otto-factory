@@ -89,7 +89,7 @@ with) — and `current_org()` is NULL for the statement's entire lifetime, so
 `org_id = current_org()` is never true and the statement silently matches **zero rows, for
 every tenant**, forever. (A handful of `org_id NOT NULL` tables — `org_members`,
 `access_tokens`, `refresh_tokens`, `authorization_codes`, `idp_connections`, `claimed_domains`,
-`tracker_connection_index` — carry no `*_tenant_isolation` policy at all, deliberately (auth has
+`tracker_connection_index`, `sso_ceremonies` — carry no `*_tenant_isolation` policy at all, deliberately (auth has
 to resolve a principal before an org is known; see `0007_rls.sql`'s own note on this). Those have
 no second branch: an unscoped rewrite of one of them always hits the first outcome, on every
 deployment shape.)
