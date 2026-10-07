@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.9.0](https://github.com/savvagent/otto-factory/compare/v0.8.0...v0.9.0) (2026-10-07)
+
+
+### ⚠ BREAKING CHANGES
+
+* migration 0034 drops the claimed_domains (domain) primary key, so the previous release's ON CONFLICT (domain) fails. The deploy is forward-only; roll back by restoring the database.
+
+### Code Refactoring
+
+* run on otto-platform crates (platform cutover Phase 3) ([#194](https://github.com/savvagent/otto-factory/issues/194)) ([48aeafe](https://github.com/savvagent/otto-factory/commit/48aeafe17b6df6998a0aacee373688b20477f218)), closes [#191](https://github.com/savvagent/otto-factory/issues/191)
+
 ## [0.8.0](https://github.com/savvagent/otto-factory/compare/v0.7.0...v0.8.0) (2026-09-16)
 
 
