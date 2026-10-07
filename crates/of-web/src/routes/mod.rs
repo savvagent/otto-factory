@@ -4,16 +4,15 @@
 //! it and what documents it. A handler that is not in the catalog is not
 //! reachable — deliberately, so that adding a route and describing it are the
 //! same act.
+//!
+//! Identity — accounts, orgs, members, teams, SSO, tokens, usage — is not here:
+//! it lives in the otto platform.
 
-pub mod auth;
+pub mod audit;
 pub mod jobs;
-pub mod orgs;
+pub mod platform;
 pub mod repos;
-pub mod sso;
-pub mod teams;
-pub mod tokens;
 pub mod trackers;
-pub mod usage;
 pub mod webhooks;
 
 /// Distinguish "field absent" from "field present and null".
@@ -23,11 +22,9 @@ pub mod webhooks;
 /// because of `#[serde(default)]`, while an explicit `null` arrives as
 /// `Some(None)`.
 ///
-/// Two `PATCH` bodies need the distinction and neither can fake it. A repo's
-/// `teamId` has to be un-settable or a team-scoped repo can never be made
-/// org-wide, and a team with repos still on it can never be deleted. A user's
-/// `locale` has to be clearable or "match my browser" is a choice nobody can
-/// make twice.
+/// A repo's `teamId` needs the distinction and cannot fake it: it has to be
+/// un-settable, or a team-scoped repo can never be made org-wide (which is also
+/// how an admin releases a repo whose team the platform has deleted).
 pub(crate) fn double_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
 where
     D: serde::Deserializer<'de>,

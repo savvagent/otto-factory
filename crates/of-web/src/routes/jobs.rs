@@ -20,7 +20,7 @@
 
 use of_core::jobs::JobsExt;
 use of_core::repos::ReposExt;
-use otto_core::teams::TeamsExt;
+use of_core::scopes;
 use std::str::FromStr;
 
 use axum::extract::{Json, Path, Query, State};
@@ -58,6 +58,27 @@ pub struct StatsQuery {
     pub repo: Option<String>,
 }
 
+/// Resolve a team slug in the caller's org through the platform, failing closed.
+async fn resolve_team(
+    state: &AppState,
+    ctx: &OrgCtx,
+    slug: &str,
+) -> ApiResult<otto_tenant::ids::TeamId> {
+    match state
+        .platform
+        .team_by_slug(ctx.org.id.as_uuid(), slug)
+        .await
+    {
+        // The platform scopes the lookup by org; check the answer anyway.
+        Ok(Some(team)) if team.org_id == ctx.org.id.as_uuid() => Ok(team.id.into()),
+        Ok(_) => Err(ApiError::not_found(format!(
+            "no team {slug:?} in this organization; team slugs are managed in the otto \
+             platform console"
+        ))),
+        Err(e) => Err(ApiError::platform_unavailable("resolve a team slug", e)),
+    }
+}
+
 /// `GET /api/orgs/{org}/jobs` — the queue, newest first.
 pub async fn list_jobs(
     State(state): State<AppState>,
@@ -74,6 +95,17 @@ pub async fn list_jobs(
         .transpose()
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
 
+    ctx.require_scope(scopes::JOBS_READ)?;
+
+    // A team slug is the platform's to resolve. Asked before the transaction
+    // opens, so a slow platform costs no pooled connection, and **failing closed**:
+    // a slug the platform does not know is an error, never "no filter" (which
+    // would list every team's jobs), and a platform that cannot answer is a 503.
+    let team_id = match &q.team {
+        Some(slug) => Some(resolve_team(&state, &ctx, slug).await?),
+        None => None,
+    };
+
     let mut tx = state.db.begin(ctx.org.id).await?;
 
     let repo_id = match &q.repo {
@@ -85,11 +117,6 @@ pub async fn list_jobs(
             .await?
             .id,
         ),
-        None => None,
-    };
-
-    let team_id = match &q.team {
-        Some(slug) => Some(tx.resolve_team(slug).await?.id),
         None => None,
     };
 
@@ -118,6 +145,7 @@ pub async fn job_stats(
     ctx: OrgCtx,
     Query(q): Query<StatsQuery>,
 ) -> ApiResult<Json<Stats>> {
+    ctx.require_scope(scopes::JOBS_READ)?;
     let mut tx = state.db.begin(ctx.org.id).await?;
 
     let repo_id = match &q.repo {
@@ -144,6 +172,7 @@ pub async fn get_job(
     ctx: OrgCtx,
     Path((_org, id)): Path<(String, String)>,
 ) -> ApiResult<Json<JobDetail>> {
+    ctx.require_scope(scopes::JOBS_READ)?;
     let id = JobId::from(id);
 
     let mut tx = state.db.begin(ctx.org.id).await?;

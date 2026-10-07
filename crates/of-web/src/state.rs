@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use otto_resource::PlatformClient;
 use otto_tenant::crypto::Cipher;
 use otto_tenant::Db;
 
@@ -17,20 +18,26 @@ const JIRA_SCOPES: &str = "read:jira-work write:jira-work offline_access";
 /// Deployment-dependent settings.
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// Public base URL of the console and the authorization server — the origin
-    /// a browser sees. Every link the product hands out is built from it: the
-    /// OAuth issuer, both discovery documents, and the invitation URL an admin
-    /// copies. A wrong value produces links that 404 rather than links that leak.
+    /// Public base URL of this service — the origin a browser sees. Every link
+    /// the product hands out is built from it (the tracker OAuth callbacks).
     pub public_url: String,
 
-    /// Canonical URI of the MCP resource server. Tokens minted here — including
-    /// personal access tokens — are audienced for exactly this, and `of-mcp`
-    /// refuses anything else.
+    /// Canonical URI of the MCP resource server. Tokens issued by the platform
+    /// are audienced for exactly this, and `of-mcp` refuses anything else.
     ///
     /// Configuration rather than something derived from the request, for the
     /// same reason as in `of-mcp`: a `Host` header is attacker-controlled, and
     /// an audience derived from one is not an audience check.
     pub resource_uri: String,
+
+    /// Base URL of the otto platform: the authorization server and identity
+    /// directory. Where a person is sent to sign in, manage members, or upgrade.
+    pub platform_url: String,
+
+    /// The key the platform signs its lifecycle webhooks with
+    /// (`/platform/webhooks`). Issued when the platform's webhook URL is
+    /// registered for this resource server; not the introspection credential.
+    pub platform_webhook_secret: String,
 
     /// Shared secret for GitHub webhook signature verification. Optional
     /// because tracker integration itself is optional per deployment.
@@ -74,24 +81,20 @@ pub struct Config {
     /// carries exactly one address. Behind nginx or a load balancer configured
     /// to replace the header, `x-forwarded-for` is correct.
     pub client_ip_header: Option<String>,
-
-    /// Whether hard-stop plans are currently being enforced against.
-    ///
-    /// Must match the flag `of-mcp` was built with (`OF_ENFORCE_QUOTAS`) — this
-    /// never gates anything here (the console's `Meter` never calls `charge`,
-    /// see `routes::usage`'s module doc), but `/api/orgs/{org}/usage` reports
-    /// this value as `enforced`, and a console reporting `false` while MCP
-    /// calls are actually being refused is a caller reading its own dashboard
-    /// and drawing the wrong conclusion about why its agent just got a
-    /// `quota_exceeded` error.
-    pub enforce_quotas: bool,
 }
 
 impl Config {
-    pub fn new(public_url: impl Into<String>, resource_uri: impl Into<String>) -> Self {
+    pub fn new(
+        public_url: impl Into<String>,
+        resource_uri: impl Into<String>,
+        platform_url: impl Into<String>,
+        platform_webhook_secret: impl Into<String>,
+    ) -> Self {
         Self {
             public_url: public_url.into().trim_end_matches('/').to_string(),
             resource_uri: resource_uri.into(),
+            platform_url: platform_url.into().trim_end_matches('/').to_string(),
+            platform_webhook_secret: platform_webhook_secret.into(),
             github_app_webhook_secret: None,
             github_app_slug: None,
             github_app_client_id: None,
@@ -99,31 +102,7 @@ impl Config {
             jira_client_id: None,
             jira_client_secret: None,
             client_ip_header: None,
-            enforce_quotas: false,
         }
-    }
-
-    /// The WebAuthn relying party id: the **host** of the public URL.
-    ///
-    /// Derived rather than configured separately, because the two must agree —
-    /// a passkey is bound to this string, and an rp_id that is not a registrable
-    /// suffix of the origin makes every ceremony fail with an error that reads
-    /// like a browser bug. Deriving it means one value can be wrong instead of
-    /// two, and `relying_party` refuses at startup rather than at first login.
-    ///
-    /// **Changing the public URL's host invalidates every passkey ever
-    /// registered.** Nothing here can soften that; it is what binding a
-    /// credential to an origin means.
-    pub fn rp_id(&self) -> Option<String> {
-        self.public_url
-            .split("://")
-            .nth(1)?
-            .split('/')
-            .next()?
-            .split(':')
-            .next()
-            .filter(|h| !h.is_empty())
-            .map(str::to_string)
     }
 
     /// Where both providers send a browser back after authorization.
@@ -212,51 +191,35 @@ impl Config {
 #[derive(Clone)]
 pub struct AppState {
     pub db: Db,
-    /// The WebAuthn relying party.
-    ///
-    /// Built once at startup from `public_url`, because its `rp_id` is what
-    /// every passkey is cryptographically bound to — deriving it per request
-    /// would make a configuration change silently invalidate credentials
-    /// instead of failing at boot.
-    pub webauthn: Arc<otto_auth::passkeys::Webauthn>,
     /// Decrypts secrets at rest (currently tracker webhook secrets and JIRA
     /// OAuth credentials — see `of_core::trackers` and `of_trackers::jira`).
     /// Held as an `Arc` because the key material is
     /// loaded once at startup and shared by every request.
     pub cipher: Arc<Cipher>,
     pub config: Arc<Config>,
-    /// Reads the org's plan and period counters for the usage endpoint. Never
-    /// charges anything — the console is not a billable surface, and a customer
-    /// looking at their own bill must not be billed for looking.
-    pub meter: of_billing::Meter,
+    /// The otto platform: introspects the bearer tokens console requests carry
+    /// and answers identity questions (org slug, team by slug or id).
+    pub platform: Arc<PlatformClient>,
 }
 
 impl AppState {
-    pub fn new(
-        db: Db,
-        cipher: Cipher,
-        webauthn: Arc<otto_auth::passkeys::Webauthn>,
-        config: Config,
-    ) -> Self {
-        let meter = of_billing::Meter::new(
-            config.enforce_quotas,
-            format!("{}/settings/billing", config.public_url),
-        );
+    pub fn new(db: Db, cipher: Cipher, platform: Arc<PlatformClient>, config: Config) -> Self {
         Self {
             db,
-            webauthn,
             cipher: Arc::new(cipher),
             config: Arc::new(config),
-            meter,
+            platform,
         }
     }
 }
 
 impl std::fmt::Debug for AppState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // No cipher.
+        // No cipher, and not the whole config: it holds the platform webhook
+        // secret and the tracker providers' client secrets.
         f.debug_struct("AppState")
-            .field("config", &self.config)
+            .field("public_url", &self.config.public_url)
+            .field("resource_uri", &self.config.resource_uri)
             .finish_non_exhaustive()
     }
 }
@@ -312,7 +275,12 @@ mod tests {
     }
 
     fn config() -> Config {
-        Config::new("https://console.test", "https://mcp.test/mcp")
+        Config::new(
+            "https://console.test",
+            "https://mcp.test/mcp",
+            "https://otto.test",
+            "whsec",
+        )
     }
 
     #[test]
@@ -417,7 +385,12 @@ mod tests {
 
     #[test]
     fn urls_survive_a_trailing_slash_on_the_configured_base() {
-        let config = Config::new("https://console.test/", "https://mcp.test/mcp");
+        let config = Config::new(
+            "https://console.test/",
+            "https://mcp.test/mcp",
+            "https://otto.test/",
+            "whsec",
+        );
         assert_eq!(config.url("/verify"), "https://console.test/verify");
         assert_eq!(config.url("verify"), "https://console.test/verify");
     }

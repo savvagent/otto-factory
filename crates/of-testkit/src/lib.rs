@@ -52,7 +52,9 @@ pub const WEBHOOK_SECRET: &str = "otto_whsec_test_secret";
 #[derive(Clone)]
 struct TokenRecord {
     jti: Uuid,
-    org: Uuid,
+    /// `None` for a [`MockPlatform::issue_floating`] token: it opens whichever
+    /// org its user joined most recently, resolved at introspection time.
+    org: Option<Uuid>,
     user: Uuid,
     scopes: Vec<String>,
     resource: String,
@@ -64,8 +66,9 @@ struct TokenRecord {
 struct Data {
     tokens: HashMap<String, TokenRecord>,
     orgs: HashMap<Uuid, OrgInfo>,
-    /// (org, user) -> (info, role)
-    members: HashMap<(Uuid, Uuid), (UserInfo, Role)>,
+    /// (org, user) -> (info, role, join order)
+    members: HashMap<(Uuid, Uuid), (UserInfo, Role, u64)>,
+    joins: u64,
     teams: HashMap<(Uuid, Uuid), TeamInfo>,
     usage: HashMap<Uuid, UsageStatus>,
     counted: Vec<UsageEvent>,
@@ -164,6 +167,8 @@ impl MockPlatform {
 
     pub fn add_member(&self, org: Uuid, user: Uuid, email: &str, role: Role) {
         let mut d = self.inner.data.lock().unwrap();
+        d.joins += 1;
+        let order = d.joins;
         d.members.insert(
             (org, user),
             (
@@ -173,8 +178,16 @@ impl MockPlatform {
                     name: Some(email.split('@').next().unwrap_or(email).into()),
                 },
                 role,
+                order,
             ),
         );
+    }
+
+    /// Change a member's role.
+    pub fn set_role(&self, org: Uuid, user: Uuid, role: Role) {
+        if let Some(m) = self.inner.data.lock().unwrap().members.get_mut(&(org, user)) {
+            m.1 = role;
+        }
     }
 
     pub fn remove_member(&self, org: Uuid, user: Uuid) {
@@ -251,16 +264,22 @@ impl MockPlatform {
                 name: "Test Org".into(),
                 plan: "free".into(),
             });
-            d.members.entry((org, user)).or_insert_with(|| {
-                (
-                    UserInfo {
-                        id: user,
-                        email: Some(format!("{}@test.example", &user.to_string()[..8])),
-                        name: None,
-                    },
-                    role,
-                )
-            });
+            if !d.members.contains_key(&(org, user)) {
+                d.joins += 1;
+                let order = d.joins;
+                d.members.insert(
+                    (org, user),
+                    (
+                        UserInfo {
+                            id: user,
+                            email: Some(format!("{}@test.example", &user.to_string()[..8])),
+                            name: None,
+                        },
+                        role,
+                        order,
+                    ),
+                );
+            }
             d.members.get_mut(&(org, user)).unwrap().1 = role;
             d.usage.entry(org).or_insert_with(|| UsageStatus {
                 org_id: org,
@@ -277,10 +296,33 @@ impl MockPlatform {
             token.clone(),
             TokenRecord {
                 jti: Uuid::new_v4(),
-                org,
+                org: Some(org),
                 user,
                 scopes: scopes.iter().map(|s| s.to_string()).collect(),
                 resource: resource.into(),
+                exp: (Utc::now() + chrono::Duration::hours(1)).timestamp(),
+                kind: TokenKind::Oauth,
+            },
+        );
+        token
+    }
+
+    /// A token for `user` that opens whichever org they joined most recently,
+    /// resolved when it is introspected. **Not how the real platform works** (a
+    /// real token is fixed to one org when it is issued); it exists so a fixture
+    /// can mint one credential per person and then place them in orgs, the way
+    /// the console tests were written. Tests about *which org a token opens* use
+    /// [`Self::issue`], which is faithful.
+    pub fn issue_floating(&self, user: Uuid, scopes: &[&str]) -> String {
+        let token = new_token();
+        self.inner.data.lock().unwrap().tokens.insert(
+            token.clone(),
+            TokenRecord {
+                jti: Uuid::new_v4(),
+                org: None,
+                user,
+                scopes: scopes.iter().map(|s| s.to_string()).collect(),
+                resource: RESOURCE_URI.into(),
                 exp: (Utc::now() + chrono::Duration::hours(1)).timestamp(),
                 kind: TokenKind::Oauth,
             },
@@ -408,12 +450,19 @@ async fn introspect(
     let body = match d.tokens.get(token.trim()) {
         // Audience: a token for another resource server is just inactive.
         Some(t) if t.resource == resource && t.exp > Utc::now().timestamp() => {
+            let org = t.org.or_else(|| {
+                d.members
+                    .iter()
+                    .filter(|((_, u), _)| *u == t.user)
+                    .max_by_key(|(_, (_, _, order))| *order)
+                    .map(|((o, _), _)| *o)
+            });
             // Active also means the user is still a member; the role is today's.
-            match d.members.get(&(t.org, t.user)) {
-                Some((_, role)) => IntrospectionResponse {
+            match org.and_then(|o| d.members.get(&(o, t.user)).map(|m| (o, m))) {
+                Some((org, (_, role, _))) => IntrospectionResponse {
                     active: true,
                     sub: Some(t.user),
-                    org_id: Some(t.org),
+                    org_id: Some(org),
                     role: Some(*role),
                     scope: Some(t.scopes.join(" ")),
                     aud: Some(t.resource.clone()),
@@ -487,7 +536,7 @@ async fn usage_status(State(inner): S, headers: HeaderMap, Path(org): Path<Uuid>
 }
 
 fn member_info(d: &Data, org: Uuid, user: Uuid) -> Option<MemberInfo> {
-    let (u, role) = d.members.get(&(org, user))?;
+    let (u, role, _) = d.members.get(&(org, user))?;
     Some(MemberInfo {
         user: u.clone(),
         org: d.orgs.get(&org)?.clone(),
@@ -531,7 +580,7 @@ async fn member_by_email(
         .members
         .iter()
         .filter(|((o, _), _)| *o == org)
-        .find(|(_, (u, _))| {
+        .find(|(_, (u, _, _))| {
             u.email
                 .as_deref()
                 .is_some_and(|e| e.eq_ignore_ascii_case(q.email.trim()))

@@ -1,17 +1,16 @@
 use of_core::jobs::JobsExt;
 use of_core::repos::ReposExt;
-use otto_core::orgs::OrgsExt;
+
 mod common;
 
 use axum::body::Body;
-use common::{cipher, Harness, PUBLIC_URL, RESOURCE};
+use common::Harness;
 use hmac::{Hmac, Mac};
 use http::{Request, StatusCode};
 use of_core::jobs::Tracker;
 use of_core::repos::NewRepo;
 use of_core::trackers::{upsert_binding, upsert_connection, Provider};
-use of_web::{AppState, Config};
-use otto_core::orgs::Role;
+
 use sha2::Sha256;
 use sqlx::PgPool;
 use tower::ServiceExt;
@@ -30,30 +29,24 @@ const UNKNOWN_GITHUB_INSTALLATION_FIXTURE: &[u8] = br#"{
   "issue":{"id":7001,"number":17,"title":"Implement webhook ingest","body":"Wire webhook verification into the tracker sync flow.","state":"open","labels":[{"name":"bug"},{"name":"trackers"}]}
 }"#;
 
-async fn harness(pool: PgPool) -> Harness {
-    let db = otto_tenant::Db::from_pool(pool);
-    common::register_resource(&db).await;
-    let mut config = Config::new(PUBLIC_URL, RESOURCE);
-    config.github_app_webhook_secret = Some(GITHUB_SECRET.into());
-    let webauthn = of_web::relying_party(&config).expect("relying party");
-    let state = AppState::new(db.clone(), cipher(), webauthn, config);
+/// An id standing in for a platform record (orgs and users are the platform's).
+struct Fx<T> {
+    id: T,
+}
 
-    Harness {
-        db,
-        router: of_web::router(state),
-        cipher: cipher(),
-    }
+async fn harness(pool: PgPool) -> Harness {
+    common::harness_with(pool, |config| {
+        config.github_app_webhook_secret = Some(GITHUB_SECRET.into());
+    })
+    .await
 }
 
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn github_webhooks_are_public_and_acknowledged_when_verified(pool: PgPool) {
     let h = harness(pool).await;
-    let org = h.db.create_org("acme", "Acme").await.unwrap();
-    let user =
-        h.db.upsert_user("owner@acme.test", Some("Owner"))
-            .await
-            .unwrap();
-    h.db.add_member(org.id, user.id, Role::Owner).await.unwrap();
+    let org = Fx {
+        id: otto_tenant::ids::OrgId::new(),
+    };
 
     let mut tx = h.db.begin(org.id).await.unwrap();
     let repo = tx
@@ -61,7 +54,7 @@ async fn github_webhooks_are_public_and_acknowledged_when_verified(pool: PgPool)
             slug: "api".into(),
             name: Some("Acme API".into()),
             remotes: vec!["git@github.com:acme/api.git".into()],
-            created_by: Some(user.id),
+            created_by: Some(otto_tenant::ids::UserId::new()),
             ..Default::default()
         })
         .await
@@ -102,12 +95,9 @@ async fn github_webhooks_are_public_and_acknowledged_when_verified(pool: PgPool)
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn github_rejection_and_unknown_connection_share_the_same_public_404(pool: PgPool) {
     let h = harness(pool).await;
-    let org = h.db.create_org("acme", "Acme").await.unwrap();
-    let user =
-        h.db.upsert_user("owner@acme.test", Some("Owner"))
-            .await
-            .unwrap();
-    h.db.add_member(org.id, user.id, Role::Owner).await.unwrap();
+    let org = Fx {
+        id: otto_tenant::ids::OrgId::new(),
+    };
 
     let mut tx = h.db.begin(org.id).await.unwrap();
     upsert_connection(&mut tx, Provider::Github, "123456", None, None)
@@ -156,12 +146,9 @@ async fn a_labelled_issue_webhook_creates_one_job_and_a_stale_redelivery_does_no
     pool: PgPool,
 ) {
     let h = harness(pool).await;
-    let org = h.db.create_org("acme", "Acme").await.unwrap();
-    let user =
-        h.db.upsert_user("owner@acme.test", Some("Owner"))
-            .await
-            .unwrap();
-    h.db.add_member(org.id, user.id, Role::Owner).await.unwrap();
+    let org = Fx {
+        id: otto_tenant::ids::OrgId::new(),
+    };
 
     let mut tx = h.db.begin(org.id).await.unwrap();
     let repo = tx
@@ -169,7 +156,7 @@ async fn a_labelled_issue_webhook_creates_one_job_and_a_stale_redelivery_does_no
             slug: "api".into(),
             name: Some("Acme API".into()),
             remotes: vec!["git@github.com:acme/api.git".into()],
-            created_by: Some(user.id),
+            created_by: Some(otto_tenant::ids::UserId::new()),
             ..Default::default()
         })
         .await
@@ -229,12 +216,9 @@ async fn a_labelled_issue_webhook_creates_one_job_and_a_stale_redelivery_does_no
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn jira_webhooks_require_the_site_and_secret_but_acknowledge_a_valid_request(pool: PgPool) {
     let h = harness(pool).await;
-    let org = h.db.create_org("globex", "Globex").await.unwrap();
-    let user =
-        h.db.upsert_user("owner@globex.test", Some("Owner"))
-            .await
-            .unwrap();
-    h.db.add_member(org.id, user.id, Role::Owner).await.unwrap();
+    let org = Fx {
+        id: otto_tenant::ids::OrgId::new(),
+    };
     let sealed_secret = h.cipher.seal(JIRA_SECRET.as_bytes()).unwrap();
 
     let mut tx = h.db.begin(org.id).await.unwrap();
@@ -243,7 +227,7 @@ async fn jira_webhooks_require_the_site_and_secret_but_acknowledge_a_valid_reque
             slug: "api".into(),
             name: Some("Globex API".into()),
             remotes: vec!["git@github.com:globex/api.git".into()],
-            created_by: Some(user.id),
+            created_by: Some(otto_tenant::ids::UserId::new()),
             ..Default::default()
         })
         .await

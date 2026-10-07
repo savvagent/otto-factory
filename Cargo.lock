@@ -1398,6 +1398,7 @@ dependencies = [
  "http",
  "of-billing",
  "of-core",
+ "of-testkit",
  "of-trackers",
  "otto-resource",
  "otto-tenant",
