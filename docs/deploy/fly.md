@@ -69,13 +69,16 @@ shared by `otto_factory` and `otto_platform`; its grants are per database. Which
 app migrates first creates it, and the other finds it present and only re-grants. Neither
 `0032` nor otto-platform's `0004_rls.sql` is disturbed by that.
 
-**Rollout caveat for `0032`.** The rename happens when the new release boots, so a
-still-running old release (which does `SET LOCAL ROLE of_app`) briefly sees no such role.
-`Db` treats a missing role as "not assumable" and skips the `SET LOCAL ROLE`, so for that
-window the old process runs its tenant transactions as the superuser, which bypasses RLS
-(its own `WHERE org_id` predicates still apply). Fly stops the old machine as soon as the
-new one passes `/readyz`, so the window is the migration itself; this app runs a single
-machine.
+**Rollout caveat for `0032`.** On `otto-db`, `otto_app` already exists (otto-platform
+created it), so `0032` takes the grant-only branch: `of_app` is **not** renamed and a
+still-running old release is unaffected.
+
+On a cluster where `otto_app` does not exist yet, `0032` renames `of_app` when the new
+release boots. An old release that has already served traffic cached "role assumable" at
+startup (`Db`'s `OnceCell`) and keeps issuing `SET LOCAL ROLE of_app`, which now fails, so
+its tenant transactions **error** (fail closed) rather than running as the superuser.
+Expect 500s from the old machine until Fly stops it once the new one passes `/readyz`;
+this app runs a single machine, so the window is the migration itself.
 
 ## The Phase 3 deploy is forward-only
 
@@ -85,9 +88,10 @@ previous image. Two of its migrations break the old binary:
 - `0034_claimed_domains_per_org` drops the `claimed_domains` primary key on `(domain)`.
   The old code's `ON CONFLICT (domain)` has no matching constraint and fails every
   domain claim.
-- `0032_rename_tenant_role_otto_app` renames `of_app`, so an old release can no longer
-  assume that role (see the rollout caveat above) and silently runs tenant transactions
-  as the superuser.
+- On a cluster where `0032_rename_tenant_role_otto_app` renamed `of_app` (not `otto-db`,
+  see the rollout caveat above), an old release can no longer assume that role. A
+  freshly started old process finds no `of_app`, skips `SET LOCAL ROLE`, and
+  `verify_tenant_isolation` refuses to start it on a superuser connection.
 
 **Rollback means restoring the database** from a snapshot taken before the deploy, then
 deploying the old image. Take that snapshot first.

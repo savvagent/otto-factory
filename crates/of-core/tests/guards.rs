@@ -61,7 +61,8 @@ fn nothing_deletes_a_team_except_through_the_guarded_wrapper() {
             continue;
         }
         // The wrapper itself calls the platform method, once, after its checks.
-        let is_wrapper = path.ends_with("of-core/src/teams.rs") || path.ends_with("src/teams.rs");
+        // Component-wise match: only of-core's wrapper, not any crate's src/teams.rs.
+        let is_wrapper = path.ends_with("of-core/src/teams.rs");
         for (n, line) in code_lines(&text) {
             let method_call = line.contains(".delete_team(");
             let path_call = line.contains("TeamsExt::delete_team(");
