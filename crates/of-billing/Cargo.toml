@@ -6,7 +6,9 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-of-core.workspace = true
+otto-tenant.workspace = true
+otto-core.workspace = true
+otto-billing.workspace = true
 sqlx.workspace = true
 serde.workspace = true
 schemars.workspace = true

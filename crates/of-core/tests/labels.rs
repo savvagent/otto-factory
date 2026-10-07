@@ -11,6 +11,8 @@
 //! cross-org negative test is not done" and a reviewer should be able to see
 //! this was decided rather than forgotten.
 
+use otto_core::orgs::OrgsExt;
+use otto_core::teams::TeamsExt;
 mod common;
 
 use common::{db, tenant};

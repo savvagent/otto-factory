@@ -5,9 +5,10 @@
 //! Bodies are bounded because every unread message is re-served on every inbox
 //! read by every member — an oversized body is paid for many times over.
 
-use crate::db::Tx;
 use crate::error::{Error, Result};
-use crate::ids::{JobId, OrgId, RepoId, TeamId, UserId};
+use crate::ids::{JobId, RepoId};
+use otto_tenant::ids::{OrgId, TeamId, UserId};
+use otto_tenant::Tx;
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
@@ -165,11 +166,50 @@ fn message_idempotency_fingerprint(sender: UserId, new: &NewMessage) -> Vec<u8> 
     }))
 }
 
-impl Tx<'_> {
+/// Extension methods on [`Tx`] for this module's domain (see the crate docs for why
+/// these are extension traits rather than inherent methods).
+pub trait MessagesExt {
     /// Resolve `new.idempotency_key` against an already-completed
     /// `send_message` call, doing no writes and touching no meter. See
     /// `jobs::Tx::find_replayed_job` — the identical shape.
-    pub async fn find_replayed_message(
+    fn find_replayed_message(
+        &mut self,
+        sender: UserId,
+        new: &NewMessage,
+    ) -> impl std::future::Future<Output = Result<Option<Message>>> + Send;
+
+    fn send_message(
+        &mut self,
+        sender: UserId,
+        new: NewMessage,
+    ) -> impl std::future::Future<Output = Result<Message>> + Send;
+
+    /// Messages visible to `reader`: broadcasts plus anything addressed to them.
+    fn inbox(
+        &mut self,
+        reader: UserId,
+        q: &InboxQuery,
+    ) -> impl std::future::Future<Output = Result<Vec<Message>>> + Send;
+
+    /// Advance the read cursor.
+    ///
+    /// Clamped to the newest existing message id, so an over-large value cannot
+    /// suppress messages that have not been written yet. Returns the cursor that
+    /// actually landed, which is rarely what a careless caller passed.
+    fn ack_messages(
+        &mut self,
+        reader: UserId,
+        up_to: i64,
+    ) -> impl std::future::Future<Output = Result<i64>> + Send;
+
+    fn unread_count(
+        &mut self,
+        reader: UserId,
+    ) -> impl std::future::Future<Output = Result<i64>> + Send;
+}
+
+impl MessagesExt for Tx<'_> {
+    async fn find_replayed_message(
         &mut self,
         sender: UserId,
         new: &NewMessage,
@@ -223,7 +263,7 @@ impl Tx<'_> {
         Ok(Some(msg))
     }
 
-    pub async fn send_message(&mut self, sender: UserId, new: NewMessage) -> Result<Message> {
+    async fn send_message(&mut self, sender: UserId, new: NewMessage) -> Result<Message> {
         let body = new.body.trim();
         if body.is_empty() {
             return Err(Error::Invalid("message body must not be empty".into()));
@@ -384,8 +424,7 @@ impl Tx<'_> {
         Ok(msg)
     }
 
-    /// Messages visible to `reader`: broadcasts plus anything addressed to them.
-    pub async fn inbox(&mut self, reader: UserId, q: &InboxQuery) -> Result<Vec<Message>> {
+    async fn inbox(&mut self, reader: UserId, q: &InboxQuery) -> Result<Vec<Message>> {
         let org = self.org();
         let limit = q.limit.clamp(1, INBOX_LIMIT_MAX);
 
@@ -415,12 +454,7 @@ impl Tx<'_> {
         Ok(msgs)
     }
 
-    /// Advance the read cursor.
-    ///
-    /// Clamped to the newest existing message id, so an over-large value cannot
-    /// suppress messages that have not been written yet. Returns the cursor that
-    /// actually landed, which is rarely what a careless caller passed.
-    pub async fn ack_messages(&mut self, reader: UserId, up_to: i64) -> Result<i64> {
+    async fn ack_messages(&mut self, reader: UserId, up_to: i64) -> Result<i64> {
         let org = self.org();
         let newest: i64 =
             sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) FROM messages WHERE org_id = $1")
@@ -446,7 +480,7 @@ impl Tx<'_> {
         Ok(landed)
     }
 
-    pub async fn unread_count(&mut self, reader: UserId) -> Result<i64> {
+    async fn unread_count(&mut self, reader: UserId) -> Result<i64> {
         let org = self.org();
         let n: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM messages m \

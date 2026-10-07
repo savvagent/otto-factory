@@ -1,3 +1,5 @@
+use of_core::jobs::JobsExt;
+use of_core::repos::ReposExt;
 mod common;
 
 use common::{db, job, tenant};

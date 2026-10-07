@@ -30,50 +30,119 @@ use rmcp::model::{ErrorCode, ErrorData};
 /// worth expressing here, because clients treat those differently at the
 /// transport level.
 pub fn from_core(e: &CoreError) -> ErrorData {
-    let code = match e {
-        // A database failure or a lost race is ours, not the caller's — the
+    envelope(Fault::of_core(e), e.to_string(), e.code(), e.retriable())
+}
+
+/// Convert an identity-domain failure (`otto-core`): a team lookup, a
+/// membership check. Same envelope, same redaction rules as [`from_core`].
+pub fn from_identity(e: &otto_core::Error) -> ErrorData {
+    envelope(
+        Fault::of_identity(e),
+        e.to_string(),
+        e.code(),
+        matches!(Fault::of_identity(e), Fault::Database),
+    )
+}
+
+/// Convert a tenant-substrate failure (`otto-tenant`).
+pub fn from_tenant(e: &otto_tenant::Error) -> ErrorData {
+    envelope(
+        Fault::of_tenant(e),
+        e.to_string(),
+        e.code(),
+        matches!(Fault::of_tenant(e), Fault::Database),
+    )
+}
+
+/// Whose fault a failure is, which decides both the JSON-RPC code and whether
+/// its text may reach the caller.
+///
+/// Identity and tenancy errors arrive wrapped (`CoreError::Identity`,
+/// `CoreError::Tenant`), so a database failure can be several layers down. It
+/// is the same failure however it got here and must be answered the same way.
+#[derive(Clone, Copy)]
+enum Fault {
+    /// The caller's request was wrong; the message is written to be read.
+    Caller,
+    /// A lost race: ours, but the message is already written for the caller.
+    Race,
+    /// Database, key configuration, ciphertext, or isolation. Ours, and the
+    /// text can carry table names, constraint names, or key diagnostics.
+    Database,
+}
+
+impl Fault {
+    fn of_core(e: &CoreError) -> Self {
+        match e {
+            CoreError::Db(_) => Fault::Database,
+            CoreError::RaceLost(_) => Fault::Race,
+            CoreError::Tenant(t) => Fault::of_tenant(t),
+            CoreError::Identity(i) => Fault::of_identity(i),
+            _ => Fault::Caller,
+        }
+    }
+
+    fn of_identity(e: &otto_core::Error) -> Self {
+        match e {
+            otto_core::Error::Db(_) => Fault::Database,
+            otto_core::Error::Tenant(t) => Fault::of_tenant(t),
+            _ => Fault::Caller,
+        }
+    }
+
+    fn of_tenant(e: &otto_tenant::Error) -> Self {
+        match e {
+            // These two describe the request.
+            otto_tenant::Error::Invalid(_) | otto_tenant::Error::OrgNotFound(_) => Fault::Caller,
+            _ => Fault::Database,
+        }
+    }
+}
+
+fn envelope(fault: Fault, text: String, code: &'static str, retriable: bool) -> ErrorData {
+    let rpc_code = match fault {
+        // A database failure or a lost race is ours, not the caller's: the
         // request was fine; the transaction lost to a concurrent write.
         // Reporting either as an argument error would send an agent into a
         // rewrite loop over a request that was fine to begin with.
-        CoreError::Db(_) | CoreError::RaceLost(_) => ErrorCode::INTERNAL_ERROR,
-        _ => ErrorCode::INVALID_PARAMS,
+        Fault::Database | Fault::Race => ErrorCode::INTERNAL_ERROR,
+        Fault::Caller => ErrorCode::INVALID_PARAMS,
     };
 
     // The internal message of a database error is not for the caller: it can
     // carry table names, constraint names, and fragments of SQL, none of which
     // an agent can act on and some of which describe other tenants' schema
     // surface. Log it, return a generic sentence.
-    let message = match e {
-        CoreError::Db(inner) => {
-            tracing::error!(error = %inner, "database failure surfaced to an MCP caller");
+    let message = match fault {
+        Fault::Database => {
+            tracing::error!(error = %text, "server-side failure surfaced to an MCP caller");
             "the server could not complete this call; retry shortly".to_string()
         }
-        // Unlike `Db`, `RaceLost`'s message is already written to be read by
-        // the caller and must reach it unredacted — but it is rare enough,
+        // Unlike `Database`, a lost race's message is already written to be
+        // read by the caller and must reach it unredacted. It is rare enough,
         // and rare-enough-to-be-suspicious if it fires a lot, that it still
-        // deserves its own trace naming which of the four call sites (named
-        // in the message itself) produced it, the same way a `Db` failure
-        // is logged just above.
-        CoreError::RaceLost(msg) => {
-            tracing::warn!(message = %msg, "a lost unique-violation race surfaced to an MCP caller");
-            msg.clone()
+        // deserves its own trace naming which call site (named in the message
+        // itself) produced it.
+        Fault::Race => {
+            tracing::warn!(message = %text, "a lost unique-violation race surfaced to an MCP caller");
+            text
         }
-        other => other.to_string(),
+        Fault::Caller => text,
     };
 
     ErrorData::new(
-        code,
+        rpc_code,
         message,
         Some(serde_json::json!({
-            "code": e.code(),
-            "retriable": e.retriable(),
+            "code": code,
+            "retriable": retriable,
         })),
     )
 }
 
 /// Convert an authentication or authorization failure.
 ///
-/// Uses [`of_auth::AuthError::public`] rather than the variant's own message,
+/// Uses [`otto_auth::AuthError::public`] rather than the variant's own message,
 /// for the same reason the login form does: the distinctions between "no such
 /// token", "revoked", and "expired" are an oracle, and an agent cannot act on
 /// them differently anyway — every one of them means "get a new token".
@@ -81,12 +150,12 @@ pub fn from_core(e: &CoreError) -> ErrorData {
 /// The exception is a missing scope, which is genuinely actionable: the agent
 /// must re-authorize asking for more, and it cannot do that without being told
 /// which scope it lacks.
-pub fn from_auth(e: &of_auth::AuthError) -> ErrorData {
+pub fn from_auth(e: &otto_auth::AuthError) -> ErrorData {
     let (code, message, retriable) = match e {
-        of_auth::AuthError::InvalidScope(detail) => {
+        otto_auth::AuthError::InvalidScope(detail) => {
             (ErrorCode::INVALID_REQUEST, detail.clone(), false)
         }
-        of_auth::AuthError::RateLimited { retry_after_secs } => (
+        otto_auth::AuthError::RateLimited { retry_after_secs } => (
             ErrorCode::INVALID_REQUEST,
             format!("too many attempts; retry in {retry_after_secs}s"),
             true,
@@ -109,8 +178,8 @@ pub fn from_auth(e: &of_auth::AuthError) -> ErrorData {
 }
 
 /// A stable machine-readable code for the auth failures an MCP caller can see.
-fn auth_code(e: &of_auth::AuthError) -> &'static str {
-    use of_auth::AuthError as A;
+fn auth_code(e: &otto_auth::AuthError) -> &'static str {
+    use otto_auth::AuthError as A;
     match e {
         A::InvalidScope(_) => "insufficient_scope",
         A::WrongAudience => "wrong_audience",
@@ -129,8 +198,9 @@ fn auth_code(e: &of_auth::AuthError) -> &'static str {
 /// message names the plan, the limit, and the URL a human goes to, because an
 /// agent that cannot say *what to do about it* just retries.
 pub fn from_billing(e: &of_billing::BillingError) -> ErrorData {
+    // `BillingError` wraps the platform's identity error, not ours.
     if let of_billing::BillingError::Core(inner) = e {
-        return from_core(inner);
+        return from_identity(inner);
     }
 
     ErrorData::new(
@@ -253,7 +323,7 @@ mod tests {
     /// failure, and must not be reported as a quota problem.
     #[test]
     fn a_core_failure_under_billing_keeps_its_own_identity() {
-        let e = from_billing(&of_billing::BillingError::Core(CoreError::Db(
+        let e = from_billing(&of_billing::BillingError::Core(otto_core::Error::Db(
             sqlx::Error::RowNotFound,
         )));
         assert_eq!(e.code, ErrorCode::INTERNAL_ERROR);
@@ -263,11 +333,11 @@ mod tests {
     /// because naming the scope is the only way the agent can fix it.
     #[test]
     fn credential_failures_collapse_but_scopes_are_named() {
-        let revoked = from_auth(&of_auth::AuthError::Revoked);
-        let expired = from_auth(&of_auth::AuthError::Expired);
+        let revoked = from_auth(&otto_auth::AuthError::Revoked);
+        let expired = from_auth(&otto_auth::AuthError::Expired);
         assert_eq!(revoked.message, expired.message);
 
-        let scope = from_auth(&of_auth::AuthError::InvalidScope(
+        let scope = from_auth(&otto_auth::AuthError::InvalidScope(
             "this token lacks the jobs:write scope".into(),
         ));
         assert!(scope.message.contains("jobs:write"));

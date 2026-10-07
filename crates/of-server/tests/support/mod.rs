@@ -12,7 +12,7 @@
 //! Also holds the one fixture RSA keypair every OIDC test in this crate
 //! signs/verifies `id_token`s against, and the small builders
 //! ([`discovery_document`], [`jwks_document`], [`sign_id_token`]) that turn
-//! it into the JSON shapes `of_auth::oidc` expects to fetch.
+//! it into the JSON shapes `otto_auth::oidc` expects to fetch.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};

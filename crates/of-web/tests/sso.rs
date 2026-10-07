@@ -5,15 +5,16 @@
 //! every case below is guarding.
 //!
 //! **DNS verification is not exercised through the HTTP `verify` endpoint.**
-//! `of_auth::dns::verify_txt_record` does a real DNS lookup, and Task 2's own
+//! `otto_auth::dns::verify_txt_record` does a real DNS lookup, and Task 2's own
 //! tests already cover its TXT-record parsing in isolation with no live
 //! network. Driving a real DNS record from an integration test would be
 //! flaky and network-dependent — the opposite of this suite's "no live
 //! network" rule — so fixtures here mark a domain verified directly through
-//! `of_core::domains::mark_verified` (the same function the verify endpoint
+//! `otto_core::domains::mark_verified` (the same function the verify endpoint
 //! itself calls once DNS succeeds), and exercise the HTTP claim/list/delete
 //! surface and its lockout guards, which do not depend on DNS at all.
 
+use otto_core::orgs::OrgsExt;
 mod common;
 mod support;
 
@@ -21,7 +22,7 @@ use std::collections::HashMap;
 
 use common::{harness, onboard, org_with_owner, sign_in, Account, Call, Harness, Reply};
 use http::StatusCode;
-use of_core::ids::OrgId;
+use otto_tenant::ids::OrgId;
 use serde_json::Value;
 use sqlx::PgPool;
 use support::{FixtureIdp, MockResponse, TestServer};
@@ -62,7 +63,7 @@ async fn claim_and_verify_domain(
     claimed.expect(StatusCode::CREATED);
 
     let mut tx = h.db.begin(org_id).await.expect("begin tx");
-    of_core::domains::mark_verified(&mut tx, domain)
+    otto_core::domains::mark_verified(&mut tx, domain)
         .await
         .expect("mark_verified");
     tx.commit().await.expect("commit");
@@ -167,7 +168,7 @@ async fn org_with_sso(
     org: &str,
     domain: &str,
 ) -> (Harness, OrgId, Account, FixtureIdp) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let admin = onboard(&h, ADMIN_EMAIL).await;
     let org_id = org_with_owner(&h, org, &admin).await;
     let idp = FixtureIdp::start().await;
@@ -274,7 +275,7 @@ async fn a_returning_federated_user_with_no_membership_row_is_reprovisioned(pool
             .unwrap();
 
     // Simulate the membership half of that first sign-in never landing.
-    h.db.remove_member(org_id, of_core::ids::UserId::from(user_id))
+    h.db.remove_member(org_id, otto_tenant::ids::UserId::from(user_id))
         .await
         .unwrap();
     let gone: i64 =
@@ -371,7 +372,7 @@ async fn callback_refuses_a_disabled_account(pool: PgPool) {
 
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn sso_start_refuses_an_unclaimed_domain(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let reply = Call::post("/api/auth/sso/start")
         .json(serde_json::json!({ "email": "nobody@unclaimed.test" }))
         .send(&h.router)
@@ -387,7 +388,7 @@ async fn binding_a_connection_refuses_a_discovery_document_missing_issuer(pool: 
     // exchange_code, and verify_id_token also needs. Without this check, a
     // connection with no issuer in its cached discovery document binds
     // successfully and then fails every subsequent sign-in attempt.
-    let h = harness(pool);
+    let h = harness(pool).await;
     let admin = onboard(&h, ADMIN_EMAIL).await;
     org_with_owner(&h, "acme", &admin).await;
 
@@ -430,7 +431,7 @@ async fn binding_a_connection_refuses_an_unparseable_endpoint_url(pool: PgPool) 
     // Present-and-a-string is not the same as "a URL" — a connection with
     // an empty or malformed authorization_endpoint would otherwise bind
     // successfully and only fail on the first sign-in attempt.
-    let h = harness(pool);
+    let h = harness(pool).await;
     let admin = onboard(&h, ADMIN_EMAIL).await;
     org_with_owner(&h, "acme", &admin).await;
 
@@ -467,7 +468,7 @@ async fn binding_a_connection_refuses_a_discovery_document_with_a_mismatched_iss
     // OIDC Discovery §4.3: the document's own `issuer` must equal the
     // issuer it was fetched from — otherwise `verify_id_token` pins `iss`
     // to a value with no relationship to what the admin configured.
-    let h = harness(pool);
+    let h = harness(pool).await;
     let admin = onboard(&h, ADMIN_EMAIL).await;
     org_with_owner(&h, "acme", &admin).await;
 
@@ -743,7 +744,7 @@ async fn a_mismatched_binding_cookie_is_refused_and_burns_the_ceremony(pool: PgP
         &h,
         &idp,
         &state,
-        Some("of_ssb_not-the-right-one"),
+        Some("otto_ssb_not-the-right-one"),
         &id_token,
     )
     .await;
@@ -807,7 +808,7 @@ async fn a_domain_reassigned_after_the_ceremony_starts_is_refused_not_retargeted
 
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn enforce_sso_cannot_be_turned_on_with_no_working_sso_path(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let admin = onboard(&h, ADMIN_EMAIL).await;
     org_with_owner(&h, "acme", &admin).await;
 
@@ -933,7 +934,7 @@ async fn passkey_login_is_not_refused_for_a_member_of_a_different_unenforced_org
     let owner = onboard(&h, "owner@other.test").await;
     let other_id = org_with_owner(&h, "other", &owner).await;
     let mut bystander = onboard(&h, "bystander@other.test").await;
-    common::add_member(&h, other_id, bystander.user, of_core::orgs::Role::Member).await;
+    common::add_member(&h, other_id, bystander.user, otto_core::orgs::Role::Member).await;
 
     let reply = sign_in(&h, &mut bystander).await;
     reply.expect(StatusCode::OK);
@@ -945,7 +946,7 @@ async fn passkey_login_is_not_refused_for_a_member_of_a_different_unenforced_org
 
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn get_connection_returns_no_content_until_one_is_bound_then_never_the_secret(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let admin = onboard(&h, ADMIN_EMAIL).await;
     org_with_owner(&h, "acme", &admin).await;
 

@@ -48,8 +48,9 @@ use axum::extract::{FromRef, FromRequestParts};
 use http::header::{COOKIE, SET_COOKIE};
 use http::request::Parts;
 use http::HeaderValue;
-use of_auth::sessions::{self, Session};
-use of_core::orgs::{Org, Role, User};
+use otto_auth::sessions::{self, Session};
+use otto_core::orgs::OrgsExt;
+use otto_core::orgs::{Org, Role, User};
 
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -340,11 +341,11 @@ mod tests {
 
     #[test]
     fn the_session_token_is_found_among_other_cookies() {
-        let parts = parts_with("theme=dark; __Host-of_session=of_ss_abc; locale=en");
-        assert_eq!(token_from(&parts), Some("of_ss_abc".into()));
+        let parts = parts_with("theme=dark; __Host-of_session=otto_ss_abc; locale=en");
+        assert_eq!(token_from(&parts), Some("otto_ss_abc".into()));
 
-        let parts = parts_with("__Host-of_session=of_ss_abc");
-        assert_eq!(token_from(&parts), Some("of_ss_abc".into()));
+        let parts = parts_with("__Host-of_session=otto_ss_abc");
+        assert_eq!(token_from(&parts), Some("otto_ss_abc".into()));
     }
 
     /// A cookie whose *name* merely ends in ours must not be read as ours —
@@ -352,10 +353,10 @@ mod tests {
     #[test]
     fn a_lookalike_cookie_name_is_not_the_session() {
         for cookie in [
-            "of_session=of_ss_abc",
-            "evil__Host-of_session=of_ss_abc",
-            "x__Host-of_session=of_ss_abc",
-            "__Host-of_session_other=of_ss_abc",
+            "of_session=otto_ss_abc",
+            "evil__Host-of_session=otto_ss_abc",
+            "x__Host-of_session=otto_ss_abc",
+            "__Host-of_session_other=otto_ss_abc",
             "__Host-of_session=",
             "theme=dark",
         ] {
@@ -372,10 +373,10 @@ mod tests {
     /// test in the suite would notice.
     #[test]
     fn the_cookie_carries_every_attribute_that_protects_it() {
-        let cookie = set_cookie("of_ss_abc");
+        let cookie = set_cookie("otto_ss_abc");
         let cookie = cookie.to_str().unwrap();
 
-        assert!(cookie.starts_with("__Host-of_session=of_ss_abc"));
+        assert!(cookie.starts_with("__Host-of_session=otto_ss_abc"));
         assert!(cookie.contains("HttpOnly"), "script could read it");
         assert!(
             cookie.contains("Secure"),
@@ -401,7 +402,7 @@ mod tests {
     /// browser holding both, and sending the stale one.
     #[test]
     fn clearing_matches_the_cookie_it_clears() {
-        let set = set_cookie("of_ss_abc");
+        let set = set_cookie("otto_ss_abc");
         let clear = clear_cookie();
         let (set, clear) = (set.to_str().unwrap(), clear.to_str().unwrap());
 
@@ -421,10 +422,10 @@ mod tests {
     /// session's.
     #[test]
     fn the_binding_cookie_carries_every_attribute_that_protects_it() {
-        let cookie = set_binding_cookie("of_ssb_abc", 600);
+        let cookie = set_binding_cookie("otto_ssb_abc", 600);
         let cookie = cookie.to_str().unwrap();
 
-        assert!(cookie.starts_with("__Host-of_sso_binding=of_ssb_abc"));
+        assert!(cookie.starts_with("__Host-of_sso_binding=otto_ssb_abc"));
         assert!(cookie.contains("HttpOnly"));
         assert!(cookie.contains("Secure"));
         assert!(cookie.contains("Path=/"));
@@ -435,7 +436,7 @@ mod tests {
 
     #[test]
     fn clearing_the_binding_cookie_matches_the_cookie_it_clears() {
-        let set = set_binding_cookie("of_ssb_abc", 600);
+        let set = set_binding_cookie("otto_ssb_abc", 600);
         let clear = clear_binding_cookie();
         let (set, clear) = (set.to_str().unwrap(), clear.to_str().unwrap());
 
@@ -448,8 +449,8 @@ mod tests {
 
     #[test]
     fn the_binding_token_is_found_among_other_cookies() {
-        let parts = parts_with("theme=dark; __Host-of_sso_binding=of_ssb_abc; locale=en");
-        assert_eq!(binding_token_from(&parts), Some("of_ssb_abc".into()));
+        let parts = parts_with("theme=dark; __Host-of_sso_binding=otto_ssb_abc; locale=en");
+        assert_eq!(binding_token_from(&parts), Some("otto_ssb_abc".into()));
         assert_eq!(binding_token_from(&parts_with("theme=dark")), None);
     }
 }

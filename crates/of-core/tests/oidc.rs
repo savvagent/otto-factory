@@ -4,19 +4,20 @@
 //! `consume_by_state_hash`'s single-use burn under a replayed/racing
 //! callback. See `docs/specs/2026-09-16-oidc-federation-design.md` §2/§3.
 
+use otto_core::orgs::OrgsExt;
 mod common;
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use chrono::{Duration, Utc};
 use common::{db, tenant};
-use of_core::crypto::Cipher;
-use of_core::error::Error;
-use of_core::{ceremonies, domains, identities, idp, orgs};
+use otto_core::error::Error;
+use otto_core::{ceremonies, domains, identities, idp, orgs};
+use otto_tenant::crypto::Cipher;
 use sqlx::PgPool;
 use std::collections::HashSet;
 
-fn sealed(cipher: &Cipher, plaintext: &[u8]) -> of_core::crypto::Sealed {
+fn sealed(cipher: &Cipher, plaintext: &[u8]) -> otto_tenant::crypto::Sealed {
     cipher.seal(plaintext).unwrap()
 }
 
@@ -378,7 +379,7 @@ async fn create_user_for_federation_concurrent_calls_never_both_win(pool: PgPool
 
 // -------------------------------------------------------------- ceremonies
 
-async fn make_connection(db: &of_core::Db, org: of_core::OrgId) -> uuid::Uuid {
+async fn make_connection(db: &otto_tenant::Db, org: otto_tenant::ids::OrgId) -> uuid::Uuid {
     let cipher = Cipher::from_base64_key(&B64.encode([5u8; 32])).unwrap();
     let mut tx = db.begin(org).await.unwrap();
     let conn = idp::upsert_connection(
@@ -694,7 +695,7 @@ async fn set_enforce_sso_does_not_require_a_different_admins_link(pool: PgPool) 
         .upsert_user("other-admin@acme.test", Some("Other Admin"))
         .await
         .unwrap();
-    db.add_member(t.org, other_admin.id, of_core::orgs::Role::Admin)
+    db.add_member(t.org, other_admin.id, otto_core::orgs::Role::Admin)
         .await
         .unwrap();
 

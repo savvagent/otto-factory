@@ -9,7 +9,7 @@
 //!   email match, under any circumstance.** [`identities::resolve_by_email`]
 //!   is consulted exactly once, on the anonymous ceremony path, and only to
 //!   decide "create a new user" vs. "refuse" — never to choose a link
-//!   target. See `of_core::identities::create_user_for_federation`'s doc
+//!   target. See `otto_core::identities::create_user_for_federation`'s doc
 //!   comment for the account-takeover shape this closes.
 //! - **No `Tx` is held open across an outbound HTTP call.** [`callback`]'s
 //!   only `Tx`s are the short, read-only one that opens the sealed client
@@ -25,14 +25,16 @@
 use axum::extract::{Json, Path, Query, State};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use http::request::Parts;
+use otto_core::orgs::OrgsExt;
+use otto_core::orgs::OrgsTxExt;
 use serde::{Deserialize, Serialize};
 
-use of_auth::crypto::{self, prefix};
-use of_auth::{dns, oidc, sessions, AuthError};
-use of_core::audit::{action, Entry};
-use of_core::ids::{OrgId, UserId};
-use of_core::orgs::{Org, Role};
-use of_core::{ceremonies, domains, identities, idp};
+use otto_auth::crypto::{self, prefix};
+use otto_auth::{dns, oidc, sessions, AuthError};
+use otto_core::orgs::{Org, Role};
+use otto_core::{ceremonies, domains, identities, idp};
+use otto_tenant::audit::{action, Entry};
+use otto_tenant::ids::{OrgId, UserId};
 
 use crate::error::{ApiError, ApiResult};
 use crate::oauth::escape;
@@ -45,7 +47,7 @@ use crate::state::{client_ip, AppState};
 /// own TTL convention this repo already follows for a single-use token.
 const CEREMONY_TTL_SECS: i64 = 600;
 
-/// `_otto-factory-verify` — must match `of_auth::dns::verify_txt_record`'s
+/// `_otto-factory-verify` — must match `otto_auth::dns::verify_txt_record`'s
 /// own subdomain exactly, since this is what the console tells an admin to
 /// put in DNS and that function is what actually checks it.
 const VERIFY_SUBDOMAIN: &str = "_otto-factory-verify";
@@ -62,7 +64,7 @@ fn email_domain(email: &str) -> Option<&str> {
 
 /// The exact TXT record name/value an admin must publish — computed the same
 /// way in both [`claim_domain`] and [`list_domains`], and matching
-/// `of_auth::dns::verify_txt_record`'s own format string.
+/// `otto_auth::dns::verify_txt_record`'s own format string.
 fn txt_instructions(domain: &str, token: &str) -> (String, String) {
     (
         format!("{VERIFY_SUBDOMAIN}.{domain}"),
@@ -118,7 +120,7 @@ async fn throttle_by_source(state: &AppState, parts: &Parts, prefix: &str) -> Ap
     };
 
     let bucket = format!("{prefix}:{ip}");
-    of_auth::ratelimit::check_and_charge(&state.db, &bucket).await?;
+    otto_auth::ratelimit::check_and_charge(&state.db, &bucket).await?;
     Ok(())
 }
 
@@ -215,6 +217,18 @@ enum Outcome {
 
 impl From<of_core::Error> for Outcome {
     fn from(e: of_core::Error) -> Self {
+        Outcome::Error(e.into())
+    }
+}
+
+impl From<otto_core::Error> for Outcome {
+    fn from(e: otto_core::Error) -> Self {
+        Outcome::Error(e.into())
+    }
+}
+
+impl From<otto_tenant::Error> for Outcome {
+    fn from(e: otto_tenant::Error) -> Self {
         Outcome::Error(e.into())
     }
 }
@@ -568,7 +582,7 @@ async fn link_authenticated(
 /// `resolve_by_email` is consulted **only** to decide "create a new user" vs.
 /// "refuse" — `Some(_)` is never a link target. The `org_members` write is
 /// the one point in steps 4–6 that needs a `Tx`; every other call here is
-/// unscoped, per `of_core::identities`'s and `of_core::idp`'s own doc
+/// unscoped, per `otto_core::identities`'s and `otto_core::idp`'s own doc
 /// comments.
 async fn link_anonymous(
     state: &AppState,
@@ -654,7 +668,7 @@ pub struct ConnectionRequest {
 /// The four discovery fields the OIDC flow needs (`issuer`,
 /// `authorization_endpoint`, `token_endpoint`, `jwks_uri`) — checked here,
 /// at bind time, so a connection is never saved half-configured
-/// (`of_auth::oidc::discovery_str`'s own doc comment names this handler as
+/// (`otto_auth::oidc::discovery_str`'s own doc comment names this handler as
 /// the one expected to do it). A review pass found `issuer` missing from an
 /// earlier draft of this check — every other of this design's callers
 /// (`authorization_url`, `exchange_code`, `verify_id_token`) need one of the
@@ -662,7 +676,7 @@ pub struct ConnectionRequest {
 /// binds successfully and then fails every subsequent sign-in.
 fn require_discovery_fields(discovery: &serde_json::Value, issuer: &str) -> ApiResult<()> {
     // `issuer` too, not just the three endpoint fields: `verify_id_token`
-    // (`of_auth::oidc::discovery_str(discovery, "issuer")`) needs it on
+    // (`otto_auth::oidc::discovery_str(discovery, "issuer")`) needs it on
     // every callback, and a review pass found this function's own doc
     // comment already claimed it checked "all three" endpoints plus
     // issuer's absence would otherwise only surface as `oidc_discovery_incomplete`
@@ -780,7 +794,7 @@ pub async fn get_connection(State(state): State<AppState>, ctx: OrgCtx) -> ApiRe
 /// `DELETE /api/orgs/{org}/sso/connection`.
 ///
 /// The lockout guard (refusing while `enforce_sso` is on) lives inside
-/// `of_core::idp::delete_connection` itself, which locks the org row before
+/// `otto_core::idp::delete_connection` itself, which locks the org row before
 /// deciding — this handler only calls it and maps the resulting
 /// `Error::SsoLockout` the same way every other `of-core` error is mapped.
 pub async fn delete_connection(State(state): State<AppState>, ctx: OrgCtx) -> ApiResult<Response> {
@@ -918,7 +932,7 @@ pub async fn verify_domain(
 /// `DELETE /api/orgs/{org}/sso/domains/{domain}`.
 ///
 /// The lockout guard (refusing while `enforce_sso` is on and this is the
-/// org's only verified domain) lives inside `of_core::domains::delete`
+/// org's only verified domain) lives inside `otto_core::domains::delete`
 /// itself, the same as [`delete_connection`]'s.
 pub async fn delete_domain(
     State(state): State<AppState>,
@@ -949,7 +963,7 @@ pub struct EnforceSsoRequest {
 /// `PUT /api/orgs/{org}/sso/enforce`.
 ///
 /// The lockout guard (refusing to turn this on with no working IdP path)
-/// lives inside `of_core::orgs::set_enforce_sso` itself.
+/// lives inside `otto_core::orgs::set_enforce_sso` itself.
 pub async fn set_enforce(
     State(state): State<AppState>,
     ctx: OrgCtx,
@@ -958,7 +972,7 @@ pub async fn set_enforce(
     ctx.require_admin()?;
 
     let mut tx = state.db.begin(ctx.org.id).await?;
-    let org = of_core::orgs::set_enforce_sso(&mut tx, req.enforce_sso, ctx.user.id).await?;
+    let org = otto_core::orgs::set_enforce_sso(&mut tx, req.enforce_sso, ctx.user.id).await?;
     tx.audit(
         Entry::new(action::ENFORCE_SSO_CHANGED)
             .actor(ctx.user.id)

@@ -4,8 +4,8 @@ use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
 use of_core::watch::Watcher;
-use of_core::Db;
 use of_server::{router, Config, LogFormat};
+use otto_tenant::Db;
 use tokio::net::TcpListener;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -33,7 +33,7 @@ async fn main() -> Result<()> {
     // construction is infallible from here on, and a bad key is a startup
     // error naming the variable rather than a panic the first time something
     // needs to encrypt a secret hours later.
-    of_core::crypto::Cipher::from_base64_key(&config.encryption_key)
+    otto_tenant::crypto::Cipher::from_base64_key(&config.encryption_key)
         .context("OF_ENCRYPTION_KEY is not a valid 32-byte base64 key")?;
 
     let db = Db::connect(&config.database_url)
@@ -45,7 +45,7 @@ async fn main() -> Result<()> {
         // replicas starting together is safe: the losers block until the winner
         // is done rather than racing each other through the same DDL.
         tracing::info!("applying migrations");
-        db.migrate().await.context("migrations failed")?;
+        of_core::migrate(&db).await.context("migrations failed")?;
     } else {
         tracing::warn!("OF_RUN_MIGRATIONS is off; assuming the schema is already current");
     }
@@ -61,6 +61,21 @@ async fn main() -> Result<()> {
         .await
         .context("refusing to serve: tenant isolation is not enforced by this database")?;
     tracing::info!("{}", isolation.summary());
+
+    // Tell the authorization server what this resource server is and which
+    // scopes it understands. The registry replaced a scope list that used to be
+    // compiled into the AS, so until this row exists every authorize, token,
+    // refresh, and PAT request for this resource is refused. Idempotent, and it
+    // never re-enables a resource an operator disabled.
+    let resource = of_mcp::register_resource(&db, &config.resource_uri)
+        .await
+        .context("could not register this resource server (OF_RESOURCE_URI)")?;
+    tracing::info!(
+        resource_uri = %resource.resource_uri,
+        scopes = %resource.scopes.join(" "),
+        disabled = resource.disabled,
+        "resource server registered"
+    );
 
     let watcher = Watcher::spawn(db.pool().clone())
         .await

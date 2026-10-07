@@ -2,8 +2,8 @@
 
 use std::sync::Arc;
 
-use of_core::crypto::Cipher;
-use of_core::Db;
+use otto_tenant::crypto::Cipher;
+use otto_tenant::Db;
 
 /// What the JIRA connection asks Atlassian for.
 ///
@@ -222,7 +222,7 @@ pub struct AppState {
     /// every passkey is cryptographically bound to — deriving it per request
     /// would make a configuration change silently invalidate credentials
     /// instead of failing at boot.
-    pub webauthn: Arc<of_auth::passkeys::Webauthn>,
+    pub webauthn: Arc<otto_auth::passkeys::Webauthn>,
     /// Decrypts secrets at rest (currently tracker webhook secrets and JIRA
     /// OAuth credentials — see `of_core::trackers` and `of_trackers::jira`).
     /// Held as an `Arc` because the key material is
@@ -239,7 +239,7 @@ impl AppState {
     pub fn new(
         db: Db,
         cipher: Cipher,
-        webauthn: Arc<of_auth::passkeys::Webauthn>,
+        webauthn: Arc<otto_auth::passkeys::Webauthn>,
         config: Config,
     ) -> Self {
         let meter = of_billing::Meter::new(

@@ -12,20 +12,28 @@
 //! policy that is not exercised by a test running as the deploying role is not
 //! a policy, it is a comment.
 
+use of_core::jobs::JobsExt;
+use of_core::leases::LeasesExt;
+use of_core::messages::MessagesExt;
+use of_core::repos::ReposExt;
+use otto_core::invites::InvitesExt;
+use otto_core::orgs::OrgsExt;
+use otto_core::teams::TeamsExt;
 mod common;
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use common::{db, job, tenant};
-use of_core::crypto::Cipher;
-use of_core::error::Error;
-use of_core::ids::{JobId, OrgId};
+use of_core::ids::JobId;
 use of_core::jobs::JobFilter;
 use of_core::messages::{InboxQuery, NewMessage};
-use of_core::orgs::{self, Role};
 use of_core::repos::{RepoPatch, RepoRef};
 use of_core::trackers::{resolve_binding, upsert_binding, upsert_connection, Provider};
-use of_core::{domains, identities, idp};
+use otto_core::error::Error;
+use otto_core::orgs::{self, Role};
+use otto_core::{domains, identities, idp};
+use otto_tenant::crypto::Cipher;
+use otto_tenant::ids::OrgId;
 use sqlx::PgPool;
 
 #[sqlx::test]
@@ -516,14 +524,14 @@ async fn cross_org_team_mutation_is_refused(pool: PgPool) {
     assert!(tx
         .update_team(
             team.id,
-            of_core::teams::TeamPatch {
+            otto_core::teams::TeamPatch {
                 name: Some("hijacked".into()),
                 ..Default::default()
             },
         )
         .await
         .is_err());
-    assert!(tx.delete_team(team.id).await.is_err());
+    assert!(of_core::teams::delete_team(&mut tx, team.id).await.is_err());
     assert!(
         tx.add_team_member(team.id, b.user).await.is_err(),
         "org B put its own user on org A's team"
@@ -713,7 +721,7 @@ async fn rls_scopes_tracker_connections(pool: PgPool) {
     tx.commit().await.unwrap();
 
     let mut tx = db.begin_unpinned().await.unwrap();
-    sqlx::query("SET LOCAL ROLE of_app")
+    sqlx::query("SET LOCAL ROLE otto_app")
         .execute(tx.conn())
         .await
         .unwrap();
@@ -777,7 +785,7 @@ async fn rls_scopes_tracker_bindings(pool: PgPool) {
     tx.commit().await.unwrap();
 
     let mut tx = db.begin_unpinned().await.unwrap();
-    sqlx::query("SET LOCAL ROLE of_app")
+    sqlx::query("SET LOCAL ROLE otto_app")
         .execute(tx.conn())
         .await
         .unwrap();
@@ -822,12 +830,12 @@ async fn rls_scopes_tracker_bindings(pool: PgPool) {
 /// That migration relabels `tracker_bindings.trigger_label` with a bare
 /// `UPDATE ... WHERE trigger_label = 'dark-factory'`. `Db::migrate` runs every
 /// migration on the raw pool (`db.rs`) — never `Db::begin`, so never `SET
-/// LOCAL ROLE of_app` and never `set_config('app.org_id', …)`. On this
+/// LOCAL ROLE otto_app` and never `set_config('app.org_id', …)`. On this
 /// deployment's actual connecting role (a superuser, confirmed against
 /// `docs/deploy/fly.md`), that is invisible in the opposite direction from
 /// what this test demonstrates: a superuser bypasses RLS outright, so the
 /// statement would touch *every* org's matching rows, not none. `SET LOCAL
-/// ROLE of_app` below drops to a role RLS actually binds — `of_app` owns
+/// ROLE otto_app` below drops to a role RLS actually binds — `otto_app` owns
 /// nothing, so it needs no `FORCE` to lose the exemption a table owner would
 /// otherwise get; the FORCE-RLS-fallback deployment shape hits the same zero
 /// for a related but distinct reason (that role *is* the owner, which is what
@@ -862,13 +870,13 @@ async fn rls_scopes_a_migration_style_update_with_no_org_context(pool: PgPool) {
     .await
     .unwrap();
 
-    // `of_app` owns nothing here, so it needs no `FORCE` to be bound by RLS —
+    // `otto_app` owns nothing here, so it needs no `FORCE` to be bound by RLS —
     // a non-owner grantee role is never exempt. Neither superuser nor
     // BYPASSRLS, and no `app.org_id` ever set — `Db::migrate` pins no org
     // automatically; a migration that needs one sets it itself (CLAUDE.md's
     // per-org loop), which this bare `UPDATE` never did.
     let mut tx = db.begin_unpinned().await.unwrap();
-    sqlx::query("SET LOCAL ROLE of_app")
+    sqlx::query("SET LOCAL ROLE otto_app")
         .execute(tx.conn())
         .await
         .unwrap();
@@ -928,7 +936,7 @@ async fn rls_scopes_a_migration_style_update_with_no_org_context(pool: PgPool) {
 }
 
 /// 0030_lease_resource_backfill.sql's own safety net, exercised the way a migration
-/// actually runs: as `of_app`, a non-owner role FORCE binds without needing to own the
+/// actually runs: as `otto_app`, a non-owner role FORCE binds without needing to own the
 /// table, with no `app.org_id` ever set automatically. Unlike the bare UPDATE above,
 /// this statement supplies its own org context via the per-org loop, so — unlike that
 /// one — it must actually match the seeded row, not just fail safely.
@@ -976,7 +984,7 @@ async fn rls_scopes_the_lease_resource_backfills_per_org_loop(pool: PgPool) {
     }
 
     let mut tx = db.begin_unpinned().await.unwrap();
-    sqlx::query("SET LOCAL ROLE of_app")
+    sqlx::query("SET LOCAL ROLE otto_app")
         .execute(tx.conn())
         .await
         .unwrap();
@@ -1019,7 +1027,7 @@ async fn rls_scopes_the_lease_resource_backfills_per_org_loop(pool: PgPool) {
 // that passing a pinned `Tx`'s connection to `Db::audit_global_on` was
 // rejected at runtime by `audit_events_append`'s `WITH CHECK`. Since
 // `savvagent/otto-factory#133`, `audit_global_on` takes `&mut
-// of_core::db::Unpinned` instead of `E: sqlx::PgExecutor<'e>`, and `Tx::conn()`
+// otto_tenant::db::Unpinned` instead of `E: sqlx::PgExecutor<'e>`, and `Tx::conn()`
 // has no way to produce one — the misuse this test caught is now a compile
 // error, which every `cargo build`/`cargo test` run already proves on every
 // commit. That type-level guarantee is provenance only, though: it says
@@ -1071,9 +1079,12 @@ async fn audit_global_on_refuses_a_transaction_pinned_after_it_was_opened(pool: 
         .await
         .unwrap();
 
-    let err = of_core::Db::audit_global_on(&mut tx, of_core::audit::Entry::new("test.misuse"))
-        .await
-        .expect_err("audit_global_on must refuse a transaction pinned by hand after it was opened");
+    let err =
+        otto_tenant::Db::audit_global_on(&mut tx, otto_tenant::audit::Entry::new("test.misuse"))
+            .await
+            .expect_err(
+                "audit_global_on must refuse a transaction pinned by hand after it was opened",
+            );
     assert_eq!(err.code(), "invalid_argument", "got: {err}");
 }
 
@@ -1089,7 +1100,7 @@ async fn audit_global_on_refuses_a_transaction_pinned_after_it_was_opened(pool: 
 
 /// The happy path, and the reason it is not trivial: `#[sqlx::test]` connects as
 /// the role Postgres was initialised with, which is a superuser. Isolation here
-/// is real only because `SET LOCAL ROLE of_app` drops out of it, so a passing
+/// is real only because `SET LOCAL ROLE otto_app` drops out of it, so a passing
 /// assertion is evidence the role was genuinely assumed.
 #[sqlx::test]
 async fn isolation_verifies_on_a_healthy_database(pool: PgPool) {
@@ -1101,20 +1112,20 @@ async fn isolation_verifies_on_a_healthy_database(pool: PgPool) {
 
     assert!(
         report.tenant_role_assumed,
-        "the test database can create of_app, so it must have been assumed — \
+        "the test database can create otto_app, so it must have been assumed — \
          a false here means begin() is no longer dropping out of the superuser"
     );
-    assert_eq!(report.effective_role, "of_app");
+    assert_eq!(report.effective_role, "otto_app");
     assert!(!report.role_is_superuser && !report.role_bypasses_rls);
     assert!(
         report.tables.len() >= 13,
-        "expected every tenant table from 0007_rls.sql, got {:?}",
+        "expected every tenant table from 0007_rls.sql (the factory's own), got {:?}",
         report.tables.iter().map(|t| &t.name).collect::<Vec<_>>()
     );
     assert!(
         report.tables.iter().all(|t| t.rls_forced),
         "every tenant table must be FORCE ROW LEVEL SECURITY — that is what \
-         carries isolation on a deployment that cannot create of_app"
+         carries isolation on a deployment that cannot create otto_app"
     );
 }
 
@@ -1166,10 +1177,14 @@ async fn isolation_refuses_a_database_with_no_policies(pool: PgPool) {
         .verify_tenant_isolation()
         .await
         .expect_err("a database with no tenant policies is not isolated");
-    assert!(err.to_string().contains("0007_rls.sql"), "{err}");
+    assert!(
+        err.to_string()
+            .contains("no table carries a tenant-isolation policy"),
+        "{err}"
+    );
 }
 
-/// The verification must not leave the session pinned to `of_app`, or the
+/// The verification must not leave the session pinned to `otto_app`, or the
 /// control plane — which runs unpinned, as the connecting role — would silently
 /// lose the privileges it needs on the very next checkout from the pool.
 #[sqlx::test]
@@ -1183,7 +1198,10 @@ async fn verifying_isolation_does_not_poison_the_pool(pool: PgPool) {
         .await
         .unwrap();
     tx.rollback().await.unwrap();
-    assert_ne!(role, "of_app", "verification leaked SET ROLE into the pool");
+    assert_ne!(
+        role, "otto_app",
+        "verification leaked SET ROLE into the pool"
+    );
 
     // And the ordinary path still isolates afterwards.
     let a = tenant(&db, "acme", "git@github.com:acme/api.git").await;
@@ -1199,13 +1217,13 @@ async fn verifying_isolation_does_not_poison_the_pool(pool: PgPool) {
 // ---------------------------------------------------------------------------
 // The audit trail under row-level security.
 //
-// These tests all issue `SET LOCAL ROLE of_app` by hand, which is not how the
+// These tests all issue `SET LOCAL ROLE otto_app` by hand, which is not how the
 // rest of the suite works and is the point: `#[sqlx::test]` connects as the
 // superuser Postgres was initialised with, and a superuser bypasses row-level
 // security even on a FORCE'd table. A test of an audit *policy* written the
 // ordinary way would pass against no policy at all.
 //
-// Dropping to `of_app` makes the policies apply, which is the same thing that
+// Dropping to `otto_app` makes the policies apply, which is the same thing that
 // happens on a deployment connecting as a non-superuser schema owner — the
 // shape where `audit_events` previously rejected every login's audit row.
 // ---------------------------------------------------------------------------
@@ -1221,7 +1239,7 @@ const AUDIT_INSERT: &str = "INSERT INTO audit_events (org_id, actor_label, actio
 async fn the_control_plane_can_append_audit_rows_with_no_org(pool: PgPool) {
     let db = db(pool);
     let mut tx = db.begin_unpinned().await.unwrap();
-    sqlx::query("SET LOCAL ROLE of_app")
+    sqlx::query("SET LOCAL ROLE otto_app")
         .execute(tx.conn())
         .await
         .unwrap();
@@ -1242,7 +1260,7 @@ async fn the_control_plane_can_append_an_org_scoped_audit_row(pool: PgPool) {
     let a = tenant(&db, "acme", "git@github.com:acme/api.git").await;
 
     let mut tx = db.begin_unpinned().await.unwrap();
-    sqlx::query("SET LOCAL ROLE of_app")
+    sqlx::query("SET LOCAL ROLE otto_app")
         .execute(tx.conn())
         .await
         .unwrap();
@@ -1283,7 +1301,7 @@ async fn audit_rows_cannot_be_rewritten(pool: PgPool) {
     let a = tenant(&db, "acme", "git@github.com:acme/api.git").await;
 
     let mut tx = db.begin_unpinned().await.unwrap();
-    sqlx::query("SET LOCAL ROLE of_app")
+    sqlx::query("SET LOCAL ROLE otto_app")
         .execute(tx.conn())
         .await
         .unwrap();
@@ -1325,7 +1343,7 @@ async fn audit_rows_cannot_be_erased_from_a_request(pool: PgPool) {
     let a = tenant(&db, "acme", "git@github.com:acme/api.git").await;
 
     let mut tx = db.begin_unpinned().await.unwrap();
-    sqlx::query("SET LOCAL ROLE of_app")
+    sqlx::query("SET LOCAL ROLE otto_app")
         .execute(tx.conn())
         .await
         .unwrap();
@@ -1433,11 +1451,11 @@ async fn claimed_domains_are_invisible_and_unmutable_across_orgs(pool: PgPool) {
     assert_eq!(still_there[0].domain, "acme.com");
 }
 
-/// A domain already held by org A cannot be claimed by org B -- the
-/// `ON CONFLICT (domain) DO UPDATE ... WHERE claimed_domains.org_id = $1`
-/// shape blocks the update for a foreign conflict and domains::claim turns
-/// that into Error::DomainAlreadyClaimed, generic, naming no org. Org A's
-/// row (including its verification_token) is left exactly as it was.
+/// A domain *verified* by org A cannot be claimed by org B — only a verified
+/// claim is exclusive (`claimed_domains_verified_domain_key`, migration 0034,
+/// savvagent/otto-platform#6). `domains::claim` turns the refusal into
+/// `Error::DomainAlreadyClaimed`, generic, naming no org. Org A's row
+/// (including its verification_token) is left exactly as it was.
 #[sqlx::test]
 async fn domains_claim_collision_across_orgs_is_refused(pool: PgPool) {
     let db = db(pool);
@@ -1446,6 +1464,9 @@ async fn domains_claim_collision_across_orgs_is_refused(pool: PgPool) {
 
     let mut tx = db.begin(a.org).await.unwrap();
     let original = domains::claim(&mut tx, "shared.test", "token-a")
+        .await
+        .unwrap();
+    domains::mark_verified(&mut tx, "shared.test")
         .await
         .unwrap();
     tx.commit().await.unwrap();
@@ -1465,6 +1486,38 @@ async fn domains_claim_collision_across_orgs_is_refused(pool: PgPool) {
         still_theirs[0].verification_token,
         original.verification_token
     );
+}
+
+/// The squatting fix, against this database's schema. An *unverified* claim
+/// must not block anyone: org A claims a domain and never proves it, and org B
+/// (the real owner) can still claim and verify it. Under the old primary key
+/// on `domain` alone, A would have held it forever.
+#[sqlx::test]
+async fn an_unverified_claim_does_not_block_the_real_owner(pool: PgPool) {
+    let db = db(pool);
+    let squatter = tenant(&db, "squatter", "git@github.com:squatter/api.git").await;
+    let owner = tenant(&db, "bigcorp", "git@github.com:bigcorp/api.git").await;
+
+    let mut tx = db.begin(squatter.org).await.unwrap();
+    domains::claim(&mut tx, "bigcorp.com", "squat")
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let mut tx = db.begin(owner.org).await.unwrap();
+    domains::claim(&mut tx, "bigcorp.com", "real")
+        .await
+        .unwrap();
+    domains::mark_verified(&mut tx, "bigcorp.com")
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    // Now that the owner holds it verified, the squatter cannot verify theirs.
+    let mut tx = db.begin(squatter.org).await.unwrap();
+    assert!(domains::mark_verified(&mut tx, "bigcorp.com")
+        .await
+        .is_err());
 }
 
 /// idp::resolve_for_domain and identities::resolve_user are the two

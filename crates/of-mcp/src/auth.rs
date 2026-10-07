@@ -13,7 +13,7 @@
 //!    is configured anywhere. Get this header wrong and the product's premise —
 //!    one URL, no install — stops working, in a way that looks to the user like
 //!    "the server is broken".
-//! 2. **Enforce the audience.** [`of_auth::tokens::introspect`] refuses a token
+//! 2. **Enforce the audience.** [`otto_auth::tokens::introspect`] refuses a token
 //!    minted for any other resource. This is the confused-deputy defense and it
 //!    is why the canonical URI is configuration rather than something derived
 //!    from the request's `Host` header — a header an attacker controls is not a
@@ -34,9 +34,9 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use http::{HeaderMap, StatusCode};
-use of_auth::tokens::{self, Principal};
-use of_auth::AuthError;
-use of_core::Db;
+use otto_auth::tokens::{self, Principal};
+use otto_auth::AuthError;
+use otto_tenant::Db;
 
 /// Everything the middleware needs, shared by the whole surface.
 #[derive(Clone)]
@@ -149,7 +149,7 @@ pub async fn require_bearer(
         // `401` would be actively harmful: every connected agent would conclude
         // its token had died and stampede the authorization server at exactly
         // the moment the database is already unwell.
-        Err(AuthError::Db(e)) => {
+        Err(e) if is_outage(&e) => {
             tracing::error!(error = %e, "token introspection failed");
             (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -181,19 +181,68 @@ pub async fn require_bearer(
     }
 }
 
+/// Whether `e` means the database could not answer, however many layers it
+/// was wrapped in on the way up.
+///
+/// `otto-auth` reports a database failure three ways depending on which layer
+/// hit it: a bare `sqlx` error (`Db`), a tenant-substrate error from opening
+/// the transaction (`Tenant`), or an identity-domain error wrapping either
+/// (`Core`). Matching only `Db` lets the other two fall through to the `401`
+/// arm, which is how an outage turns into every agent being told to
+/// re-authenticate.
+fn is_outage(e: &AuthError) -> bool {
+    fn tenant(e: &otto_tenant::Error) -> bool {
+        matches!(e, otto_tenant::Error::Db(_))
+    }
+    match e {
+        AuthError::Db(_) => true,
+        AuthError::Tenant(t) => tenant(t),
+        AuthError::Core(otto_core::Error::Db(_)) => true,
+        AuthError::Core(otto_core::Error::Tenant(t)) => tenant(t),
+        _ => false,
+    }
+}
+
 /// `GET /.well-known/oauth-protected-resource` (RFC 9728).
 ///
 /// Served from here rather than alongside the authorization server's own
 /// documents because it describes *this* resource, and because the `401` above
 /// points at it — a discovery pointer whose target lives in a different crate's
 /// router is a pointer that goes stale the first time the surfaces are split.
-pub async fn protected_resource_metadata(
-    State(rs): State<Arc<ResourceServer>>,
-) -> Json<serde_json::Value> {
-    Json(of_auth::oauth::protected_resource_metadata(
-        &rs.resource_uri,
-        &rs.public_url,
-    ))
+///
+/// The scopes and name come from the registry row this service registers at
+/// startup, so what is advertised is exactly what the authorization server will
+/// issue.
+pub async fn protected_resource_metadata(State(rs): State<Arc<ResourceServer>>) -> Response {
+    match otto_auth::resources::get(&rs.db, &rs.resource_uri).await {
+        Ok(Some(resource)) => Json(otto_auth::oauth::protected_resource_metadata(
+            &resource,
+            &rs.public_url,
+        ))
+        .into_response(),
+        Ok(None) => {
+            tracing::error!(resource = %rs.resource_uri, "resource server is not registered");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": "temporarily_unavailable",
+                    "error_description": "this resource server is not registered yet",
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "could not read the resource registry");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": "temporarily_unavailable",
+                    "error_description": "could not read this resource's metadata right now; retry shortly",
+                })),
+            )
+                .into_response()
+        }
+    }
 }
 
 /// The authenticated caller of a tool call.
@@ -219,8 +268,8 @@ mod tests {
     fn the_scheme_is_case_insensitive() {
         for prefix in ["Bearer", "bearer", "BEARER", "BeArEr"] {
             assert_eq!(
-                bearer(&headers(&format!("{prefix} of_at_abc"))),
-                Some("of_at_abc"),
+                bearer(&headers(&format!("{prefix} otto_at_abc"))),
+                Some("otto_at_abc"),
                 "{prefix} should be accepted"
             );
         }
@@ -228,7 +277,13 @@ mod tests {
 
     #[test]
     fn other_schemes_and_malformed_headers_carry_no_token() {
-        for bad in ["Basic dXNlcjpwdw==", "of_at_abc", "Bearer", "Bearer   ", ""] {
+        for bad in [
+            "Basic dXNlcjpwdw==",
+            "otto_at_abc",
+            "Bearer",
+            "Bearer   ",
+            "",
+        ] {
             assert_eq!(bearer(&headers(bad)), None, "{bad:?} should yield no token");
         }
         assert_eq!(bearer(&HeaderMap::new()), None);

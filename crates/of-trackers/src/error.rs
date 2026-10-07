@@ -68,4 +68,8 @@ pub enum Error {
 
     #[error(transparent)]
     Core(#[from] of_core::Error),
+
+    /// A seal/open failure from `otto_tenant::crypto::Cipher`.
+    #[error(transparent)]
+    Tenant(#[from] otto_tenant::Error),
 }

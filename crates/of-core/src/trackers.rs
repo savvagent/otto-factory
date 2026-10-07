@@ -14,10 +14,12 @@ use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use std::str::FromStr;
 
-use crate::crypto::Sealed;
-use crate::db::{Db, Tx};
 use crate::error::{Error, Result};
-use crate::ids::{OrgId, RepoId};
+use crate::ids::RepoId;
+use crate::repos::ReposExt;
+use otto_tenant::crypto::Sealed;
+use otto_tenant::ids::OrgId;
+use otto_tenant::{Db, Tx};
 
 const NONCE_BYTES: usize = 12;
 /// AES-256-GCM's authentication tag, which the `aes-gcm` crate appends to the
@@ -108,7 +110,7 @@ struct TrackerConnectionRow {
 
 fn encode_sealed(sealed: &Sealed) -> Result<String> {
     if sealed.nonce.len() != NONCE_BYTES {
-        return Err(Error::Crypto("stored nonce has the wrong length".into()));
+        return Err(otto_tenant::Error::Crypto("stored nonce has the wrong length".into()).into());
     }
     let mut combined = Vec::with_capacity(sealed.nonce.len() + sealed.ciphertext.len());
     combined.extend_from_slice(&sealed.nonce);
@@ -127,13 +129,14 @@ pub fn decode_stored_secret(encoded: &str) -> Result<Sealed> {
     // caller has not learned anything about the key or the ciphertext's
     // authenticity. Say so distinctly; conflating the two would send an
     // operator debugging a truncated column value chasing the wrong key.
-    let combined = B64
-        .decode(encoded)
-        .map_err(|_| Error::Crypto("stored sealed value is not valid base64".into()))?;
+    let combined = B64.decode(encoded).map_err(|_| {
+        otto_tenant::Error::Crypto("stored sealed value is not valid base64".into())
+    })?;
     if combined.len() < NONCE_BYTES + GCM_TAG_BYTES {
-        return Err(Error::Crypto(
+        return Err(otto_tenant::Error::Crypto(
             "stored sealed value is too short to contain a nonce and an authentication tag".into(),
-        ));
+        )
+        .into());
     }
     Ok(Sealed {
         nonce: combined[..NONCE_BYTES].to_vec(),

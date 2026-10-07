@@ -25,9 +25,9 @@
 
 use axum::extract::{Json, Path, State};
 use axum::response::{IntoResponse, Response};
-use of_auth::oauth;
-use of_auth::tokens::{self, TokenSummary};
-use of_core::audit::{action, Entry};
+use otto_auth::resources;
+use otto_auth::tokens::{self, TokenSummary};
+use otto_tenant::audit::{action, Entry};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -83,10 +83,14 @@ pub async fn mint_token(
     ctx: OrgCtx,
     Json(req): Json<MintTokenRequest>,
 ) -> ApiResult<Response> {
-    // Validated against the authorization server's own list, so an unknown
+    // Validated against this resource server's registry row, so an unknown
     // scope is refused here exactly as it would be at `/oauth/authorize`
-    // — and an empty request gets the same read-only default.
-    let scopes = oauth::validate_scopes(&req.scopes)?;
+    // — and an empty request gets the same read-only default. `mint_pat`
+    // checks the registry again; resolving it here is what gives the
+    // `org:admin` check below, and the response, the effective scopes.
+    let scopes = resources::get_active(&state.db, &state.config.resource_uri)
+        .await?
+        .grant_scopes(&req.scopes)?;
 
     // `org:admin` is a real capability, not a label: it must not be mintable by
     // someone who does not have it.

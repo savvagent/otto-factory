@@ -16,7 +16,8 @@
 
 use axum::extract::{Json, Path, State};
 use axum::response::{IntoResponse, Response};
-use of_core::audit::{action, Entry};
+use of_core::audit::action;
+use of_core::repos::ReposExt;
 use of_core::trackers::{
     delete_binding, delete_connection, get_connection, list_bindings_for_repo, list_connections,
     resolve_binding, upsert_binding, upsert_connection, Provider, TrackerBinding,
@@ -24,6 +25,7 @@ use of_core::trackers::{
 };
 use of_trackers::github::GithubUserAuth;
 use of_trackers::jira::JiraClient;
+use otto_tenant::audit::Entry;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
@@ -287,7 +289,7 @@ async fn connect_github(state: &AppState, req: &ConnectTrackerRequest) -> Result
 async fn connect_jira(
     state: &AppState,
     req: &ConnectTrackerRequest,
-) -> Result<(String, of_core::crypto::Sealed), ApiError> {
+) -> Result<(String, otto_tenant::crypto::Sealed), ApiError> {
     let (client_id, client_secret) = state
         .config
         .jira_client_id
@@ -473,7 +475,7 @@ pub async fn unbind_repo(
 /// applies, so a team-scoped repo's tracker binding is not readable by members
 /// of other teams — the binding names the customer's JIRA project.
 async fn resolve_repo(
-    tx: &mut of_core::Tx<'_>,
+    tx: &mut otto_tenant::Tx<'_>,
     ctx: &OrgCtx,
     slug: String,
 ) -> ApiResult<of_core::repos::Repo> {

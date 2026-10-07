@@ -15,10 +15,14 @@
 use axum::extract::{Json, Path, State};
 use axum::response::{IntoResponse, Response};
 use http::request::Parts;
-use of_core::audit::{action, Entry};
-use of_core::ids::UserId;
-use of_core::invites::Invite;
-use of_core::orgs::{Membership, Org, OrgMember, Role};
+use otto_core::invites::Invite;
+use otto_core::invites::InvitesExt;
+use otto_core::orgs::OrgsExt;
+use otto_core::orgs::OrgsTxExt;
+use otto_core::orgs::{Membership, Org, OrgMember, Role};
+use otto_core::teams::TeamsExt;
+use otto_tenant::audit::{action, Entry};
+use otto_tenant::ids::UserId;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -91,7 +95,7 @@ pub async fn create_org(
     // confirmed. Not quite: `login_recovery_code` opens a session, and an admin
     // may have reset that member's credential, which leaves a signed-in account
     // with nothing enrolled. This is the check that notices.
-    if !of_auth::passkeys::has_credential(&state.db, caller.user.id).await? {
+    if !otto_auth::passkeys::has_credential(&state.db, caller.user.id).await? {
         return Err(ApiError::forbidden(
             "register a passkey before creating an organization",
         ));
@@ -239,7 +243,7 @@ pub async fn remove_member(
     }
     tx.remove_from_all_teams(target).await?;
     tx.remove_member(target).await?;
-    let revoked = of_auth::tokens::revoke_all_in_org_tx(tx.conn(), target, ctx.org.id).await?;
+    let revoked = otto_auth::tokens::revoke_all_in_org_tx(tx.conn(), target, ctx.org.id).await?;
     tx.audit(
         Entry::new(action::MEMBER_REMOVED)
             .actor(ctx.user.id)
@@ -264,7 +268,7 @@ pub async fn remove_member(
 /// Locks the owner rows for the rest of `tx` (see
 /// `Tx::count_owners_for_update`), so the caller's own write further down the
 /// same transaction is guaranteed consistent with what this just counted.
-async fn guard_last_owner_locked(tx: &mut of_core::Tx<'_>, ctx: &OrgCtx) -> ApiResult<()> {
+async fn guard_last_owner_locked(tx: &mut otto_tenant::Tx<'_>, ctx: &OrgCtx) -> ApiResult<()> {
     if tx.count_owners_for_update().await? <= 1 {
         return Err(ApiError::conflict(
             "last_owner",
@@ -286,7 +290,7 @@ async fn guard_last_owner_locked(tx: &mut of_core::Tx<'_>, ctx: &OrgCtx) -> ApiR
 /// leaves membership alone, so they can sign back in on a device that is still
 /// theirs.
 ///
-/// Sessions are deliberately not org-scoped (see `of_auth::sessions`'s module
+/// Sessions are deliberately not org-scoped (see `otto_auth::sessions`'s module
 /// doc — one login reaches every org a person belongs to, so they are not
 /// asked to sign in twice), which means this org-scoped action's effect is
 /// not: an admin here also ends that member's sessions for orgs unrelated to
@@ -307,7 +311,7 @@ pub async fn force_logout(
         .await?
         .ok_or_else(|| ApiError::not_found("that user is not a member of this org"))?;
 
-    let revoked = of_auth::sessions::revoke_all(&state.db, target).await?;
+    let revoked = otto_auth::sessions::revoke_all(&state.db, target).await?;
     Ok(Json(serde_json::json!({ "sessionsRevoked": revoked })))
 }
 
@@ -357,7 +361,7 @@ pub async fn reset_member_passkeys(
     }
 
     let ip = client_ip(&parts, &state.config);
-    let token = of_auth::crypto::generate(of_auth::crypto::prefix::INVITE);
+    let token = otto_auth::crypto::generate(otto_auth::crypto::prefix::INVITE);
 
     // Clearing the passkeys, ending the sessions they opened, minting the
     // claim code, and recording the audit row all share one transaction: a
@@ -367,16 +371,16 @@ pub async fn reset_member_passkeys(
     // (savvagent/otto-factory#134). This used to also write a second,
     // best-effort, post-commit `auth.passkey.cleared` row on an unpinned
     // connection, on the theory that it mirrored what a self-service clear
-    // writes globally (`of_auth::passkeys::clear`) — but there is no
+    // writes globally (`otto_auth::passkeys::clear`) — but there is no
     // self-service passkey clear in production, so that write had no live
     // counterpart to mirror and only duplicated this row under a second
     // action name. Dropped rather than merely re-scoped: this one row,
     // already atomic and already org-scoped, is `#134`'s actual fix for this
-    // call site. See `of_auth::passkeys::clear`'s doc comment.
+    // call site. See `otto_auth::passkeys::clear`'s doc comment.
     let mut tx = state.db.begin(ctx.org.id).await?;
-    of_auth::passkeys::clear_tx(tx.conn(), target).await?;
-    of_auth::sessions::revoke_all_tx(tx.conn(), target).await?;
-    of_core::invites::create_account_claim_tx(tx.conn(), target, &token.hash, Some(ctx.user.id))
+    otto_auth::passkeys::clear_tx(tx.conn(), target).await?;
+    otto_auth::sessions::revoke_all_tx(tx.conn(), target).await?;
+    otto_core::invites::create_account_claim_tx(tx.conn(), target, &token.hash, Some(ctx.user.id))
         .await?;
     tx.audit(
         Entry::new(action::MEMBER_PASSKEYS_RESET)
@@ -439,7 +443,7 @@ pub async fn create_invite(
         ctx.require_owner()?;
     }
 
-    let token = of_auth::crypto::generate(of_auth::crypto::prefix::INVITE);
+    let token = otto_auth::crypto::generate(otto_auth::crypto::prefix::INVITE);
     let email = req.email.trim().to_string();
 
     let mut tx = state.db.begin(ctx.org.id).await?;
@@ -477,7 +481,7 @@ pub async fn create_invite(
 #[serde(rename_all = "camelCase")]
 pub struct CreatedInvite {
     #[serde(flatten)]
-    pub invite: of_core::invites::Invite,
+    pub invite: otto_core::invites::Invite,
     pub code: String,
     pub link: String,
 }
@@ -515,7 +519,7 @@ pub async fn accept_invite(
     parts: Parts,
     Json(req): Json<AcceptInviteRequest>,
 ) -> ApiResult<Json<Joined>> {
-    if !of_auth::passkeys::has_credential(&state.db, caller.user.id).await? {
+    if !otto_auth::passkeys::has_credential(&state.db, caller.user.id).await? {
         return Err(ApiError::forbidden(
             "register a passkey before accepting an invitation",
         ));
@@ -529,9 +533,9 @@ pub async fn accept_invite(
         .db
         .get_org_by_slug(&org_slug)
         .await?
-        .ok_or(of_core::Error::InviteInvalid)?;
+        .ok_or(otto_core::Error::InviteInvalid)?;
 
-    let hash = of_auth::crypto::hash(req.token.trim());
+    let hash = otto_auth::crypto::hash(req.token.trim());
 
     // An account with no address cannot be the one an invitation names, and
     // saying so plainly beats a generic refusal — the fix is to set it.

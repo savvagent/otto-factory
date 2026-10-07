@@ -31,8 +31,8 @@
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use http::{header, HeaderValue, StatusCode};
-use of_auth::AuthError;
 use of_core::Error as CoreError;
+use otto_auth::AuthError;
 
 #[derive(Debug)]
 pub struct ApiError {
@@ -116,42 +116,79 @@ impl From<CoreError> for ApiError {
     fn from(e: CoreError) -> Self {
         use CoreError::*;
 
-        // `Db` and the three internal-only variants below never reach the
-        // caller. Everything else in `of-core::Error` was written to be read
-        // by whoever hit it.
-        //
-        // `IsolationNotEnforced` is a startup assertion, so arriving here at all
-        // would mean a server that promised to refuse to serve is serving. It is
-        // logged in full and answered vaguely: its message names database roles
-        // and tables, which is infrastructure detail no HTTP client should be
-        // handed. `Config`/`Crypto` carry the same shape of risk — key-material
-        // and ciphertext diagnostics, never an HTTP client's business.
-        match &e {
-            Db(inner) => return ApiError::internal("of-core", inner),
-            IsolationNotEnforced { .. } | Config(_) | Crypto(_) => {
-                return ApiError::internal("of-core", &e)
-            }
-            _ => {}
+        // Identity and tenancy failures are the platform's: they carry their
+        // own codes and wording and are mapped on their own below.
+        let e = match e {
+            Identity(inner) => return ApiError::from(inner),
+            Tenant(inner) => return ApiError::from(inner),
+            other => other,
+        };
+
+        // `Db` never reaches the caller. Everything else in `of-core::Error`
+        // was written to be read by whoever hit it.
+        if let Db(inner) = &e {
+            return ApiError::internal("of-core", inner);
         }
 
         let status = match &e {
-            JobNotFound(_)
-            | RepoNotFound(_)
-            | RepoUnresolved { .. }
-            | TeamNotFound { .. }
-            | OrgNotFound(_) => StatusCode::NOT_FOUND,
+            JobNotFound(_) | RepoNotFound(_) | RepoUnresolved { .. } => StatusCode::NOT_FOUND,
 
             RepoSlugTaken(_)
             | RemoteTaken(..)
-            | TeamSlugTaken(_)
             | TeamInUse { .. }
-            | AlreadyAMember { .. }
             | LeaseHeld { .. }
             | LeaseNotHeld(_)
             | AlreadyClaimed { .. }
             | TicketAlreadyLinked { .. }
-            | IdempotencyKeyConflict { .. }
-            | DomainAlreadyClaimed => StatusCode::CONFLICT,
+            | IdempotencyKeyConflict { .. } => StatusCode::CONFLICT,
+
+            WrongStatus { .. } | DependencyCycle(..) | Invalid(_) => StatusCode::BAD_REQUEST,
+
+            // Retriable, not the caller's fault — the same distinction
+            // retriable() already draws at the MCP layer. 503, not 500: this
+            // is specifically a "try again" condition, and its message
+            // (unlike Db's) is already safe to show as-is.
+            RaceLost(_) => StatusCode::SERVICE_UNAVAILABLE,
+
+            Db(_) | Identity(_) | Tenant(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+
+        let mut api = ApiError::new(status, e.code(), e.to_string());
+        // Rare, and the only signal an operator gets if it fires more than
+        // expected -- or if send_message's currently-unreachable case (see
+        // that site's own comment in messages.rs) is ever reached by a
+        // future change. Unlike Db's ApiError::internal path, this does not
+        // redact the message; it only adds the log side-effect and a small
+        // retry hint, since the race this describes is expected to resolve
+        // almost immediately.
+        if let RaceLost(_) = &e {
+            tracing::warn!(
+                message = %api.message,
+                "a lost unique-violation race surfaced to the console API"
+            );
+            api.retry_after = Some(1);
+        }
+        api
+    }
+}
+
+/// Identity-domain failures (`otto-core`): orgs, teams, invites, SSO guards.
+impl From<otto_core::Error> for ApiError {
+    fn from(e: otto_core::Error) -> Self {
+        use otto_core::Error::*;
+
+        let e = match e {
+            Tenant(inner) => return ApiError::from(inner),
+            other => other,
+        };
+        if let Db(inner) = &e {
+            return ApiError::internal("otto-core", inner);
+        }
+
+        let status = match &e {
+            TeamNotFound { .. } | OrgNotFound(_) => StatusCode::NOT_FOUND,
+
+            TeamSlugTaken(_) | AlreadyAMember { .. } | DomainAlreadyClaimed => StatusCode::CONFLICT,
 
             // Gone, not Not Found: the link was real, and saying so is what
             // tells the holder to ask for a new one rather than re-check the URL.
@@ -163,39 +200,35 @@ impl From<CoreError> for ApiError {
             // (`set_enforce_sso`'s enable path, `idp::delete_connection`,
             // `domains::delete`) refuses with 400, naming the reason, so the
             // admin who tripped it knows what to fix before retrying.
-            WrongStatus { .. }
-            | DependencyCycle(..)
-            | Invalid(_)
-            | NotAMember(_)
-            | SsoLockout { .. } => StatusCode::BAD_REQUEST,
+            Invalid(_) | NotAMember(_) | SsoLockout { .. } => StatusCode::BAD_REQUEST,
 
-            // Retriable, not the caller's fault — the same distinction
-            // retriable() already draws at the MCP layer. 503, not 500: this
-            // is specifically a "try again" condition, and its message
-            // (unlike Db's) is already safe to show as-is.
-            RaceLost(_) => StatusCode::SERVICE_UNAVAILABLE,
-
-            Db(_) | IsolationNotEnforced { .. } | Config(_) | Crypto(_) => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
+            Db(_) | Tenant(_) => unreachable!("returned above"),
         };
 
-        let mut api = ApiError::new(status, e.code(), e.to_string());
-        // Rare, and the only signal an operator gets if it fires more than
-        // expected -- or if send_message's currently-unreachable case (see
-        // that site's own comment in messages.rs) is ever reached by a
-        // future change. Unlike Db/Config/Crypto's ApiError::internal path,
-        // this does not redact the message; it only adds the log
-        // side-effect and a small retry hint, since the race this describes
-        // is expected to resolve almost immediately.
-        if let RaceLost(_) = &e {
-            tracing::warn!(
-                message = %api.message,
-                "a lost unique-violation race surfaced to the console API"
-            );
-            api.retry_after = Some(1);
+        ApiError::new(status, e.code(), e.to_string())
+    }
+}
+
+/// Tenant-substrate failures (`otto-tenant`).
+///
+/// `IsolationNotEnforced` is a startup assertion, so arriving here at all would
+/// mean a server that promised to refuse to serve is serving. It is logged in
+/// full and answered vaguely: its message names database roles and tables,
+/// which is infrastructure detail no HTTP client should be handed.
+/// `Config`/`Crypto` carry the same shape of risk -- key-material and
+/// ciphertext diagnostics, never an HTTP client's business.
+impl From<otto_tenant::Error> for ApiError {
+    fn from(e: otto_tenant::Error) -> Self {
+        use otto_tenant::Error::*;
+
+        match &e {
+            Db(inner) => ApiError::internal("otto-tenant", inner),
+            IsolationNotEnforced { .. } | Config(_) | Crypto(_) => {
+                ApiError::internal("otto-tenant", &e)
+            }
+            Invalid(_) => ApiError::new(StatusCode::BAD_REQUEST, e.code(), e.to_string()),
+            OrgNotFound(_) => ApiError::new(StatusCode::NOT_FOUND, e.code(), e.to_string()),
         }
-        api
     }
 }
 
@@ -216,10 +249,12 @@ impl From<AuthError> for ApiError {
             e,
             AuthError::Config(_) | AuthError::Crypto(_) | AuthError::Db(_)
         ) {
-            return ApiError::internal("of-auth", e);
+            return ApiError::internal("otto-auth", e);
         }
-        if let AuthError::Core(inner) = e {
-            return ApiError::from(inner);
+        match e {
+            AuthError::Core(inner) => return ApiError::from(inner),
+            AuthError::Tenant(inner) => return ApiError::from(inner),
+            _ => {}
         }
 
         // Unlike Config/Crypto/Db above, these keep their own status/message
@@ -307,10 +342,12 @@ fn auth_code(e: &AuthError) -> &'static str {
         AuthError::InvalidGrant(_) => "invalid_grant",
         AuthError::UnsupportedGrantType(_) => "unsupported_grant_type",
         AuthError::InvalidScope(_) => "invalid_scope",
+        AuthError::InvalidTarget(_) => "invalid_target",
 
         AuthError::Config(_)
         | AuthError::Crypto(_)
         | AuthError::Core(_)
+        | AuthError::Tenant(_)
         | AuthError::Db(_)
         | AuthError::OidcHttp { .. }
         | AuthError::OidcApi { .. }
@@ -447,20 +484,25 @@ mod tests {
     #[test]
     fn a_spent_invitation_is_gone_and_a_taken_slug_is_a_conflict() {
         assert_eq!(
-            ApiError::from(CoreError::InviteInvalid).status,
+            ApiError::from(otto_core::Error::InviteInvalid).status,
             StatusCode::GONE
         );
         assert_eq!(
-            ApiError::from(CoreError::TeamSlugTaken("platform".into())).status,
+            ApiError::from(otto_core::Error::TeamSlugTaken("platform".into())).status,
             StatusCode::CONFLICT
         );
         assert_eq!(
-            ApiError::from(CoreError::TeamNotFound {
+            ApiError::from(otto_core::Error::TeamNotFound {
                 slug: "nope".into(),
                 known: "platform".into(),
             })
             .status,
             StatusCode::NOT_FOUND
+        );
+        // The same errors arrive wrapped when they cross `of-core`.
+        assert_eq!(
+            ApiError::from(CoreError::Identity(otto_core::Error::InviteInvalid)).status,
+            StatusCode::GONE
         );
     }
 }

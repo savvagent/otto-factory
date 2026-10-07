@@ -20,7 +20,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
-use of_core::Db;
+use otto_tenant::Db;
 
 /// How long a readiness check waits on the database.
 ///

@@ -80,16 +80,7 @@ macro_rules! uuid_id {
     };
 }
 
-uuid_id!(
-    OrgId,
-    "The tenant boundary. Every tenant-scoped operation takes one."
-);
-uuid_id!(
-    UserId,
-    "A global human identity, shared across every org they belong to."
-);
 uuid_id!(RepoId, "A registered repository within one org.");
-uuid_id!(TeamId, "A team within one org.");
 
 /// A job identifier: `job-N`, unique **within an org**, drawn from that org's
 /// own counter.

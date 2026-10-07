@@ -8,11 +8,12 @@
 //! tenant-scoped function without a cross-org negative test is not done" and a
 //! reviewer should be able to see this was decided rather than forgotten.
 
+use otto_core::orgs::OrgsExt;
 mod common;
 
 use common::db;
-use of_core::error::Error;
-use of_core::i18n::SUPPORTED_LOCALES;
+use otto_core::error::Error;
+use otto_core::i18n::SUPPORTED_LOCALES;
 use sqlx::PgPool;
 
 #[sqlx::test]
@@ -91,7 +92,11 @@ async fn an_unsupported_locale_is_refused_and_names_the_options(pool: PgPool) {
         .await
         .unwrap_err();
 
-    assert!(matches!(err, Error::Invalid(_)), "got {err:?}");
+    // The platform reports a bad locale as a tenant-substrate `Invalid`.
+    assert!(
+        matches!(err, Error::Tenant(otto_tenant::Error::Invalid(_))),
+        "got {err:?}"
+    );
     assert_eq!(err.code(), "invalid_argument");
 
     let message = err.to_string();

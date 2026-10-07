@@ -9,6 +9,7 @@
 //! Both tools here are free, and deliberately so: a caller must never have to
 //! spend an operation to find out how many it has left.
 
+use otto_core::orgs::OrgsExt;
 use rmcp::handler::server::tool::Extension;
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::model::ErrorData;
@@ -69,8 +70,8 @@ impl Factory {
             role,
             token: out::TokenOut {
                 kind: match caller.kind {
-                    of_auth::tokens::TokenKind::Oauth => "oauth",
-                    of_auth::tokens::TokenKind::Pat => "pat",
+                    otto_auth::tokens::TokenKind::Oauth => "oauth",
+                    otto_auth::tokens::TokenKind::Pat => "pat",
                 },
                 client_id: caller.client_id,
                 scopes: caller.scopes,

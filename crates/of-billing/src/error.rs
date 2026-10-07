@@ -26,11 +26,11 @@ pub enum BillingError {
     },
 
     #[error(transparent)]
-    Core(#[from] of_core::Error),
+    Core(#[from] otto_core::Error),
 }
 
 impl BillingError {
-    /// Stable machine-readable code, for the same reason `of_core::Error` has
+    /// Stable machine-readable code, for the same reason `otto_core::Error` has
     /// one: agents branch on this, humans read the message.
     pub fn code(&self) -> &'static str {
         match self {
@@ -45,7 +45,10 @@ impl BillingError {
     pub fn retriable(&self) -> bool {
         match self {
             BillingError::QuotaExceeded { .. } => false,
-            BillingError::Core(e) => e.retriable(),
+            BillingError::Core(e) => matches!(
+                e,
+                otto_core::Error::Db(_) | otto_core::Error::Tenant(otto_tenant::Error::Db(_))
+            ),
         }
     }
 }

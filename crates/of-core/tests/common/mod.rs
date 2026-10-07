@@ -4,11 +4,14 @@
 
 #![allow(dead_code)]
 
-use of_core::ids::{OrgId, RepoId, UserId};
+use of_core::ids::RepoId;
 use of_core::jobs::NewJob;
-use of_core::orgs::Role;
 use of_core::repos::NewRepo;
-use of_core::Db;
+use of_core::repos::ReposExt;
+use otto_core::orgs::OrgsExt;
+use otto_core::orgs::Role;
+use otto_tenant::ids::{OrgId, UserId};
+use otto_tenant::Db;
 use sqlx::PgPool;
 
 pub struct Tenant {

@@ -31,6 +31,7 @@
 
 use otto_auth::error::AuthError;
 use otto_auth::{login, passkeys};
+use otto_core::orgs::OrgsExt;
 use otto_tenant::ids::UserId;
 use otto_tenant::Db;
 use sqlx::PgPool;
@@ -463,7 +464,7 @@ async fn registration_writes_the_passkey_registered_action(pool: PgPool) {
         "registration must write auth.passkey.registered"
     );
     assert_eq!(
-        action_count(&db, otto_tenant::audit::action::TOTP_ENROLLED, user).await,
+        action_count(&db, "auth.totp.enrolled", user).await,
         0,
         "registration must not write the historical TOTP action"
     );
@@ -750,7 +751,7 @@ async fn clearing_writes_the_passkey_cleared_action(pool: PgPool) {
         "clearing must write auth.passkey.cleared"
     );
     assert_eq!(
-        action_count(&db, otto_tenant::audit::action::TOTP_RESET, user).await,
+        action_count(&db, "auth.totp.reset", user).await,
         0,
         "clearing must not write the historical TOTP action"
     );
@@ -1063,15 +1064,17 @@ async fn a_new_accounts_challenge_is_not_named_after_the_product(pool: PgPool) {
     let (name, display_name) = names_in(&ceremony.challenge);
 
     assert_ne!(
-        display_name, "otto-factory",
+        display_name, "Otto Platform",
         "the picker entry must name the account, not the site"
     );
     assert_ne!(
-        name, "otto-factory",
+        name, "Otto Platform",
         "the sortable name must name the account too"
     );
+    // otto-platform's relying-party name, shown in the picker for credentials
+    // registered from here on (existing credentials bind to the rp id, not this).
     assert!(
-        display_name.contains("otto-factory"),
+        display_name.contains("Otto Platform"),
         "the site still belongs in the display name, beside the account: {display_name:?}"
     );
 }

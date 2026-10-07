@@ -30,7 +30,7 @@ use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 use of_core::watch::Watcher;
-use of_core::Db;
+use otto_tenant::Db;
 use tower::ServiceExt;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
@@ -77,7 +77,7 @@ pub fn router(db: Db, watcher: Arc<Watcher>, config: &Config) -> Result<Router> 
 
 /// `of-web`'s state, with the settings that are this deployment's to decide.
 fn web_state(db: Db, config: &Config) -> Result<of_web::AppState> {
-    let cipher = of_core::crypto::Cipher::from_base64_key(&config.encryption_key)
+    let cipher = otto_tenant::crypto::Cipher::from_base64_key(&config.encryption_key)
         .context("OF_ENCRYPTION_KEY is not a valid 32-byte base64 key")?;
 
     let web_config = web_config(config);

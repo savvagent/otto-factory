@@ -1,6 +1,7 @@
-use of_core::ids::{JobId, OrgId, RepoId};
+use of_core::ids::{JobId, RepoId};
 use of_core::jobs::{Job, Status, Tracker};
 use of_core::trackers::{Provider, TrackerBinding};
+use otto_tenant::ids::OrgId;
 
 fn binding(provider: Provider, trigger_label: &str) -> TrackerBinding {
     TrackerBinding {

@@ -14,12 +14,13 @@
 //! one agents read. `of-core` derives `JsonSchema` alongside the `Serialize` it
 //! already had, which is the same concern rather than a new one.
 
-use of_core::ids::{JobId, OrgId, UserId};
+use of_core::ids::JobId;
 use of_core::jobs::{Job, Stats};
 use of_core::leases::Lease;
 use of_core::messages::Message;
-use of_core::orgs::{Plan, Role};
 use of_core::repos::Repo;
+use otto_core::orgs::{Plan, Role};
+use otto_tenant::ids::{OrgId, UserId};
 use schemars::JsonSchema;
 use serde::Serialize;
 

@@ -12,7 +12,7 @@
 
 use axum::extract::{Json, State};
 use of_billing::meter::Status;
-use of_core::audit::AuditEvent;
+use otto_tenant::audit::AuditEvent;
 use serde::Deserialize;
 
 use crate::error::ApiResult;

@@ -8,8 +8,9 @@
 //! shows what is claimable, `claim_jobs` takes it atomically, and starting
 //! work you have not claimed is how two agents end up writing the same file.
 
-use of_core::audit::{action, Entry};
+use of_core::audit::action;
 use of_core::ids::JobId;
+use of_core::jobs::JobsExt;
 use of_core::jobs::{Job, JobFilter, NewJob, Status, Tracker};
 use of_core::trackers::{
     decode_stored_secret, get_connection, resolve_binding, upsert_connection, Provider,
@@ -20,6 +21,7 @@ use of_trackers::jira::JiraClient;
 use of_trackers::sync::{
     normalize_remote_revision, outbound_decision, select_jira_transition, JobTransition,
 };
+use otto_tenant::audit::Entry;
 use rmcp::handler::server::tool::Extension;
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::model::ErrorData;
@@ -69,7 +71,7 @@ fn parse_github_ticket_ref(ticket_ref: &str) -> Option<(&str, &str, i64)> {
 
 struct JiraSyncOutcome {
     remote_revision: Option<String>,
-    rotated_credentials: Option<of_core::crypto::Sealed>,
+    rotated_credentials: Option<otto_tenant::crypto::Sealed>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -357,7 +359,7 @@ impl Factory {
     /// see [`BindingLookup`].
     async fn resolve_tracker_binding(
         &self,
-        org_id: of_core::ids::OrgId,
+        org_id: otto_tenant::ids::OrgId,
         repo_id: of_core::ids::RepoId,
         provider: Provider,
     ) -> Result<BindingLookup, String> {
@@ -600,7 +602,7 @@ impl Factory {
             .ok_or_else(|| {
                 "JIRA tracker sync is not configured (missing encryption key)".to_string()
             })?;
-        let cipher = of_core::crypto::Cipher::from_base64_key(encryption_key)
+        let cipher = otto_tenant::crypto::Cipher::from_base64_key(encryption_key)
             .map_err(|error| error.to_string())?;
         let encoded = connection.encrypted_credentials.as_deref().ok_or_else(|| {
             format!(

@@ -5,6 +5,9 @@
 //! cannot hold; `watch` lets an agent sit still until something happens
 //! instead of asking every few seconds.
 
+use of_core::leases::LeasesExt;
+use of_core::messages::MessagesExt;
+use otto_core::orgs::OrgsExt;
 use std::time::Duration;
 
 use of_core::ids::JobId;
@@ -595,9 +598,9 @@ impl Factory {
     /// indistinguishable to the caller and only one of them is safe to confirm.
     async fn member_by_email(
         &self,
-        caller: &of_auth::tokens::Principal,
+        caller: &otto_auth::tokens::Principal,
         email: &str,
-    ) -> Result<of_core::ids::UserId, ErrorData> {
+    ) -> Result<otto_tenant::ids::UserId, ErrorData> {
         let not_a_member = || {
             ErrorData::invalid_params(
                 format!(

@@ -1,3 +1,6 @@
+use of_core::jobs::JobsExt;
+use of_core::repos::ReposExt;
+use otto_core::orgs::OrgsExt;
 mod common;
 
 use axum::body::Body;
@@ -5,10 +8,10 @@ use common::{cipher, Harness, PUBLIC_URL, RESOURCE};
 use hmac::{Hmac, Mac};
 use http::{Request, StatusCode};
 use of_core::jobs::Tracker;
-use of_core::orgs::Role;
 use of_core::repos::NewRepo;
 use of_core::trackers::{upsert_binding, upsert_connection, Provider};
 use of_web::{AppState, Config};
+use otto_core::orgs::Role;
 use sha2::Sha256;
 use sqlx::PgPool;
 use tower::ServiceExt;
@@ -27,8 +30,9 @@ const UNKNOWN_GITHUB_INSTALLATION_FIXTURE: &[u8] = br#"{
   "issue":{"id":7001,"number":17,"title":"Implement webhook ingest","body":"Wire webhook verification into the tracker sync flow.","state":"open","labels":[{"name":"bug"},{"name":"trackers"}]}
 }"#;
 
-fn harness(pool: PgPool) -> Harness {
-    let db = of_core::Db::from_pool(pool);
+async fn harness(pool: PgPool) -> Harness {
+    let db = otto_tenant::Db::from_pool(pool);
+    common::register_resource(&db).await;
     let mut config = Config::new(PUBLIC_URL, RESOURCE);
     config.github_app_webhook_secret = Some(GITHUB_SECRET.into());
     let webauthn = of_web::relying_party(&config).expect("relying party");
@@ -43,7 +47,7 @@ fn harness(pool: PgPool) -> Harness {
 
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn github_webhooks_are_public_and_acknowledged_when_verified(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let org = h.db.create_org("acme", "Acme").await.unwrap();
     let user =
         h.db.upsert_user("owner@acme.test", Some("Owner"))
@@ -97,7 +101,7 @@ async fn github_webhooks_are_public_and_acknowledged_when_verified(pool: PgPool)
 
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn github_rejection_and_unknown_connection_share_the_same_public_404(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let org = h.db.create_org("acme", "Acme").await.unwrap();
     let user =
         h.db.upsert_user("owner@acme.test", Some("Owner"))
@@ -151,7 +155,7 @@ async fn github_rejection_and_unknown_connection_share_the_same_public_404(pool:
 async fn a_labelled_issue_webhook_creates_one_job_and_a_stale_redelivery_does_not_duplicate_it(
     pool: PgPool,
 ) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let org = h.db.create_org("acme", "Acme").await.unwrap();
     let user =
         h.db.upsert_user("owner@acme.test", Some("Owner"))
@@ -224,7 +228,7 @@ async fn a_labelled_issue_webhook_creates_one_job_and_a_stale_redelivery_does_no
 
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn jira_webhooks_require_the_site_and_secret_but_acknowledge_a_valid_request(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let org = h.db.create_org("globex", "Globex").await.unwrap();
     let user =
         h.db.upsert_user("owner@globex.test", Some("Owner"))
@@ -307,7 +311,7 @@ async fn jira_webhooks_require_the_site_and_secret_but_acknowledge_a_valid_reque
 
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn the_openapi_document_mentions_the_webhook_route(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let doc = common::Call::get("/api/openapi.json").send(&h.router).await;
     doc.expect(StatusCode::OK);
     assert!(doc.body["paths"]["/webhooks/{provider}"]["post"].is_object());

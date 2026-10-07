@@ -4,9 +4,11 @@
 //! server. The agent passes whatever `git remote get-url origin` gave it; this
 //! module turns that into exactly one registered repo, or a clear error.
 
-use crate::db::Tx;
 use crate::error::{Error, Result};
-use crate::ids::{OrgId, RepoId, TeamId, UserId};
+use crate::ids::RepoId;
+use otto_core::teams::TeamsExt;
+use otto_tenant::ids::{OrgId, TeamId, UserId};
+use otto_tenant::Tx;
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
@@ -210,25 +212,77 @@ pub fn normalize_remote(raw: &str) -> String {
 const REPO_COLS: &str = "id, org_id, slug, name, provider, default_branch, team_id, \
                          default_agent_type, tracker_binding, active, created_at, created_by";
 
-impl Tx<'_> {
-    /// Prove a team id belongs to this transaction's org before it is written
-    /// onto a repo. The schema's foreign key alone cannot express that — it is
-    /// `REFERENCES teams(id)`, not a composite `(org_id, team_id)` one — so
-    /// without this check a leaked or guessed team id from another tenant
-    /// would attach silently, and deleting that foreign team would later null
-    /// out this repo's assignment out from under it.
-    async fn require_team_in_org(&mut self, team: TeamId) -> Result<()> {
-        self.get_team(team)
-            .await?
-            .ok_or_else(|| Error::TeamNotFound {
-                slug: team.to_string(),
-                known: "unknown".into(),
-            })?;
-        Ok(())
-    }
-
+/// Extension methods on [`Tx`] for this module's domain (see the crate docs for why
+/// these are extension traits rather than inherent methods).
+pub trait ReposExt {
     /// Register a repo and its remotes.
-    pub async fn register_repo(&mut self, new: NewRepo) -> Result<Repo> {
+    fn register_repo(
+        &mut self,
+        new: NewRepo,
+    ) -> impl std::future::Future<Output = Result<Repo>> + Send;
+
+    /// Add a remote to an existing repo, normalizing it first.
+    fn add_remote(
+        &mut self,
+        repo_id: RepoId,
+        raw_remote: &str,
+    ) -> impl std::future::Future<Output = Result<String>> + Send;
+
+    /// Like every other list in `of-core`, bounded rather than exhaustive —
+    /// a console poll that fetches this every 30 seconds has no business
+    /// re-reading an unbounded table on every tick just because the org's
+    /// repo count happens to keep growing.
+    fn list_repos(
+        &mut self,
+        include_inactive: bool,
+        limit: Option<i64>,
+    ) -> impl std::future::Future<Output = Result<Vec<Repo>>> + Send;
+
+    fn get_repo_by_slug(
+        &mut self,
+        slug: &str,
+    ) -> impl std::future::Future<Output = Result<Option<Repo>>> + Send;
+
+    fn get_repo(
+        &mut self,
+        id: RepoId,
+    ) -> impl std::future::Future<Output = Result<Option<Repo>>> + Send;
+
+    /// Resolve a [`RepoRef`] to exactly one repo.
+    ///
+    /// Order: explicit slug → normalized remote match. There is deliberately no
+    /// "org default" fallback — an unresolvable repo raises
+    /// [`Error::RepoUnresolved`] listing the registered slugs, whichever way it
+    /// was named. Queueing work against a repo the agent did not mean is a
+    /// silent, expensive failure; an error the agent can read and act on is a
+    /// cheap one.
+    fn resolve_repo(
+        &mut self,
+        r: &RepoRef,
+    ) -> impl std::future::Future<Output = Result<Repo>> + Send;
+
+    /// Apply a partial update.
+    ///
+    /// `COALESCE($n, column)` per field: an omitted field keeps its stored
+    /// value rather than being overwritten with a default. New remotes are
+    /// attached after the update and go through the same conflict check as
+    /// registration, so a remote already claimed by a sibling repo is an error
+    /// naming that repo rather than a silent re-point.
+    fn update_repo(
+        &mut self,
+        id: RepoId,
+        patch: RepoPatch,
+    ) -> impl std::future::Future<Output = Result<Repo>> + Send;
+
+    fn set_repo_active(
+        &mut self,
+        id: RepoId,
+        active: bool,
+    ) -> impl std::future::Future<Output = Result<()>> + Send;
+}
+
+impl ReposExt for Tx<'_> {
+    async fn register_repo(&mut self, new: NewRepo) -> Result<Repo> {
         if new.slug.trim().is_empty() {
             return Err(Error::Invalid("repo slug must not be empty".into()));
         }
@@ -289,53 +343,7 @@ impl Tx<'_> {
         Ok(repo)
     }
 
-    /// Attach an already-normalized remote to a repo.
-    async fn attach_remote(&mut self, repo_id: RepoId, normalized: &str) -> Result<()> {
-        let org = self.org();
-        let res = sqlx::query(
-            "INSERT INTO repo_remotes (org_id, repo_id, normalized) VALUES ($1, $2, $3) \
-             ON CONFLICT (org_id, normalized) DO NOTHING",
-        )
-        .bind(org)
-        .bind(repo_id)
-        .bind(normalized)
-        .execute(self.conn())
-        .await?;
-
-        // A no-op insert means this remote is already claimed. Silently letting
-        // that pass would leave the caller believing their repo is reachable by
-        // a remote that actually resolves to a different one.
-        if res.rows_affected() == 0 {
-            let owner: Option<String> = sqlx::query_scalar(
-                "SELECT r.slug FROM repo_remotes m JOIN repos r ON r.id = m.repo_id \
-                 WHERE m.org_id = $1 AND m.normalized = $2",
-            )
-            .bind(org)
-            .bind(normalized)
-            .fetch_optional(self.conn())
-            .await?;
-
-            if let Some(slug) = owner {
-                let same = sqlx::query_scalar::<_, bool>(
-                    "SELECT EXISTS (SELECT 1 FROM repo_remotes \
-                     WHERE org_id = $1 AND normalized = $2 AND repo_id = $3)",
-                )
-                .bind(org)
-                .bind(normalized)
-                .bind(repo_id)
-                .fetch_one(self.conn())
-                .await?;
-
-                if !same {
-                    return Err(Error::RemoteTaken(normalized.to_string(), slug));
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Add a remote to an existing repo, normalizing it first.
-    pub async fn add_remote(&mut self, repo_id: RepoId, raw_remote: &str) -> Result<String> {
+    async fn add_remote(&mut self, repo_id: RepoId, raw_remote: &str) -> Result<String> {
         let normalized = normalize_remote(raw_remote);
         if normalized.is_empty() {
             return Err(Error::Invalid(format!(
@@ -346,11 +354,7 @@ impl Tx<'_> {
         Ok(normalized)
     }
 
-    /// Like every other list in `of-core`, bounded rather than exhaustive —
-    /// a console poll that fetches this every 30 seconds has no business
-    /// re-reading an unbounded table on every tick just because the org's
-    /// repo count happens to keep growing.
-    pub async fn list_repos(
+    async fn list_repos(
         &mut self,
         include_inactive: bool,
         limit: Option<i64>,
@@ -368,7 +372,7 @@ impl Tx<'_> {
         Ok(repos)
     }
 
-    pub async fn get_repo_by_slug(&mut self, slug: &str) -> Result<Option<Repo>> {
+    async fn get_repo_by_slug(&mut self, slug: &str) -> Result<Option<Repo>> {
         let org = self.org();
         let repo = sqlx::query_as(&format!(
             "SELECT {REPO_COLS} FROM repos WHERE org_id = $1 AND slug = $2"
@@ -380,7 +384,7 @@ impl Tx<'_> {
         Ok(repo)
     }
 
-    pub async fn get_repo(&mut self, id: RepoId) -> Result<Option<Repo>> {
+    async fn get_repo(&mut self, id: RepoId) -> Result<Option<Repo>> {
         let org = self.org();
         let repo = sqlx::query_as(&format!(
             "SELECT {REPO_COLS} FROM repos WHERE org_id = $1 AND id = $2"
@@ -392,15 +396,7 @@ impl Tx<'_> {
         Ok(repo)
     }
 
-    /// Resolve a [`RepoRef`] to exactly one repo.
-    ///
-    /// Order: explicit slug → normalized remote match. There is deliberately no
-    /// "org default" fallback — an unresolvable repo raises
-    /// [`Error::RepoUnresolved`] listing the registered slugs, whichever way it
-    /// was named. Queueing work against a repo the agent did not mean is a
-    /// silent, expensive failure; an error the agent can read and act on is a
-    /// cheap one.
-    pub async fn resolve_repo(&mut self, r: &RepoRef) -> Result<Repo> {
+    async fn resolve_repo(&mut self, r: &RepoRef) -> Result<Repo> {
         if let Some(slug) = r.slug.as_deref().filter(|s| !s.trim().is_empty()) {
             if let Some(repo) = self.get_repo_by_slug(slug).await? {
                 return Ok(repo);
@@ -449,38 +445,7 @@ impl Tx<'_> {
         Err(self.unresolved(&attempted).await?)
     }
 
-    /// The "could not resolve" error, with the registered slugs in it.
-    ///
-    /// Returns `Result<Error>` rather than `Error` because listing the repos is
-    /// itself a query: a database failure while composing an error message is a
-    /// database failure, and reporting it as "no such repo" would send someone
-    /// looking for a typo that is not there.
-    async fn unresolved(&mut self, attempted: &str) -> Result<Error> {
-        let known = self
-            .list_repos(false, None)
-            .await?
-            .into_iter()
-            .map(|r| r.slug)
-            .collect::<Vec<_>>();
-
-        Ok(Error::RepoUnresolved {
-            attempted: attempted.to_string(),
-            known: if known.is_empty() {
-                "none registered yet".into()
-            } else {
-                known.join(", ")
-            },
-        })
-    }
-
-    /// Apply a partial update.
-    ///
-    /// `COALESCE($n, column)` per field: an omitted field keeps its stored
-    /// value rather than being overwritten with a default. New remotes are
-    /// attached after the update and go through the same conflict check as
-    /// registration, so a remote already claimed by a sibling repo is an error
-    /// naming that repo rather than a silent re-point.
-    pub async fn update_repo(&mut self, id: RepoId, patch: RepoPatch) -> Result<Repo> {
+    async fn update_repo(&mut self, id: RepoId, patch: RepoPatch) -> Result<Repo> {
         // Same cross-tenant risk as registration: a bare foreign key would
         // accept a team id from another org.
         if let Some(Some(team)) = patch.team_id {
@@ -522,7 +487,7 @@ impl Tx<'_> {
         Ok(repo)
     }
 
-    pub async fn set_repo_active(&mut self, id: RepoId, active: bool) -> Result<()> {
+    async fn set_repo_active(&mut self, id: RepoId, active: bool) -> Result<()> {
         let org = self.org();
         sqlx::query("UPDATE repos SET active = $3 WHERE org_id = $1 AND id = $2")
             .bind(org)
@@ -531,6 +496,101 @@ impl Tx<'_> {
             .execute(self.conn())
             .await?;
         Ok(())
+    }
+}
+
+pub(crate) trait ReposInternal {
+    /// Prove a team id belongs to this transaction's org before it is written
+    /// onto a repo. The schema's foreign key alone cannot express that — it is
+    /// `REFERENCES teams(id)`, not a composite `(org_id, team_id)` one — so
+    /// without this check a leaked or guessed team id from another tenant
+    /// would attach silently, and deleting that foreign team would later null
+    /// out this repo's assignment out from under it.
+    async fn require_team_in_org(&mut self, team: TeamId) -> Result<()>;
+
+    /// Attach an already-normalized remote to a repo.
+    async fn attach_remote(&mut self, repo_id: RepoId, normalized: &str) -> Result<()>;
+
+    /// The "could not resolve" error, with the registered slugs in it.
+    ///
+    /// Returns `Result<Error>` rather than `Error` because listing the repos is
+    /// itself a query: a database failure while composing an error message is a
+    /// database failure, and reporting it as "no such repo" would send someone
+    /// looking for a typo that is not there.
+    async fn unresolved(&mut self, attempted: &str) -> Result<Error>;
+}
+
+impl ReposInternal for Tx<'_> {
+    async fn require_team_in_org(&mut self, team: TeamId) -> Result<()> {
+        self.get_team(team)
+            .await?
+            .ok_or_else(|| otto_core::Error::TeamNotFound {
+                slug: team.to_string(),
+                known: "unknown".into(),
+            })?;
+        Ok(())
+    }
+
+    async fn attach_remote(&mut self, repo_id: RepoId, normalized: &str) -> Result<()> {
+        let org = self.org();
+        let res = sqlx::query(
+            "INSERT INTO repo_remotes (org_id, repo_id, normalized) VALUES ($1, $2, $3) \
+             ON CONFLICT (org_id, normalized) DO NOTHING",
+        )
+        .bind(org)
+        .bind(repo_id)
+        .bind(normalized)
+        .execute(self.conn())
+        .await?;
+
+        // A no-op insert means this remote is already claimed. Silently letting
+        // that pass would leave the caller believing their repo is reachable by
+        // a remote that actually resolves to a different one.
+        if res.rows_affected() == 0 {
+            let owner: Option<String> = sqlx::query_scalar(
+                "SELECT r.slug FROM repo_remotes m JOIN repos r ON r.id = m.repo_id \
+                 WHERE m.org_id = $1 AND m.normalized = $2",
+            )
+            .bind(org)
+            .bind(normalized)
+            .fetch_optional(self.conn())
+            .await?;
+
+            if let Some(slug) = owner {
+                let same = sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS (SELECT 1 FROM repo_remotes \
+                     WHERE org_id = $1 AND normalized = $2 AND repo_id = $3)",
+                )
+                .bind(org)
+                .bind(normalized)
+                .bind(repo_id)
+                .fetch_one(self.conn())
+                .await?;
+
+                if !same {
+                    return Err(Error::RemoteTaken(normalized.to_string(), slug));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn unresolved(&mut self, attempted: &str) -> Result<Error> {
+        let known = self
+            .list_repos(false, None)
+            .await?
+            .into_iter()
+            .map(|r| r.slug)
+            .collect::<Vec<_>>();
+
+        Ok(Error::RepoUnresolved {
+            attempted: attempted.to_string(),
+            known: if known.is_empty() {
+                "none registered yet".into()
+            } else {
+                known.join(", ")
+            },
+        })
     }
 }
 

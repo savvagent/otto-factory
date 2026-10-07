@@ -1,3 +1,4 @@
+use of_core::jobs::JobsExt;
 use std::str::FromStr;
 
 use axum::body::Bytes;

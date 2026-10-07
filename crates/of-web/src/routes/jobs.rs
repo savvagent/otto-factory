@@ -18,6 +18,9 @@
 //! already write that message, and a filter that silently matched nothing would
 //! render an empty queue that looks like a quiet one.
 
+use of_core::jobs::JobsExt;
+use of_core::repos::ReposExt;
+use otto_core::teams::TeamsExt;
 use std::str::FromStr;
 
 use axum::extract::{Json, Path, Query, State};

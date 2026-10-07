@@ -463,7 +463,7 @@ fn entity_schemas() -> Value {
     let role = json!({ "type": "string", "enum": ["owner", "admin", "member"] });
 
     let locale = {
-        let mut values: Vec<Value> = of_core::i18n::SUPPORTED_LOCALES
+        let mut values: Vec<Value> = otto_core::i18n::SUPPORTED_LOCALES
             .iter()
             .map(|l| json!(l))
             .collect();
@@ -710,7 +710,7 @@ fn entity_schemas() -> Value {
             "type": "object",
             "description": "Shown once. Only a SHA-256 hash of `token` is stored.",
             "properties": {
-                "token": { "type": "string", "examples": ["of_pat_…"] },
+                "token": { "type": "string", "examples": ["otto_pat_…"] },
                 "id": uuid,
                 "name": { "type": "string" },
                 "scopes": { "type": "array", "items": { "type": "string" } },
@@ -995,7 +995,7 @@ fn response_schemas() -> Value {
 fn request_schemas() -> Value {
     let role = json!({ "type": "string", "enum": ["owner", "admin", "member"] });
     let locale = {
-        let mut values: Vec<Value> = of_core::i18n::SUPPORTED_LOCALES
+        let mut values: Vec<Value> = otto_core::i18n::SUPPORTED_LOCALES
             .iter()
             .map(|l| json!(l))
             .collect();
