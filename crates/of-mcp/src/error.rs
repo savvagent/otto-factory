@@ -33,17 +33,6 @@ pub fn from_core(e: &CoreError) -> ErrorData {
     envelope(Fault::of_core(e), e.to_string(), e.code(), e.retriable())
 }
 
-/// Convert an identity-domain failure (`otto-core`): a team lookup, a
-/// membership check. Same envelope, same redaction rules as [`from_core`].
-pub fn from_identity(e: &otto_core::Error) -> ErrorData {
-    envelope(
-        Fault::of_identity(e),
-        e.to_string(),
-        e.code(),
-        matches!(Fault::of_identity(e), Fault::Database),
-    )
-}
-
 /// Convert a tenant-substrate failure (`otto-tenant`).
 pub fn from_tenant(e: &otto_tenant::Error) -> ErrorData {
     envelope(
@@ -57,8 +46,9 @@ pub fn from_tenant(e: &otto_tenant::Error) -> ErrorData {
 /// Whose fault a failure is, which decides both the JSON-RPC code and whether
 /// its text may reach the caller.
 ///
-/// Identity and tenancy errors arrive wrapped (`CoreError::Identity`,
-/// `CoreError::Tenant`), so a database failure can be several layers down. It
+/// Tenancy errors arrive wrapped (`CoreError::Tenant`), and billing and platform
+/// failures arrive from several crates, so a database failure can be layers
+/// down. It
 /// is the same failure however it got here and must be answered the same way.
 #[derive(Clone, Copy)]
 enum Fault {
@@ -69,6 +59,10 @@ enum Fault {
     /// A database failure: ours, transient, and the text can carry table
     /// names or constraint names. Retriable.
     Database,
+    /// The platform could not answer an identity question. Ours, transient or
+    /// not depending on the failure; the text can carry the platform's response
+    /// body, so it is redacted like a database error.
+    Platform,
     /// Permanent server misconfiguration: a bad encryption key, undecryptable
     /// ciphertext, or tenant isolation not enforced. Ours, redacted like
     /// `Database` (the text can carry key diagnostics), but retrying the same
@@ -82,15 +76,7 @@ impl Fault {
             CoreError::Db(_) => Fault::Database,
             CoreError::RaceLost(_) => Fault::Race,
             CoreError::Tenant(t) => Fault::of_tenant(t),
-            CoreError::Identity(i) => Fault::of_identity(i),
-            _ => Fault::Caller,
-        }
-    }
-
-    fn of_identity(e: &otto_core::Error) -> Self {
-        match e {
-            otto_core::Error::Db(_) => Fault::Database,
-            otto_core::Error::Tenant(t) => Fault::of_tenant(t),
+            CoreError::Platform(_) => Fault::Platform,
             _ => Fault::Caller,
         }
     }
@@ -113,7 +99,9 @@ fn envelope(fault: Fault, text: String, code: &'static str, retriable: bool) -> 
         // request was fine; the transaction lost to a concurrent write.
         // Reporting either as an argument error would send an agent into a
         // rewrite loop over a request that was fine to begin with.
-        Fault::Database | Fault::Misconfigured | Fault::Race => ErrorCode::INTERNAL_ERROR,
+        Fault::Database | Fault::Misconfigured | Fault::Race | Fault::Platform => {
+            ErrorCode::INTERNAL_ERROR
+        }
         Fault::Caller => ErrorCode::INVALID_PARAMS,
     };
 
@@ -135,6 +123,12 @@ fn envelope(fault: Fault, text: String, code: &'static str, retriable: bool) -> 
             tracing::warn!(message = %text, "a lost unique-violation race surfaced to an MCP caller");
             text
         }
+        Fault::Platform => {
+            tracing::error!(error = %text, "platform lookup failed for an MCP caller");
+            "the otto platform could not be reached to check this; nothing was changed. \
+             Retry shortly."
+                .to_string()
+        }
         Fault::Caller => text,
     };
 
@@ -148,55 +142,33 @@ fn envelope(fault: Fault, text: String, code: &'static str, retriable: bool) -> 
     )
 }
 
-/// Convert an authentication or authorization failure.
+/// Convert a missing-scope failure.
 ///
-/// Uses [`otto_auth::AuthError::public`] rather than the variant's own message,
-/// for the same reason the login form does: the distinctions between "no such
-/// token", "revoked", and "expired" are an oracle, and an agent cannot act on
-/// them differently anyway — every one of them means "get a new token".
-///
-/// The exception is a missing scope, which is genuinely actionable: the agent
-/// must re-authorize asking for more, and it cannot do that without being told
-/// which scope it lacks.
-pub fn from_auth(e: &otto_auth::AuthError) -> ErrorData {
-    let (code, message, retriable) = match e {
-        otto_auth::AuthError::InvalidScope(detail) => {
-            (ErrorCode::INVALID_REQUEST, detail.clone(), false)
-        }
-        otto_auth::AuthError::RateLimited { retry_after_secs } => (
-            ErrorCode::INVALID_REQUEST,
-            format!("too many attempts; retry in {retry_after_secs}s"),
-            true,
-        ),
-        other => (
-            ErrorCode::INVALID_REQUEST,
-            other.public().to_string(),
-            false,
-        ),
-    };
-
+/// A missing scope is genuinely actionable: the agent must re-authorize asking
+/// for more, and it cannot do that without being told which scope it lacks. (Every
+/// other credential failure is answered at the HTTP layer with a `401` before a
+/// handler runs, and says as little as possible on purpose.)
+pub fn from_scope(e: &crate::auth::MissingScope) -> ErrorData {
     ErrorData::new(
-        code,
-        message,
+        ErrorCode::INVALID_REQUEST,
+        e.to_string(),
         Some(serde_json::json!({
-            "code": auth_code(e),
-            "retriable": retriable,
+            "code": "insufficient_scope",
+            "retriable": false,
         })),
     )
 }
 
-/// A stable machine-readable code for the auth failures an MCP caller can see.
-fn auth_code(e: &otto_auth::AuthError) -> &'static str {
-    use otto_auth::AuthError as A;
-    match e {
-        A::InvalidScope(_) => "insufficient_scope",
-        A::WrongAudience => "wrong_audience",
-        A::Expired => "token_expired",
-        A::Revoked => "token_revoked",
-        A::RateLimited { .. } => "rate_limited",
-        A::NotAMember => "not_a_member",
-        _ => "unauthorized",
-    }
+/// Convert a failed platform call made on a caller's behalf (a member or team
+/// lookup). The caller is refused; the platform's response text, which can carry
+/// a status body, stays in the log.
+pub fn from_platform(e: &otto_resource::Error) -> ErrorData {
+    envelope(
+        Fault::Platform,
+        e.to_string(),
+        "platform_unavailable",
+        e.is_retriable(),
+    )
 }
 
 /// Convert a metering failure.
@@ -206,9 +178,15 @@ fn auth_code(e: &otto_auth::AuthError) -> &'static str {
 /// message names the plan, the limit, and the URL a human goes to, because an
 /// agent that cannot say *what to do about it* just retries.
 pub fn from_billing(e: &of_billing::BillingError) -> ErrorData {
-    // `BillingError` wraps the platform's identity error, not ours.
-    if let of_billing::BillingError::Core(inner) = e {
-        return from_identity(inner);
+    // Not quota refusals: a failed lookup or a database fault keeps its own
+    // identity (and redaction) rather than being reported as a billing problem.
+    match e {
+        of_billing::BillingError::Platform(p) => return from_platform(p),
+        of_billing::BillingError::Tenant(t) => return from_tenant(t),
+        of_billing::BillingError::Db(_) => {
+            return envelope(Fault::Database, e.to_string(), e.code(), true)
+        }
+        of_billing::BillingError::QuotaExceeded { .. } => {}
     }
 
     ErrorData::new(
@@ -330,11 +308,31 @@ mod tests {
     /// A database failure that reaches us through billing is still a database
     /// failure, and must not be reported as a quota problem.
     #[test]
-    fn a_core_failure_under_billing_keeps_its_own_identity() {
-        let e = from_billing(&of_billing::BillingError::Core(otto_core::Error::Db(
+    fn a_database_failure_under_billing_keeps_its_own_identity() {
+        let e = from_billing(&of_billing::BillingError::Tenant(otto_tenant::Error::Db(
             sqlx::Error::RowNotFound,
         )));
         assert_eq!(e.code, ErrorCode::INTERNAL_ERROR);
+        assert_eq!(e.data.unwrap()["retriable"], true);
+    }
+
+    /// A platform that cannot be reached is a refusal the caller can retry, and
+    /// its response body (which could be anything) never reaches the caller.
+    #[test]
+    fn a_platform_failure_is_retriable_and_redacted() {
+        let e = from_platform(&otto_resource::Error::Status {
+            status: 503,
+            body: "internal host db-7.private exploded".into(),
+        });
+        assert_eq!(e.code, ErrorCode::INTERNAL_ERROR);
+        let data = e.data.as_ref().unwrap();
+        assert_eq!(data["code"], "platform_unavailable");
+        assert_eq!(data["retriable"], true);
+        assert!(!e.message.contains("db-7"));
+
+        // A rejected credential is ours to fix, and retrying cannot help.
+        let e = from_platform(&otto_resource::Error::Unauthorized);
+        assert_eq!(e.data.unwrap()["retriable"], false);
     }
 
     /// A permanent misconfiguration (bad key, undecryptable ciphertext,
@@ -355,28 +353,16 @@ mod tests {
             assert_eq!(converted.data.as_ref().unwrap()["retriable"], false, "{e}");
             assert!(!converted.message.contains("OF_ENCRYPTION_KEY"));
             assert!(!converted.message.contains("otto_app"));
-
-            // Wrapped in the identity and factory errors it is the same answer.
-            let via_identity = from_identity(&otto_core::Error::Tenant(
-                otto_tenant::Error::Crypto("bad tag".into()),
-            ));
-            assert_eq!(via_identity.data.unwrap()["retriable"], false);
         }
         let db = from_tenant(&otto_tenant::Error::Db(sqlx::Error::PoolTimedOut));
         assert_eq!(db.data.unwrap()["retriable"], true);
     }
 
-    /// Credential failures collapse to one answer; a missing scope does not,
-    /// because naming the scope is the only way the agent can fix it.
+    /// A missing scope is named, because naming it is the only way the agent
+    /// can fix it.
     #[test]
-    fn credential_failures_collapse_but_scopes_are_named() {
-        let revoked = from_auth(&otto_auth::AuthError::Revoked);
-        let expired = from_auth(&otto_auth::AuthError::Expired);
-        assert_eq!(revoked.message, expired.message);
-
-        let scope = from_auth(&otto_auth::AuthError::InvalidScope(
-            "this token lacks the jobs:write scope".into(),
-        ));
+    fn a_missing_scope_is_named() {
+        let scope = from_scope(&crate::auth::MissingScope("jobs:write".into()));
         assert!(scope.message.contains("jobs:write"));
         assert_eq!(scope.data.unwrap()["code"], "insufficient_scope");
     }

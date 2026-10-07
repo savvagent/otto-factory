@@ -7,7 +7,6 @@
 
 use of_core::leases::LeasesExt;
 use of_core::messages::MessagesExt;
-use otto_core::orgs::OrgsExt;
 use std::time::Duration;
 
 use of_core::ids::JobId;
@@ -585,20 +584,24 @@ fn lease_id(raw: &str) -> Result<uuid::Uuid, ErrorData> {
 }
 
 impl Factory {
-    /// Resolve an email address to a member of the caller's own org.
+    /// Resolve an email address to a member of the caller's own org, by asking
+    /// the platform, which owns accounts and memberships.
     ///
-    /// `users` is a global table — one human, one row, however many orgs they
-    /// belong to — so an email lookup alone crosses the tenant boundary. The
-    /// membership check is what keeps it inside: without it, this tool would
-    /// both deliver messages to strangers and answer "does this address have a
-    /// otto-factory account?" for anyone who asked.
+    /// The platform answers only for active members of *this* org, which is what
+    /// keeps an email lookup inside the tenant boundary: without that, this tool
+    /// would both deliver messages to strangers and answer "does this address
+    /// have an otto account?" for anyone who asked. The answer is checked again
+    /// here (the org in the response must be the caller's) rather than trusted.
     ///
     /// The failure says "no member of this organization", never "no such user",
     /// for the same reason the login form is careful: the two are
     /// indistinguishable to the caller and only one of them is safe to confirm.
+    /// A platform that cannot answer is an error, not a "no": recording a
+    /// message as broadcast, or refusing a real teammate, because a lookup
+    /// failed would both be wrong.
     async fn member_by_email(
         &self,
-        caller: &otto_auth::tokens::Principal,
+        caller: &crate::auth::Principal,
         email: &str,
     ) -> Result<otto_tenant::ids::UserId, ErrorData> {
         let not_a_member = || {
@@ -611,20 +614,15 @@ impl Factory {
             )
         };
 
-        let user = self
-            .db()
-            .get_user_by_email(email)
+        let member = self
+            .platform()
+            .member_by_email(caller.org_id.as_uuid(), email)
             .await
             .mcp()?
+            .filter(|m| m.org.id == caller.org_id.as_uuid())
             .ok_or_else(not_a_member)?;
 
-        self.db()
-            .member_role(caller.org_id, user.id)
-            .await
-            .mcp()?
-            .ok_or_else(not_a_member)?;
-
-        Ok(user.id)
+        Ok(member.user.id.into())
     }
 }
 

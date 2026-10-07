@@ -19,7 +19,6 @@ use of_core::jobs::{Job, Stats};
 use of_core::leases::Lease;
 use of_core::messages::Message;
 use of_core::repos::Repo;
-use otto_core::orgs::{Plan, Role};
 use otto_tenant::ids::{OrgId, UserId};
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -131,12 +130,31 @@ pub struct WatchOut {
     pub waited_seconds: u64,
 }
 
+/// A member's role in an org. The platform owns roles; this is how one is shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    Owner,
+    Admin,
+    Member,
+}
+
+impl From<otto_resource::Role> for Role {
+    fn from(r: otto_resource::Role) -> Self {
+        match r {
+            otto_resource::Role::Owner => Role::Owner,
+            otto_resource::Role::Admin => Role::Admin,
+            otto_resource::Role::Member => Role::Member,
+        }
+    }
+}
+
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct WhoAmI {
     pub user: UserOut,
     pub org: OrgOut,
-    /// The caller's role in this org, if they are still a member.
+    /// The caller's role in this org, as the platform last reported it.
     pub role: Option<Role>,
     pub token: TokenOut,
     /// Where this org stands against its monthly allowance. Here as well as in
@@ -160,7 +178,8 @@ pub struct OrgOut {
     pub id: OrgId,
     pub slug: Option<String>,
     pub name: Option<String>,
-    pub plan: Option<Plan>,
+    /// `free`, `team`, `business`, or `enterprise`.
+    pub plan: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

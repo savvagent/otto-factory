@@ -1392,7 +1392,7 @@ impl Factory {
         // below (see `Factory::would_refuse`'s doc comment).
         let mut tx = self.tx(&caller).await?;
         let job = tx.get_job(&JobId::from(args.job)).await.mcp()?;
-        self.would_refuse(&mut tx, "sync_ticket").await?;
+        self.would_refuse(caller.org_id, "sync_ticket").await?;
         tx.commit().await.mcp()?;
 
         let Some(tracker) = job.tracker else {

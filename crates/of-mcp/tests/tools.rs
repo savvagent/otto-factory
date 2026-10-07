@@ -7,16 +7,19 @@
 //! its `WWW-Authenticate` header *are* the onboarding path and a test that
 //! skipped them would let the whole zero-install premise break silently.
 
+use std::sync::Arc;
+use std::time::Duration;
+
 use of_billing::Meter;
 use of_core::ids::RepoId;
 use of_core::jobs::Tracker;
 use of_core::trackers::{upsert_binding, upsert_connection, Provider};
 use of_core::watch::Watcher;
+use of_mcp::auth::Principal;
 use of_mcp::server::Factory;
 use of_mcp::tools;
-use otto_auth::tokens::{Principal, TokenKind};
-use otto_core::orgs::OrgsExt;
-use otto_core::orgs::Role;
+use of_testkit::MockPlatform;
+use otto_resource::{ClientConfig, PlatformClient, Role, TokenKind};
 use otto_tenant::ids::{OrgId, UserId};
 use otto_tenant::Db;
 use rmcp::handler::server::tool::Extension;
@@ -25,8 +28,10 @@ use rmcp::model::ErrorData;
 use rmcp::ServerHandler;
 use sqlx::PgPool;
 
-const RESOURCE: &str = "https://mcp.otto-factory.test/mcp";
+/// The audience the mock platform's default resource server is registered as.
+const RESOURCE: &str = of_testkit::RESOURCE_URI;
 const PUBLIC: &str = "https://mcp.otto-factory.test";
+const PLATFORM: &str = "https://otto.test";
 const REMOTE: &str = "git@github.com:acme/api.git";
 const UPGRADE_URL: &str = "https://mcp.otto-factory.test/settings/billing";
 
@@ -43,6 +48,7 @@ fn principal(user: UserId, org: OrgId, scopes: Vec<String>) -> Principal {
         token_id: uuid::Uuid::new_v4(),
         user_id: user,
         org_id: org,
+        role: Role::Owner,
         client_id: Some("otto_client_test".into()),
         scopes,
         kind: TokenKind::Oauth,
@@ -104,41 +110,81 @@ fn code_of(e: &ErrorData) -> String {
 struct Env {
     factory: Factory,
     db: Db,
+    platform: MockPlatform,
+    client: Arc<PlatformClient>,
+}
+
+/// A fixture org / user, registered with the mock platform. Orgs and users are
+/// the platform's records; this database only ever sees their ids.
+struct Org {
+    id: OrgId,
+}
+struct User {
+    id: UserId,
 }
 
 async fn env(pool: PgPool) -> (Env, Principal) {
     // Enforcement off, matching the milestone-1 default: recording is on,
     // refusing is not.
-    env_metered(pool, Meter::new(false, UPGRADE_URL)).await
+    env_metered(pool, false).await
 }
 
-async fn env_metered(pool: PgPool, meter: Meter) -> (Env, Principal) {
+async fn env_metered(pool: PgPool, enforce: bool) -> (Env, Principal) {
     let db = Db::from_pool(pool.clone());
     let watcher = Watcher::spawn(pool).await.expect("watcher");
 
-    let org = db.create_org("acme", "Acme").await.unwrap();
-    let user = db.upsert_user("rob@acme.test", Some("Rob")).await.unwrap();
-    db.add_member(org.id, user.id, Role::Owner).await.unwrap();
+    let platform = MockPlatform::start().await;
+    // A 1 ms usage cache, so a test sees the numbers it just shipped rather than
+    // a minute-old answer.
+    let mut cfg = ClientConfig::new(&platform.url, RESOURCE, of_testkit::SECRET);
+    cfg.usage_status_ttl = Duration::from_millis(1);
+    let client = platform.client_with(cfg);
 
-    let caller = principal(user.id, org.id, all_scopes());
-    (
-        Env {
-            factory: Factory::new(db.clone(), watcher, meter),
-            db,
-        },
-        caller,
-    )
+    let env = Env {
+        factory: Factory::new(
+            db.clone(),
+            watcher,
+            client.clone(),
+            Meter::new(client.clone(), enforce, UPGRADE_URL),
+        ),
+        db,
+        platform,
+        client,
+    };
+    let org = env.org("acme", "Acme");
+    let user = env.member(org.id, "rob@acme.test", Role::Owner);
+    (env, principal(user.id, org.id, all_scopes()))
 }
 
 impl Env {
+    fn org(&self, slug: &str, name: &str) -> Org {
+        let id = OrgId::new();
+        self.platform.add_org(id.as_uuid(), slug, name);
+        Org { id }
+    }
+
+    fn member(&self, org: OrgId, email: &str, role: Role) -> User {
+        let id = UserId::new();
+        self.platform
+            .add_member(org.as_uuid(), id.as_uuid(), email, role);
+        User { id }
+    }
+
     /// Add a second member to the fixture org.
     async fn teammate(&self, org: OrgId, email: &str) -> Principal {
-        let user = self.db.upsert_user(email, None).await.unwrap();
-        self.db
-            .add_member(org, user.id, Role::Member)
-            .await
-            .unwrap();
+        let user = self.member(org, email, Role::Member);
         principal(user.id, org, all_scopes())
+    }
+
+    /// Deliver everything recorded so far to the platform, as the background
+    /// shipper would.
+    async fn ship(&self) {
+        let cfg = of_billing::outbox::ShipperConfig::default();
+        while of_billing::outbox::pending(&self.db).await.unwrap() > 0 {
+            of_billing::outbox::ship_once(&self.db, &self.client, &cfg)
+                .await
+                .expect("ship usage");
+        }
     }
 
     /// Register the fixture repo through the tool surface.
@@ -159,8 +205,24 @@ impl Env {
             .clone()
     }
 
-    /// This org's standing, read through the `usage` tool.
+    /// Make the platform report `billable` operations used *in total*, counting
+    /// everything this test has already shipped to it.
+    async fn set_standing(&self, org: OrgId, billable: i64, included: i64) {
+        self.ship().await;
+        let shipped = self
+            .platform
+            .counted_usage()
+            .iter()
+            .filter(|e| e.org_id == org.as_uuid() && e.billable)
+            .count() as i64;
+        self.platform
+            .set_usage(org.as_uuid(), billable - shipped, included, true);
+    }
+
+    /// This org's standing, read through the `usage` tool. Everything recorded
+    /// so far is shipped first, so the platform's numbers include it.
     async fn usage(&self, caller: &Principal) -> serde_json::Value {
+        self.ship().await;
         ok(self
             .factory
             .usage(Extension(parts(caller)), Parameters(tools::org::NoArgs {}))
@@ -1136,12 +1198,8 @@ async fn one_orgs_token_cannot_see_or_touch_anothers_work(pool: PgPool) {
     let id = job["id"].as_str().unwrap().to_string();
 
     // A second tenant, with a token as privileged as one can be.
-    let globex = env.db.create_org("globex", "Globex").await.unwrap();
-    let eve = env.db.upsert_user("eve@globex.test", None).await.unwrap();
-    env.db
-        .add_member(globex.id, eve.id, Role::Owner)
-        .await
-        .unwrap();
+    let globex = env.org("globex", "Globex");
+    let eve = env.member(globex.id, "eve@globex.test", Role::Owner);
     let intruder = principal(eve.id, globex.id, all_scopes());
 
     let jobs = ok(env
@@ -1225,12 +1283,8 @@ async fn one_orgs_token_cannot_see_or_touch_anothers_work(pool: PgPool) {
 async fn a_message_cannot_be_addressed_to_someone_in_another_org(pool: PgPool) {
     let (env, caller) = env(pool).await;
 
-    let globex = env.db.create_org("globex", "Globex").await.unwrap();
-    let outsider = env.db.upsert_user("cfo@globex.test", None).await.unwrap();
-    env.db
-        .add_member(globex.id, outsider.id, Role::Member)
-        .await
-        .unwrap();
+    let globex = env.org("globex", "Globex");
+    env.member(globex.id, "cfo@globex.test", Role::Member);
 
     let to = |address: &str| tools::coord::SendMessageArgs {
         body: "hello".into(),
@@ -1835,6 +1889,42 @@ fn every_tool_documents_itself() {
 
 // ------------------------------------------------------------ the front door
 
+/// The assembled router, authenticating against `client`'s platform.
+async fn front_door(pool: PgPool, client: Arc<PlatformClient>) -> axum::Router {
+    let db = Db::from_pool(pool.clone());
+    let watcher = Watcher::spawn(pool).await.unwrap();
+    of_mcp::router(
+        db,
+        watcher,
+        of_mcp::Config::new(client, PLATFORM, RESOURCE, PUBLIC),
+    )
+}
+
+/// A client that does not remember an answer, so a test sees the platform's
+/// current one.
+fn uncached(platform: &MockPlatform) -> Arc<PlatformClient> {
+    let mut cfg = ClientConfig::new(&platform.url, RESOURCE, of_testkit::SECRET);
+    cfg.introspection_ttl = Duration::from_millis(1);
+    cfg.negative_ttl = Duration::from_millis(1);
+    platform.client_with(cfg)
+}
+
+async fn post_mcp(app: &axum::Router, token: Option<&str>) -> http::Response<axum::body::Body> {
+    use tower::ServiceExt;
+
+    let mut req = http::Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header("host", "mcp.otto-factory.test");
+    if let Some(token) = token {
+        req = req.header("authorization", format!("Bearer {token}"));
+    }
+    app.clone()
+        .oneshot(req.body(axum::body::Body::empty()).unwrap())
+        .await
+        .unwrap()
+}
+
 /// The `401` that makes zero-install onboarding work. An agent configured with
 /// nothing but the MCP URL finds the authorization server through this header
 /// and nowhere else.
@@ -1842,23 +1932,10 @@ fn every_tool_documents_itself() {
 async fn unauthenticated_requests_are_told_where_to_authenticate(pool: PgPool) {
     use tower::ServiceExt;
 
-    let db = Db::from_pool(pool.clone());
-    of_mcp::register_resource(&db, RESOURCE).await.unwrap();
-    let watcher = Watcher::spawn(pool).await.unwrap();
-    let app = of_mcp::router(db, watcher, of_mcp::Config::new(RESOURCE, PUBLIC));
+    let platform = MockPlatform::start().await;
+    let app = front_door(pool, platform.client()).await;
 
-    let response = app
-        .clone()
-        .oneshot(
-            http::Request::builder()
-                .method("POST")
-                .uri("/mcp")
-                .header("host", "mcp.otto-factory.test")
-                .body(axum::body::Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    let response = post_mcp(&app, None).await;
 
     assert_eq!(response.status(), http::StatusCode::UNAUTHORIZED);
     let challenge = response
@@ -1874,9 +1951,15 @@ async fn unauthenticated_requests_are_told_where_to_authenticate(pool: PgPool) {
         ),
         "{challenge}"
     );
+    assert_eq!(
+        platform.introspect_calls(),
+        0,
+        "no token, nothing to ask about"
+    );
 
     // And the document it points at is reachable without a token, or the
-    // pointer is a closed loop.
+    // pointer is a closed loop. It names the *platform* as the authorization
+    // server: this service issues no tokens.
     let metadata = app
         .oneshot(
             http::Request::builder()
@@ -1894,55 +1977,50 @@ async fn unauthenticated_requests_are_told_where_to_authenticate(pool: PgPool) {
         .unwrap();
     let doc: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(doc["resource"], RESOURCE);
-    assert_eq!(doc["authorization_servers"][0], PUBLIC);
+    assert_eq!(doc["authorization_servers"][0], PLATFORM);
+    assert_eq!(doc["bearer_methods_supported"][0], "header");
+    let scopes: Vec<&str> = doc["scopes_supported"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s.as_str().unwrap())
+        .collect();
+    assert_eq!(scopes, of_core::scopes::KNOWN);
+}
+
+/// A token the platform vouches for gets through to the transport.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_valid_token_reaches_the_mcp_transport(pool: PgPool) {
+    let platform = MockPlatform::start().await;
+    let (org, user) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+    let token = platform.issue(org, user, Role::Member, &["jobs:read"]);
+    let app = front_door(pool, platform.client()).await;
+
+    let response = post_mcp(&app, Some(&token)).await;
+
+    // The empty body is not a JSON-RPC request, so `rmcp` refuses it — but it
+    // is `rmcp` refusing it, which is the only thing this test is about.
+    assert_ne!(response.status(), http::StatusCode::UNAUTHORIZED);
+    assert_ne!(response.status(), http::StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(platform.introspect_calls(), 1);
 }
 
 /// A token minted for somebody else's resource must not open this one. The
 /// confused-deputy defense, through the real middleware.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn a_token_for_another_resource_is_refused(pool: PgPool) {
-    use tower::ServiceExt;
-
-    let db = Db::from_pool(pool.clone());
-    let watcher = Watcher::spawn(pool).await.unwrap();
-
-    let org = db.create_org("acme", "Acme").await.unwrap();
-    let user = db.upsert_user("rob@acme.test", None).await.unwrap();
-    db.add_member(org.id, user.id, Role::Owner).await.unwrap();
-
-    // Both resources are registered: a PAT can only be minted for one the
-    // registry knows, and the point here is that the *audience* still keeps
-    // this one out.
-    of_mcp::register_resource(&db, RESOURCE).await.unwrap();
-    of_mcp::register_resource(&db, "https://someone-else.test/mcp")
-        .await
-        .unwrap();
-
-    let (foreign_token, _) = otto_auth::tokens::mint_pat(
-        &db,
-        user.id,
-        org.id,
-        "elsewhere",
-        &["jobs:read".to_string()],
+    let platform = MockPlatform::start().await;
+    let (org, user) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+    let foreign = platform.issue_for(
         "https://someone-else.test/mcp",
-        None,
-    )
-    .await
-    .unwrap();
+        org,
+        user,
+        Role::Owner,
+        &["jobs:read"],
+    );
+    let app = front_door(pool, platform.client()).await;
 
-    let app = of_mcp::router(db, watcher, of_mcp::Config::new(RESOURCE, PUBLIC));
-    let response = app
-        .oneshot(
-            http::Request::builder()
-                .method("POST")
-                .uri("/mcp")
-                .header("host", "mcp.otto-factory.test")
-                .header("authorization", format!("Bearer {foreign_token}"))
-                .body(axum::body::Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    let response = post_mcp(&app, Some(&foreign)).await;
 
     assert_eq!(response.status(), http::StatusCode::UNAUTHORIZED);
     let challenge = response
@@ -1953,47 +2031,75 @@ async fn a_token_for_another_resource_is_refused(pool: PgPool) {
         .unwrap()
         .to_string();
     assert!(
-        challenge.contains("different resource"),
-        "the caller needs to know that re-authenticating will not help: {challenge}"
+        challenge.contains("not valid for this resource"),
+        "the caller needs to be told to ask for this resource: {challenge}"
     );
 }
 
-/// A database outage is not an authentication failure. `otto-auth` reports it
-/// as `AuthError::Tenant(Db(..))` when opening the transaction fails (the old
-/// `of-auth` reported it as `Db` or `Core`), and a middleware that matched only
-/// `AuthError::Db` answered `401` — telling every connected agent its token had
-/// died at exactly the moment the database was unwell. It must be `503`, with no
-/// `WWW-Authenticate` challenge to chase.
+/// Junk that cannot be a platform token is refused without bothering the
+/// platform at all.
 #[sqlx::test(migrations = "../of-core/migrations")]
-async fn a_database_outage_is_503_not_401(pool: PgPool) {
-    use tower::ServiceExt;
+async fn a_token_that_is_not_shaped_like_ours_never_reaches_the_platform(pool: PgPool) {
+    let platform = MockPlatform::start().await;
+    let app = front_door(pool, platform.client()).await;
 
-    // The watcher keeps the healthy pool; the request path gets a database
-    // that cannot be reached, so every checkout fails the way an outage does
-    // (`begin_unpinned` surfaces it as a tenant-substrate database error).
-    let watcher = Watcher::spawn(pool).await.unwrap();
-    let unreachable = sqlx::postgres::PgPoolOptions::new()
-        .acquire_timeout(std::time::Duration::from_secs(2))
-        .connect_lazy("postgres://nobody:nothing@127.0.0.1:1/none")
-        .unwrap();
-    let db = Db::from_pool(unreachable);
-    let app = of_mcp::router(db, watcher, of_mcp::Config::new(RESOURCE, PUBLIC));
+    let response = post_mcp(&app, Some("definitely-not-a-token")).await;
 
-    let response = app
-        .oneshot(
-            http::Request::builder()
-                .method("POST")
-                .uri("/mcp")
-                .header("host", "mcp.otto-factory.test")
-                .header(
-                    "authorization",
-                    "Bearer otto_pat_whatever-the-database-is-down",
-                )
-                .body(axum::body::Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    assert_eq!(response.status(), http::StatusCode::UNAUTHORIZED);
+    assert_eq!(platform.introspect_calls(), 0);
+}
+
+/// Revocation at the platform takes effect here once the cache entry lapses.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_revoked_token_stops_working(pool: PgPool) {
+    let platform = MockPlatform::start().await;
+    let (org, user) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+    let token = platform.issue(org, user, Role::Owner, &["jobs:read"]);
+    let app = front_door(pool, uncached(&platform)).await;
+
+    assert_ne!(
+        post_mcp(&app, Some(&token)).await.status(),
+        http::StatusCode::UNAUTHORIZED
+    );
+
+    platform.revoke(&token);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert_eq!(
+        post_mcp(&app, Some(&token)).await.status(),
+        http::StatusCode::UNAUTHORIZED
+    );
+}
+
+/// A member removed from the org at the platform loses access: the platform
+/// answers inactive for a token whose user is no longer in the org.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_removed_member_stops_working(pool: PgPool) {
+    let platform = MockPlatform::start().await;
+    let (org, user) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+    let token = platform.issue(org, user, Role::Member, &["jobs:read"]);
+    let app = front_door(pool, uncached(&platform)).await;
+
+    platform.remove_member(org, user);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert_eq!(
+        post_mcp(&app, Some(&token)).await.status(),
+        http::StatusCode::UNAUTHORIZED
+    );
+}
+
+/// A platform outage is not an authentication failure. A middleware that
+/// answered `401` would tell every connected agent its token had died at exactly
+/// the moment the platform was unwell, and send them all to re-authenticate
+/// against it. It must be `503`, with no `WWW-Authenticate` challenge to chase.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_platform_outage_is_503_not_401(pool: PgPool) {
+    let platform = MockPlatform::start().await;
+    let (org, user) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+    let token = platform.issue(org, user, Role::Owner, &["jobs:read"]);
+    let app = front_door(pool, uncached(&platform)).await;
+
+    platform.set_down(true);
+    let response = post_mcp(&app, Some(&token)).await;
 
     assert_eq!(response.status(), http::StatusCode::SERVICE_UNAVAILABLE);
     assert!(
@@ -2002,6 +2108,59 @@ async fn a_database_outage_is_503_not_401(pool: PgPool) {
             .get(http::header::WWW_AUTHENTICATE)
             .is_none(),
         "an outage must not send the client off to re-authenticate"
+    );
+    assert!(response.headers().contains_key(http::header::RETRY_AFTER));
+
+    // And recovery is immediate: failures are never cached.
+    platform.set_down(false);
+    assert_ne!(
+        post_mcp(&app, Some(&token)).await.status(),
+        http::StatusCode::SERVICE_UNAVAILABLE
+    );
+}
+
+/// The platform being unreachable at all (not answering 5xx, not answering) is
+/// the same `503`.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn an_unreachable_platform_is_503_not_401(pool: PgPool) {
+    let platform = MockPlatform::start().await;
+    let token = platform.issue(
+        uuid::Uuid::new_v4(),
+        uuid::Uuid::new_v4(),
+        Role::Owner,
+        &["jobs:read"],
+    );
+    // Nothing listens on port 1.
+    let dead = platform.client_with(ClientConfig::new(
+        "http://127.0.0.1:1",
+        RESOURCE,
+        of_testkit::SECRET,
+    ));
+    let app = front_door(pool, dead).await;
+
+    assert_eq!(
+        post_mcp(&app, Some(&token)).await.status(),
+        http::StatusCode::SERVICE_UNAVAILABLE
+    );
+}
+
+/// If the platform refuses *our* credential (a rotated secret nobody deployed),
+/// the caller's token is not the problem and re-authenticating cannot help: `503`.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn our_own_rejected_credential_is_503_not_401(pool: PgPool) {
+    let platform = MockPlatform::start().await;
+    let token = platform.issue(
+        uuid::Uuid::new_v4(),
+        uuid::Uuid::new_v4(),
+        Role::Owner,
+        &["jobs:read"],
+    );
+    let wrong = platform.client_with(ClientConfig::new(&platform.url, RESOURCE, "wrong-secret"));
+    let app = front_door(pool, wrong).await;
+
+    assert_eq!(
+        post_mcp(&app, Some(&token)).await.status(),
+        http::StatusCode::SERVICE_UNAVAILABLE
     );
 }
 
@@ -2129,19 +2288,11 @@ async fn whoami_reports_the_allowance(pool: PgPool) {
 /// what happened, and go and upgrade.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn enforcement_stops_work_but_never_reads(pool: PgPool) {
-    let (env, caller) = env_metered(pool, Meter::new(true, UPGRADE_URL)).await;
+    let (env, caller) = env_metered(pool, true).await;
     env.register(&caller).await;
 
     // Spend the Free plan's entire bucket.
-    sqlx::query(
-        "INSERT INTO org_period_usage (org_id, period_start, billable_count, total_count) \
-         VALUES ($1, date_trunc('month', now() AT TIME ZONE 'utc')::date, 500, 500) \
-         ON CONFLICT (org_id, period_start) DO UPDATE SET billable_count = 500",
-    )
-    .bind(caller.org_id)
-    .execute(env.db.pool())
-    .await
-    .unwrap();
+    env.set_standing(caller.org_id, 500, 500).await;
 
     let e = err(env
         .factory
@@ -2189,18 +2340,10 @@ async fn enforcement_stops_work_but_never_reads(pool: PgPool) {
 /// that lands exactly on it. A plan sold as 500 operations has to deliver 500.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn the_last_included_operation_is_allowed(pool: PgPool) {
-    let (env, caller) = env_metered(pool, Meter::new(true, UPGRADE_URL)).await;
+    let (env, caller) = env_metered(pool, true).await;
     env.register(&caller).await;
 
-    sqlx::query(
-        "INSERT INTO org_period_usage (org_id, period_start, billable_count, total_count) \
-         VALUES ($1, date_trunc('month', now() AT TIME ZONE 'utc')::date, 499, 499) \
-         ON CONFLICT (org_id, period_start) DO UPDATE SET billable_count = 499",
-    )
-    .bind(caller.org_id)
-    .execute(env.db.pool())
-    .await
-    .unwrap();
+    env.set_standing(caller.org_id, 499, 500).await;
 
     env.add_job(&caller, "the five hundredth").await;
 
@@ -2216,15 +2359,7 @@ async fn with_enforcement_off_an_over_budget_org_keeps_working(pool: PgPool) {
     let (env, caller) = env(pool).await;
     env.register(&caller).await;
 
-    sqlx::query(
-        "INSERT INTO org_period_usage (org_id, period_start, billable_count, total_count) \
-         VALUES ($1, date_trunc('month', now() AT TIME ZONE 'utc')::date, 9_000, 9_000) \
-         ON CONFLICT (org_id, period_start) DO UPDATE SET billable_count = 9000",
-    )
-    .bind(caller.org_id)
-    .execute(env.db.pool())
-    .await
-    .unwrap();
+    env.set_standing(caller.org_id, 9000, 500).await;
 
     env.add_job(&caller, "well past the bucket").await;
 
@@ -2244,12 +2379,8 @@ async fn usage_is_counted_per_org(pool: PgPool) {
     env.add_job(&acme, "acme work").await;
     env.add_job(&acme, "more acme work").await;
 
-    let globex = env.db.create_org("globex", "Globex").await.unwrap();
-    let eve = env.db.upsert_user("eve@globex.test", None).await.unwrap();
-    env.db
-        .add_member(globex.id, eve.id, Role::Owner)
-        .await
-        .unwrap();
+    let globex = env.org("globex", "Globex");
+    let eve = env.member(globex.id, "eve@globex.test", Role::Owner);
     let other = principal(eve.id, globex.id, all_scopes());
 
     let theirs = env.usage(&other).await;
@@ -2570,7 +2701,7 @@ async fn sync_ticket_reports_an_outbound_failure_as_retriable(pool: PgPool) {
 /// didn't, this would return `tracker_sync_failed` just like that test does.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn sync_ticket_refuses_before_the_outbound_call_when_over_budget(pool: PgPool) {
-    let (env, caller) = env_metered(pool, Meter::new(true, UPGRADE_URL)).await;
+    let (env, caller) = env_metered(pool, true).await;
     let repo = env.register(&caller).await;
     let repo_id: RepoId = repo["id"].as_str().unwrap().parse().unwrap();
 
@@ -2629,15 +2760,7 @@ async fn sync_ticket_refuses_before_the_outbound_call_when_over_budget(pool: PgP
     // update that only touched billable_count would leave total_count below
     // billable_count, an impossible state for this table since every
     // billable call is also a total one.
-    sqlx::query(
-        "INSERT INTO org_period_usage (org_id, period_start, billable_count, total_count) \
-         VALUES ($1, date_trunc('month', now() AT TIME ZONE 'utc')::date, 500, 500) \
-         ON CONFLICT (org_id, period_start) DO UPDATE SET billable_count = 500, total_count = 500",
-    )
-    .bind(caller.org_id)
-    .execute(env.db.pool())
-    .await
-    .unwrap();
+    env.set_standing(caller.org_id, 500, 500).await;
 
     let e = err(env
         .factory
@@ -2795,4 +2918,152 @@ async fn sync_ticket_reports_a_malformed_jira_ticket_ref_as_non_retriable(pool: 
     assert_eq!(code_of(&e), "invalid_argument");
     assert_eq!(e.data.as_ref().unwrap()["retriable"], false);
     assert!(e.message.contains("not a valid JIRA"), "{}", e.message);
+}
+
+// ------------------------------------------------- end to end, over the wire
+
+/// One JSON-RPC call to the assembled `/mcp` endpoint, the way an agent makes it:
+/// real bearer token, introspected by the (mock) platform, principal carried
+/// through the transport to the handler. Stateless mode, so no `initialize`.
+async fn call_tool(
+    app: &axum::Router,
+    token: &str,
+    tool: &str,
+    arguments: serde_json::Value,
+) -> serde_json::Value {
+    use tower::ServiceExt;
+
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": { "name": tool, "arguments": arguments },
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            http::Request::builder()
+                .method("POST")
+                .uri("/mcp")
+                .header("host", "mcp.otto-factory.test")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .header("accept", "application/json, text/event-stream")
+                .body(axum::body::Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        response.status().is_success(),
+        "tools/call {tool} answered {}",
+        response.status()
+    );
+    let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+        panic!("not JSON ({e}): {}", String::from_utf8_lossy(&bytes));
+    })
+}
+
+/// The whole path, once: token -> platform introspection -> principal -> handler
+/// -> platform member lookup -> answer. A token opens exactly its own org, and the
+/// platform's records (not ours) say who the caller is.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_token_opens_exactly_its_own_org_over_the_wire(pool: PgPool) {
+    let platform = MockPlatform::start().await;
+    let (acme, globex) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+    let (rob, eve) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+    platform.add_org(acme, "acme", "Acme");
+    platform.add_org(globex, "globex", "Globex");
+    platform.add_member(acme, rob, "rob@acme.test", Role::Admin);
+    platform.add_member(globex, eve, "eve@globex.test", Role::Owner);
+    let rob_token = platform.issue(acme, rob, Role::Admin, of_core::scopes::KNOWN);
+    let eve_token = platform.issue(globex, eve, Role::Owner, of_core::scopes::KNOWN);
+    let app = front_door(pool, platform.client()).await;
+
+    let whoami = call_tool(&app, &rob_token, "whoami", serde_json::json!({})).await;
+    let out = &whoami["result"]["structuredContent"];
+    assert_eq!(out["user"]["email"], "rob@acme.test", "{whoami}");
+    assert_eq!(out["org"]["slug"], "acme");
+    assert_eq!(out["role"], "admin");
+
+    // Acme registers a repo and queues work; Globex, with an equally privileged
+    // token, sees none of it.
+    let reg = call_tool(
+        &app,
+        &rob_token,
+        "register_repo",
+        serde_json::json!({ "slug": "api", "remotes": [REMOTE] }),
+    )
+    .await;
+    assert!(reg["result"]["isError"] != true, "{reg}");
+
+    let theirs = call_tool(&app, &eve_token, "list_repos", serde_json::json!({})).await;
+    assert_eq!(
+        theirs["result"]["structuredContent"]["repos"],
+        serde_json::json!([]),
+        "{theirs}"
+    );
+    let ours = call_tool(&app, &rob_token, "list_repos", serde_json::json!({})).await;
+    assert_eq!(
+        ours["result"]["structuredContent"]["repos"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+/// A name the platform cannot resolve because the platform is down must be an
+/// error, never "send it to everyone" and never "no such member".
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_direct_message_fails_closed_when_the_platform_cannot_answer(pool: PgPool) {
+    let (env, caller) = env(pool).await;
+    env.teammate(caller.org_id, "bob@acme.test").await;
+    env.platform.set_down(true);
+
+    let e = err(env
+        .factory
+        .send_message(
+            Extension(parts(&caller)),
+            Parameters(tools::coord::SendMessageArgs {
+                body: "private".into(),
+                to: Some("bob@acme.test".into()),
+                kind: None,
+                repo: None,
+                remote: None,
+                job: None,
+                in_reply_to: None,
+                agent: None,
+                idempotency_key: None,
+            }),
+        )
+        .await);
+
+    assert_eq!(code_of(&e), "platform_unavailable");
+    assert_eq!(e.data.as_ref().unwrap()["retriable"], true);
+    let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM messages")
+        .fetch_one(env.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        stored, 0,
+        "a message was stored although its recipient was never resolved"
+    );
+}
+
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn whoami_refuses_rather_than_guessing_when_the_platform_is_down(pool: PgPool) {
+    let (env, caller) = env(pool).await;
+    env.platform.set_down(true);
+
+    let e = err(env
+        .factory
+        .whoami(Extension(parts(&caller)), Parameters(tools::org::NoArgs {}))
+        .await);
+
+    assert_eq!(code_of(&e), "platform_unavailable");
+    assert_eq!(e.data.as_ref().unwrap()["retriable"], true);
 }
