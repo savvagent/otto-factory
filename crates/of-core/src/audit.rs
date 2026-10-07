@@ -15,6 +15,12 @@ pub mod action {
     pub const TRACKER_BOUND: &str = "tracker.repo.bound";
     pub const TRACKER_UNBOUND: &str = "tracker.repo.unbound";
 
+    // Applied from the platform's lifecycle webhooks (of-core::platform_events).
+    /// A team was deleted at the platform; rows scoped to it stay scoped.
+    pub const TEAM_SCOPE_ORPHANED: &str = "platform.team.deleted";
+    /// A member was removed at the platform; their leases and claims were released.
+    pub const MEMBER_RELEASED: &str = "platform.member.removed";
+
     // Jobs.
     pub const JOB_CANCEL_REQUESTED: &str = "job.cancel.requested";
     pub const JOB_CANCELLED: &str = "job.cancelled";

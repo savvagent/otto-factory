@@ -1,13 +1,14 @@
-//! otto-factory's own migrations: `0001`–`0034` and onward, in
-//! `crates/of-core/migrations`.
+//! otto-factory's own migrations, in `crates/of-core/migrations`.
+//!
+//! `0001_baseline.sql` is a squashed, domain-only baseline that replaced the
+//! original `0001`-`0034` history at the platform cutover
+//! (savvagent/otto-factory#192); migrations are append-only again from there.
 //!
 //! **Never call `otto_tenant::Db::migrate` on this database.** It applies
-//! otto-platform's own migration history (`0001_identity` … `0008_…`), whose
-//! version numbers collide with this one's and whose checksums differ, so sqlx
-//! would refuse to start at best and interleave two histories in one
-//! `_sqlx_migrations` table at worst. The platform's schema is already in this
-//! database, brought in by this crate's migrations (see `0033`/`0034`), which
-//! is the point of keeping a single history here until the Phase 4 split.
+//! otto-platform's own migration history, whose version numbers collide with
+//! this one's and whose checksums differ, so sqlx would refuse to start at best
+//! and interleave two histories in one `_sqlx_migrations` table at worst. The
+//! platform's schema lives in the platform's database, not this one.
 //!
 //! `tests/guards.rs` fails the build if a workspace source file calls the
 //! platform's `migrate`.

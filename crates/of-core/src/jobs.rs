@@ -11,6 +11,7 @@
 use crate::error::{Error, Result};
 use crate::ids::{JobId, RepoId};
 use crate::repos::ReposExt;
+use crate::teams::VerifiedTeam;
 use otto_tenant::ids::{OrgId, TeamId, UserId};
 use otto_tenant::Tx;
 use serde::{Deserialize, Serialize};
@@ -193,7 +194,9 @@ pub struct Job {
 #[derive(Debug, Clone, Default)]
 pub struct NewJob {
     pub repo_id: RepoId,
-    pub team_id: Option<TeamId>,
+    /// Overrides the repo's team. Already confirmed with the platform; an
+    /// unchecked id cannot be passed here (see [`VerifiedTeam`]).
+    pub team_id: Option<VerifiedTeam>,
     pub title: String,
     pub description: Option<String>,
     pub ticket_ref: Option<String>,
@@ -285,7 +288,7 @@ fn job_idempotency_fingerprint(new: &NewJob) -> Vec<u8> {
 
     crate::idempotency::fingerprint(&serde_json::json!({
         "repoId": repo_id,
-        "teamId": team_id,
+        "teamId": team_id.map(|t| t.id()),
         "title": title.trim(),
         "description": description,
         "ticketRef": ticket_ref,
@@ -603,19 +606,15 @@ impl JobsExt for Tx<'_> {
             .await?
             .ok_or_else(|| Error::RepoNotFound(new.repo_id.to_string()))?;
 
-        let seq: i64 = sqlx::query_scalar(
-            "UPDATE orgs SET next_job_seq = next_job_seq + 1 WHERE id = $1 \
-             RETURNING next_job_seq - 1",
-        )
-        .bind(org)
-        .fetch_optional(self.conn())
-        .await?
-        .ok_or(otto_tenant::Error::OrgNotFound(org))?;
+        let seq = self.next_job_seq().await?;
 
         let id = JobId::from_seq(seq);
         // Inherit the repo's team unless the caller named one, so team-scoped
         // reads work without the caller having to know about teams at all.
-        let team_id = new.team_id.or(repo.team_id);
+        let team_id = match new.team_id {
+            Some(t) => Some(t.in_org(org)?),
+            None => repo.team_id,
+        };
 
         let (job, created): (Job, bool) = if let Some(key) = new.idempotency_key.as_deref() {
             let hash = job_idempotency_fingerprint(&new);
@@ -942,14 +941,7 @@ impl JobsExt for Tx<'_> {
             .await?
             .ok_or_else(|| Error::RepoNotFound(repo_id.to_string()))?;
 
-        let seq: i64 = sqlx::query_scalar(
-            "UPDATE orgs SET next_job_seq = next_job_seq + 1 WHERE id = $1 \
-             RETURNING next_job_seq - 1",
-        )
-        .bind(org)
-        .fetch_optional(self.conn())
-        .await?
-        .ok_or(otto_tenant::Error::OrgNotFound(org))?;
+        let seq = self.next_job_seq().await?;
 
         let id = JobId::from_seq(seq);
         // A savepoint, not a bare INSERT: Postgres aborts the *whole*
@@ -1713,6 +1705,9 @@ impl JobsExt for Tx<'_> {
 }
 
 pub(crate) trait JobsInternal {
+    /// Allocate the next `job-N` sequence number from `org_counters`.
+    async fn next_job_seq(&mut self) -> Result<i64>;
+
     /// Look up the *live* job holding a ticket ref, scoped to one repo and
     /// tracker. Unlike `get_job_by_ticket_for_repo`'s newest-wins semantics —
     /// deliberately tolerant of multiple *historical* jobs sharing a
@@ -1732,7 +1727,7 @@ pub(crate) trait JobsInternal {
         ticket_ref: &str,
     ) -> Result<Option<Job>>;
 
-    /// Keeps `orgs.jobs_completed_total`/`jobs_failed_total` exactly in step
+    /// Keeps `org_counters.jobs_completed_total`/`jobs_failed_total` exactly in step
     /// with every transition into or out of a terminal status, so the
     /// org-wide branch of `stats` can read them instead of re-scanning the
     /// org's whole job history on every call. A no-op for any other status —
@@ -1831,7 +1826,7 @@ pub(crate) trait JobsInternal {
         expected_attempts: Option<i32>,
     ) -> Result<Job>;
 
-    /// `completed`/`failed` come from `orgs.jobs_completed_total`/
+    /// `completed`/`failed` come from `org_counters.jobs_completed_total`/
     /// `jobs_failed_total` — counters kept exactly in step by
     /// `bump_terminal_counter` — rather than a `COUNT(*)` over every job the
     /// org has ever run. `cancelled` has no such cache (it is rare enough
@@ -1872,14 +1867,35 @@ impl JobsInternal for Tx<'_> {
                 return Ok(())
             }
         };
+        // Upserted: the counter row is created lazily, so a terminal transition
+        // on an org that has somehow never allocated a job id still counts.
         sqlx::query(&format!(
-            "UPDATE orgs SET {column} = {column} + $2 WHERE id = $1"
+            "INSERT INTO org_counters (org_id, {column}) VALUES ($1, GREATEST($2, 0)) \
+             ON CONFLICT (org_id) DO UPDATE SET {column} = org_counters.{column} + $2"
         ))
         .bind(self.org())
         .bind(delta)
         .execute(self.conn())
         .await?;
         Ok(())
+    }
+
+    /// Allocate the next `job-N` sequence number for this org.
+    ///
+    /// The counter lives in this database's own `org_counters` table (it used to
+    /// be a column on the platform-side `orgs` row). The first call for an org
+    /// creates its row; every call takes the row lock, so two concurrent inserts
+    /// can never be handed the same number.
+    async fn next_job_seq(&mut self) -> Result<i64> {
+        let seq: i64 = sqlx::query_scalar(
+            "INSERT INTO org_counters (org_id, next_job_seq) VALUES ($1, 2) \
+             ON CONFLICT (org_id) DO UPDATE SET next_job_seq = org_counters.next_job_seq + 1 \
+             RETURNING next_job_seq - 1",
+        )
+        .bind(self.org())
+        .fetch_one(self.conn())
+        .await?;
+        Ok(seq)
     }
 
     async fn ensure_claim_held(
@@ -2039,13 +2055,14 @@ impl JobsInternal for Tx<'_> {
     }
 
     async fn org_wide_stats(&mut self, org: OrgId) -> Result<Stats> {
+        // No row means the org has never created a job: zero totals, not an error.
         let (completed, failed): (i64, i64) = sqlx::query_as(
-            "SELECT jobs_completed_total, jobs_failed_total FROM orgs WHERE id = $1",
+            "SELECT jobs_completed_total, jobs_failed_total FROM org_counters WHERE org_id = $1",
         )
         .bind(org)
         .fetch_optional(self.conn())
         .await?
-        .ok_or(otto_tenant::Error::OrgNotFound(org))?;
+        .unwrap_or((0, 0));
 
         #[derive(sqlx::FromRow)]
         struct Live {

@@ -1,10 +1,12 @@
 //! `of-core` — the otto-factory domain: repos, jobs, leases, messages, trackers.
 //!
-//! Identity, tenancy, auth, and plan usage are not here. They live in
-//! otto-platform (`otto-tenant`, `otto-core`, `otto-auth`, `otto-billing`), and
-//! this crate builds the factory's domain on top of `otto-tenant`'s pinned
-//! transaction. This crate owns every factory SQL statement and knows nothing
-//! about HTTP, MCP, or authentication. Two rules hold throughout, and both exist
+//! Identity, tenancy, auth, and plan usage are not here. They live in the otto
+//! platform, in another database, reached over HTTP (`otto-resource`); this
+//! crate builds the factory's domain on top of `otto-tenant`'s pinned
+//! transaction and holds no foreign key to anything the platform owns.
+//!
+//! This crate owns every factory SQL statement and knows nothing about HTTP,
+//! MCP, or authentication. Two rules hold throughout, and both exist
 //! to make cross-tenant leakage structurally impossible rather than merely
 //! unlikely:
 //!
@@ -22,7 +24,7 @@
 //! forbid inherent `impl Tx<'_> { ... }` blocks here. The factory's methods are
 //! therefore extension traits ([`jobs::JobsExt`], [`repos::ReposExt`],
 //! [`leases::LeasesExt`], [`messages::MessagesExt`]); import the trait alongside
-//! `Tx` to call its methods, exactly as for `otto_core`'s `OrgsExt`/`TeamsExt`.
+//! `Tx` to call its methods.
 //!
 //! [`OrgId`]: otto_tenant::ids::OrgId
 //! [`Tx`]: otto_tenant::Tx
@@ -36,6 +38,7 @@ pub mod jobs;
 pub mod leases;
 pub mod messages;
 pub mod migrate;
+pub mod platform_events;
 pub mod repos;
 pub mod scopes;
 pub mod teams;

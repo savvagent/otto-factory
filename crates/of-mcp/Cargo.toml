@@ -8,8 +8,7 @@ rust-version.workspace = true
 [dependencies]
 of-core.workspace = true
 otto-tenant.workspace = true
-otto-core.workspace = true
-otto-auth.workspace = true
+otto-resource.workspace = true
 of-billing.workspace = true
 of-trackers.workspace = true
 sqlx.workspace = true
@@ -33,8 +32,7 @@ url.workspace = true
 tokio = { workspace = true, features = ["full"] }
 of-core.workspace = true
 otto-tenant.workspace = true
-otto-core.workspace = true
-otto-auth.workspace = true
+otto-resource.workspace = true
 rmcp.workspace = true
 of-billing.workspace = true
 sqlx.workspace = true

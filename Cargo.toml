@@ -7,6 +7,7 @@ members = [
   "crates/of-trackers",
   "crates/of-web",
   "crates/of-server",
+  "crates/of-testkit",
 ]
 
 [workspace.package]
@@ -21,13 +22,15 @@ of-mcp = { path = "crates/of-mcp" }
 of-billing = { path = "crates/of-billing" }
 of-trackers = { path = "crates/of-trackers" }
 of-web = { path = "crates/of-web" }
+of-testkit = { path = "crates/of-testkit" }
 
-# Identity, tenancy, auth, and plan-usage queries live in otto-platform
-# (savvagent/otto-factory#191). One rev for all four: they version together.
-otto-tenant = { git = "https://github.com/savvagent/otto-platform", rev = "c7437afdc63bc211f00f003868f7de208ae2341b" }
-otto-core = { git = "https://github.com/savvagent/otto-platform", rev = "c7437afdc63bc211f00f003868f7de208ae2341b" }
-otto-auth = { git = "https://github.com/savvagent/otto-platform", rev = "c7437afdc63bc211f00f003868f7de208ae2341b" }
-otto-billing = { git = "https://github.com/savvagent/otto-platform", rev = "c7437afdc63bc211f00f003868f7de208ae2341b" }
+# otto-factory is a resource server of the otto platform (savvagent/otto-factory#192):
+# identity, auth, orgs, teams, plans, and billing live there. This repo links only the
+# tenant-isolation substrate (`otto-tenant`: pinned transactions, RLS proof, Cipher, the
+# audit-trail pattern) and the resource-server client (`otto-resource`: introspection,
+# usage shipping, identity lookups, webhook verification). One rev for both.
+otto-tenant = { git = "https://github.com/savvagent/otto-platform", rev = "3cd60b68c576dee9ec8ef11f680e394828917324" }
+otto-resource = { git = "https://github.com/savvagent/otto-platform", rev = "3cd60b68c576dee9ec8ef11f680e394828917324" }
 
 sqlx = { version = "0.8", default-features = false, features = [
   "runtime-tokio", "tls-rustls", "postgres", "chrono", "uuid", "macros", "migrate", "json",

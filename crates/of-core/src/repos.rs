@@ -6,7 +6,7 @@
 
 use crate::error::{Error, Result};
 use crate::ids::RepoId;
-use otto_core::teams::TeamsExt;
+use crate::teams::VerifiedTeam;
 use otto_tenant::ids::{OrgId, TeamId, UserId};
 use otto_tenant::Tx;
 use serde::{Deserialize, Serialize};
@@ -76,7 +76,9 @@ pub struct NewRepo {
     pub remotes: Vec<String>,
     pub provider: Option<Provider>,
     pub default_branch: Option<String>,
-    pub team_id: Option<TeamId>,
+    /// The owning team, already confirmed with the platform. See
+    /// [`VerifiedTeam`]: an unchecked id cannot be passed here.
+    pub team_id: Option<VerifiedTeam>,
     pub default_agent_type: Option<String>,
     pub tracker_binding: Option<serde_json::Value>,
     pub created_by: Option<UserId>,
@@ -108,12 +110,11 @@ pub struct RepoPatch {
     /// Three states, not two: `None` leaves the team alone, `Some(Some(id))`
     /// moves the repo to that team, and `Some(None)` makes it org-wide.
     ///
-    /// A plain `Option<TeamId>` cannot express the last one — "absent" and
+    /// A plain `Option<_>` cannot express the last one — "absent" and
     /// "clear it" collapse into the same value — so a repo could be scoped to a
-    /// team and never unscoped. That is not a cosmetic gap: `delete_team`
-    /// refuses while repos are still scoped to it, so without a way to unassign
-    /// them a team becomes undeletable.
-    pub team_id: Option<Option<TeamId>>,
+    /// team and never unscoped. That matters most for a repo whose team the
+    /// platform has deleted: an admin has to be able to reassign or release it.
+    pub team_id: Option<Option<VerifiedTeam>>,
     pub default_agent_type: Option<String>,
     pub tracker_binding: Option<serde_json::Value>,
     pub active: Option<bool>,
@@ -287,13 +288,10 @@ impl ReposExt for Tx<'_> {
             return Err(Error::Invalid("repo slug must not be empty".into()));
         }
 
-        // `team_id` only has a schema-level `REFERENCES teams(id)`, not a
-        // composite `(org_id, team_id)` one, so a team UUID from another
-        // tenant would otherwise attach silently. Resolving it through this
-        // same pinned `Tx` proves it belongs to this org before the insert.
-        if let Some(team) = new.team_id {
-            self.require_team_in_org(team).await?;
-        }
+        // The team was verified against the platform by whoever built `NewRepo`
+        // (`VerifiedTeam` has no other constructor); here we only check that it
+        // was verified for *this* transaction's org.
+        let team_id = new.team_id.map(|t| t.in_org(self.org())).transpose()?;
 
         let normalized: Vec<String> = new
             .remotes
@@ -323,7 +321,7 @@ impl ReposExt for Tx<'_> {
         .bind(&name)
         .bind(provider)
         .bind(new.default_branch.as_deref().unwrap_or("main"))
-        .bind(new.team_id)
+        .bind(team_id)
         .bind(new.default_agent_type.as_deref())
         .bind(new.tracker_binding.unwrap_or_else(|| serde_json::json!({})))
         .bind(new.created_by)
@@ -446,11 +444,12 @@ impl ReposExt for Tx<'_> {
     }
 
     async fn update_repo(&mut self, id: RepoId, patch: RepoPatch) -> Result<Repo> {
-        // Same cross-tenant risk as registration: a bare foreign key would
-        // accept a team id from another org.
-        if let Some(Some(team)) = patch.team_id {
-            self.require_team_in_org(team).await?;
-        }
+        // Same rule as registration: the team was verified for some org; make
+        // sure it is this one.
+        let team_id: Option<Option<TeamId>> = patch
+            .team_id
+            .map(|t| t.map(|t| t.in_org(self.org())).transpose())
+            .transpose()?;
 
         let org = self.org();
 
@@ -469,8 +468,8 @@ impl ReposExt for Tx<'_> {
         .bind(patch.default_branch.as_deref())
         // COALESCE cannot express "set this to NULL", so the team is written
         // through an explicit "was it named?" flag instead.
-        .bind(patch.team_id.is_some())
-        .bind(patch.team_id.flatten())
+        .bind(team_id.is_some())
+        .bind(team_id.flatten())
         .bind(patch.default_agent_type.as_deref())
         .bind(patch.tracker_binding.as_ref())
         .bind(patch.active)
@@ -500,14 +499,6 @@ impl ReposExt for Tx<'_> {
 }
 
 pub(crate) trait ReposInternal {
-    /// Prove a team id belongs to this transaction's org before it is written
-    /// onto a repo. The schema's foreign key alone cannot express that — it is
-    /// `REFERENCES teams(id)`, not a composite `(org_id, team_id)` one — so
-    /// without this check a leaked or guessed team id from another tenant
-    /// would attach silently, and deleting that foreign team would later null
-    /// out this repo's assignment out from under it.
-    async fn require_team_in_org(&mut self, team: TeamId) -> Result<()>;
-
     /// Attach an already-normalized remote to a repo.
     async fn attach_remote(&mut self, repo_id: RepoId, normalized: &str) -> Result<()>;
 
@@ -521,16 +512,6 @@ pub(crate) trait ReposInternal {
 }
 
 impl ReposInternal for Tx<'_> {
-    async fn require_team_in_org(&mut self, team: TeamId) -> Result<()> {
-        self.get_team(team)
-            .await?
-            .ok_or_else(|| otto_core::Error::TeamNotFound {
-                slug: team.to_string(),
-                known: "unknown".into(),
-            })?;
-        Ok(())
-    }
-
     async fn attach_remote(&mut self, repo_id: RepoId, normalized: &str) -> Result<()> {
         let org = self.org();
         let res = sqlx::query(

@@ -1,17 +1,10 @@
-//! Source-level guards for two calls that compile fine and must never be made.
+//! Source-level guard for a call that compiles fine and must never be made.
 //!
-//! Both are cases where otto-platform ships a perfectly reasonable method that
-//! is wrong *for this deployment*, and the only thing between a caller and the
-//! mistake is that nobody reaches for it. A test that reads the source is crude
-//! but it is the one thing that fails when someone does.
-//!
-//! - `TeamsExt::delete_team` has no "team in use" guard: `repos.team_id`,
-//!   `jobs.team_id`, and `messages.team_id` are `ON DELETE SET NULL`, and a null
-//!   `team_id` means *org-wide*, so deleting a team through the platform method
-//!   silently publishes everything scoped to it to the whole org. Go through
-//!   `of_core::teams::delete_team`.
-//! - `otto_tenant::Db::migrate` would apply otto-platform's own migration
-//!   history to this database. Go through `of_core::migrate`.
+//! `otto_tenant::Db::migrate` is a perfectly reasonable method that is wrong
+//! *for this deployment*: it would apply otto-platform's own migration history
+//! to this database, and the only thing between a caller and the mistake is that
+//! nobody reaches for it. A test that reads the source is crude but it is the one
+//! thing that fails when someone does. Go through `of_core::migrate`.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -49,35 +42,6 @@ fn code_lines(text: &str) -> impl Iterator<Item = (usize, &str)> {
     text.lines()
         .enumerate()
         .filter(|(_, l)| !l.trim_start().starts_with("//"))
-}
-
-#[test]
-fn nothing_deletes_a_team_except_through_the_guarded_wrapper() {
-    let this_file = Path::new(file!()).file_name().unwrap().to_owned();
-    let mut offenders = Vec::new();
-
-    for (path, text) in workspace_sources() {
-        if path.file_name() == Some(&this_file) {
-            continue;
-        }
-        // The wrapper itself calls the platform method, once, after its checks.
-        // Component-wise match: only of-core's wrapper, not any crate's src/teams.rs.
-        let is_wrapper = path.ends_with("of-core/src/teams.rs");
-        for (n, line) in code_lines(&text) {
-            let method_call = line.contains(".delete_team(");
-            let path_call = line.contains("TeamsExt::delete_team(");
-            if method_call || (path_call && !is_wrapper) {
-                offenders.push(format!("{}:{}: {}", path.display(), n + 1, line.trim()));
-            }
-        }
-    }
-
-    assert!(
-        offenders.is_empty(),
-        "call `of_core::teams::delete_team(&mut tx, id)`, not the platform's \
-         `TeamsExt::delete_team`, which has no team-in-use guard:\n{}",
-        offenders.join("\n")
-    );
 }
 
 #[test]
