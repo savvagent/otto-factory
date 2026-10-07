@@ -66,9 +66,14 @@ enum Fault {
     Caller,
     /// A lost race: ours, but the message is already written for the caller.
     Race,
-    /// Database, key configuration, ciphertext, or isolation. Ours, and the
-    /// text can carry table names, constraint names, or key diagnostics.
+    /// A database failure: ours, transient, and the text can carry table
+    /// names or constraint names. Retriable.
     Database,
+    /// Permanent server misconfiguration: a bad encryption key, undecryptable
+    /// ciphertext, or tenant isolation not enforced. Ours, redacted like
+    /// `Database` (the text can carry key diagnostics), but retrying the same
+    /// call can never succeed.
+    Misconfigured,
 }
 
 impl Fault {
@@ -94,7 +99,10 @@ impl Fault {
         match e {
             // These two describe the request.
             otto_tenant::Error::Invalid(_) | otto_tenant::Error::OrgNotFound(_) => Fault::Caller,
-            _ => Fault::Database,
+            otto_tenant::Error::Db(_) => Fault::Database,
+            otto_tenant::Error::Config(_)
+            | otto_tenant::Error::Crypto(_)
+            | otto_tenant::Error::IsolationNotEnforced { .. } => Fault::Misconfigured,
         }
     }
 }
@@ -105,7 +113,7 @@ fn envelope(fault: Fault, text: String, code: &'static str, retriable: bool) -> 
         // request was fine; the transaction lost to a concurrent write.
         // Reporting either as an argument error would send an agent into a
         // rewrite loop over a request that was fine to begin with.
-        Fault::Database | Fault::Race => ErrorCode::INTERNAL_ERROR,
+        Fault::Database | Fault::Misconfigured | Fault::Race => ErrorCode::INTERNAL_ERROR,
         Fault::Caller => ErrorCode::INVALID_PARAMS,
     };
 
@@ -114,7 +122,7 @@ fn envelope(fault: Fault, text: String, code: &'static str, retriable: bool) -> 
     // an agent can act on and some of which describe other tenants' schema
     // surface. Log it, return a generic sentence.
     let message = match fault {
-        Fault::Database => {
+        Fault::Database | Fault::Misconfigured => {
             tracing::error!(error = %text, "server-side failure surfaced to an MCP caller");
             "the server could not complete this call; retry shortly".to_string()
         }
@@ -327,6 +335,35 @@ mod tests {
             sqlx::Error::RowNotFound,
         )));
         assert_eq!(e.code, ErrorCode::INTERNAL_ERROR);
+    }
+
+    /// A permanent misconfiguration (bad key, undecryptable ciphertext,
+    /// isolation not enforced) is the server's fault and redacted, but an agent
+    /// that retries it will fail identically forever, so it is not retriable.
+    /// Only a real database error is.
+    #[test]
+    fn misconfiguration_is_redacted_and_not_retriable_but_db_errors_are() {
+        for e in [
+            otto_tenant::Error::Config("OF_ENCRYPTION_KEY is not valid base64".into()),
+            otto_tenant::Error::Crypto("bad tag".into()),
+            otto_tenant::Error::IsolationNotEnforced {
+                problems: "role otto_app".into(),
+            },
+        ] {
+            let converted = from_tenant(&e);
+            assert_eq!(converted.code, ErrorCode::INTERNAL_ERROR);
+            assert_eq!(converted.data.as_ref().unwrap()["retriable"], false, "{e}");
+            assert!(!converted.message.contains("OF_ENCRYPTION_KEY"));
+            assert!(!converted.message.contains("otto_app"));
+
+            // Wrapped in the identity and factory errors it is the same answer.
+            let via_identity = from_identity(&otto_core::Error::Tenant(
+                otto_tenant::Error::Crypto("bad tag".into()),
+            ));
+            assert_eq!(via_identity.data.unwrap()["retriable"], false);
+        }
+        let db = from_tenant(&otto_tenant::Error::Db(sqlx::Error::PoolTimedOut));
+        assert_eq!(db.data.unwrap()["retriable"], true);
     }
 
     /// Credential failures collapse to one answer; a missing scope does not,

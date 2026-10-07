@@ -385,7 +385,7 @@ fn sso_schemas() -> Value {
             "createdAt": timestamp,
             "txtRecordName": {
                 "type": "string",
-                "description": "The TXT record name to publish, e.g. _otto-factory-verify.acme.com.",
+                "description": "The TXT record name to publish, e.g. _otto-verify.acme.com.",
             },
             "txtRecordValue": {
                 "type": "string",

@@ -9,7 +9,7 @@
 //!
 //! **Call [`delete_team`] here, never `otto_core::teams::TeamsExt::delete_team`.**
 //! The latter still compiles anywhere `TeamsExt` is imported, and nothing but
-//! this note stops a caller reaching for it; `tests/team_guard.rs` fails the
+//! this note stops a caller reaching for it; `tests/guards.rs` fails the
 //! build if a source file in this workspace does.
 
 use crate::error::{Error, Result};

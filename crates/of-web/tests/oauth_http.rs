@@ -885,3 +885,101 @@ async fn the_no_organization_page_is_translated(pool: PgPool) {
         "the client name was double-escaped, so the page misreports who is asking"
     );
 }
+
+// ------------------------------------------- one consent page, one resource
+
+/// The registry knows every otto-* resource server, but this consent screen and
+/// its `org:admin` gate describe only otto-factory's. A client that names
+/// another registered resource must be refused, on both the page and the
+/// decision, and no code may be issued for it.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn the_consent_flow_refuses_another_registered_resource(pool: PgPool) {
+    let h = harness(pool).await;
+    otto_auth::resources::register(
+        &h.db,
+        otto_auth::resources::ResourceServerSpec {
+            resource_uri: "https://flags.otto.test/mcp",
+            name: "otto-flags",
+            scopes: &["flags:read", "flags:write"],
+            default_scopes: &["flags:read"],
+        },
+    )
+    .await
+    .unwrap();
+
+    let rob = onboard(&h, "rob@acme.test").await;
+    org_with_owner(&h, "acme", &rob).await;
+    let client_id = register(&h, "Test Agent", REDIRECT).await;
+    let (_, challenge) = pkce();
+
+    let other = "https%3A%2F%2Fflags.otto.test%2Fmcp";
+    let page = Call::get(format!(
+        "{}&resource={other}",
+        authorize_url(&client_id, &challenge, "flags:read", "s")
+    ))
+    .with_session(&rob.session)
+    .send(&h.router)
+    .await;
+    page.expect(StatusCode::BAD_REQUEST);
+    assert!(page.text.contains("not served by this authorization page"));
+
+    let org_id = h.db.get_org_by_slug("acme").await.unwrap().unwrap().id;
+    let decision = Call::post("/oauth/authorize")
+        .with_session(&rob.session)
+        .form(&[
+            ("response_type", "code"),
+            ("client_id", &client_id),
+            ("redirect_uri", REDIRECT),
+            ("code_challenge", &challenge),
+            ("code_challenge_method", "S256"),
+            ("scope", "flags:read"),
+            ("resource", "https://flags.otto.test/mcp"),
+            ("state", "s"),
+            ("org_id", &org_id.to_string()),
+            ("decision", "allow"),
+        ])
+        .send(&h.router)
+        .await;
+    decision.expect(StatusCode::BAD_REQUEST);
+    assert!(
+        decision.headers.get(http::header::LOCATION).is_none(),
+        "a refused resource must not redirect with a code"
+    );
+}
+
+// ------------------------------------------------- discovery under an outage
+
+/// The open discovery documents read the registry. A database that cannot
+/// answer is a "retry" condition (`503`), never a `500`.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn discovery_is_503_when_the_database_is_unreachable(pool: PgPool) {
+    let h = common::harness_with_unreachable_db(pool).await;
+
+    for path in [
+        "/.well-known/oauth-authorization-server",
+        "/.well-known/oauth-protected-resource",
+    ] {
+        let reply = Call::get(path).send(&h.router).await;
+        reply.expect(StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            reply.error_code(),
+            Some("temporarily_unavailable"),
+            "{path}"
+        );
+    }
+}
+
+/// A resource missing from the registry is a genuine misconfiguration (the
+/// service registers itself at startup), so it stays a `500`.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_missing_registry_row_is_a_500_not_a_503(pool: PgPool) {
+    let h = harness(pool).await;
+    sqlx::query("DELETE FROM resource_servers")
+        .execute(h.db.pool())
+        .await
+        .unwrap();
+    let reply = Call::get("/.well-known/oauth-protected-resource")
+        .send(&h.router)
+        .await;
+    reply.expect(StatusCode::INTERNAL_SERVER_ERROR);
+}

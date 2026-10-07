@@ -62,7 +62,9 @@ use crate::state::{client_ip, AppState};
 pub async fn as_metadata(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let servers = resources::list(&state.db).await?;
+    let servers = resources::list(&state.db)
+        .await
+        .map_err(|e| ApiError::from_auth_or_unavailable("as metadata", e))?;
     Ok(Json(oauth::as_metadata(
         &state.config.public_url,
         &resources::all_scopes(&servers),
@@ -79,7 +81,8 @@ pub async fn protected_resource_metadata(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let resource = resources::get(&state.db, &state.config.resource_uri)
-        .await?
+        .await
+        .map_err(|e| ApiError::from_auth_or_unavailable("protected resource metadata", e))?
         .ok_or_else(|| {
             ApiError::internal(
                 "protected resource metadata",
@@ -181,6 +184,24 @@ impl AuthorizeParams {
     }
 }
 
+/// The registry knows every otto-* resource server, but this consent screen,
+/// its scope descriptions, and its `org:admin` gate describe only ours. A
+/// client that names another registered resource is refused here rather than
+/// shown a page that would mis-describe what it is granting.
+fn require_our_resource(
+    state: &AppState,
+    authorization: &oauth::Authorization,
+) -> Result<(), AuthError> {
+    if authorization.resource.resource_uri == state.config.resource_uri {
+        Ok(())
+    } else {
+        Err(AuthError::InvalidTarget(format!(
+            "{:?} is not served by this authorization page",
+            authorization.resource.resource_uri
+        )))
+    }
+}
+
 /// `GET /oauth/authorize` — render the consent screen.
 ///
 /// A signed-out visitor is sent to the console's login page with `next` set to
@@ -216,6 +237,9 @@ pub async fn authorize_page(
             Ok(authorization) => authorization,
             Err(e) => return error_page(&e, locale),
         };
+    if let Err(e) = require_our_resource(&state, &authorization) {
+        return error_page(&e, locale);
+    }
     let client = &authorization.client;
 
     if params.response_type != "code" {
@@ -341,6 +365,9 @@ pub async fn authorize_decision(
         Ok(authorization) => authorization,
         Err(e) => return error_page(&e, locale),
     };
+    if let Err(e) = require_our_resource(&state, &authorization) {
+        return error_page(&e, locale);
+    }
 
     // Normalize the same way `authorize_page` did before rendering the consent
     // screen: a client that omits `scope` gets the resource server's defaults,
@@ -397,7 +424,7 @@ pub async fn authorize_decision(
                 .actor(caller.user.id)
                 .target("client", params.client_id.clone())
                 .from_request(client_ip(&parts, &state.config).as_deref(), None)
-                .detail(serde_json::json!({ "scopes": req.scopes })),
+                .detail(serde_json::json!({ "scopes": req.scopes, "resource": req.resource })),
         )
         .await;
 

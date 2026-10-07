@@ -77,6 +77,21 @@ window the old process runs its tenant transactions as the superuser, which bypa
 new one passes `/readyz`, so the window is the migration itself; this app runs a single
 machine.
 
+## The Phase 3 deploy is forward-only
+
+Once the release that runs on the otto-platform crates has booted, do not redeploy the
+previous image. Two of its migrations break the old binary:
+
+- `0034_claimed_domains_per_org` drops the `claimed_domains` primary key on `(domain)`.
+  The old code's `ON CONFLICT (domain)` has no matching constraint and fails every
+  domain claim.
+- `0032_rename_tenant_role_otto_app` renames `of_app`, so an old release can no longer
+  assume that role (see the rollout caveat above) and silently runs tenant transactions
+  as the superuser.
+
+**Rollback means restoring the database** from a snapshot taken before the deploy, then
+deploying the old image. Take that snapshot first.
+
 > An earlier version of this section described a managed-Postgres deployment where
 > `CREATEROLE` was unavailable and isolation instead relied on `FORCE ROW LEVEL
 > SECURITY` applying to a non-superuser table owner. That is not this deployment, but it

@@ -47,10 +47,10 @@ use crate::state::{client_ip, AppState};
 /// own TTL convention this repo already follows for a single-use token.
 const CEREMONY_TTL_SECS: i64 = 600;
 
-/// `_otto-factory-verify` — must match `otto_auth::dns::verify_txt_record`'s
+/// `_otto-verify` — must match `otto_auth::dns::verify_txt_record`'s
 /// own subdomain exactly, since this is what the console tells an admin to
 /// put in DNS and that function is what actually checks it.
-const VERIFY_SUBDOMAIN: &str = "_otto-factory-verify";
+const VERIFY_SUBDOMAIN: &str = "_otto-verify";
 
 fn redirect_uri(config: &crate::state::Config) -> String {
     config.url("/sso/callback")
@@ -68,8 +68,26 @@ fn email_domain(email: &str) -> Option<&str> {
 fn txt_instructions(domain: &str, token: &str) -> (String, String) {
     (
         format!("{VERIFY_SUBDOMAIN}.{domain}"),
-        format!("otto-factory-verify={token}"),
+        format!("otto-verify={token}"),
     )
+}
+
+#[cfg(test)]
+mod dns_instructions_tests {
+    use super::txt_instructions;
+
+    /// What the console tells an admin to publish must be what
+    /// `otto_auth::dns::verify_txt_record` looks up, or verification can never
+    /// succeed. That crate's constants are private, so the exact strings are
+    /// pinned here; they mirror `VERIFY_SUBDOMAIN` and the `otto-verify=`
+    /// format in otto-auth/src/dns.rs (rev c7437af). A platform bump that
+    /// renames them must change this test and `txt_instructions` together.
+    #[test]
+    fn instructions_match_what_otto_auth_queries() {
+        let (name, value) = txt_instructions("acme.com", "tok123");
+        assert_eq!(name, "_otto-verify.acme.com");
+        assert_eq!(value, "otto-verify=tok123");
+    }
 }
 
 // ---------------------------------------------------------------------------

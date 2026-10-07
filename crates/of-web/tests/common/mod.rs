@@ -522,6 +522,23 @@ pub async fn unregistered_credential(h: &Harness) -> (Authenticator, String) {
 /// only property that makes a throttle keyed on it worth anything.
 pub const CLIENT_IP_HEADER: &str = "fly-client-ip";
 
+/// A harness whose database cannot be reached, for outage behavior.
+pub async fn harness_with_unreachable_db(_pool: PgPool) -> Harness {
+    let unreachable = sqlx::postgres::PgPoolOptions::new()
+        .acquire_timeout(std::time::Duration::from_secs(2))
+        .connect_lazy("postgres://nobody:nothing@127.0.0.1:1/none")
+        .expect("lazy pool");
+    let db = Db::from_pool(unreachable);
+    let config = Config::new(PUBLIC_URL, RESOURCE);
+    let webauthn = of_web::relying_party(&config).expect("relying party");
+    let state = AppState::new(db.clone(), cipher(), webauthn, config);
+    Harness {
+        db,
+        router: of_web::router(state),
+        cipher: cipher(),
+    }
+}
+
 /// A harness deployed the way production is — behind a proxy that stamps the
 /// caller's address onto every request.
 ///

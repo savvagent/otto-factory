@@ -112,6 +112,45 @@ impl IntoResponse for ApiError {
     }
 }
 
+impl ApiError {
+    /// The database could not answer. `503`, not `500`: it is a "try again"
+    /// condition, and a client that treats it as a server bug or an auth
+    /// failure will do the wrong thing. The detail is logged, never sent.
+    pub fn unavailable(context: &str, e: impl std::fmt::Display) -> Self {
+        tracing::error!(error = %e, context, "database unavailable");
+        Self::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "temporarily_unavailable",
+            "could not reach the database right now; retry shortly",
+        )
+    }
+
+    /// Like `From<AuthError>`, but a database outage is `503`. For the open
+    /// discovery documents, whose failure must read as "retry", not "broken".
+    pub fn from_auth_or_unavailable(context: &str, e: AuthError) -> Self {
+        if is_db_outage(&e) {
+            Self::unavailable(context, e)
+        } else {
+            Self::from(e)
+        }
+    }
+}
+
+/// Whether `e` means the database could not answer, at any wrapping depth.
+/// Mirrors `of-mcp`'s `is_outage`.
+pub fn is_db_outage(e: &AuthError) -> bool {
+    fn tenant(e: &otto_tenant::Error) -> bool {
+        matches!(e, otto_tenant::Error::Db(_))
+    }
+    match e {
+        AuthError::Db(_) => true,
+        AuthError::Tenant(t) => tenant(t),
+        AuthError::Core(otto_core::Error::Db(_)) => true,
+        AuthError::Core(otto_core::Error::Tenant(t)) => tenant(t),
+        _ => false,
+    }
+}
+
 impl From<CoreError> for ApiError {
     fn from(e: CoreError) -> Self {
         use CoreError::*;

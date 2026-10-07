@@ -9,7 +9,7 @@
 //! database, brought in by this crate's migrations (see `0033`/`0034`), which
 //! is the point of keeping a single history here until the Phase 4 split.
 //!
-//! `tests/migrator.rs` fails the build if a workspace source file calls the
+//! `tests/guards.rs` fails the build if a workspace source file calls the
 //! platform's `migrate`.
 
 use otto_tenant::Db;
