@@ -4,8 +4,8 @@
 //! this file is longer than a `serde` derive would be:
 //!
 //! 1. **A setting whose wrong value fails silently has no default.** A wrong
-//!    `OF_PUBLIC_URL` does not crash: it mails links to an origin that does not
-//!    exist and mints tokens for an audience nothing accepts, and the first
+//!    `OF_PUBLIC_URL` does not crash: it hands out links to an origin that does not
+//!    exist and advertises an audience nothing accepts, and the first
 //!    report arrives hours later from somebody who cannot sign in. Refusing to
 //!    start is the cheap version of that failure.
 //! 2. **A setting whose wrong value is merely inconvenient gets one.** The bind
@@ -23,16 +23,37 @@ use std::path::PathBuf;
 use anyhow::{anyhow, Context, Result};
 
 /// The whole deployment, resolved.
-#[derive(Debug, Clone)]
+///
+/// `Debug` is written by hand and prints no secret: this struct holds the
+/// platform credentials, the encryption key, and the tracker providers' client
+/// secrets, and a `{:?}` in a log line must never be how they leak.
+#[derive(Clone)]
 pub struct Config {
     pub database_url: String,
     pub bind: SocketAddr,
 
-    /// Public origin a browser sees. The OAuth issuer and the discovery
-    /// documents are built from it.
+    /// Public origin a browser sees. The links this service hands out and the
+    /// discovery pointer in a `401` are built from it.
     pub public_url: String,
-    /// Canonical MCP resource URI, and the audience every token carries.
+    /// Canonical MCP resource URI, and the audience every token carries. Must
+    /// be exactly the `resource_uri` this service was registered with at the
+    /// platform (`otto-platform-server resource register`).
     pub resource_uri: String,
+
+    /// The otto platform's base URL, e.g. `https://otto.savvagent.com`: the OAuth
+    /// authorization server, the identity directory, and the billing system of
+    /// record. Advertised to MCP clients as this resource's authorization server
+    /// and called for token introspection, member and team lookups, and usage.
+    pub platform_url: String,
+    /// The introspection credential the platform issued when this service was
+    /// registered (`otto_rs_…`). Authenticates every call this service makes to
+    /// the platform, as HTTP Basic with `resource_uri` as the user.
+    pub introspection_secret: String,
+    /// The key the platform signs its lifecycle webhooks to this service with
+    /// (`otto_whsec_…`), issued when the webhook URL
+    /// (`{public_url}/platform/webhooks`) was registered. A different secret
+    /// from the introspection credential, on purpose.
+    pub platform_webhook_secret: String,
 
     /// 32 bytes, base64. Encrypts secrets at rest (currently tracker webhook
     /// secrets and JIRA OAuth credentials — see `of_core::trackers` and
@@ -71,11 +92,11 @@ pub struct Config {
     /// Atlassian OAuth client secret for JIRA tracker sync.
     pub jira_client_secret: Option<String>,
 
-    /// See `of_web::Config::client_ip_header` — the header a trusted proxy
-    /// writes the client address into, if any.
-    pub client_ip_header: Option<String>,
-
+    /// Refuse billable calls once an org on a hard-stop plan is past its bucket,
+    /// as the platform reports it (cached up to a minute, so overrun is bounded
+    /// by that window and by what is still in the usage outbox).
     pub enforce_quotas: bool,
+    /// Where a caller who has run out is told to go. Defaults to the platform.
     pub upgrade_url: String,
 
     /// Extra authorities accepted in the MCP endpoint's `Host` header, beyond
@@ -91,6 +112,21 @@ pub struct Config {
 
     pub run_migrations: bool,
     pub log_format: LogFormat,
+}
+
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("bind", &self.bind)
+            .field("public_url", &self.public_url)
+            .field("resource_uri", &self.resource_uri)
+            .field("platform_url", &self.platform_url)
+            .field("enforce_quotas", &self.enforce_quotas)
+            .field("static_dir", &self.static_dir)
+            .field("run_migrations", &self.run_migrations)
+            .field("log_format", &self.log_format)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,6 +158,17 @@ impl Config {
             return Err(anyhow!("OF_PUBLIC_URL has no host: {public_url:?}"));
         }
 
+        let platform_url = required("OF_PLATFORM_URL")?
+            .trim_end_matches('/')
+            .to_string();
+        let platform = url::Url::parse(&platform_url)
+            .with_context(|| format!("OF_PLATFORM_URL is not a URL: {platform_url:?}"))?;
+        if !matches!(platform.scheme(), "http" | "https") || platform.host_str().is_none() {
+            return Err(anyhow!(
+                "OF_PLATFORM_URL must be an http(s) URL with a host, got {platform_url:?}"
+            ));
+        }
+
         Ok(Self {
             database_url: required("DATABASE_URL")?,
             bind: parse_var("OF_BIND", "0.0.0.0:8080", |v| {
@@ -135,6 +182,10 @@ impl Config {
             // and the audience must match what the AS mints tokens for.
             resource_uri: optional("OF_RESOURCE_URI")
                 .unwrap_or_else(|| format!("{public_url}/mcp")),
+
+            platform_url: platform_url.clone(),
+            introspection_secret: required("OF_INTROSPECTION_SECRET")?,
+            platform_webhook_secret: required("OF_PLATFORM_WEBHOOK_SECRET")?,
 
             encryption_key: required("OF_ENCRYPTION_KEY")?,
             github_app_id: optional("OF_GITHUB_APP_ID")
@@ -155,13 +206,9 @@ impl Config {
             jira_client_id: optional("OF_JIRA_CLIENT_ID"),
             jira_client_secret: optional("OF_JIRA_CLIENT_SECRET"),
 
-            client_ip_header: optional("OF_CLIENT_IP_HEADER")
-                .map(|v| v.trim().to_ascii_lowercase())
-                .filter(|v| !v.is_empty()),
-
             enforce_quotas: parse_var("OF_ENFORCE_QUOTAS", "0", parse_bool)?,
             upgrade_url: optional("OF_UPGRADE_URL")
-                .unwrap_or_else(|| format!("{public_url}/settings/billing")),
+                .unwrap_or_else(|| format!("{platform_url}/settings/billing")),
 
             extra_allowed_hosts: list("OF_ALLOWED_HOSTS"),
             allowed_origins: list("OF_ALLOWED_ORIGINS"),
@@ -261,6 +308,9 @@ impl Config {
             bind: "0.0.0.0:8080".parse().expect("test bind"),
             public_url: "https://factory.example.com".into(),
             resource_uri: "https://factory.example.com/mcp".into(),
+            platform_url: "https://otto.example.com".into(),
+            introspection_secret: "otto_rs_test".into(),
+            platform_webhook_secret: "otto_whsec_test".into(),
             encryption_key: "k".into(),
             github_app_id: None,
             github_app_private_key: None,
@@ -270,9 +320,8 @@ impl Config {
             github_app_client_secret: None,
             jira_client_id: None,
             jira_client_secret: None,
-            client_ip_header: None,
             enforce_quotas: false,
-            upgrade_url: "https://factory.example.com/settings/billing".into(),
+            upgrade_url: "https://otto.example.com/settings/billing".into(),
             extra_allowed_hosts: vec![],
             allowed_origins: vec![],
             static_dir: "web/build".into(),

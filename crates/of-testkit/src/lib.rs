@@ -109,9 +109,15 @@ impl MockPlatform {
             .route("/oauth/introspect", post(introspect))
             .route("/internal/usage", post(ingest_usage))
             .route("/internal/orgs/{org}/usage-status", get(usage_status))
-            .route("/internal/orgs/{org}/members/by-email", get(member_by_email))
+            .route(
+                "/internal/orgs/{org}/members/by-email",
+                get(member_by_email),
+            )
             .route("/internal/orgs/{org}/members/{user}", get(member))
-            .route("/internal/orgs/{org}/teams/by-slug/{slug}", get(team_by_slug))
+            .route(
+                "/internal/orgs/{org}/teams/by-slug/{slug}",
+                get(team_by_slug),
+            )
             .route("/internal/orgs/{org}/teams/{team}", get(team))
             .with_state(inner.clone());
 
@@ -185,7 +191,14 @@ impl MockPlatform {
 
     /// Change a member's role.
     pub fn set_role(&self, org: Uuid, user: Uuid, role: Role) {
-        if let Some(m) = self.inner.data.lock().unwrap().members.get_mut(&(org, user)) {
+        if let Some(m) = self
+            .inner
+            .data
+            .lock()
+            .unwrap()
+            .members
+            .get_mut(&(org, user))
+        {
             m.1 = role;
         }
     }
@@ -480,7 +493,11 @@ async fn introspect(
     Json(body).into_response()
 }
 
-async fn ingest_usage(State(inner): S, headers: HeaderMap, Json(batch): Json<UsageBatch>) -> Response {
+async fn ingest_usage(
+    State(inner): S,
+    headers: HeaderMap,
+    Json(batch): Json<UsageBatch>,
+) -> Response {
     if let Err(res) = caller(&inner, &headers) {
         return res;
     }
