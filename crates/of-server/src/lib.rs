@@ -99,7 +99,6 @@ fn web_state(db: Db, config: &Config) -> Result<of_web::AppState> {
 /// that state once already — see `every_deployment_setting_reaches_of_web`.
 fn web_config(config: &Config) -> of_web::Config {
     let mut web = of_web::Config::new(&config.public_url, &config.resource_uri);
-    web.totp_issuer = config.totp_issuer.clone();
     web.github_app_webhook_secret = config.github_app_webhook_secret.clone();
     // The tracker console needs all five to take an admin through connecting a
     // provider: the slug and the OAuth pair for GitHub, the OAuth pair for JIRA.
@@ -186,7 +185,6 @@ mod tests {
     #[test]
     fn every_deployment_setting_reaches_of_web() {
         let mut config = Config::for_test();
-        config.totp_issuer = "acme-factory".into();
         config.github_app_webhook_secret = Some("webhook-secret".into());
         config.github_app_slug = Some("otto-factory".into());
         config.github_app_client_id = Some("gh-client".into());
@@ -198,7 +196,6 @@ mod tests {
 
         let web = web_config(&config);
 
-        assert_eq!(web.totp_issuer, "acme-factory");
         assert_eq!(
             web.github_app_webhook_secret.as_deref(),
             Some("webhook-secret")

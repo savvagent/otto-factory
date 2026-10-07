@@ -32,9 +32,6 @@ pub struct Config {
     /// an audience derived from one is not an audience check.
     pub resource_uri: String,
 
-    /// Unused since passkeys replaced TOTP — see `of_server::Config::totp_issuer`.
-    pub totp_issuer: String,
-
     /// Shared secret for GitHub webhook signature verification. Optional
     /// because tracker integration itself is optional per deployment.
     pub github_app_webhook_secret: Option<String>,
@@ -95,7 +92,6 @@ impl Config {
         Self {
             public_url: public_url.into().trim_end_matches('/').to_string(),
             resource_uri: resource_uri.into(),
-            totp_issuer: "otto-factory".into(),
             github_app_webhook_secret: None,
             github_app_slug: None,
             github_app_client_id: None,

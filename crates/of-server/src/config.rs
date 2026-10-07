@@ -38,10 +38,6 @@ pub struct Config {
     /// secrets and JIRA OAuth credentials — see `of_core::trackers` and
     /// `of_trackers::jira`).
     pub encryption_key: String,
-    /// Unused since passkeys replaced TOTP (see `CLAUDE.md`'s Authentication
-    /// section) — kept only because `OF_TOTP_ISSUER` is still read from the
-    /// environment below and threaded through to `of-web`'s `AppState`.
-    pub totp_issuer: String,
 
     /// GitHub App id for tracker integration. Optional because deployments
     /// that do not enable GitHub integration have no App configured.
@@ -141,7 +137,6 @@ impl Config {
                 .unwrap_or_else(|| format!("{public_url}/mcp")),
 
             encryption_key: required("OF_ENCRYPTION_KEY")?,
-            totp_issuer: optional("OF_TOTP_ISSUER").unwrap_or_else(|| "otto-factory".into()),
             github_app_id: optional("OF_GITHUB_APP_ID")
                 .map(|value| {
                     value.trim().parse::<i64>().with_context(|| {
@@ -267,7 +262,6 @@ impl Config {
             public_url: "https://factory.example.com".into(),
             resource_uri: "https://factory.example.com/mcp".into(),
             encryption_key: "k".into(),
-            totp_issuer: "otto-factory".into(),
             github_app_id: None,
             github_app_private_key: None,
             github_app_webhook_secret: None,

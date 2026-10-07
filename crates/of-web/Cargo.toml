@@ -50,7 +50,6 @@ chrono.workspace = true
 base64.workspace = true
 sha2.workspace = true
 hmac.workspace = true
-totp-rs.workspace = true
 jsonwebtoken.workspace = true
 # `ServiceExt::oneshot`, for driving the assembled router without binding a port.
 tower = { workspace = true, features = ["util"] }

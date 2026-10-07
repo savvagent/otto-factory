@@ -28,10 +28,10 @@ serverless model would fight. See `CLAUDE.md` for why the process must stay warm
   differently numbered history. The platform's tables are already here, brought in by
   otto-factory's migrations (`0033` resource registry, `0034` per-org domain claims).
 
-- **Secrets staged**: `DATABASE_URL`, `OF_ENCRYPTION_KEY` (generated with
+- **Secrets staged**: `DATABASE_URL` and `OF_ENCRYPTION_KEY` (generated with
   `openssl rand -base64 32`, per `.env.example`; it is fed unchanged to
   `otto_tenant::crypto::Cipher`, whose AES-256-GCM format is byte-compatible with
-  the data already encrypted), and `OF_SIGNING_KEY`, which nothing reads any more.
+  the data already encrypted). `OF_SIGNING_KEY` was removed; nothing reads it.
 
 ## Resource-server registration
 

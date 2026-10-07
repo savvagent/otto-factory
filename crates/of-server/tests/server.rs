@@ -26,7 +26,6 @@ fn config(static_dir: &str) -> Config {
         public_url: PUBLIC.into(),
         resource_uri: RESOURCE.into(),
         encryption_key: KEY.into(),
-        totp_issuer: "otto-factory".into(),
         github_app_id: None,
         github_app_private_key: None,
         github_app_webhook_secret: None,
