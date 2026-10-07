@@ -97,6 +97,10 @@ async fn main() -> Result<()> {
         shipper_shutdown,
     ));
 
+    // Hourly housekeeping: forget old platform-event dedupe markers (30 days)
+    // and expired removed-member tombstones.
+    let sweeper = tokio::spawn(sweep_loop(db.clone(), stop_shipper.subscribe()));
+
     let app = router(db, watcher.clone(), platform, &config)?;
 
     let listener = TcpListener::bind(config.bind)
@@ -125,6 +129,7 @@ async fn main() -> Result<()> {
     if let Err(e) = shipper.await {
         tracing::warn!(error = %e, "the usage shipper did not stop cleanly");
     }
+    sweeper.abort();
 
     // After the server, deliberately. `Watcher::spawn` takes a connection out of
     // the pool for `LISTEN` and detaches it, so dropping the pool does not
@@ -136,6 +141,24 @@ async fn main() -> Result<()> {
     tracing::info!("stopped");
 
     Ok(())
+}
+
+/// How long platform-event dedupe markers are kept.
+const PLATFORM_EVENT_RETENTION_DAYS: i32 = 30;
+
+/// Run [`of_core::platform_events::sweep`] hourly until shutdown.
+async fn sweep_loop(db: Db, mut shutdown: tokio::sync::watch::Receiver<bool>) {
+    loop {
+        match of_core::platform_events::sweep(&db, PLATFORM_EVENT_RETENTION_DAYS).await {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(rows = n, "swept old platform-event records"),
+            Err(e) => tracing::warn!(error = %e, "platform-event sweep failed"),
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_secs(3600)) => {}
+            _ = shutdown.changed() => return,
+        }
+    }
 }
 
 /// Ask the platform something harmless, to learn whether our credential works.

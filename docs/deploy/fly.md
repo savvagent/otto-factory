@@ -281,3 +281,10 @@ fly deploy -a otto-factory-mcp
 
 which will build the Dockerfile, run migrations on startup, and pass the `/readyz`
 check before routing traffic to the machine.
+
+## Operational notes
+
+- `usage_outbox_rejected` holds usage events the platform refused (with its reason); a row there
+  is billing the platform was never told about, and each one is also logged at error level.
+- `platform_events` markers older than 30 days and expired `removed_members` tombstones are swept
+  hourly. `deleted_orgs` is permanent (the platform never reuses an org id).

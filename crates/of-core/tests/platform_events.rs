@@ -9,7 +9,7 @@ use common::{db, job, tenant, Member};
 use of_core::jobs::{JobsExt, Status};
 use of_core::leases::LeasesExt;
 use of_core::messages::{MessagesExt, NewMessage};
-use of_core::platform_events::{apply, Outcome};
+use of_core::platform_events::{apply, revoked, Outcome};
 use of_core::repos::{NewRepo, ReposExt};
 use of_core::teams::VerifiedTeam;
 use of_core::trackers::{upsert_binding, upsert_connection, Provider};
@@ -159,7 +159,7 @@ async fn org_deleted_purges_that_org_and_only_that_org(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn a_redelivered_event_is_a_no_op(pool: PgPool) {
+async fn a_redelivery_reruns_the_cleanup_and_catches_work_that_raced_the_purge(pool: PgPool) {
     let db = db(pool);
     let a = tenant(&db, "acme", "git@github.com:acme/api.git").await;
     let id = Uuid::new_v4();
@@ -174,21 +174,109 @@ async fn a_redelivered_event_is_a_no_op(pool: PgPool) {
         apply(&db, &ev).await.unwrap(),
         Outcome::Applied { .. }
     ));
-    assert_eq!(apply(&db, &ev).await.unwrap(), Outcome::Duplicate);
+    assert!(
+        revoked(&db, a.org, a.user).await.unwrap(),
+        "the org is tombstoned"
+    );
 
-    // New rows after the purge (an org id reused by a test, say) are not wiped
-    // by a replay: the marker outlived the purge.
+    // A transaction that began before the purge commits after it.
     let mut tx = db.begin(a.org).await.unwrap();
     tx.register_repo(NewRepo {
-        slug: "later".into(),
-        remotes: vec!["git@github.com:acme/later.git".into()],
+        slug: "late".into(),
+        remotes: vec!["git@github.com:acme/late.git".into()],
         ..Default::default()
     })
     .await
     .unwrap();
     tx.commit().await.unwrap();
-    assert_eq!(apply(&db, &ev).await.unwrap(), Outcome::Duplicate);
     assert_eq!(count(&db, a.org, "repos").await, 1);
+
+    // The platform's redelivery is acknowledged as a repeat, and sweeps it up.
+    assert_eq!(apply(&db, &ev).await.unwrap(), Outcome::Duplicate);
+    assert_eq!(
+        count(&db, a.org, "repos").await,
+        0,
+        "a write that raced the purge survived"
+    );
+    assert_eq!(
+        count(&db, a.org, "platform_events").await,
+        1,
+        "one marker, not one per delivery"
+    );
+}
+
+#[sqlx::test]
+async fn a_removed_member_is_refused_briefly_and_then_the_platform_decides(pool: PgPool) {
+    let db = db(pool);
+    let a = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+    let bob = Member::new().id;
+    assert!(!revoked(&db, a.org, bob).await.unwrap());
+
+    let ev = event(
+        "member.removed",
+        serde_json::json!({ "org_id": a.org.as_uuid(), "user_id": bob.as_uuid() }),
+    );
+    apply(&db, &ev).await.unwrap();
+    assert!(revoked(&db, a.org, bob).await.unwrap());
+    assert!(
+        !revoked(&db, a.org, a.user).await.unwrap(),
+        "only the removed user"
+    );
+    assert!(
+        !revoked(&db, OrgId::new(), bob).await.unwrap(),
+        "only in that org"
+    );
+
+    // Work that raced the removal (a claim and a lease taken by a request that
+    // was already in flight) is released by the re-run.
+    let mut tx = db.begin(a.org).await.unwrap();
+    tx.acquire_lease(a.repo, "branch:late", bob, None, None, None)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(apply(&db, &ev).await.unwrap(), Outcome::Duplicate);
+    let mut tx = db.begin(a.org).await.unwrap();
+    assert!(tx.list_leases(None).await.unwrap().is_empty());
+    tx.commit().await.unwrap();
+
+    // The tombstone is short-lived: once the platform's own cache has caught up
+    // it is the platform's word that counts, so a re-added member is not locked out.
+    sqlx::query("UPDATE removed_members SET removed_at = now() - interval '1 hour'")
+        .execute(db.pool())
+        .await
+        .unwrap();
+    assert!(!revoked(&db, a.org, bob).await.unwrap());
+    assert!(of_core::platform_events::sweep(&db, 30).await.unwrap() >= 1);
+}
+
+#[sqlx::test]
+async fn the_sweep_forgets_old_event_markers_only(pool: PgPool) {
+    let db = db(pool);
+    let a = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+    apply(
+        &db,
+        &event(
+            "team.deleted",
+            serde_json::json!({ "org_id": a.org.as_uuid(), "team_id": TeamId::new().as_uuid() }),
+        ),
+    )
+    .await
+    .unwrap();
+    apply(
+        &db,
+        &event(
+            "team.deleted",
+            serde_json::json!({ "org_id": a.org.as_uuid(), "team_id": TeamId::new().as_uuid() }),
+        ),
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE platform_events SET received_at = now() - interval '40 days' WHERE ctid = (SELECT ctid FROM platform_events LIMIT 1)")
+        .execute(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(of_core::platform_events::sweep(&db, 30).await.unwrap(), 1);
+    assert_eq!(count(&db, a.org, "platform_events").await, 1);
 }
 
 #[sqlx::test]

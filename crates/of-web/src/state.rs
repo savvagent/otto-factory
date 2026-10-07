@@ -16,7 +16,10 @@ use otto_tenant::Db;
 const JIRA_SCOPES: &str = "read:jira-work write:jira-work offline_access";
 
 /// Deployment-dependent settings.
-#[derive(Debug, Clone)]
+///
+/// `Debug` is written by hand and prints no secret: this holds the platform
+/// webhook secret and the tracker providers' client secrets.
+#[derive(Clone)]
 pub struct Config {
     /// Public base URL of this service — the origin a browser sees. Every link
     /// the product hands out is built from it (the tracker OAuth callbacks).
@@ -61,6 +64,21 @@ pub struct Config {
     /// tracker console performs. Optional for the same reason.
     pub jira_client_id: Option<String>,
     pub jira_client_secret: Option<String>,
+}
+
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("public_url", &self.public_url)
+            .field("resource_uri", &self.resource_uri)
+            .field("platform_url", &self.platform_url)
+            .field(
+                "github_tracker_configured",
+                &self.github_tracker_configured(),
+            )
+            .field("jira_tracker_configured", &self.jira_tracker_configured())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Config {
@@ -206,6 +224,20 @@ impl std::fmt::Debug for AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn debug_output_never_contains_a_secret() {
+        let mut c = Config::new(
+            "https://c.test",
+            "https://m.test/mcp",
+            "https://o.test",
+            "whsec-SECRET",
+        );
+        c.github_app_client_secret = Some("gh-SECRET".into());
+        c.jira_client_secret = Some("jira-SECRET".into());
+        c.github_app_webhook_secret = Some("hook-SECRET".into());
+        assert!(!format!("{c:?}").contains("SECRET"));
+    }
 
     #[test]
     fn urls_survive_a_trailing_slash_on_the_configured_base() {

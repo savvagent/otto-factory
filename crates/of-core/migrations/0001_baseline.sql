@@ -421,6 +421,48 @@ CREATE TABLE platform_events (
   received_at timestamptz NOT NULL DEFAULT now()
 );
 
+-- Usage the platform refused outright. Never dropped silently: a rejected event
+-- is moved here, with the platform's reason, in the same transaction that
+-- removes it from the outbox, so an operator can see what was refused and why.
+CREATE TABLE usage_outbox_rejected (
+  id          bigserial   PRIMARY KEY,
+  event_id    uuid        NOT NULL,
+  org_id      uuid        NOT NULL,
+  user_id     uuid,
+  tool        text        NOT NULL,
+  billable    boolean     NOT NULL,
+  occurred_at timestamptz NOT NULL,
+  reason      text        NOT NULL,
+  rejected_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX usage_outbox_rejected_org_idx ON usage_outbox_rejected (org_id, rejected_at DESC);
+
+-- -------------------------------------------------------------- tombstones
+
+-- Orgs the platform has deleted. Written FIRST by the org.deleted handler,
+-- before the purge, and checked on every authenticated request: the platform's
+-- token cache (60 s) and in-flight transactions would otherwise let writes
+-- land after the purge, in rows nobody would ever clean up. Permanent (the
+-- platform never reuses an org id). Deliberately not under row-level security:
+-- authentication has to consult it before any org is pinned.
+CREATE TABLE deleted_orgs (
+  org_id     uuid PRIMARY KEY,
+  deleted_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- Members the platform has just removed. Short-lived: it only has to cover the
+-- window in which a cached introspection still vouches for the user (60 s), after
+-- which the platform itself answers "inactive". Swept after a few minutes, so a
+-- member who is re-added is not locked out. Not under row-level security, for
+-- the same reason as deleted_orgs.
+CREATE TABLE removed_members (
+  org_id     uuid        NOT NULL,
+  user_id    uuid        NOT NULL,
+  removed_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (org_id, user_id)
+);
+
 -- --------------------------------------------------------------- audit trail
 
 -- The factory's own domain audit trail (REPO_*, TRACKER_*, JOB_*), written with
@@ -484,6 +526,12 @@ END $$;
 ALTER TABLE usage_outbox ENABLE ROW LEVEL SECURITY;
 ALTER TABLE usage_outbox FORCE ROW LEVEL SECURITY;
 CREATE POLICY usage_outbox_tenant_isolation ON usage_outbox
+  USING (org_id = current_org() OR current_org() IS NULL)
+  WITH CHECK (org_id = current_org() OR current_org() IS NULL);
+
+ALTER TABLE usage_outbox_rejected ENABLE ROW LEVEL SECURITY;
+ALTER TABLE usage_outbox_rejected FORCE ROW LEVEL SECURITY;
+CREATE POLICY usage_outbox_rejected_tenant_isolation ON usage_outbox_rejected
   USING (org_id = current_org() OR current_org() IS NULL)
   WITH CHECK (org_id = current_org() OR current_org() IS NULL);
 

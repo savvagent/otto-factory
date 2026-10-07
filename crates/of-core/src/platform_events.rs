@@ -45,11 +45,60 @@ use serde::Serialize;
 pub enum Outcome {
     /// Effects applied now.
     Applied { detail: serde_json::Value },
-    /// This event id was applied by an earlier delivery.
+    /// This event id was applied by an earlier delivery. The clean-up was
+    /// re-run anyway (it is idempotent), to catch work that raced the first run.
     Duplicate,
     /// An event type this version does not know. Acknowledged, not failed:
     /// failing it would only make the platform retry it forever.
     Ignored,
+}
+
+/// How long a removed member is refused by [`revoked`]. Past the introspection
+/// cache's 60 s the platform itself answers "inactive", so this only has to
+/// outlast that; it is short so a member who is re-added is not locked out.
+pub const REMOVED_MEMBER_TTL_SECS: i64 = 300;
+
+/// Whether `user`'s token for `org` must be refused regardless of what the
+/// platform's cached introspection says: the org was deleted, or the user was
+/// just removed from it.
+///
+/// Called by both HTTP surfaces on every authenticated request. An `Err` is a
+/// database failure and must be answered `503`, not treated as "not revoked".
+pub async fn revoked(db: &Db, org: OrgId, user: UserId) -> Result<bool> {
+    let hit: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM deleted_orgs WHERE org_id = $1) \
+             OR EXISTS (SELECT 1 FROM removed_members \
+                        WHERE org_id = $1 AND user_id = $2 \
+                          AND removed_at > now() - make_interval(secs => $3))",
+    )
+    .bind(org)
+    .bind(user)
+    .bind(REMOVED_MEMBER_TTL_SECS as f64)
+    .fetch_one(db.pool())
+    .await?;
+    Ok(hit)
+}
+
+/// Housekeeping: forget dedupe markers older than `keep_days` and expired
+/// removed-member tombstones. Safe at any time, because clean-up is idempotent
+/// and a forgotten marker only means a (very) late redelivery writes its audit
+/// entry again.
+pub async fn sweep(db: &Db, keep_days: i32) -> Result<u64> {
+    let events = sqlx::query(
+        "DELETE FROM platform_events WHERE received_at < now() - make_interval(days => $1)",
+    )
+    .bind(keep_days)
+    .execute(db.pool())
+    .await?
+    .rows_affected();
+    let tombstones = sqlx::query(
+        "DELETE FROM removed_members WHERE removed_at < now() - make_interval(secs => $1)",
+    )
+    .bind((REMOVED_MEMBER_TTL_SECS * 2) as f64)
+    .execute(db.pool())
+    .await?
+    .rows_affected();
+    Ok(events + tombstones)
 }
 
 /// Apply one verified delivery.
@@ -92,6 +141,13 @@ async fn first_delivery(
 }
 
 async fn org_deleted(db: &Db, event: &WebhookEvent, org: OrgId) -> Result<Outcome> {
+    // Tombstone first, on its own, so authentication refuses this org from now
+    // on -- before, not as part of, the purge.
+    sqlx::query("INSERT INTO deleted_orgs (org_id) VALUES ($1) ON CONFLICT (org_id) DO NOTHING")
+        .bind(org)
+        .execute(db.pool())
+        .await?;
+
     // The org's audit trail is append-only to a pinned transaction (there is no
     // UPDATE policy and DELETE needs `current_org() IS NULL`), so it goes first,
     // on the pool, unpinned. Idempotent, and a failure here aborts before the
@@ -103,10 +159,7 @@ async fn org_deleted(db: &Db, event: &WebhookEvent, org: OrgId) -> Result<Outcom
         .rows_affected();
 
     let mut tx = db.begin(org).await?;
-    if !first_delivery(&mut tx, event, "org.deleted").await? {
-        tx.rollback().await?;
-        return Ok(Outcome::Duplicate);
-    }
+    let first = first_delivery(&mut tx, event, "org.deleted").await?;
 
     // Children before parents: messages reference jobs and repos, jobs and
     // tracker bindings reference repos, bindings and the connection index
@@ -138,18 +191,19 @@ async fn org_deleted(db: &Db, event: &WebhookEvent, org: OrgId) -> Result<Outcom
     deleted.insert("audit_events".into(), audit.into());
     tx.commit().await?;
 
-    tracing::info!(org = %org, event_id = %event.id, ?deleted, "purged a deleted org's data");
-    Ok(Outcome::Applied {
-        detail: deleted.into(),
+    tracing::info!(org = %org, event_id = %event.id, first, ?deleted, "purged a deleted org's data");
+    Ok(if first {
+        Outcome::Applied {
+            detail: deleted.into(),
+        }
+    } else {
+        Outcome::Duplicate
     })
 }
 
 async fn team_deleted(db: &Db, event: &WebhookEvent, org: OrgId, team: TeamId) -> Result<Outcome> {
     let mut tx = db.begin(org).await?;
-    if !first_delivery(&mut tx, event, "team.deleted").await? {
-        tx.rollback().await?;
-        return Ok(Outcome::Duplicate);
-    }
+    let first = first_delivery(&mut tx, event, "team.deleted").await?;
 
     let mut counts = serde_json::Map::new();
     for table in ["repos", "jobs", "messages"] {
@@ -165,17 +219,23 @@ async fn team_deleted(db: &Db, event: &WebhookEvent, org: OrgId, team: TeamId) -
     let detail: serde_json::Value = counts.into();
 
     // Deliberately no UPDATE: the dangling id is the tombstone (module docs).
-    tx.audit(
-        Entry::new(action::TEAM_SCOPE_ORPHANED)
-            .actor_label("platform")
-            .target("team", team.to_string())
-            .detail(detail.clone()),
-    )
-    .await?;
+    if first {
+        tx.audit(
+            Entry::new(action::TEAM_SCOPE_ORPHANED)
+                .actor_label("platform")
+                .target("team", team.to_string())
+                .detail(detail.clone()),
+        )
+        .await?;
+    }
     tx.commit().await?;
 
     tracing::info!(org = %org, team = %team, ?detail, "team deleted; its scoped rows stay team-scoped");
-    Ok(Outcome::Applied { detail })
+    Ok(if first {
+        Outcome::Applied { detail }
+    } else {
+        Outcome::Duplicate
+    })
 }
 
 async fn member_removed(
@@ -184,11 +244,19 @@ async fn member_removed(
     org: OrgId,
     user: UserId,
 ) -> Result<Outcome> {
+    // Tombstone first (see `revoked`): from here on this user's cached token is
+    // refused, so nothing new is leased or claimed in their name while we clean up.
+    sqlx::query(
+        "INSERT INTO removed_members (org_id, user_id) VALUES ($1, $2) \
+         ON CONFLICT (org_id, user_id) DO UPDATE SET removed_at = now()",
+    )
+    .bind(org)
+    .bind(user)
+    .execute(db.pool())
+    .await?;
+
     let mut tx = db.begin(org).await?;
-    if !first_delivery(&mut tx, event, "member.removed").await? {
-        tx.rollback().await?;
-        return Ok(Outcome::Duplicate);
-    }
+    let first = first_delivery(&mut tx, event, "member.removed").await?;
 
     let leases = sqlx::query(
         "UPDATE repo_leases SET released_at = now() \
@@ -227,15 +295,21 @@ async fn member_removed(
         "claims_released": claims,
         "cursors_dropped": cursors,
     });
-    tx.audit(
-        Entry::new(action::MEMBER_RELEASED)
-            .actor_label("platform")
-            .target("user", user.to_string())
-            .detail(detail.clone()),
-    )
-    .await?;
+    if first {
+        tx.audit(
+            Entry::new(action::MEMBER_RELEASED)
+                .actor_label("platform")
+                .target("user", user.to_string())
+                .detail(detail.clone()),
+        )
+        .await?;
+    }
     tx.commit().await?;
 
     tracing::info!(org = %org, user = %user, ?detail, "member removed; released what they held");
-    Ok(Outcome::Applied { detail })
+    Ok(if first {
+        Outcome::Applied { detail }
+    } else {
+        Outcome::Duplicate
+    })
 }

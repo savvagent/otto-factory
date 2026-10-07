@@ -154,6 +154,7 @@ impl Config {
 /// and no shared session store.
 pub fn router(db: Db, watcher: Arc<Watcher>, config: Config) -> Router {
     let rs = Arc::new(ResourceServer::new(
+        db.clone(),
         config.platform.clone(),
         config.resource_uri.clone(),
         config.public_url.clone(),

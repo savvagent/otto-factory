@@ -741,3 +741,70 @@ async fn nothing_but_the_token_decides_who_is_calling(pool: PgPool) {
         .await
         .expect(StatusCode::UNAUTHORIZED);
 }
+
+/// The platform's introspection cache would keep vouching for these tokens for
+/// up to a minute; the tombstones refuse them at once.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_deleted_org_and_a_removed_member_are_refused_before_the_cache_expires(pool: PgPool) {
+    let h = harness(pool).await;
+    let (org, rob, bob) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    h.platform.add_org(org, "acme", "Acme");
+    h.platform
+        .add_member(org, rob, "rob@acme.test", Role::Owner);
+    h.platform
+        .add_member(org, bob, "bob@acme.test", Role::Member);
+    let (rob_t, bob_t) = (
+        h.platform.issue(org, rob, Role::Owner, ALL),
+        h.platform.issue(org, bob, Role::Member, ALL),
+    );
+    for t in [&rob_t, &bob_t] {
+        Call::get("/api/orgs/acme/repos")
+            .with_session(t)
+            .send(&h.router)
+            .await
+            .expect(StatusCode::OK); // warms the introspection cache
+    }
+
+    // Removed at the platform; the platform still "vouches" (mock unchanged).
+    let (header, body) = sign(
+        "member.removed",
+        serde_json::json!({ "org_id": org, "user_id": bob }),
+    );
+    deliver(&h, Some(&header), body)
+        .await
+        .expect(StatusCode::OK);
+    Call::get("/api/orgs/acme/repos")
+        .with_session(&bob_t)
+        .send(&h.router)
+        .await
+        .expect(StatusCode::UNAUTHORIZED);
+    Call::get("/api/orgs/acme/repos")
+        .with_session(&rob_t)
+        .send(&h.router)
+        .await
+        .expect(StatusCode::OK);
+
+    // The tombstone is short-lived: a re-added member works again.
+    sqlx::query("UPDATE removed_members SET removed_at = now() - interval '1 hour'")
+        .execute(h.db.pool())
+        .await
+        .unwrap();
+    Call::get("/api/orgs/acme/repos")
+        .with_session(&bob_t)
+        .send(&h.router)
+        .await
+        .expect(StatusCode::OK);
+
+    // A deleted org is refused for everyone, permanently.
+    let (header, body) = sign("org.deleted", serde_json::json!({ "org_id": org }));
+    deliver(&h, Some(&header), body)
+        .await
+        .expect(StatusCode::OK);
+    for t in [&rob_t, &bob_t] {
+        Call::get("/api/orgs/acme/repos")
+            .with_session(t)
+            .send(&h.router)
+            .await
+            .expect(StatusCode::UNAUTHORIZED);
+    }
+}

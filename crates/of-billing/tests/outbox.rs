@@ -205,7 +205,7 @@ async fn concurrent_shippers_never_double_count(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "of_core::MIGRATOR")]
-async fn a_rejected_event_is_dropped_not_retried_forever(pool: PgPool) {
+async fn a_rejected_event_is_kept_in_a_dead_letter_table_not_dropped(pool: PgPool) {
     let platform = MockPlatform::start().await;
     let db = Db::from_pool(pool);
     let client = platform.client();
@@ -216,6 +216,57 @@ async fn a_rejected_event_is_dropped_not_retried_forever(pool: PgPool) {
 
     let report = outbox::ship_once(&db, &client, &cfg()).await.unwrap();
     assert_eq!(report.rejected, 1);
+    assert_eq!(
+        outbox::pending(&db).await.unwrap(),
+        0,
+        "not retried forever"
+    );
+
+    let (tool, billable, reason): (String, bool, String) =
+        sqlx::query_as("SELECT tool, billable, reason FROM usage_outbox_rejected")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    assert_eq!((tool.as_str(), billable), ("add_job", true));
+    assert!(
+        reason.contains("does not exist"),
+        "the platform's reason is kept: {reason}"
+    );
+}
+
+/// A receipt that does not account for every event cannot be trusted to have
+/// covered the batch: keep everything and ask again.
+#[sqlx::test(migrator = "of_core::MIGRATOR")]
+async fn a_receipt_that_does_not_add_up_deletes_nothing(pool: PgPool) {
+    let platform = MockPlatform::start().await;
+    let db = Db::from_pool(pool);
+    let client = platform.client();
+    let meter = Meter::new(client.clone(), false, "https://x.test/billing");
+    let (org, user) = (OrgId::new(), UserId::new());
+    for _ in 0..3 {
+        record(&db, org, user, &meter, "add_job").await;
+    }
+
+    platform.short_receipts(1);
+    assert!(outbox::ship_once(&db, &client, &cfg()).await.is_err());
+    assert_eq!(
+        outbox::pending(&db).await.unwrap(),
+        3,
+        "rows were deleted on an unreliable receipt"
+    );
+
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let report = outbox::ship_once(&db, &client, &cfg()).await.unwrap();
+    assert_eq!(
+        (report.claimed, report.duplicates),
+        (3, 3),
+        "the retry is all duplicates"
+    );
+    assert_eq!(
+        platform.counted_usage().len(),
+        3,
+        "and nothing was counted twice"
+    );
     assert_eq!(outbox::pending(&db).await.unwrap(), 0);
 }
 
@@ -368,4 +419,91 @@ async fn the_report_surfaces_a_platform_failure_instead_of_inventing_numbers() {
 
     // A different org the platform has never heard of: an error, not zeros.
     assert!(meter.report(OrgId::new()).await.is_err());
+}
+
+/// The platform's count lags by whatever is still in the outbox, so the check
+/// adds the org's unshipped billable usage before comparing to the limit.
+#[sqlx::test(migrator = "of_core::MIGRATOR")]
+async fn unshipped_usage_counts_against_the_bucket(pool: PgPool) {
+    let platform = MockPlatform::start().await;
+    let db = Db::from_pool(pool);
+    let meter = Meter::new(platform.client(), true, "https://x.test/billing");
+    let (org, user) = (OrgId::new(), UserId::new());
+    platform.add_org(org.as_uuid(), "acme", "Acme");
+    platform.set_usage(org.as_uuid(), 498, 500, true);
+
+    // Two calls fit (498 -> 500), and nothing has been shipped.
+    record(&db, org, user, &meter, "add_job").await;
+    record(&db, org, user, &meter, "add_job").await;
+
+    // The platform still says 498, but the outbox holds two more.
+    let mut tx = db.begin(org).await.unwrap();
+    let err = meter.charge(&mut tx, user, "add_job").await.unwrap_err();
+    assert!(
+        matches!(err, BillingError::QuotaExceeded { used: 500, .. }),
+        "{err:?}"
+    );
+    // Free calls are still fine.
+    meter.charge(&mut tx, user, "list_jobs").await.unwrap();
+    tx.commit().await.unwrap();
+}
+
+/// An outage adds one bounded lookup, not one per call.
+#[sqlx::test(migrator = "of_core::MIGRATOR")]
+async fn an_outage_is_remembered_so_it_does_not_slow_every_call(pool: PgPool) {
+    let platform = MockPlatform::start().await;
+    let db = Db::from_pool(pool);
+    let mut c = otto_resource::ClientConfig::new(
+        &platform.url,
+        of_testkit::RESOURCE_URI,
+        of_testkit::SECRET,
+    );
+    c.usage_status_ttl = Duration::from_millis(1);
+    let meter = Meter::new(platform.client_with(c), true, "https://x.test/billing");
+    let (org, user) = (OrgId::new(), UserId::new());
+    platform.add_org(org.as_uuid(), "acme", "Acme");
+    platform.set_down(true);
+
+    for _ in 0..5 {
+        record(&db, org, user, &meter, "add_job").await;
+    }
+    assert_eq!(
+        platform.lookup_calls(),
+        0,
+        "a down platform counts no lookups"
+    );
+    // (set_down answers 503 before counting; what matters is the next check.)
+    platform.set_down(false);
+    platform.set_usage(org.as_uuid(), 500, 500, true);
+    // Still inside the remembered window: allowed without asking.
+    record(&db, org, user, &meter, "add_job").await;
+    assert_eq!(
+        platform.lookup_calls(),
+        0,
+        "the failed lookup was not remembered"
+    );
+}
+
+/// `warm` makes the network call before a transaction exists.
+#[sqlx::test(migrator = "of_core::MIGRATOR")]
+async fn warm_looks_the_org_up_before_any_transaction(pool: PgPool) {
+    let platform = MockPlatform::start().await;
+    let db = Db::from_pool(pool);
+    let meter = Meter::new(platform.client(), true, "https://x.test/billing");
+    let (org, user) = (OrgId::new(), UserId::new());
+    platform.add_org(org.as_uuid(), "acme", "Acme");
+
+    meter.warm(org).await;
+    assert_eq!(platform.lookup_calls(), 1);
+    record(&db, org, user, &meter, "add_job").await;
+    assert_eq!(
+        platform.lookup_calls(),
+        1,
+        "the in-transaction check hit the cache"
+    );
+
+    // Off, it never asks.
+    let off = Meter::new(platform.client(), false, "https://x.test/billing");
+    off.warm(OrgId::new()).await;
+    assert_eq!(platform.lookup_calls(), 1);
 }

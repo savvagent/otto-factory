@@ -41,16 +41,29 @@
 //! (and logged). The alternative is refusing paying customers' work because a
 //! lookup failed; the call is still recorded in the outbox, so nothing is
 //! under-billed. Authentication already requires the platform, so this only
-//! matters in the window where a cached token outlives an outage.
+//! matters in the window where a cached token outlives an outage. The decision
+//! is remembered per org for [`FAIL_OPEN_FOR`], so an outage costs one bounded
+//! lookup per org per few seconds, not one per call.
+//!
+//! **The lookup happens before the transaction opens.** [`Meter::warm`] (called
+//! by `Factory::tx`) makes the platform call first, so a slow platform never
+//! holds a pooled database connection; the check inside the transaction then
+//! reads the client's cache.
+//!
+//! **Unshipped usage counts.** The platform's total lags by whatever is still in
+//! the outbox, so the check adds this org's unshipped billable rows to the
+//! platform's count before comparing it to the limit.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use otto_resource::{PlatformClient, UsageStatus};
 use otto_tenant::ids::{OrgId, UserId};
 use otto_tenant::Tx;
 use serde::Serialize;
 
-use crate::classify::{self, Class};
+use crate::classify;
 use crate::error::{BillingError, Result};
 use crate::outbox;
 
@@ -63,6 +76,9 @@ use crate::outbox;
 /// like any other — the same outcome as the platform being down.
 const QUOTA_LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// How long a failed quota lookup is remembered, per org, as "allow".
+const FAIL_OPEN_FOR: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Fraction of the bucket at which a caller starts being warned.
 ///
 /// Eighty percent is early enough that a team has time to do something about it
@@ -73,6 +89,8 @@ pub const WARN_AT: f64 = 0.8;
 #[derive(Clone)]
 pub struct Meter {
     platform: Arc<PlatformClient>,
+    /// Orgs whose last quota lookup failed, and until when to skip looking.
+    fail_open: Arc<Mutex<HashMap<OrgId, Instant>>>,
     /// Refuse billable calls past a hard-stop bucket. Off by default.
     pub enforce: bool,
     /// Where a caller who has run out is told to go. Named in the refusal,
@@ -98,8 +116,18 @@ impl Meter {
     ) -> Self {
         Self {
             platform,
+            fail_open: Arc::default(),
             enforce,
             upgrade_url: upgrade_url.into(),
+        }
+    }
+
+    /// Look the org's quota standing up now, so the check inside the tool's
+    /// transaction finds it cached. Called before the transaction opens; a
+    /// no-op when enforcement is off. Never fails: see the module docs.
+    pub async fn warm(&self, org: OrgId) {
+        if self.enforce {
+            let _ = self.status_for(org).await;
         }
     }
 
@@ -109,7 +137,18 @@ impl Meter {
     /// nothing is written.
     pub async fn charge(&self, tx: &mut Tx<'_>, user: UserId, tool: &str) -> Result<Charge> {
         let class = classify::classify(tool);
-        self.check_quota(tx.org(), tool, class).await?;
+        if self.enforce && class.is_billable() {
+            if let Some(status) = self.status_for(tx.org()).await {
+                // What the platform has not been told about yet.
+                let unshipped: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM usage_outbox WHERE org_id = $1 AND billable",
+                )
+                .bind(tx.org())
+                .fetch_one(tx.conn())
+                .await?;
+                self.refuse_if_spent(status, unshipped, tool)?;
+            }
+        }
         outbox::enqueue(tx, Some(user), tool, class.is_billable()).await?;
         Ok(Charge {
             billable: class.is_billable(),
@@ -140,30 +179,27 @@ impl Meter {
     /// enforcement is off or the tool isn't billable, so it costs nothing in the
     /// default configuration.
     pub async fn would_refuse(&self, org: OrgId, tool: &str) -> Result<()> {
-        self.check_quota(org, tool, classify::classify(tool)).await
-    }
-
-    /// The enforcement/hard-stop/bucket check shared by [`Self::charge`] and
-    /// [`Self::would_refuse`].
-    ///
-    /// The check reads the count *before* this call is added, so the call that
-    /// lands exactly on the limit is allowed and the next one is not. An
-    /// off-by-one here is the difference between a plan advertised as 500
-    /// operations delivering 500 or 499.
-    async fn check_quota(&self, org: OrgId, tool: &str, class: Class) -> Result<()> {
+        let class = classify::classify(tool);
         if !self.enforce || !class.is_billable() {
             return Ok(());
         }
-        let status = match tokio::time::timeout(
-            QUOTA_LOOKUP_TIMEOUT,
-            self.platform.usage_status(org.as_uuid()),
-        )
-        .await
-        {
-            Ok(Ok(status)) => status,
-            Ok(Err(e)) => return self.allow_unchecked(org, tool, &e.to_string()),
-            Err(_) => return self.allow_unchecked(org, tool, "timed out"),
-        };
+        match self.status_for(org).await {
+            // No transaction here, so unshipped usage is not added; the `charge`
+            // that follows does count it.
+            Some(status) => self.refuse_if_spent(status, 0, tool),
+            None => Ok(()),
+        }
+    }
+
+    /// The enforcement/hard-stop/bucket comparison shared by [`Self::charge`]
+    /// and [`Self::would_refuse`].
+    ///
+    /// It compares the count *before* this call is added, so the call that
+    /// lands exactly on the limit is allowed and the next one is not. An
+    /// off-by-one here is the difference between a plan advertised as 500
+    /// operations delivering 500 or 499.
+    fn refuse_if_spent(&self, mut status: UsageStatus, unshipped: i64, tool: &str) -> Result<()> {
+        status.billable_count += unshipped;
         if status.is_blocked() {
             return Err(BillingError::QuotaExceeded {
                 tool: tool.to_string(),
@@ -176,16 +212,45 @@ impl Meter {
         Ok(())
     }
 
-    /// The platform could not answer the quota question: let the call through.
-    /// It is still recorded in the outbox, so nothing is under-billed.
-    fn allow_unchecked(&self, org: OrgId, tool: &str, why: &str) -> Result<()> {
+    /// The platform's usage status for `org`, or `None` if it could not be read
+    /// in time (the caller then allows the call). Bounded by
+    /// [`QUOTA_LOOKUP_TIMEOUT`], and a failure is remembered for
+    /// [`FAIL_OPEN_FOR`] so an outage does not add that wait to every call.
+    async fn status_for(&self, org: OrgId) -> Option<UsageStatus> {
+        if let Some(until) = self
+            .fail_open
+            .lock()
+            .ok()
+            .and_then(|m| m.get(&org).copied())
+        {
+            if until > Instant::now() {
+                return None;
+            }
+        }
+        let failure = match tokio::time::timeout(
+            QUOTA_LOOKUP_TIMEOUT,
+            self.platform.usage_status(org.as_uuid()),
+        )
+        .await
+        {
+            Ok(Ok(status)) => {
+                if let Ok(mut m) = self.fail_open.lock() {
+                    m.remove(&org);
+                }
+                return Some(status);
+            }
+            Ok(Err(e)) => e.to_string(),
+            Err(_) => "timed out".to_string(),
+        };
         tracing::warn!(
             org = %org,
-            tool,
-            reason = why,
-            "could not read usage from the platform in time; allowing the call (it is still recorded)"
+            reason = %failure,
+            "could not read usage from the platform in time; allowing billable calls for {FAIL_OPEN_FOR:?} (they are still recorded)"
         );
-        Ok(())
+        if let Ok(mut m) = self.fail_open.lock() {
+            m.insert(org, Instant::now() + FAIL_OPEN_FOR);
+        }
+        None
     }
 
     /// Report an org's standing without charging for anything.

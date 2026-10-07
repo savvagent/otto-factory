@@ -3098,3 +3098,64 @@ async fn whoami_refuses_rather_than_guessing_when_the_platform_is_down(pool: PgP
     assert_eq!(code_of(&e), "platform_unavailable");
     assert_eq!(e.data.as_ref().unwrap()["retriable"], true);
 }
+
+/// The platform's introspection cache keeps vouching for a token for up to a
+/// minute, but a deleted org or a just-removed member is refused at once, so
+/// nothing new is written, leased, or claimed in their name while (or after) the
+/// platform's lifecycle webhook cleans up.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn tombstoned_orgs_and_members_are_refused_despite_a_warm_cache(pool: PgPool) {
+    let platform = MockPlatform::start().await;
+    let (org, rob, bob) = (
+        uuid::Uuid::new_v4(),
+        uuid::Uuid::new_v4(),
+        uuid::Uuid::new_v4(),
+    );
+    platform.add_org(org, "acme", "Acme");
+    platform.add_member(org, rob, "rob@acme.test", Role::Owner);
+    platform.add_member(org, bob, "bob@acme.test", Role::Member);
+    let bob_token = platform.issue(org, bob, Role::Member, of_core::scopes::KNOWN);
+    let rob_token = platform.issue(org, rob, Role::Owner, of_core::scopes::KNOWN);
+    let db = Db::from_pool(pool.clone());
+    // Default client: a 60 s cache, which is the point.
+    let app = front_door(pool, platform.client()).await;
+
+    for t in [&bob_token, &rob_token] {
+        assert_ne!(
+            post_mcp(&app, Some(t)).await.status(),
+            http::StatusCode::UNAUTHORIZED
+        );
+    }
+    let apply = |kind: &'static str, data: serde_json::Value| {
+        let db = db.clone();
+        async move {
+            let (h, b) = MockPlatform::webhook(kind, data);
+            let ev = otto_resource::webhook::verify(of_testkit::WEBHOOK_SECRET, &h, &b).unwrap();
+            of_core::platform_events::apply(&db, &ev).await.unwrap();
+        }
+    };
+
+    apply(
+        "member.removed",
+        serde_json::json!({ "org_id": org, "user_id": bob }),
+    )
+    .await;
+    let after = post_mcp(&app, Some(&bob_token)).await;
+    assert_eq!(
+        after.status(),
+        http::StatusCode::UNAUTHORIZED,
+        "a removed member kept leasing and claiming"
+    );
+    assert_ne!(
+        post_mcp(&app, Some(&rob_token)).await.status(),
+        http::StatusCode::UNAUTHORIZED
+    );
+
+    apply("org.deleted", serde_json::json!({ "org_id": org })).await;
+    for t in [&bob_token, &rob_token] {
+        assert_eq!(
+            post_mcp(&app, Some(t)).await.status(),
+            http::StatusCode::UNAUTHORIZED
+        );
+    }
+}

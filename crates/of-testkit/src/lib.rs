@@ -82,6 +82,8 @@ struct Inner {
     down: AtomicBool,
     /// Fail the next N usage POSTs with 503, then recover.
     fail_usage: AtomicUsize,
+    /// Answer the next N usage POSTs with a receipt that under-reports by one.
+    short_receipts: AtomicUsize,
     introspect_calls: AtomicUsize,
     usage_calls: AtomicUsize,
     lookup_calls: AtomicUsize,
@@ -100,6 +102,7 @@ impl MockPlatform {
             data: Mutex::new(Data::default()),
             down: AtomicBool::new(false),
             fail_usage: AtomicUsize::new(0),
+            short_receipts: AtomicUsize::new(0),
             introspect_calls: AtomicUsize::new(0),
             usage_calls: AtomicUsize::new(0),
             lookup_calls: AtomicUsize::new(0),
@@ -350,6 +353,12 @@ impl MockPlatform {
 
     // --------------------------------------------------------------- failures
 
+    /// Make the next `n` usage POSTs count the batch but answer with a receipt
+    /// that accounts for one event fewer than was sent.
+    pub fn short_receipts(&self, n: usize) {
+        self.inner.short_receipts.store(n, Ordering::SeqCst);
+    }
+
     /// While down, every endpoint answers `503`.
     pub fn set_down(&self, down: bool) {
         self.inner.down.store(down, Ordering::SeqCst);
@@ -535,6 +544,15 @@ async fn ingest_usage(
         } else {
             receipt.duplicates += 1;
         }
+    }
+    if inner
+        .short_receipts
+        .load(Ordering::SeqCst)
+        .checked_sub(1)
+        .is_some()
+    {
+        inner.short_receipts.fetch_sub(1, Ordering::SeqCst);
+        receipt.accepted = receipt.accepted.saturating_sub(1);
     }
     Json(receipt).into_response()
 }

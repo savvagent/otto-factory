@@ -290,11 +290,16 @@ members, invites, teams, SSO, tokens, or usage. Those are the platform's, and
   change when the platform exposes "teams of this member").
 - **The platform's webhooks are idempotent and signature-first.** `/platform/webhooks` verifies
   `Otto-Signature` (HMAC over timestamp and raw body, replay-bounded) before parsing anything;
-  a bad signature is `401` and does nothing. A handled event, a repeat (deduped on the event id
-  in the same transaction as its effects, `platform_events`), and an unknown event type are all
-  `200`; a failure to apply is `5xx` so the platform retries. It is mounted at
+  a bad signature is `401` and does nothing. A handled event, a repeat (the event id is recorded in the same transaction as its effects, `platform_events`;
+  a redelivery **re-runs** the idempotent clean-up to catch work that raced the first run), and an
+  unknown event type are all `200`; a failure to apply is `5xx` so the platform retries. It is mounted at
   `/platform/webhooks`, not under `/webhooks/{provider}`, so a platform event can never be
   mistaken for a tracker one.
+- **Tombstones close the cache window.** Introspection is cached for 60 s, so `org.deleted` and
+  `member.removed` first write `deleted_orgs` / `removed_members` (the latter swept after minutes)
+  and both HTTP surfaces refuse a tombstoned org or user on every request
+  (`of_core::platform_events::revoked`; a database error there is a `503`). Only then does the
+  clean-up run.
 - **The router and the OpenAPI document are built from one list.** Adding a route means
   adding it to `catalog.rs` with its summary and description; `router()` mounts the list and
   `openapi::document` renders it. A route not in the catalog is not reachable, on purpose.
@@ -502,7 +507,9 @@ the *record*. Four rules hold, and the first is what makes the others true:
 2. **Delivery is a background task, and it is idempotent.** `of_billing::outbox::run` claims due
    rows (`FOR UPDATE SKIP LOCKED`, `next_attempt_at` as claim lease and retry backoff), posts them
    with `PlatformClient::ship_usage`, and deletes what the platform answered for (accepted,
-   duplicate, or rejected — all final). The platform dedupes on `event_id`, so any retry, from
+   duplicate, or rejected — all final; a rejected event is moved to `usage_outbox_rejected` with the
+   platform's reason and an error log, never dropped, and a receipt whose counts do not add up to the
+   batch deletes nothing). The platform dedupes on `event_id`, so any retry, from
    any replica, counts once. A platform outage delays billing and never loses it, and never
    affects a tool call.
 3. **A new tool must be classified.** `exhaustive_over` compares the router against the
@@ -511,7 +518,9 @@ the *record*. Four rules hold, and the first is what makes the others true:
    charge for is a worse failure than under-billing ourselves.
 4. **Enforcement never blocks a read, and a lookup failure never blocks work.** It is behind
    `OF_ENFORCE_QUOTAS`, off by default, and refuses only billable tools on hard-stop plans, judged
-   against the platform's usage status cached for 60 s (`UsageStatus::is_blocked`). That makes
+   against the platform's usage status cached for 60 s (`UsageStatus::is_blocked`) plus the org's
+   unshipped billable outbox rows, looked up in `Factory::tx` before the transaction opens, and a
+   failed lookup is remembered per org for 5 s. That makes
    overrun bounded by one cache window plus the unshipped outbox — an accepted cost of the split.
    If the platform cannot answer, the call is allowed (and still recorded).
 

@@ -44,11 +44,15 @@ use chrono::{DateTime, Utc};
 use http::{HeaderMap, StatusCode};
 use otto_resource::{PlatformClient, Role, TokenClaims, TokenKind};
 use otto_tenant::ids::{OrgId, UserId};
+use otto_tenant::Db;
 use uuid::Uuid;
 
 /// Everything the middleware needs, shared by the whole surface.
 #[derive(Clone)]
 pub struct ResourceServer {
+    /// Consulted for tombstones (a deleted org, a just-removed member) that must
+    /// refuse a token the platform's cached introspection still vouches for.
+    pub db: Db,
     /// The platform: authorization server, identity directory, billing.
     pub platform: Arc<PlatformClient>,
     /// This resource's canonical URI — the audience every token must name.
@@ -67,12 +71,14 @@ pub struct ResourceServer {
 
 impl ResourceServer {
     pub fn new(
+        db: Db,
         platform: Arc<PlatformClient>,
         resource_uri: impl Into<String>,
         public_url: impl Into<String>,
         authorization_server: impl Into<String>,
     ) -> Self {
         Self {
+            db,
             platform,
             resource_uri: resource_uri.into(),
             public_url: public_url.into(),
@@ -216,6 +222,29 @@ pub async fn require_bearer(
 
     match rs.platform.introspect(token).await {
         Ok(Some(claims)) => {
+            // The platform vouches for this token (possibly from a cache up to
+            // 60 s old), but it may have told us since that the org is gone or
+            // the user was removed: honour that now rather than at cache expiry.
+            // A database failure here is an outage (503), not "not revoked".
+            match of_core::platform_events::revoked(
+                &rs.db,
+                claims.org_id.into(),
+                claims.user_id.into(),
+            )
+            .await
+            {
+                Ok(false) => {}
+                Ok(true) => {
+                    return challenge(
+                        &rs.metadata_url(),
+                        "this token is no longer valid for this resource; sign in again",
+                    )
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "could not check the revocation tombstones");
+                    return unavailable();
+                }
+            }
             req.extensions_mut().insert(Principal::from(claims));
             next.run(req).await
         }

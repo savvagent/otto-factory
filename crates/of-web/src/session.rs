@@ -160,6 +160,20 @@ where
 
         let claims = authenticate(&state, parts).await?;
 
+        // A deleted org or a just-removed member is refused now, though the
+        // platform's cached introspection may still vouch for the token.
+        match of_core::platform_events::revoked(
+            &state.db,
+            claims.org_id.into(),
+            claims.user_id.into(),
+        )
+        .await
+        {
+            Ok(false) => {}
+            Ok(true) => return Err(ApiError::unauthenticated()),
+            Err(e) => return Err(ApiError::unavailable("check revocation tombstones", e)),
+        }
+
         // **An org that is not the token's is reported as not found, not as
         // forbidden** — see the module docs.
         let missing = || ApiError::not_found(format!("no org {wanted:?} that this token opens"));

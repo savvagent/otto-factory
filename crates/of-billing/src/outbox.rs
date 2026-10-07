@@ -159,18 +159,53 @@ pub async fn ship_once(
 
     match platform.ship_usage(&events).await {
         Ok(receipt) => {
-            // Accepted, duplicate, and rejected are all final: delete the lot.
+            // Every event must be in exactly one of the three outcomes. If the
+            // counts do not add up the response is not to be trusted to have
+            // accounted for the whole batch, so nothing is deleted: the rows
+            // are retried (the platform dedupes) and the mismatch is loud.
+            let answered =
+                receipt.accepted as usize + receipt.duplicates as usize + receipt.rejected.len();
+            if answered != ids.len() {
+                let msg = format!(
+                    "the platform accounted for {answered} of {} usage events (accepted {}, duplicate {}, rejected {})",
+                    ids.len(),
+                    receipt.accepted,
+                    receipt.duplicates,
+                    receipt.rejected.len()
+                );
+                tracing::error!("{msg}; keeping every row and retrying");
+                let err = otto_resource::Error::Decode(msg);
+                reschedule(db, &ids, &err, cfg).await;
+                return Err(ShipError::Platform(err));
+            }
+
+            // Accepted and duplicate are final. Rejected is final too, but it is
+            // money nobody was told about, so it is kept in a dead-letter table
+            // with the platform's reason, in the same transaction that removes it
+            // from the outbox -- never dropped silently.
+            let mut tx = db.pool().begin().await?;
             for r in &receipt.rejected {
-                tracing::warn!(
+                tracing::error!(
                     event_id = %r.event_id,
                     reason = %r.reason,
-                    "the platform refused a usage event; dropping it"
+                    "the platform refused a usage event; moving it to usage_outbox_rejected"
                 );
+                sqlx::query(
+                    "INSERT INTO usage_outbox_rejected \
+                       (event_id, org_id, user_id, tool, billable, occurred_at, reason) \
+                     SELECT event_id, org_id, user_id, tool, billable, occurred_at, $2 \
+                     FROM usage_outbox WHERE event_id = $1",
+                )
+                .bind(r.event_id)
+                .bind(&r.reason)
+                .execute(&mut *tx)
+                .await?;
             }
             sqlx::query("DELETE FROM usage_outbox WHERE id = ANY($1)")
                 .bind(&ids)
-                .execute(db.pool())
+                .execute(&mut *tx)
                 .await?;
+            tx.commit().await?;
             Ok(ShipReport {
                 claimed: ids.len(),
                 accepted: receipt.accepted,
@@ -179,27 +214,32 @@ pub async fn ship_once(
             })
         }
         Err(e) => {
-            // Reschedule exactly these rows. `attempts` was already bumped by
-            // the claim, so the delay doubles per consecutive failure.
-            let reschedule = sqlx::query(
-                "UPDATE usage_outbox SET last_error = $2, \
-                        next_attempt_at = now() + make_interval(secs => \
-                            LEAST($3::float8 * power(2, LEAST(attempts - 1, 20)), $4::float8)) \
-                 WHERE id = ANY($1)",
-            )
-            .bind(&ids)
-            .bind(truncate(&e.to_string(), 500))
-            .bind(cfg.base_backoff.as_secs_f64())
-            .bind(cfg.max_backoff.as_secs_f64())
-            .execute(db.pool())
-            .await;
-            if let Err(re) = reschedule {
-                // The claim lease still holds the rows back, so this only
-                // delays the retry; it cannot lose anything.
-                tracing::warn!(error = %re, "could not record a usage shipping failure");
-            }
+            reschedule(db, &ids, &e, cfg).await;
             Err(ShipError::Platform(e))
         }
+    }
+}
+
+/// Put exactly these rows back with exponential backoff and the failure
+/// recorded. `attempts` was already bumped by the claim, so the delay doubles
+/// per consecutive failure.
+async fn reschedule(db: &Db, ids: &[i64], e: &otto_resource::Error, cfg: &ShipperConfig) {
+    let rescheduled = sqlx::query(
+        "UPDATE usage_outbox SET last_error = $2, \
+                next_attempt_at = now() + make_interval(secs => \
+                    LEAST($3::float8 * power(2, LEAST(attempts - 1, 20)), $4::float8)) \
+         WHERE id = ANY($1)",
+    )
+    .bind(ids)
+    .bind(truncate(&e.to_string(), 500))
+    .bind(cfg.base_backoff.as_secs_f64())
+    .bind(cfg.max_backoff.as_secs_f64())
+    .execute(db.pool())
+    .await;
+    if let Err(re) = rescheduled {
+        // The claim lease still holds the rows back, so this only delays the
+        // retry; it cannot lose anything.
+        tracing::warn!(error = %re, "could not record a usage shipping failure");
     }
 }
 
@@ -258,7 +298,7 @@ pub async fn run(
                 match &e {
                     ShipError::Platform(otto_resource::Error::Unauthorized) => tracing::error!(
                         "the platform rejected this resource server's credential; usage is \
-                         accumulating in the outbox. Check OTTO_INTROSPECTION_SECRET"
+                         accumulating in the outbox. Check OF_INTROSPECTION_SECRET"
                     ),
                     other => {
                         tracing::warn!(error = %other, retry_in = ?wait, "usage shipping failed")

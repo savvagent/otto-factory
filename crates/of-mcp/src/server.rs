@@ -240,6 +240,9 @@ impl Factory {
 
     /// Open a transaction pinned to the caller's org.
     pub async fn tx(&self, caller: &Principal) -> Result<Tx<'static>, ErrorData> {
+        // The quota lookup is a network call: do it before a pooled connection
+        // is held, so a slow platform costs this call time and nothing else.
+        self.meter.warm(caller.org_id).await;
         self.db
             .begin(caller.org_id)
             .await
