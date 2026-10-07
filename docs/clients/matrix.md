@@ -1,5 +1,12 @@
 # Client conformance matrix
 
+> **Note (platform split, savvagent/otto-factory#192).** The verification below was recorded when
+> otto-factory was its own authorization server. Registration, authorization, consent, and token
+> exchange are now the otto platform's (`/oauth/*` at its origin); otto-factory serves only
+> `/.well-known/oauth-protected-resource`, which names the platform. The `/oauth/*` paths and the
+> `of_auth::oauth` references in the sections below are historical. Clients need only the MCP URL,
+> which is unchanged, and should be re-verified against the platform after the cutover.
+
 Milestone 1, task 12. Run on **2026-09-02** against `of-server` built from `46c7896`
 plus the two fixes this run produced (below), serving on one origin with a real
 Postgres behind it.

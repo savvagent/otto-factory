@@ -1,23 +1,28 @@
 # otto-factory on Fly.io, org "savvagent".
 #
-# Database: database `otto_factory` on `otto-db`, a standalone (unmanaged) Fly
-# Postgres app shared with otto-platform (`otto_platform`) -- shared for cost; split
-# onto dedicated instances before real customers, since each app's attach role is a
-# superuser on the whole instance. It is unmanaged because migrations need
-# CREATEROLE, which the managed `savvagent-pg` cluster's per-app roles do not get.
-# The connecting role, created by `fly postgres attach`, is a superuser, which is
-# what makes `CREATE ROLE`/`ALTER ROLE ... RENAME` succeed at migration time
-# (`0007_rls.sql`, `0018_rename_tenant_role.sql`, `0032_rename_tenant_role_otto_app.sql`).
-# The flip side: this role BYPASSES RLS entirely, FORCE included -- isolation rests
-# wholly on `otto_tenant::Db::begin` issuing `SET LOCAL ROLE otto_app` (renamed from
-# `of_app` by 0032 so otto-tenant works with its default role name), and any
-# statement that runs directly on the pool (every migration) sees every org's rows.
-# otto-factory keeps its own migration history (0001 onward) and never runs
-# otto-platform's. DATABASE_URL is staged as a secret. See docs/deploy/fly.md.
+# A resource server of the otto platform (https://otto.savvagent.com): identity, OAuth,
+# orgs, teams, and billing live there; this app holds only the coordination domain.
 #
-# Secrets are NOT in this file — `fly secrets set` puts DATABASE_URL and
-# OF_ENCRYPTION_KEY in the machine's environment. Everything below is
-# configuration a reader is meant to see.
+# Database: database `otto_factory` on `otto-db`, a standalone (unmanaged) Fly
+# Postgres app shared with the platform (`otto_platform`) -- shared for cost; split
+# onto dedicated instances before real customers, since each app's attach role is a
+# superuser on the whole instance. It is unmanaged because the baseline migration
+# creates the `otto_app` role, which needs CREATEROLE that the managed `savvagent-pg`
+# cluster's per-app roles do not get. The connecting role, created by
+# `fly postgres attach`, is a superuser, so it BYPASSES RLS entirely, FORCE included:
+# isolation rests wholly on `otto_tenant::Db::begin` issuing `SET LOCAL ROLE otto_app`,
+# and any statement that runs directly on the pool (every migration, the usage shipper)
+# sees every org's rows. otto-factory keeps its own migration history -- a squashed
+# domain-only baseline since the platform cutover -- and never runs the platform's.
+#
+# Secrets are NOT in this file -- `fly secrets set` puts these in the machine's
+# environment (docs/deploy/fly.md):
+#   DATABASE_URL                from `fly postgres attach`
+#   OF_ENCRYPTION_KEY           openssl rand -base64 32
+#   OF_INTROSPECTION_SECRET     otto_rs_...   printed once by the platform's
+#                               `otto-platform-server resource register`
+#   OF_PLATFORM_WEBHOOK_SECRET  otto_whsec_... printed once by its `resource set-webhook`
+# Everything below is configuration a reader is meant to see.
 
 app = "otto-factory-mcp"
 primary_region = "iad"
@@ -30,39 +35,28 @@ primary_region = "iad"
   # process serves plain HTTP and the public origin is https.
   OF_BIND = "0.0.0.0:8080"
   # The hostname a browser and an agent both see. `otto-factory-mcp.fly.dev`
-  # still answers, but nothing advertises it: every emailed-equivalent link, the
-  # OAuth issuer, both discovery documents, and the token audience are built
-  # from this value.
-  #
-  # It is also the WebAuthn relying party id (`of-server` derives it from this
-  # host and asserts it at startup), which makes changing it more expensive than
-  # it looks: **every passkey ever registered is bound to this hostname and
-  # would stop working.** Settled deliberately while the database held no
-  # accounts. A later move behind a Cloudflare Worker keeps this same hostname —
-  # a Worker custom domain serves it directly — so that migration is safe.
+  # still answers, but nothing advertises it: the discovery pointer in a 401 and
+  # the tracker OAuth callbacks are built from OF_PUBLIC_URL.
   OF_PUBLIC_URL = "https://otto-factory.savvagent.com"
+  # The token audience: exactly the resource_uri registered at the platform
+  # (`otto-platform-server resource register <this>`), and the HTTP Basic user on
+  # every call this app makes to it. Passkeys are NOT bound to this hostname any
+  # more -- they belong to the platform's.
   OF_RESOURCE_URI = "https://otto-factory.savvagent.com/mcp"
+  # The OAuth authorization server, identity directory, and billing system of
+  # record. Advertised to MCP clients as this resource's authorization server.
+  OF_PLATFORM_URL = "https://otto.savvagent.com"
   OF_STATIC_DIR = "/srv/console"
   OF_LOG_FORMAT = "json"
   RUST_LOG = "info,of_server=info,of_mcp=info,of_web=info"
 
-  # `fly-client-ip`, deliberately not `x-forwarded-for`. fly-proxy *appends*
-  # to X-Forwarded-For, so a caller sending its own value arrives as
-  # "<theirs>, <real>" and the left-most entry — the one every convention
-  # calls the client — is attacker-chosen. Keying a rate limiter on that is
-  # worse than not having one, because it looks like it is working.
-  # Fly-Client-IP is written by the proxy and holds exactly one address.
-  #
-  # If Cloudflare is put in front of this app, both of these change: the header
-  # becomes cf-connecting-ip, and OF_ALLOWED_HOSTS has to name this app's own
-  # hostname because the Worker's subrequest arrives with it in Host. See
-  # docs/deploy/cloudflare.md — neither is optional and neither fails loudly.
-  OF_CLIENT_IP_HEADER = "fly-client-ip"
+  # If Cloudflare is put in front of this app, OF_ALLOWED_HOSTS has to name this
+  # app's own hostname because the Worker's subrequest arrives with it in Host.
+  # See docs/deploy/cloudflare.md -- it is not optional and does not fail loudly.
 
 [http_service]
   internal_port = 8080
-  # The session cookie carries the __Host- prefix, which browsers refuse to
-  # store without Secure. A plain-http console cannot log anyone in.
+  # Bearer tokens must never cross the wire in clear.
   force_https = true
   auto_start_machines = true
   # Suspend rather than stop: `watch` is a long poll and an agent waiting on a
@@ -82,7 +76,8 @@ primary_region = "iad"
     interval = "15s"
     timeout = "5s"
     # Migrations run at startup under an advisory lock, so a first boot against
-    # a fresh database has DDL to get through before it can answer.
+    # a fresh database has DDL to get through before it can answer. Readiness is
+    # the database only: a platform outage must not pull a replica out of rotation.
     grace_period = "30s"
 
 [[vm]]

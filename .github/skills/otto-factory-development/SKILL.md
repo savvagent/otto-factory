@@ -203,7 +203,7 @@ explains the reasoning behind each at length — read it, and treat the list her
    `otto_app` cannot be created) `FORCE ROW LEVEL SECURITY` carries the guarantee instead —
    `Db::verify_tenant_isolation` reads back which shape it is in, and `of-server` refuses to bind a
    port unless one of them holds. A new tenant table needs a `NOT NULL org_id`, an entry in the
-   `tenant_tables` array in `0007_rls.sql`, a policy named exactly `<table>_tenant_isolation`, and a
+   `tenant_tables` array in `0001_baseline.sql`, a policy named exactly `<table>_tenant_isolation`, and a
    **cross-org negative test**. Without the negative test it is not done.
 2. **Ordinary cross-org tests pass on guard 1 alone.** The tests that actually exercise RLS are the
    `rls_scopes_*` ones in `crates/of-core/tests/isolation.rs`, which issue deliberately unscoped SQL
@@ -263,22 +263,23 @@ explains the reasoning behind each at length — read it, and treat the list her
     tool must be classified in `of-billing::classify`** — `exhaustive_over` and
     `every_tool_has_a_price` fail when the router and the price list disagree. Enforcement is behind
     `OF_ENFORCE_QUOTAS`, off by default, and never blocks a read.
-12. **Migrations are forward-only, one file per concern, in `crates/of-core/migrations/`.** Never
-    edit a migration that has been applied anywhere — add a new one. `0007_rls.sql` runs last.
+12. **Migrations are append-only, one file per concern, in `crates/of-core/migrations/`.** Never
+    edit a migration that has been applied anywhere — add a new one. (`0001_baseline.sql` is a
+    one-time squash, done at the platform cutover; the schema is domain-only and holds no foreign
+    key to anything the platform owns — `tests/guards.rs` enforces that.)
 13. **`Watcher::spawn` detaches a connection for `LISTEN`, and dropping the pool does not reclaim
     it.** A `#[sqlx::test]` that spawns a watcher and never calls `Watcher::shutdown()` hangs at
     teardown instead of failing. `of-server`'s graceful shutdown runs `watcher.shutdown().await`
     only after `axum::serve(...)` returns — keep that ordering.
 14. **`of-server` assembly has failures only it can produce.** Route collisions are a startup panic,
     and `the_whole_router_assembles` reaches it before a deployment does. The SPA fallback must never
-    answer under `/api`, `/oauth`, `/mcp`, or `/.well-known`. `/healthz` never touches the database
-    and `/readyz` always does. `into_make_service_with_connect_info` is load-bearing: without it
-    `client_ip` returns `None` and every per-IP throttle silently stops working, and
-    `OF_CLIENT_IP_HEADER` must name a header the proxy **overwrites** (`fly-client-ip`, never
-    `x-forwarded-for`).
+    answer under `/api`, `/oauth`, `/mcp`, `/.well-known`, `/platform`, or `/webhooks`. `/healthz`
+    never touches the database and `/readyz` always does (neither touches the platform). There is
+    one shared `PlatformClient`, and a platform failure is a `503`, never a `401`.
 15. **`Config::from_env` never falls back quietly.** A variable that is set but unparseable is a
-    startup error naming it, not a default. `OF_PUBLIC_URL` and `OF_ENCRYPTION_KEY` have no defaults
-    at all. Never log a secret, a token, or `OF_ENCRYPTION_KEY`; never echo one in an error or a
+    startup error naming it, not a default. `OF_PUBLIC_URL`, `OF_PLATFORM_URL`,
+    `OF_INTROSPECTION_SECRET`, `OF_PLATFORM_WEBHOOK_SECRET`, and `OF_ENCRYPTION_KEY` have no
+    defaults at all. Never log a secret, a token, or `OF_ENCRYPTION_KEY`; never echo one in an error or a
     response; never commit one.
 16. **Errors are written for an LLM caller that has never read the docs**: what went wrong, what the
     valid options were, what to call next. `Error::code()` is the stable machine-readable branch
@@ -471,7 +472,7 @@ convention requires it. Create `docs/specs/YYYY-MM-DD-<slug>-design.md`, followi
 - Numbered sections (§1, §2, …) for each component: shape, configuration, security properties,
   testing. Cite `file:line` references to existing code where the design touches it
 - **Tenant isolation** — if the change adds or touches a tenant table, name the `org_id` column, the
-  `0007_rls.sql` registration, the `<table>_tenant_isolation` policy, and the cross-org negative test
+  `0001_baseline.sql` registration, the `<table>_tenant_isolation` policy, and the cross-org negative test
 - **Metering** — if the change adds an MCP tool, name its `of-billing::classify` classification
 
 Required sections, wherever they fit: **Assumptions** (every choice made without asking, each with a
@@ -827,9 +828,9 @@ npm run build`. Confirm nothing about the deployment got baked into the bundle (
 - **Cloudflare Worker** — if `web/worker/` or `web/wrangler.jsonc` changed: `npm test` (vitest is the
   Worker's routing gate) and re-read [`docs/deploy/cloudflare.md`](../../../docs/deploy/cloudflare.md).
 - **Database migrations** — if `crates/of-core/migrations/` changed: confirm the new file is
-  _additive and new_ (an already-applied migration is never edited), that `0007_rls.sql` still runs
+  _additive and new_ (an already-applied migration is never edited), that `0001_baseline.sql` still runs
   last, and that a fresh cluster applies cleanly — `podman compose down -v && podman compose up -d`
-  then `cargo test -p of-core`. A new tenant table must appear in `0007_rls.sql`'s `tenant_tables`
+  then `cargo test -p of-core`. A new tenant table must appear in `0001_baseline.sql`'s `tenant_tables`
   with a `<table>_tenant_isolation` policy and a cross-org negative test, or
   `Db::verify_tenant_isolation` will not vouch for it at startup.
 - **CI** — if `.github/workflows/` changed: confirm the workflow parses and the jobs actually ran on

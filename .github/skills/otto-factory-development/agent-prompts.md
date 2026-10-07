@@ -40,7 +40,7 @@ Agent tool:
       substrate and ships no workflow opinion; every coding agent is equally first-class. A
       capability that could live in a customer's own skill belongs in the skill, not the server
     - Tenant isolation: if a tenant table is added or touched, does the spec name the org_id column,
-      the 0007_rls.sql registration, the <table>_tenant_isolation policy, and the cross-org negative test?
+      the 0001_baseline.sql registration, the <table>_tenant_isolation policy, and the cross-org negative test?
     - Metering: if an MCP tool is added, does the spec name its of-billing::classify classification?
     - Public-interface changes: is any non-additive change to the MCP tool surface, the console API,
       the OAuth/discovery endpoints, the config surface, or the schema named explicitly? (An applied
@@ -87,7 +87,7 @@ Agent tool:
       written for an LLM that has never read the docs?
     - Does any task put SQL outside of-core?
     - Does a task adding a migration add a NEW file (never editing an applied one), keeping
-      0007_rls.sql last?
+      0001_baseline.sql last?
     - Are the out-of-band artifacts the task touches (container image, console bundle, Cloudflare
       Worker, migrations, .env.example) called out?
 
