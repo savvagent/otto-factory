@@ -1,6 +1,7 @@
 //! Repo tools — how an agent's working directory becomes a thing the server
 //! can coordinate on.
 
+use of_core::repos::ReposExt;
 use of_core::repos::{NewRepo, RepoPatch};
 use rmcp::handler::server::tool::Extension;
 use rmcp::handler::server::wrapper::{Json, Parameters};

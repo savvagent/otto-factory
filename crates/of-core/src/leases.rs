@@ -12,9 +12,10 @@
 //! wedge a repository forever. Leases expire, and any acquire reaps the expired
 //! ones first.
 
-use crate::db::Tx;
 use crate::error::{Error, Result};
-use crate::ids::{JobId, OrgId, RepoId, UserId};
+use crate::ids::{JobId, RepoId};
+use otto_tenant::ids::{OrgId, UserId};
+use otto_tenant::Tx;
 use serde::Serialize;
 use sqlx::FromRow;
 
@@ -54,7 +55,9 @@ pub struct Lease {
 const LEASE_COLS: &str = "id, org_id, repo_id, resource, holder_user_id, holder_label, job_id, \
                           acquired_at, renewed_at, expires_at, released_at";
 
-impl Tx<'_> {
+/// Extension methods on [`Tx`] for this module's domain (see the crate docs for why
+/// these are extension traits rather than inherent methods).
+pub trait LeasesExt {
     /// Take a lease on `(repo, resource)`.
     ///
     /// Reaps expired leases for this resource first, then inserts. If a live
@@ -65,7 +68,43 @@ impl Tx<'_> {
     /// Re-acquiring a lease you already hold renews it instead of failing, so an
     /// agent that lost track of its own state converges rather than deadlocking
     /// against itself.
-    pub async fn acquire_lease(
+    fn acquire_lease(
+        &mut self,
+        repo_id: RepoId,
+        resource: &str,
+        holder: UserId,
+        label: Option<&str>,
+        job_id: Option<&JobId>,
+        ttl_secs: Option<i64>,
+    ) -> impl std::future::Future<Output = Result<Lease>> + Send;
+
+    /// Extend a lease you hold. Only the holder may renew — otherwise any agent
+    /// could keep another's lease alive indefinitely.
+    fn renew_lease(
+        &mut self,
+        lease_id: uuid::Uuid,
+        holder: UserId,
+        ttl_secs: Option<i64>,
+    ) -> impl std::future::Future<Output = Result<Lease>> + Send;
+
+    fn release_lease(
+        &mut self,
+        lease_id: uuid::Uuid,
+        holder: UserId,
+    ) -> impl std::future::Future<Output = Result<()>> + Send;
+
+    /// Live leases — "who is in this repo right now?".
+    ///
+    /// Filters expired rows in the query rather than relying on the reaper, so
+    /// the answer is correct even when nothing has tried to acquire recently.
+    fn list_leases(
+        &mut self,
+        repo_id: Option<RepoId>,
+    ) -> impl std::future::Future<Output = Result<Vec<Lease>>> + Send;
+}
+
+impl LeasesExt for Tx<'_> {
+    async fn acquire_lease(
         &mut self,
         repo_id: RepoId,
         resource: &str,
@@ -145,9 +184,7 @@ impl Tx<'_> {
         Ok(lease)
     }
 
-    /// Extend a lease you hold. Only the holder may renew — otherwise any agent
-    /// could keep another's lease alive indefinitely.
-    pub async fn renew_lease(
+    async fn renew_lease(
         &mut self,
         lease_id: uuid::Uuid,
         holder: UserId,
@@ -171,7 +208,7 @@ impl Tx<'_> {
         .ok_or_else(|| Error::LeaseNotHeld(lease_id.to_string()))
     }
 
-    pub async fn release_lease(&mut self, lease_id: uuid::Uuid, holder: UserId) -> Result<()> {
+    async fn release_lease(&mut self, lease_id: uuid::Uuid, holder: UserId) -> Result<()> {
         let org = self.org();
         let n = sqlx::query(
             "UPDATE repo_leases SET released_at = now() \
@@ -190,11 +227,7 @@ impl Tx<'_> {
         Ok(())
     }
 
-    /// Live leases — "who is in this repo right now?".
-    ///
-    /// Filters expired rows in the query rather than relying on the reaper, so
-    /// the answer is correct even when nothing has tried to acquire recently.
-    pub async fn list_leases(&mut self, repo_id: Option<RepoId>) -> Result<Vec<Lease>> {
+    async fn list_leases(&mut self, repo_id: Option<RepoId>) -> Result<Vec<Lease>> {
         let org = self.org();
         let leases = sqlx::query_as(&format!(
             "SELECT {LEASE_COLS} FROM repo_leases \

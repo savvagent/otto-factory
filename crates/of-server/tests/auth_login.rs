@@ -6,11 +6,12 @@
 //! disabled or the user signs out, and it is not interchangeable with a bearer
 //! token. A session that outlives any of those is a laptop left in a cafe.
 
-use of_auth::error::AuthError;
-use of_auth::{login, sessions};
-use of_core::ids::UserId;
-use of_core::orgs::Role;
-use of_core::Db;
+use otto_auth::error::AuthError;
+use otto_auth::{login, sessions};
+use otto_core::orgs::OrgsExt;
+use otto_core::orgs::Role;
+use otto_tenant::ids::UserId;
+use otto_tenant::Db;
 use sqlx::PgPool;
 
 const EMAIL: &str = "rob@acme.test";
@@ -58,7 +59,7 @@ async fn a_session_dies_on_logout_and_says_so_in_the_trail(pool: PgPool) {
     // Logging out twice, or with a cookie that was never valid, is not an error
     // — there is nothing useful a caller could do differently.
     login::logout(&db, &out.session_token, None).await.unwrap();
-    login::logout(&db, "of_ss_never-existed", None)
+    login::logout(&db, "otto_ss_never-existed", None)
         .await
         .unwrap();
 }
@@ -180,9 +181,9 @@ async fn a_session_cookie_is_not_a_bearer_token(pool: PgPool) {
     let (db, user) = fixture(pool).await;
     let s = sessions::create(&db, user).await.unwrap();
 
-    assert!(s.token.starts_with("of_ss_"));
+    assert!(s.token.starts_with("otto_ss_"));
     assert!(
-        of_auth::tokens::introspect(&db, &s.token, "https://mcp.otto-factory.test/mcp")
+        otto_auth::tokens::introspect(&db, &s.token, "https://mcp.otto-factory.test/mcp")
             .await
             .is_err(),
         "a console cookie must not open the MCP surface"

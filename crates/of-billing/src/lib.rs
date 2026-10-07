@@ -6,9 +6,9 @@
 //! agent tens of thousands of operations a month for waiting quietly, which is
 //! precisely the behaviour the server asks of it.
 //!
-//! The split of responsibility with `of-core` is deliberate. Every statement
-//! against a tenant table lives in `of-core` and goes through a pinned `Tx`
-//! (see `of_core::usage`); what lives here is policy — which tools cost
+//! The split of responsibility with `otto-billing` is deliberate. Every
+//! statement against a tenant table lives there and goes through a pinned `Tx`
+//! (see `otto_billing::usage`); what lives here is policy — which tools cost
 //! anything, what a bucket is worth, when a call is refused. That leaves the
 //! interesting decisions unit-testable with no database at all, which is why
 //! the threshold arithmetic in [`meter`] and the price list in [`classify`]

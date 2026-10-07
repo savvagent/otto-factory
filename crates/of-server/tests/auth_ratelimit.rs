@@ -9,9 +9,9 @@
 //! table forever, and that concurrent callers racing one bucket cannot push
 //! it past its limit.
 
-use of_auth::ratelimit::{self, CapPolicy};
-use of_auth::AuthError;
-use of_core::Db;
+use otto_auth::ratelimit::{self, CapPolicy};
+use otto_auth::AuthError;
+use otto_tenant::Db;
 use sqlx::PgPool;
 
 /// A small policy so these tests do not need hundreds of requests to reach

@@ -1,45 +1,47 @@
-//! `of-core` — the otto-factory domain: orgs, repos, jobs, leases, messages.
+//! `of-core` — the otto-factory domain: repos, jobs, leases, messages, trackers.
 //!
-//! This crate owns every SQL statement in the product and knows nothing about
-//! HTTP, MCP, or authentication. Two rules hold throughout, and both exist to
-//! make cross-tenant leakage structurally impossible rather than merely unlikely:
+//! Identity, tenancy, auth, and plan usage are not here. They live in
+//! otto-platform (`otto-tenant`, `otto-core`, `otto-auth`, `otto-billing`), and
+//! this crate builds the factory's domain on top of `otto-tenant`'s pinned
+//! transaction. This crate owns every factory SQL statement and knows nothing
+//! about HTTP, MCP, or authentication. Two rules hold throughout, and both exist
+//! to make cross-tenant leakage structurally impossible rather than merely
+//! unlikely:
 //!
 //! 1. **Every tenant-scoped operation takes an [`OrgId`]** — usually by being a
 //!    method on [`Tx`], which cannot be constructed without one. There is no
 //!    function in this crate that reads a job without naming an org.
 //! 2. **Every tenant transaction runs pinned.** [`Db::begin`] issues
-//!    `SET LOCAL ROLE of_app` and `SET LOCAL app.org_id`, so Postgres row-level
-//!    security applies even when the connecting user owns the tables. A query
-//!    that forgets its `org_id` predicate returns nothing instead of leaking.
-//!    Where `of_app` cannot exist — managed Postgres does not hand out the
-//!    cluster privilege to create it — `FORCE ROW LEVEL SECURITY` carries the
-//!    same guarantee, and [`Db::verify_tenant_isolation`] proves at startup that
-//!    one of the two is genuinely in force. See [`isolation`].
+//!    `SET LOCAL ROLE otto_app` and `SET LOCAL app.org_id`, so Postgres
+//!    row-level security applies even when the connecting user owns the tables.
+//!    A query that forgets its `org_id` predicate returns nothing instead of
+//!    leaking. See `otto_tenant::isolation` for the deployment shapes that
+//!    qualify and the one that does not.
+//!
+//! Because [`Tx`] and [`Db`] are defined in `otto-tenant`, Rust's orphan rules
+//! forbid inherent `impl Tx<'_> { ... }` blocks here. The factory's methods are
+//! therefore extension traits ([`jobs::JobsExt`], [`repos::ReposExt`],
+//! [`leases::LeasesExt`], [`messages::MessagesExt`]); import the trait alongside
+//! `Tx` to call its methods, exactly as for `otto_core`'s `OrgsExt`/`TeamsExt`.
+//!
+//! [`OrgId`]: otto_tenant::ids::OrgId
+//! [`Tx`]: otto_tenant::Tx
+//! [`Db`]: otto_tenant::Db
 
 pub mod audit;
-pub mod ceremonies;
-pub mod crypto;
-pub mod db;
-pub mod domains;
 pub mod error;
-pub mod i18n;
 pub mod idempotency;
-pub mod identities;
-pub mod idp;
 pub mod ids;
-pub mod invites;
-pub mod isolation;
 pub mod jobs;
-pub mod labels;
 pub mod leases;
 pub mod messages;
-pub mod orgs;
+pub mod migrate;
 pub mod repos;
+pub mod scopes;
 pub mod teams;
 pub mod trackers;
-pub mod usage;
 pub mod watch;
 
-pub use db::{Db, Tx, Unpinned};
 pub use error::{Error, Result};
-pub use ids::{JobId, OrgId, RepoId, TeamId, UserId};
+pub use ids::{JobId, RepoId};
+pub use migrate::{migrate, MIGRATOR};

@@ -6,8 +6,9 @@
 
 use axum::extract::{Json, Path, State};
 use axum::response::{IntoResponse, Response};
-use of_core::ids::UserId;
-use of_core::teams::{Team, TeamMember, TeamPatch};
+use otto_core::teams::TeamsExt;
+use otto_core::teams::{Team, TeamMember, TeamPatch};
+use otto_tenant::ids::UserId;
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -92,7 +93,7 @@ pub async fn delete_team(
 
     let mut tx = state.db.begin(ctx.org.id).await?;
     let team = tx.resolve_team(&slug).await?;
-    tx.delete_team(team.id).await?;
+    of_core::teams::delete_team(&mut tx, team.id).await?;
     tx.commit().await?;
 
     Ok(http::StatusCode::NO_CONTENT.into_response())

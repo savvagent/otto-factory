@@ -35,7 +35,7 @@ required for any new tenant table:
 1. **API shape.** Tenant data is reachable only through `Tx`, which cannot be constructed
    without an `OrgId`. Every statement carries `org_id = $1` explicitly, even though RLS
    would also filter it — the predicate keeps plans index-friendly and intent legible.
-2. **Row-level security.** `Db::begin` issues `SET LOCAL ROLE of_app` **and**
+2. **Row-level security.** `Db::begin` issues `SET LOCAL ROLE otto_app` **and**
    `SET LOCAL app.org_id`. Both matter. Postgres exempts superusers and table owners from
    their own RLS policies, and the connecting user is frequently one or both, so **without
    the `SET LOCAL ROLE` the policies do nothing at all**. This was verified empirically,
@@ -43,7 +43,7 @@ required for any new tenant table:
 
    The role is issued *only when it can be assumed*, because `CREATE ROLE` needs a
    cluster-level privilege that managed Postgres does not hand out — on Fly's managed
-   cluster `of_app` cannot be created at all. There, every tenant table being
+   cluster `otto_app` cannot be created at all. There, every tenant table being
    `FORCE ROW LEVEL SECURITY` carries the same guarantee: FORCE applies the policies to
    the table's owner, and the connecting role is neither a superuser nor `BYPASSRLS`.
    **Nothing assumes which of the two shapes it is in.** `Db::verify_tenant_isolation`
@@ -66,17 +66,17 @@ names the credential in `allowCredentials`. Only what the fake sees is softened;
 server step is the production one. What that cannot cover — a browser finding a credential
 unprompted — needs a CDP virtual authenticator, which is how the flow was actually verified.
 
-**A privilege granted to `of_app` is not a protection.** `of_app` does not exist on
-managed Postgres, so `REVOKE … FROM of_app` protects nothing there. Express the rule as a
+**A privilege granted to `otto_app` is not a protection.** `otto_app` does not exist on
+managed Postgres, so `REVOKE … FROM otto_app` protects nothing there. Express the rule as a
 policy instead: `audit_events` is append-only because it has no `UPDATE` policy, which
 under FORCE binds the table's owner too — strictly stronger than the grant it replaced,
 and it survives both deployment shapes. `#[sqlx::test]` connects as a superuser and
-bypasses RLS, so a test of such a policy **must** `SET LOCAL ROLE of_app` explicitly or it
+bypasses RLS, so a test of such a policy **must** `SET LOCAL ROLE otto_app` explicitly or it
 passes against no policy at all.
 
 **A migration that touches a tenant table's data needs its own `org_id` scoping — RLS is not
 available to supply one.** `Db::migrate` runs every migration statement on the connection pool
-directly, never through `Db::begin`: `app.org_id` is never set and `of_app` is never assumed.
+directly, never through `Db::begin`: `app.org_id` is never set and `otto_app` is never assumed.
 What that means depends on which side of guard 2 the connecting role is on. If it is a
 superuser or has `BYPASSRLS` — this deployment's actual shape today, per `docs/deploy/fly.md`
 — RLS does not apply at all, `FORCE` included; an unscoped `UPDATE`/`DELETE` against a tenant
@@ -128,9 +128,9 @@ END $$;
 Temporarily toggling `ALTER TABLE <table> NO FORCE ROW LEVEL SECURITY` / `... FORCE ROW LEVEL
 SECURITY` around an unscoped statement is not recommended: it only helps when the migrating role
 owns the table, and a forgotten restore is caught by `Db::verify_tenant_isolation` at the next
-boot only on the fallback shape. `of_app` being assumable (also true of this deployment today,
+boot only on the fallback shape. `otto_app` being assumable (also true of this deployment today,
 per `docs/deploy/fly.md`) is a separate fact from whether the connecting role bypasses RLS, and
-it is the one that matters here: the startup check itself runs as `of_app`, which owns nothing,
+it is the one that matters here: the startup check itself runs as `otto_app`, which owns nothing,
 so `FORCE` is not load-bearing for that check either, and a forgotten restore is not caught
 there at all. The loop above has no such gap. `TRUNCATE` and `COPY ... FROM` against a tenant
 table must never appear in a migration, for related but distinct reasons: Postgres has no RLS
@@ -196,7 +196,7 @@ compile-time layering discipline, not separate services.
 | Crate | Responsibility |
 |---|---|
 | `of-core` | Domain + **all** SQL. No HTTP, no auth. Every tenant fn takes an `OrgId`. |
-| `of-auth` | OAuth 2.1 AS, passkeys, enterprise OIDC federation, personal access tokens. |
+| (otto-platform) | Identity, tenancy, auth, and plan usage are the `otto-tenant`, `otto-core`, `otto-auth`, and `otto-billing` crates from `savvagent/otto-platform`, pinned by rev in the workspace `Cargo.toml`. There is no `of-auth` crate. Never call `otto_tenant::Db::migrate` on this database; use `of_core::migrate`. Delete teams only through `of_core::teams::delete_team`. |
 | `of-mcp` | `rmcp` Streamable HTTP server, tool surface, resource-server middleware. |
 | `of-billing` | Usage recording, period counters, tier limits. |
 | `of-trackers` | GitHub App + JIRA clients, webhook ingest, two-way sync. |
@@ -445,7 +445,7 @@ recovery always means the assistant *could* impersonate; the honest mitigations 
 is auditable, single-use, and expiring. An org's last owner has nobody above them, and the
 console says so.
 
-**Two places `of-auth::passkeys` overrides webauthn-rs, both on the challenge and never on
+**Two places `otto_auth::passkeys` overrides webauthn-rs, both on the challenge and never on
 the verification state.** `start_passkey_registration` sets `require_resident_key(false)`,
 which would produce credentials that cannot be found without naming the account first;
 `start_discoverable_authentication` forces `mediation: conditional`, which is the autofill

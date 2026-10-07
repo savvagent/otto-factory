@@ -12,11 +12,12 @@ use axum::body::Body;
 use axum::Router;
 use base64::Engine;
 use http::{Request, Response, StatusCode};
-use of_core::crypto::Cipher;
-use of_core::ids::{OrgId, UserId};
-use of_core::orgs::Role;
-use of_core::Db;
 use of_web::{AppState, Config};
+use otto_core::orgs::OrgsExt;
+use otto_core::orgs::Role;
+use otto_tenant::crypto::Cipher;
+use otto_tenant::ids::{OrgId, UserId};
+use otto_tenant::Db;
 use serde_json::Value;
 use sqlx::PgPool;
 use tower::ServiceExt;
@@ -27,14 +28,33 @@ pub const RESOURCE: &str = "https://mcp.otto-factory.test/mcp";
 pub const PUBLIC_URL: &str = "https://console.otto-factory.test";
 pub const ISSUER: &str = "otto-factory";
 
+/// Register this service's resource with the authorization server's registry,
+/// as `of-server` does at every startup. Without the row every
+/// `/oauth/authorize`, token, refresh, and PAT request for [`RESOURCE`] is
+/// refused as `invalid_target`.
+pub async fn register_resource(db: &Db) {
+    otto_auth::resources::register(
+        db,
+        otto_auth::resources::ResourceServerSpec {
+            resource_uri: RESOURCE,
+            name: of_core::scopes::RESOURCE_NAME,
+            scopes: of_core::scopes::KNOWN,
+            default_scopes: of_core::scopes::DEFAULT,
+        },
+    )
+    .await
+    .expect("register the resource server");
+}
+
 pub struct Harness {
     pub db: Db,
     pub router: Router,
     pub cipher: Cipher,
 }
 
-pub fn harness(pool: PgPool) -> Harness {
+pub async fn harness(pool: PgPool) -> Harness {
     let db = Db::from_pool(pool);
+    register_resource(&db).await;
     let config = Config::new(PUBLIC_URL, RESOURCE);
     let webauthn = of_web::relying_party(&config).expect("relying party");
     let state = AppState::new(db.clone(), cipher(), webauthn, config);
@@ -53,8 +73,9 @@ pub fn harness(pool: PgPool) -> Harness {
 /// shape worth testing (and what `a_deployment_that_cannot_connect_a_provider_says_so`
 /// asserts) — but it means every connect request is refused for the deployment's
 /// gap before the request itself is ever looked at. This one gets past that.
-pub fn harness_with_trackers(pool: PgPool) -> Harness {
+pub async fn harness_with_trackers(pool: PgPool) -> Harness {
     let db = Db::from_pool(pool);
+    register_resource(&db).await;
     let mut config = Config::new(PUBLIC_URL, RESOURCE);
     config.github_app_slug = Some("otto-factory".into());
     config.github_app_client_id = Some("gh-client".into());
@@ -501,6 +522,23 @@ pub async fn unregistered_credential(h: &Harness) -> (Authenticator, String) {
 /// only property that makes a throttle keyed on it worth anything.
 pub const CLIENT_IP_HEADER: &str = "fly-client-ip";
 
+/// A harness whose database cannot be reached, for outage behavior.
+pub async fn harness_with_unreachable_db(_pool: PgPool) -> Harness {
+    let unreachable = sqlx::postgres::PgPoolOptions::new()
+        .acquire_timeout(std::time::Duration::from_secs(2))
+        .connect_lazy("postgres://nobody:nothing@127.0.0.1:1/none")
+        .expect("lazy pool");
+    let db = Db::from_pool(unreachable);
+    let config = Config::new(PUBLIC_URL, RESOURCE);
+    let webauthn = of_web::relying_party(&config).expect("relying party");
+    let state = AppState::new(db.clone(), cipher(), webauthn, config);
+    Harness {
+        db,
+        router: of_web::router(state),
+        cipher: cipher(),
+    }
+}
+
 /// A harness deployed the way production is — behind a proxy that stamps the
 /// caller's address onto every request.
 ///
@@ -508,8 +546,9 @@ pub const CLIENT_IP_HEADER: &str = "fly-client-ip";
 /// `ConnectInfo`, so under it every request arrives with **no** client
 /// address and every throttle keyed on one is silently a no-op. A test about
 /// rate limiting has to be able to say where the request came from.
-pub fn harness_behind_proxy(pool: PgPool) -> Harness {
+pub async fn harness_behind_proxy(pool: PgPool) -> Harness {
     let db = Db::from_pool(pool);
+    register_resource(&db).await;
     let mut config = Config::new(PUBLIC_URL, RESOURCE);
     config.client_ip_header = Some(CLIENT_IP_HEADER.into());
     let webauthn = of_web::relying_party(&config).expect("relying party");

@@ -2,8 +2,8 @@
 
 use std::sync::Arc;
 
-use of_core::crypto::Cipher;
-use of_core::Db;
+use otto_tenant::crypto::Cipher;
+use otto_tenant::Db;
 
 /// What the JIRA connection asks Atlassian for.
 ///
@@ -31,9 +31,6 @@ pub struct Config {
     /// same reason as in `of-mcp`: a `Host` header is attacker-controlled, and
     /// an audience derived from one is not an audience check.
     pub resource_uri: String,
-
-    /// Unused since passkeys replaced TOTP — see `of_server::Config::totp_issuer`.
-    pub totp_issuer: String,
 
     /// Shared secret for GitHub webhook signature verification. Optional
     /// because tracker integration itself is optional per deployment.
@@ -95,7 +92,6 @@ impl Config {
         Self {
             public_url: public_url.into().trim_end_matches('/').to_string(),
             resource_uri: resource_uri.into(),
-            totp_issuer: "otto-factory".into(),
             github_app_webhook_secret: None,
             github_app_slug: None,
             github_app_client_id: None,
@@ -222,7 +218,7 @@ pub struct AppState {
     /// every passkey is cryptographically bound to — deriving it per request
     /// would make a configuration change silently invalidate credentials
     /// instead of failing at boot.
-    pub webauthn: Arc<of_auth::passkeys::Webauthn>,
+    pub webauthn: Arc<otto_auth::passkeys::Webauthn>,
     /// Decrypts secrets at rest (currently tracker webhook secrets and JIRA
     /// OAuth credentials — see `of_core::trackers` and `of_trackers::jira`).
     /// Held as an `Arc` because the key material is
@@ -239,7 +235,7 @@ impl AppState {
     pub fn new(
         db: Db,
         cipher: Cipher,
-        webauthn: Arc<of_auth::passkeys::Webauthn>,
+        webauthn: Arc<otto_auth::passkeys::Webauthn>,
         config: Config,
     ) -> Self {
         let meter = of_billing::Meter::new(

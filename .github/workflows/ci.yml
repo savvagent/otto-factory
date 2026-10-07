@@ -44,8 +44,8 @@ jobs:
       # Same image, user, db name and port-mapping rationale as compose.yaml:
       # `cargo test` runs `#[sqlx::test]` against a real Postgres, no mocks.
       # The service account is a superuser, matching local `podman compose`,
-      # which is what lets 0007_rls.sql's `CREATE ROLE of_app` succeed and
-      # exercise the explicit `SET LOCAL ROLE` guard the isolation tests pin.
+      # which is what lets the role migrations (0007/0018/0032) succeed and
+      # exercise the explicit `SET LOCAL ROLE otto_app` guard the isolation tests pin.
       postgres:
         image: postgres:16
         env:
@@ -111,26 +111,28 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Pre-create df_app and of_app roles
+      - name: Pre-create df_app, of_app and otto_app roles
         # 0007_rls.sql is frozen (migrations are forward-only) and always
         # checks for a role literally named df_app; 0018_rename_tenant_role.sql
-        # renames it to of_app. Both checks are check-then-create/rename,
-        # idempotent across sequential migration runs but not atomic, and
-        # `#[sqlx::test]` migrates one throwaway database per test, many in
-        # parallel, against this one cluster-scoped pair of roles. Pre-creating
-        # only df_app (as before the rename existed) would still race: the
-        # first parallel database to finish migrating renames df_app away, so
-        # every other in-flight database's still-running 0007 finds it newly
-        # absent and races the others on re-creating it. Pre-creating BOTH
-        # roles before any test starts means every database's 0007 finds
-        # df_app present (skip-create, no race) and every database's 0018
-        # finds of_app already present (skip-rename, grant-only, no race) --
-        # the rename branch in 0018 only ever fires for real on an actual
-        # deployment migrating forward, never under this workaround.
+        # renames it to of_app, and 0032_rename_tenant_role_otto_app.sql renames
+        # that to otto_app (the name otto-tenant's `Db` assumes). Each step is
+        # check-then-create/rename, idempotent across sequential migration runs
+        # but not atomic, and `#[sqlx::test]` migrates one throwaway database
+        # per test, many in parallel, against this one cluster-scoped set of
+        # roles. Pre-creating only the oldest would still race: the first
+        # parallel database to finish migrating renames it away, so every other
+        # in-flight database's still-running earlier migration finds it newly
+        # absent and races the others on re-creating it. Pre-creating ALL
+        # THREE before any test starts means every database's 0007 finds df_app
+        # present (skip-create), 0018 finds of_app present (skip-rename,
+        # grant-only) and 0032 finds otto_app present (skip-rename,
+        # grant-only) -- the rename branches only ever fire for real on an
+        # actual deployment migrating forward, never under this workaround.
         run: |
           psql "$DATABASE_URL" \
             -c "CREATE ROLE df_app NOLOGIN;" \
-            -c "CREATE ROLE of_app NOLOGIN;"
+            -c "CREATE ROLE of_app NOLOGIN;" \
+            -c "CREATE ROLE otto_app NOLOGIN;"
 
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
@@ -230,7 +232,7 @@ jobs:
             revert
           scopes: |
             of-core
-            of-auth
+            otto-platform
             of-mcp
             of-billing
             of-trackers

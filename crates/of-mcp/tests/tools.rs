@@ -7,16 +7,18 @@
 //! its `WWW-Authenticate` header *are* the onboarding path and a test that
 //! skipped them would let the whole zero-install premise break silently.
 
-use of_auth::tokens::{Principal, TokenKind};
 use of_billing::Meter;
-use of_core::ids::{OrgId, RepoId, UserId};
+use of_core::ids::RepoId;
 use of_core::jobs::Tracker;
-use of_core::orgs::Role;
 use of_core::trackers::{upsert_binding, upsert_connection, Provider};
 use of_core::watch::Watcher;
-use of_core::Db;
 use of_mcp::server::Factory;
 use of_mcp::tools;
+use otto_auth::tokens::{Principal, TokenKind};
+use otto_core::orgs::OrgsExt;
+use otto_core::orgs::Role;
+use otto_tenant::ids::{OrgId, UserId};
+use otto_tenant::Db;
 use rmcp::handler::server::tool::Extension;
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::model::ErrorData;
@@ -30,7 +32,7 @@ const UPGRADE_URL: &str = "https://mcp.otto-factory.test/settings/billing";
 
 /// Everything a token can carry, for the tests that are not about scopes.
 fn all_scopes() -> Vec<String> {
-    of_auth::oauth::KNOWN_SCOPES
+    of_core::scopes::KNOWN
         .iter()
         .map(|s| s.to_string())
         .collect()
@@ -41,7 +43,7 @@ fn principal(user: UserId, org: OrgId, scopes: Vec<String>) -> Principal {
         token_id: uuid::Uuid::new_v4(),
         user_id: user,
         org_id: org,
-        client_id: Some("of_client_test".into()),
+        client_id: Some("otto_client_test".into()),
         scopes,
         kind: TokenKind::Oauth,
         expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
@@ -1841,6 +1843,7 @@ async fn unauthenticated_requests_are_told_where_to_authenticate(pool: PgPool) {
     use tower::ServiceExt;
 
     let db = Db::from_pool(pool.clone());
+    of_mcp::register_resource(&db, RESOURCE).await.unwrap();
     let watcher = Watcher::spawn(pool).await.unwrap();
     let app = of_mcp::router(db, watcher, of_mcp::Config::new(RESOURCE, PUBLIC));
 
@@ -1907,7 +1910,15 @@ async fn a_token_for_another_resource_is_refused(pool: PgPool) {
     let user = db.upsert_user("rob@acme.test", None).await.unwrap();
     db.add_member(org.id, user.id, Role::Owner).await.unwrap();
 
-    let (foreign_token, _) = of_auth::tokens::mint_pat(
+    // Both resources are registered: a PAT can only be minted for one the
+    // registry knows, and the point here is that the *audience* still keeps
+    // this one out.
+    of_mcp::register_resource(&db, RESOURCE).await.unwrap();
+    of_mcp::register_resource(&db, "https://someone-else.test/mcp")
+        .await
+        .unwrap();
+
+    let (foreign_token, _) = otto_auth::tokens::mint_pat(
         &db,
         user.id,
         org.id,
@@ -1944,6 +1955,53 @@ async fn a_token_for_another_resource_is_refused(pool: PgPool) {
     assert!(
         challenge.contains("different resource"),
         "the caller needs to know that re-authenticating will not help: {challenge}"
+    );
+}
+
+/// A database outage is not an authentication failure. `otto-auth` reports it
+/// as `AuthError::Tenant(Db(..))` when opening the transaction fails (the old
+/// `of-auth` reported it as `Db` or `Core`), and a middleware that matched only
+/// `AuthError::Db` answered `401` — telling every connected agent its token had
+/// died at exactly the moment the database was unwell. It must be `503`, with no
+/// `WWW-Authenticate` challenge to chase.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_database_outage_is_503_not_401(pool: PgPool) {
+    use tower::ServiceExt;
+
+    // The watcher keeps the healthy pool; the request path gets a database
+    // that cannot be reached, so every checkout fails the way an outage does
+    // (`begin_unpinned` surfaces it as a tenant-substrate database error).
+    let watcher = Watcher::spawn(pool).await.unwrap();
+    let unreachable = sqlx::postgres::PgPoolOptions::new()
+        .acquire_timeout(std::time::Duration::from_secs(2))
+        .connect_lazy("postgres://nobody:nothing@127.0.0.1:1/none")
+        .unwrap();
+    let db = Db::from_pool(unreachable);
+    let app = of_mcp::router(db, watcher, of_mcp::Config::new(RESOURCE, PUBLIC));
+
+    let response = app
+        .oneshot(
+            http::Request::builder()
+                .method("POST")
+                .uri("/mcp")
+                .header("host", "mcp.otto-factory.test")
+                .header(
+                    "authorization",
+                    "Bearer otto_pat_whatever-the-database-is-down",
+                )
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), http::StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        response
+            .headers()
+            .get(http::header::WWW_AUTHENTICATE)
+            .is_none(),
+        "an outage must not send the client off to re-authenticate"
     );
 }
 

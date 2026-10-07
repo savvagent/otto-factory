@@ -2,7 +2,6 @@
 resolver = "2"
 members = [
   "crates/of-core",
-  "crates/of-auth",
   "crates/of-mcp",
   "crates/of-billing",
   "crates/of-trackers",
@@ -18,11 +17,17 @@ rust-version = "1.88"
 
 [workspace.dependencies]
 of-core = { path = "crates/of-core" }
-of-auth = { path = "crates/of-auth" }
 of-mcp = { path = "crates/of-mcp" }
 of-billing = { path = "crates/of-billing" }
 of-trackers = { path = "crates/of-trackers" }
 of-web = { path = "crates/of-web" }
+
+# Identity, tenancy, auth, and plan-usage queries live in otto-platform
+# (savvagent/otto-factory#191). One rev for all four: they version together.
+otto-tenant = { git = "https://github.com/savvagent/otto-platform", rev = "c7437afdc63bc211f00f003868f7de208ae2341b" }
+otto-core = { git = "https://github.com/savvagent/otto-platform", rev = "c7437afdc63bc211f00f003868f7de208ae2341b" }
+otto-auth = { git = "https://github.com/savvagent/otto-platform", rev = "c7437afdc63bc211f00f003868f7de208ae2341b" }
+otto-billing = { git = "https://github.com/savvagent/otto-platform", rev = "c7437afdc63bc211f00f003868f7de208ae2341b" }
 
 sqlx = { version = "0.8", default-features = false, features = [
   "runtime-tokio", "tls-rustls", "postgres", "chrono", "uuid", "macros", "migrate", "json",
@@ -44,7 +49,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 async-trait = "0.1"
 futures = "0.3"
-regex = "1"
 url = "2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 base64 = "0.22"
@@ -52,15 +56,7 @@ rand = "0.8"
 sha2 = "0.10"
 hmac = "0.12"
 subtle = "2"
-aes-gcm = "0.10"
-argon2 = "0.5"
-# `otpauth` adds issuer/account_name and get_url() for the provisioning URI
-# an authenticator app scans; `gen_secret` gives Secret::generate_secret().
-totp-rs = { version = "5", default-features = false, features = ["gen_secret", "otpauth"] }
 jsonwebtoken = "9"
-# DNS TXT record lookups for claimed-domain verification (of-auth::dns). Nothing
-# else in this workspace does DNS resolution.
-hickory-resolver = "0.26"
 # Loads .env for local runs. Never overrides a variable already set, so a
 # deployment's real environment always wins over a file that got shipped.
 dotenvy = "0.15"

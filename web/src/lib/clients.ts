@@ -63,7 +63,7 @@ export interface ClientRecipe {
  * warning would be actively wrong shown next to a snippet with nothing to
  * replace.
  */
-export const PLACEHOLDER = 'of_pat_…';
+export const PLACEHOLDER = 'otto_pat_…';
 
 export const CLIENTS: ClientRecipe[] = [
   {

@@ -1,5 +1,11 @@
 //! Domain errors.
 //!
+//! Identity and tenancy failures are not redefined here: they arrive as
+//! [`Error::Identity`] (`otto_core::Error`) and [`Error::Tenant`]
+//! (`otto_tenant::Error`), wrapped rather than flattened, so that the platform
+//! owns their codes and wording. [`Error::code`] and [`Error::retriable`]
+//! delegate to them.
+//!
 //! These are written to be readable by an LLM tool caller that has never seen
 //! the docs: a failure says what went wrong, what the valid options were, and
 //! what to call next. `NotFound` naming the org, `UnknownRepo` listing the
@@ -7,7 +13,7 @@
 //! reason — a bare "not found" makes an agent guess, and a guessing agent
 //! retries wrongly.
 
-use crate::ids::{JobId, OrgId, UserId};
+use crate::ids::JobId;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -75,15 +81,6 @@ pub enum Error {
     #[error("lease {0} is not held by you")]
     LeaseNotHeld(String),
 
-    #[error("org {0} not found")]
-    OrgNotFound(OrgId),
-
-    #[error("no team {slug:?} in this org. Teams: {known}")]
-    TeamNotFound { slug: String, known: String },
-
-    #[error("team slug {0:?} is already taken in this org")]
-    TeamSlugTaken(String),
-
     /// Refused rather than cascaded: a null `team_id` means org-wide, so
     /// deleting a team that still owns repos would publish them to the whole
     /// org without saying so.
@@ -92,33 +89,6 @@ pub enum Error {
          then delete the team — deleting it now would make them visible org-wide."
     )]
     TeamInUse { repos: String },
-
-    #[error("user {0} is not a member of this org")]
-    NotAMember(UserId),
-
-    #[error("{email} is already a member of this org, as {role}")]
-    AlreadyAMember { email: String, role: String },
-
-    /// Unknown, already accepted, and expired collapse into one answer — which
-    /// of the three it was is not something the holder of a failing token
-    /// should be able to determine.
-    #[error("this invitation is no longer valid. Ask an admin of the org to send a new one.")]
-    InviteInvalid,
-
-    #[error(
-        "this invitation was sent to {invited}, but you are signed in as {signed_in_as}. \
-         Sign in as {invited} to accept it."
-    )]
-    InviteWrongAccount {
-        invited: String,
-        signed_in_as: String,
-    },
-
-    #[error("{0}")]
-    Config(String),
-
-    #[error("{0}")]
-    Crypto(String),
 
     #[error("{0}")]
     Invalid(String),
@@ -140,41 +110,18 @@ pub enum Error {
     )]
     IdempotencyKeyConflict { key: String, tool: &'static str },
 
-    /// The database cannot enforce tenant isolation as configured. Raised only
-    /// by `Db::verify_tenant_isolation` at startup, never by a request: by the
-    /// time a tool call is in flight it is far too late to discover that one
-    /// org can read another's rows. Carries the specific findings because
-    /// "isolation is broken" without naming the table or the role is not
-    /// something an operator can act on at 3am.
-    #[error(
-        "the database cannot enforce tenant isolation, so one org could read \
-         another's data: {problems}"
-    )]
-    IsolationNotEnforced { problems: String },
-
-    /// A domain is globally unique (`claimed_domains.domain` is the primary
-    /// key) and another org already holds it. Deliberately generic — unlike
-    /// the JIRA-site-registration precedent's bounded disclosure, a domain
-    /// claim is a full account/organization identity, so nothing beyond "you
-    /// were refused" is confirmed here, not even which org holds it.
-    #[error("this domain is already claimed by another organization")]
-    DomainAlreadyClaimed,
-
-    /// A change to an org's SSO configuration was refused because it would
-    /// leave (or already leaves) the org with `enforce_sso = true` and no
-    /// working IdP sign-in path — no bound connection, no verified domain, or
-    /// (for a domain delete) no verified domain left once this one is gone.
-    /// Raised by `orgs::set_enforce_sso`'s enable path, `idp::delete_connection`,
-    /// and `domains::delete`, each behind `orgs::lock_for_sso_guard` so the
-    /// check this error reports on cannot be raced by a concurrent admin
-    /// action. `reason` names which piece is missing — an admin fixing this
-    /// needs to know whether to bind a connection, verify a domain, or turn
-    /// enforcement off first.
-    #[error("{reason}")]
-    SsoLockout { reason: String },
-
     #[error(transparent)]
     Db(#[from] sqlx::Error),
+
+    /// An identity-domain failure from `otto-core`: an unknown team, a duplicate
+    /// slug, a non-member, an invite that is no longer valid.
+    #[error(transparent)]
+    Identity(#[from] otto_core::Error),
+
+    /// A failure from the tenant substrate (`otto-tenant`): an unknown org, a
+    /// crypto or configuration fault, an isolation failure at startup.
+    #[error(transparent)]
+    Tenant(#[from] otto_tenant::Error),
 }
 
 impl Error {
@@ -193,23 +140,13 @@ impl Error {
             Error::DependencyCycle(..) => "dependency_cycle",
             Error::LeaseHeld { .. } => "lease_held",
             Error::LeaseNotHeld(_) => "lease_not_held",
-            Error::OrgNotFound(_) => "org_not_found",
-            Error::TeamNotFound { .. } => "team_not_found",
-            Error::TeamSlugTaken(_) => "team_slug_taken",
             Error::TeamInUse { .. } => "team_in_use",
-            Error::NotAMember(_) => "not_a_member",
-            Error::AlreadyAMember { .. } => "already_a_member",
-            Error::InviteInvalid => "invite_invalid",
-            Error::InviteWrongAccount { .. } => "invite_wrong_account",
-            Error::Config(_) => "internal_error",
-            Error::Crypto(_) => "internal_error",
             Error::Invalid(_) => "invalid_argument",
             Error::RaceLost(_) => "race_lost",
             Error::IdempotencyKeyConflict { .. } => "idempotency_key_conflict",
-            Error::IsolationNotEnforced { .. } => "isolation_not_enforced",
-            Error::DomainAlreadyClaimed => "domain_already_claimed",
-            Error::SsoLockout { .. } => "sso_lockout",
             Error::Db(_) => "internal_error",
+            Error::Identity(e) => e.code(),
+            Error::Tenant(e) => e.code(),
         }
     }
 
@@ -233,10 +170,15 @@ impl Error {
     /// an identical retry can land in a different, successful outcome once the
     /// concurrent write that caused it has finished settling.
     pub fn retriable(&self) -> bool {
-        matches!(
-            self,
-            Error::LeaseHeld { .. } | Error::Db(_) | Error::RaceLost(_)
-        )
+        match self {
+            Error::LeaseHeld { .. } | Error::Db(_) | Error::RaceLost(_) => true,
+            // A database fault is the same transient condition however many
+            // crates it passed through on the way up.
+            Error::Tenant(otto_tenant::Error::Db(_)) => true,
+            Error::Identity(otto_core::Error::Db(_)) => true,
+            Error::Identity(otto_core::Error::Tenant(otto_tenant::Error::Db(_))) => true,
+            _ => false,
+        }
     }
 }
 

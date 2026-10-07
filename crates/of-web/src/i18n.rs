@@ -4,7 +4,7 @@
 //! writes; there is no client-side JS to swap strings, so the language has to
 //! be decided server-side, per request.
 //!
-//! **The enum is not defined here.** `of_core::i18n::Locale` owns the list —
+//! **The enum is not defined here.** `otto_core::i18n::Locale` owns the list —
 //! `of-core` cannot depend on `of-web`, so this direction is the only one
 //! available, and it is also the right one: which languages the product speaks
 //! is a domain fact, not an HTTP one. This module owns the two things that
@@ -17,7 +17,7 @@
 //! did not justify a second compiler toolchain, and the two surfaces share no
 //! keys anyway.
 
-pub use of_core::i18n::Locale;
+pub use otto_core::i18n::Locale;
 
 /// Pick a locale from an `Accept-Language` header.
 ///
@@ -123,7 +123,7 @@ pub enum Key {
     /// Takes the client's name.
     ErrorNoOrgBody,
 
-    // Scope descriptions, in the order `oauth::KNOWN_SCOPES` lists them.
+    // Scope descriptions, in the order `of_core::scopes::KNOWN` lists them.
     ScopeJobsRead,
     ScopeJobsWrite,
     ScopeReposRead,

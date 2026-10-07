@@ -15,7 +15,7 @@ import { CLIENTS, PLACEHOLDER } from './clients';
 
 describe('CLIENTS token recipes', () => {
   const url = 'https://mcp.example.test';
-  const mintedToken = 'of_pat_realtoken';
+  const mintedToken = 'otto_pat_realtoken';
 
   for (const recipe of CLIENTS) {
     it(`${recipe.id}'s token() either embeds a secret, or explains the alternative via note`, () => {

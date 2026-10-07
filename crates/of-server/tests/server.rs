@@ -6,9 +6,9 @@
 
 use axum::body::Body;
 use of_core::watch::Watcher;
-use of_core::Db;
 use of_server::config::LogFormat;
 use of_server::Config;
+use otto_tenant::Db;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use tower::ServiceExt;
@@ -26,7 +26,6 @@ fn config(static_dir: &str) -> Config {
         public_url: PUBLIC.into(),
         resource_uri: RESOURCE.into(),
         encryption_key: KEY.into(),
-        totp_issuer: "otto-factory".into(),
         github_app_id: None,
         github_app_private_key: None,
         github_app_webhook_secret: None,
@@ -116,6 +115,9 @@ async fn body_text(response: http::Response<Body>) -> String {
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn the_whole_router_assembles(pool: PgPool) {
     let db = Db::from_pool(pool.clone());
+    of_mcp::register_resource(&db, RESOURCE)
+        .await
+        .expect("register");
     let watcher = Watcher::spawn(pool).await.unwrap();
 
     let _app = of_server::router(db, watcher.clone(), &config("web/build")).expect("router");
@@ -129,6 +131,9 @@ async fn the_whole_router_assembles(pool: PgPool) {
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn discovery_is_open_and_answers_on_one_origin(pool: PgPool) {
     let db = Db::from_pool(pool.clone());
+    of_mcp::register_resource(&db, RESOURCE)
+        .await
+        .expect("register");
     let watcher = Watcher::spawn(pool).await.unwrap();
     let app = of_server::router(db, watcher.clone(), &config("web/build")).expect("router");
 
@@ -152,6 +157,9 @@ async fn discovery_is_open_and_answers_on_one_origin(pool: PgPool) {
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn the_mcp_endpoint_points_an_unauthenticated_caller_at_this_origin(pool: PgPool) {
     let db = Db::from_pool(pool.clone());
+    of_mcp::register_resource(&db, RESOURCE)
+        .await
+        .expect("register");
     let watcher = Watcher::spawn(pool).await.unwrap();
     let app = of_server::router(db, watcher.clone(), &config("web/build")).expect("router");
 
@@ -234,6 +242,9 @@ async fn readiness_passes_against_a_live_database(pool: PgPool) {
 async fn the_console_fallback_stops_at_the_api(pool: PgPool) {
     let bundle = Bundle::new("spa");
     let db = Db::from_pool(pool.clone());
+    of_mcp::register_resource(&db, RESOURCE)
+        .await
+        .expect("register");
     let watcher = Watcher::spawn(pool).await.unwrap();
     let app = of_server::router(db, watcher.clone(), &config(bundle.path())).expect("router");
 

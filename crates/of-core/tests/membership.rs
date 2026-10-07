@@ -5,14 +5,18 @@
 //! it as opaque bytes here is the same contract `of-web` holds up with a real
 //! SHA-256 digest.
 
+use of_core::repos::ReposExt;
+use otto_core::invites::InvitesExt;
+use otto_core::orgs::OrgsExt;
+use otto_core::teams::TeamsExt;
 mod common;
 
 use common::{db, tenant, Tenant};
-use of_core::error::Error;
-use of_core::ids::UserId;
-use of_core::orgs::Role;
-use of_core::teams::TeamPatch;
-use of_core::Db;
+use otto_core::error::Error;
+use otto_core::orgs::Role;
+use otto_core::teams::TeamPatch;
+use otto_tenant::ids::UserId;
+use otto_tenant::Db;
 use sqlx::PgPool;
 
 /// A second human in the same org.
@@ -109,9 +113,13 @@ async fn deleting_a_team_that_still_owns_repos_is_refused(pool: PgPool) {
     .await
     .unwrap();
 
-    let err = tx.delete_team(team.id).await.unwrap_err();
+    let err = of_core::teams::delete_team(&mut tx, team.id)
+        .await
+        .unwrap_err();
     match &err {
-        Error::TeamInUse { repos } => assert!(repos.contains("api"), "should name the repo"),
+        of_core::Error::TeamInUse { repos } => {
+            assert!(repos.contains("api"), "should name the repo")
+        }
         other => panic!("expected TeamInUse, got {other:?}"),
     }
     tx.commit().await.unwrap();
@@ -131,7 +139,7 @@ async fn a_team_with_nothing_scoped_to_it_deletes(pool: PgPool) {
     let mut tx = db.begin(t.org).await.unwrap();
     let team = tx.create_team("platform", "Platform").await.unwrap();
     tx.add_team_member(team.id, t.user).await.unwrap();
-    tx.delete_team(team.id).await.unwrap();
+    of_core::teams::delete_team(&mut tx, team.id).await.unwrap();
     assert!(tx.list_teams().await.unwrap().is_empty());
     // The membership went with it, by cascade.
     assert!(tx.list_user_teams(t.user).await.unwrap().is_empty());

@@ -36,10 +36,11 @@ use axum::extract::{Form, Query, State};
 use axum::response::{Html, IntoResponse, Response};
 use axum::Json;
 use http::request::Parts;
-use of_auth::error::AuthError;
-use of_auth::{oauth, tokens};
-use of_core::audit::{action, Entry};
-use of_core::ids::OrgId;
+use otto_auth::error::AuthError;
+use otto_auth::{oauth, resources, tokens};
+use otto_core::orgs::OrgsExt;
+use otto_tenant::audit::{action, Entry};
+use otto_tenant::ids::OrgId;
 use serde::Deserialize;
 
 use crate::error::ApiError;
@@ -55,8 +56,19 @@ use crate::state::{client_ip, AppState};
 ///
 /// Open, and necessarily so: it is what an unauthenticated client reads to find
 /// out how to authenticate.
-pub async fn as_metadata(State(state): State<AppState>) -> Json<serde_json::Value> {
-    Json(oauth::as_metadata(&state.config.public_url))
+///
+/// `scopes_supported` is the union across every enabled resource server in the
+/// registry, so it is read from there rather than from a list compiled in here.
+pub async fn as_metadata(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let servers = resources::list(&state.db)
+        .await
+        .map_err(|e| ApiError::from_auth_or_unavailable("as metadata", e))?;
+    Ok(Json(oauth::as_metadata(
+        &state.config.public_url,
+        &resources::all_scopes(&servers),
+    )))
 }
 
 /// `GET /.well-known/oauth-protected-resource` (RFC 9728).
@@ -65,11 +77,22 @@ pub async fn as_metadata(State(state): State<AppState>) -> Json<serde_json::Valu
 /// here too because some clients look for it beside the AS metadata rather than
 /// beside the resource, and a client that cannot find this document cannot
 /// start the flow at all.
-pub async fn protected_resource_metadata(State(state): State<AppState>) -> Json<serde_json::Value> {
-    Json(oauth::protected_resource_metadata(
-        &state.config.resource_uri,
+pub async fn protected_resource_metadata(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let resource = resources::get(&state.db, &state.config.resource_uri)
+        .await
+        .map_err(|e| ApiError::from_auth_or_unavailable("protected resource metadata", e))?
+        .ok_or_else(|| {
+            ApiError::internal(
+                "protected resource metadata",
+                "this service's resource is not in the registry; it registers at startup",
+            )
+        })?;
+    Ok(Json(oauth::protected_resource_metadata(
+        &resource,
         &state.config.public_url,
-    ))
+    )))
 }
 
 // ---------------------------------------------------------------------------
@@ -89,7 +112,7 @@ pub async fn register_client(
 ) -> Result<Response, OAuthError> {
     if let Some(ip) = client_ip(&parts, &state.config) {
         let bucket = format!("dcr:{ip}");
-        of_auth::ratelimit::check_and_charge(&state.db, &bucket).await?;
+        otto_auth::ratelimit::check_and_charge(&state.db, &bucket).await?;
     }
 
     let registered = oauth::register_client(&state.db, req).await?;
@@ -161,6 +184,24 @@ impl AuthorizeParams {
     }
 }
 
+/// The registry knows every otto-* resource server, but this consent screen,
+/// its scope descriptions, and its `org:admin` gate describe only ours. A
+/// client that names another registered resource is refused here rather than
+/// shown a page that would mis-describe what it is granting.
+fn require_our_resource(
+    state: &AppState,
+    authorization: &oauth::Authorization,
+) -> Result<(), AuthError> {
+    if authorization.resource.resource_uri == state.config.resource_uri {
+        Ok(())
+    } else {
+        Err(AuthError::InvalidTarget(format!(
+            "{:?} is not served by this authorization page",
+            authorization.resource.resource_uri
+        )))
+    }
+}
+
 /// `GET /oauth/authorize` — render the consent screen.
 ///
 /// A signed-out visitor is sent to the console's login page with `next` set to
@@ -189,16 +230,17 @@ pub async fn authorize_page(
 
     // Validated before anything is rendered. Every failure at this stage is a
     // page, never a redirect: the destination is what could not be verified.
-    let client = match oauth::validate_authorize(
-        &state.db,
-        &params.to_request(&state.config.resource_uri),
-        &state.config.resource_uri,
-    )
-    .await
-    {
-        Ok(client) => client,
-        Err(e) => return error_page(&e, locale),
-    };
+    let authorization =
+        match oauth::validate_authorize(&state.db, &params.to_request(&state.config.resource_uri))
+            .await
+        {
+            Ok(authorization) => authorization,
+            Err(e) => return error_page(&e, locale),
+        };
+    if let Err(e) = require_our_resource(&state, &authorization) {
+        return error_page(&e, locale);
+    }
+    let client = &authorization.client;
 
     if params.response_type != "code" {
         return redirect_error(
@@ -228,18 +270,12 @@ pub async fn authorize_page(
         );
     }
 
-    let scopes = oauth::validate_scopes(&params.to_request(&state.config.resource_uri).scopes)
-        .unwrap_or_else(|_| {
-            oauth::DEFAULT_SCOPES
-                .iter()
-                .map(|s| s.to_string())
-                .collect()
-        });
-
+    // The registry resolved the scopes: the resource server's defaults when the
+    // client asked for none, otherwise exactly what it asked for.
     Html(consent_html(
-        &client,
+        client,
         &params,
-        &scopes,
+        &authorization.scopes,
         &orgs,
         caller
             .user
@@ -325,22 +361,21 @@ pub async fn authorize_decision(
     // Re-validated on the way in. The form is user-supplied and could have been
     // edited between render and submit; nothing about having rendered a page is
     // evidence about what came back.
-    if let Err(e) = oauth::validate_authorize(&state.db, &req, &state.config.resource_uri).await {
+    let authorization = match oauth::validate_authorize(&state.db, &req).await {
+        Ok(authorization) => authorization,
+        Err(e) => return error_page(&e, locale),
+    };
+    if let Err(e) = require_our_resource(&state, &authorization) {
         return error_page(&e, locale);
     }
 
     // Normalize the same way `authorize_page` did before rendering the consent
-    // screen: a client that omits `scope` gets `DEFAULT_SCOPES`, which is what
-    // the human just looked at. Without this, the hidden form field resubmits
-    // the *original*, empty `scope`, and the code issued below would carry
-    // zero scopes while the page just displayed a list of grants — an agent
-    // whose every tool call then fails, with no visible reason why.
-    req.scopes = oauth::validate_scopes(&req.scopes).unwrap_or_else(|_| {
-        oauth::DEFAULT_SCOPES
-            .iter()
-            .map(|s| s.to_string())
-            .collect()
-    });
+    // screen: a client that omits `scope` gets the resource server's defaults,
+    // which is what the human just looked at. Without this, the hidden form
+    // field resubmits the *original*, empty `scope`, and the code issued below
+    // would carry zero scopes while the page just displayed a list of grants —
+    // an agent whose every tool call then fails, with no visible reason why.
+    req.scopes = authorization.scopes;
 
     if form.decision != "allow" {
         return redirect_error(
@@ -389,7 +424,7 @@ pub async fn authorize_decision(
                 .actor(caller.user.id)
                 .target("client", params.client_id.clone())
                 .from_request(client_ip(&parts, &state.config).as_deref(), None)
-                .detail(serde_json::json!({ "scopes": req.scopes })),
+                .detail(serde_json::json!({ "scopes": req.scopes, "resource": req.resource })),
         )
         .await;
 
@@ -434,10 +469,10 @@ pub async fn token(
     State(state): State<AppState>,
     Form(form): Form<TokenForm>,
 ) -> Result<Response, OAuthError> {
-    let resource = form
-        .resource
-        .clone()
-        .unwrap_or_else(|| state.config.resource_uri.clone());
+    // RFC 8707 §2.2: a token request may repeat `resource`, and if it does it
+    // must name the resource the grant was issued for. Omitting it is fine; the
+    // grant already carries its audience.
+    let requested_resource = form.resource.as_deref();
 
     let client_id = form
         .client_id
@@ -465,7 +500,7 @@ pub async fn token(
                 &client_id,
                 redirect_uri,
                 verifier,
-                &resource,
+                requested_resource,
             )
             .await?;
 
@@ -489,7 +524,8 @@ pub async fn token(
                 .ok_or_else(|| AuthError::InvalidRequest("refresh_token is required".into()))?;
 
             let (issued, user, org, _reused) =
-                tokens::redeem_refresh(&state.db, presented, &client_id, &resource).await?;
+                tokens::redeem_refresh(&state.db, presented, &client_id, requested_resource)
+                    .await?;
 
             let _ = state
                 .db
@@ -700,7 +736,7 @@ button.primary{background:#111;color:#fff;border-color:#111}\
 /// What each scope actually permits, in a sentence a person can weigh.
 ///
 /// A consent screen listing `jobs:write` has not obtained informed consent from
-/// anybody. If a scope is added to `KNOWN_SCOPES` without a line here it renders
+/// anybody. If a scope is added to `of_core::scopes::KNOWN` without a line here it renders
 /// as its bare name, which is ugly on purpose — the test at the bottom of this
 /// file fails instead.
 fn scope_description(locale: Locale, scope: &str) -> &'static str {
@@ -721,7 +757,7 @@ fn consent_html(
     client: &oauth::Client,
     params: &AuthorizeParams,
     scopes: &[String],
-    orgs: &[of_core::orgs::Membership],
+    orgs: &[otto_core::orgs::Membership],
     signed_in_as: &str,
     locale: Locale,
 ) -> String {
@@ -904,7 +940,7 @@ impl CurrentUser {
     /// logged in yet.
     async fn from_request_parts_public(parts: &Parts, state: &AppState) -> Option<CurrentUser> {
         let token = crate::session::token_from(parts)?;
-        let session = of_auth::sessions::resolve(&state.db, &token).await.ok()?;
+        let session = otto_auth::sessions::resolve(&state.db, &token).await.ok()?;
         let user = state.db.get_user(session.user_id).await.ok()??;
         Some(CurrentUser { user, session })
     }
@@ -950,7 +986,7 @@ mod tests {
     /// same failure this test was written to prevent — it just moved.
     #[test]
     fn every_issuable_scope_is_explained_in_words() {
-        for scope in oauth::KNOWN_SCOPES {
+        for scope in of_core::scopes::KNOWN {
             for locale in Locale::ALL {
                 assert!(
                     !scope_description(locale, scope).is_empty(),
@@ -966,14 +1002,14 @@ mod tests {
     #[test]
     fn the_consent_page_leads_with_the_redirect_host() {
         let client = oauth::Client {
-            client_id: "of_client_x".into(),
+            client_id: "otto_client_x".into(),
             client_name: Some("<b>Claude Code</b>".into()),
             redirect_uris: vec!["http://127.0.0.1:1455/callback".into()],
             disabled: false,
         };
         let params = AuthorizeParams {
             response_type: "code".into(),
-            client_id: "of_client_x".into(),
+            client_id: "otto_client_x".into(),
             redirect_uri: "http://127.0.0.1:1455/callback".into(),
             code_challenge: "x".repeat(43),
             code_challenge_method: "S256".into(),
@@ -981,13 +1017,13 @@ mod tests {
             resource: None,
             state: Some("opaque".into()),
         };
-        let orgs = vec![of_core::orgs::Membership {
+        let orgs = vec![otto_core::orgs::Membership {
             org_id: OrgId::new(),
-            user_id: of_core::ids::UserId::new(),
-            role: of_core::orgs::Role::Owner,
+            user_id: otto_tenant::ids::UserId::new(),
+            role: otto_core::orgs::Role::Owner,
             org_slug: "acme".into(),
             org_name: "Acme".into(),
-            plan: of_core::orgs::Plan::Free,
+            plan: otto_core::orgs::Plan::Free,
         }];
 
         let html = consent_html(

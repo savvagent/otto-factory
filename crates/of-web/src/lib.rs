@@ -53,14 +53,14 @@ pub use state::{AppState, Config};
 /// device is broken.
 pub fn relying_party(
     config: &Config,
-) -> anyhow::Result<std::sync::Arc<of_auth::passkeys::Webauthn>> {
+) -> anyhow::Result<std::sync::Arc<otto_auth::passkeys::Webauthn>> {
     let rp_id = config.rp_id().ok_or_else(|| {
         anyhow::anyhow!(
             "OF_PUBLIC_URL ({}) has no host, so there is nothing to bind passkeys to",
             config.public_url
         )
     })?;
-    let webauthn = of_auth::passkeys::relying_party(&rp_id, &config.public_url)?;
+    let webauthn = otto_auth::passkeys::relying_party(&rp_id, &config.public_url)?;
     Ok(std::sync::Arc::new(webauthn))
 }
 
@@ -101,7 +101,7 @@ mod tests {
     /// router before a deployment does.
     #[tokio::test]
     async fn the_router_assembles() {
-        let db = of_core::Db::from_pool(
+        let db = otto_tenant::Db::from_pool(
             sqlx::postgres::PgPoolOptions::new()
                 .max_connections(1)
                 // Not connected — `connect_lazy` builds a pool without touching
@@ -113,7 +113,7 @@ mod tests {
         let config = Config::new("https://console.test", "https://mcp.test/mcp");
         let state = AppState::new(
             db,
-            of_core::crypto::Cipher::from_base64_key(
+            otto_tenant::crypto::Cipher::from_base64_key(
                 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
             )
             .expect("test key"),

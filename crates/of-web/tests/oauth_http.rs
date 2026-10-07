@@ -7,6 +7,7 @@
 //! or as a redirect, and whether the token endpoint speaks form-encoded RFC 6749
 //! rather than the JSON a modern instinct would reach for.
 
+use otto_core::orgs::OrgsExt;
 mod common;
 
 use base64::Engine;
@@ -89,7 +90,7 @@ fn percent_decode(raw: &str) -> String {
 /// it is wrong, onboarding fails in a way that looks like "the server is broken".
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn the_discovery_documents_describe_this_server(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
 
     let meta = Call::get("/.well-known/oauth-authorization-server")
         .send(&h.router)
@@ -128,7 +129,7 @@ async fn the_discovery_documents_describe_this_server(pool: PgPool) {
 /// The whole authorization code flow, as a CLI agent runs it.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn an_agent_gets_a_token_it_can_use_against_the_mcp_surface(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     org_with_owner(&h, "acme", &rob).await;
 
@@ -209,7 +210,7 @@ async fn an_agent_gets_a_token_it_can_use_against_the_mcp_surface(pool: PgPool) 
     );
 
     let access = tokens.body["access_token"].as_str().unwrap();
-    let principal = of_auth::tokens::introspect(&h.db, access, RESOURCE)
+    let principal = otto_auth::tokens::introspect(&h.db, access, RESOURCE)
         .await
         .expect("the minted token must work against the MCP resource");
     assert_eq!(principal.org_id, org_id);
@@ -248,7 +249,7 @@ async fn an_agent_gets_a_token_it_can_use_against_the_mcp_surface(pool: PgPool) 
     assert_eq!(replayed.body["error"], "invalid_grant");
 }
 
-/// A client that omits `scope` gets `DEFAULT_SCOPES`. The consent page shows
+/// A client that omits `scope` gets `of_core::scopes::DEFAULT`. The consent page shows
 /// exactly that list before the human decides — the token issued on "allow"
 /// must carry the same scopes, not the empty list a naive read of the
 /// original (scope-less) request would produce. Before this was fixed, the
@@ -257,7 +258,7 @@ async fn an_agent_gets_a_token_it_can_use_against_the_mcp_surface(pool: PgPool) 
 /// failed every tool call after a consent screen had just promised it access.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn a_scopeless_request_is_granted_the_scopes_the_consent_page_showed(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     org_with_owner(&h, "acme", &rob).await;
     let client_id = register(&h, "Test Agent", REDIRECT).await;
@@ -314,13 +315,13 @@ async fn a_scopeless_request_is_granted_the_scopes_the_consent_page_showed(pool:
 
     assert_eq!(
         tokens.body["scope"],
-        of_auth::oauth::DEFAULT_SCOPES.join(" "),
+        of_core::scopes::DEFAULT.join(" "),
         "the issued token must carry what the consent page displayed, not an \
          empty scope list"
     );
 
     let access = tokens.body["access_token"].as_str().unwrap();
-    let principal = of_auth::tokens::introspect(&h.db, access, RESOURCE)
+    let principal = otto_auth::tokens::introspect(&h.db, access, RESOURCE)
         .await
         .expect("the minted token must work against the MCP resource");
     assert!(principal.has_scope("jobs:read"));
@@ -329,7 +330,7 @@ async fn a_scopeless_request_is_granted_the_scopes_the_consent_page_showed(pool:
 /// A signed-out visitor has to end up somewhere they can act, not at a 401.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn an_unauthenticated_visitor_is_sent_to_log_in_and_comes_back(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let client_id = register(&h, "Test Agent", REDIRECT).await;
     let (_, challenge) = pkce();
 
@@ -357,7 +358,7 @@ async fn an_unauthenticated_visitor_is_sent_to_log_in_and_comes_back(pool: PgPoo
 /// must never be redirected to — it is precisely what could not be verified.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn an_unregistered_redirect_uri_renders_a_page_and_never_redirects(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     org_with_owner(&h, "acme", &rob).await;
     let client_id = register(&h, "Test Agent", REDIRECT).await;
@@ -388,7 +389,7 @@ async fn an_unregistered_redirect_uri_renders_a_page_and_never_redirects(pool: P
 /// can say something useful instead of hanging on a callback that never comes.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn declining_sends_the_client_an_error_not_a_dead_end(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     let org_id = org_with_owner(&h, "acme", &rob).await;
     let client_id = register(&h, "Test Agent", REDIRECT).await;
@@ -427,7 +428,7 @@ async fn declining_sends_the_client_an_error_not_a_dead_end(pool: PgPool) {
 /// hand-edited form field is the whole attack surface for a cross-tenant token.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn consent_cannot_name_an_org_the_caller_is_not_in(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     let mallory = onboard(&h, "mallory@evil.test").await;
     let acme = org_with_owner(&h, "acme", &rob).await;
@@ -464,11 +465,11 @@ async fn consent_cannot_name_an_org_the_caller_is_not_in(pool: PgPool) {
 /// A client cannot be granted authority the human granting it does not hold.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn a_member_cannot_consent_to_org_admin(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     let bob = onboard(&h, "bob@acme.test").await;
     let org = org_with_owner(&h, "acme", &rob).await;
-    common::add_member(&h, org, bob.user, of_core::orgs::Role::Member).await;
+    common::add_member(&h, org, bob.user, otto_core::orgs::Role::Member).await;
 
     let client_id = register(&h, "Test Agent", REDIRECT).await;
     let (_, challenge) = pkce();
@@ -502,13 +503,13 @@ async fn a_member_cannot_consent_to_org_admin(pool: PgPool) {
 /// author debugging a bare `invalid_request` has nothing to go on.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn the_token_endpoint_refuses_a_request_without_pkce(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let client_id = register(&h, "Test Agent", REDIRECT).await;
 
     let refused = Call::post("/oauth/token")
         .form(&[
             ("grant_type", "authorization_code"),
-            ("code", "of_ac_whatever"),
+            ("code", "otto_ac_whatever"),
             ("client_id", &client_id),
             ("redirect_uri", REDIRECT),
         ])
@@ -532,7 +533,7 @@ async fn the_token_endpoint_refuses_a_request_without_pkce(pool: PgPool) {
 
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn an_unsupported_grant_type_says_what_is_supported(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let client_id = register(&h, "Test Agent", REDIRECT).await;
 
     let refused = Call::post("/oauth/token")
@@ -555,7 +556,7 @@ async fn an_unsupported_grant_type_says_what_is_supported(pool: PgPool) {
 /// holds. This is the property PKCE exists for, checked at the HTTP edge.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn a_stolen_code_is_useless_without_the_verifier(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     let org_id = org_with_owner(&h, "acme", &rob).await;
     let client_id = register(&h, "Test Agent", REDIRECT).await;
@@ -595,9 +596,9 @@ async fn a_stolen_code_is_useless_without_the_verifier(pool: PgPool) {
 /// reported otherwise would be an oracle for testing stolen tokens.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn revocation_is_silent_about_whether_the_token_existed(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     Call::post("/oauth/revoke")
-        .form(&[("token", "of_at_never-existed")])
+        .form(&[("token", "otto_at_never-existed")])
         .send(&h.router)
         .await
         .expect(StatusCode::OK);
@@ -609,7 +610,7 @@ async fn revocation_is_silent_about_whether_the_token_existed(pool: PgPool) {
 /// keeps an authorization code from crossing the network in the clear.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn registration_screens_the_redirect_uris_it_will_accept(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
 
     for (uri, why) in [
         ("http://app.example.com/cb", "cleartext to a public host"),
@@ -641,7 +642,7 @@ async fn registration_screens_the_redirect_uris_it_will_accept(pool: PgPool) {
 /// row, so the endpoint the plan puts behind a throttle is actually throttled.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn a_registered_client_is_usable_and_named_on_the_consent_screen(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     org_with_owner(&h, "acme", &rob).await;
 
@@ -686,7 +687,7 @@ async fn a_registered_client_is_usable_and_named_on_the_consent_screen(pool: PgP
 /// `users.locale` NULL, which is what makes this test about the header.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn the_consent_page_negotiates_accept_language(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     org_with_owner(&h, "acme", &rob).await;
     let client_id = register(&h, "Test Agent", REDIRECT).await;
@@ -735,7 +736,7 @@ async fn the_consent_page_negotiates_accept_language(pool: PgPool) {
 /// Weights and region subtags reach the page, not just bare tags.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn the_consent_page_honours_weights_and_region_subtags(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     org_with_owner(&h, "acme", &rob).await;
     let client_id = register(&h, "Test Agent", REDIRECT).await;
@@ -767,7 +768,7 @@ async fn the_consent_page_honours_weights_and_region_subtags(pool: PgPool) {
 /// all: somebody who set Spanish on an English-configured work laptop meant it.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn a_stored_locale_beats_the_header(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     org_with_owner(&h, "acme", &rob).await;
     let client_id = register(&h, "Test Agent", REDIRECT).await;
@@ -809,7 +810,7 @@ async fn a_stored_locale_beats_the_header(pool: PgPool) {
 /// page in the same flow.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn the_error_page_speaks_the_same_language_as_the_consent_page(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     org_with_owner(&h, "acme", &rob).await;
     let (_, challenge) = pkce();
@@ -854,7 +855,7 @@ async fn the_error_page_speaks_the_same_language_as_the_consent_page(pool: PgPoo
 /// translatable because the text is ours rather than an `AuthError`'s.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn the_no_organization_page_is_translated(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     // A name with markup in it, because `client_name` is self-asserted through
     // open registration and this page is where it is shown.
@@ -883,4 +884,102 @@ async fn the_no_organization_page_is_translated(pool: PgPool) {
         !page.text.contains("&amp;lt;"),
         "the client name was double-escaped, so the page misreports who is asking"
     );
+}
+
+// ------------------------------------------- one consent page, one resource
+
+/// The registry knows every otto-* resource server, but this consent screen and
+/// its `org:admin` gate describe only otto-factory's. A client that names
+/// another registered resource must be refused, on both the page and the
+/// decision, and no code may be issued for it.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn the_consent_flow_refuses_another_registered_resource(pool: PgPool) {
+    let h = harness(pool).await;
+    otto_auth::resources::register(
+        &h.db,
+        otto_auth::resources::ResourceServerSpec {
+            resource_uri: "https://flags.otto.test/mcp",
+            name: "otto-flags",
+            scopes: &["flags:read", "flags:write"],
+            default_scopes: &["flags:read"],
+        },
+    )
+    .await
+    .unwrap();
+
+    let rob = onboard(&h, "rob@acme.test").await;
+    org_with_owner(&h, "acme", &rob).await;
+    let client_id = register(&h, "Test Agent", REDIRECT).await;
+    let (_, challenge) = pkce();
+
+    let other = "https%3A%2F%2Fflags.otto.test%2Fmcp";
+    let page = Call::get(format!(
+        "{}&resource={other}",
+        authorize_url(&client_id, &challenge, "flags:read", "s")
+    ))
+    .with_session(&rob.session)
+    .send(&h.router)
+    .await;
+    page.expect(StatusCode::BAD_REQUEST);
+    assert!(page.text.contains("not served by this authorization page"));
+
+    let org_id = h.db.get_org_by_slug("acme").await.unwrap().unwrap().id;
+    let decision = Call::post("/oauth/authorize")
+        .with_session(&rob.session)
+        .form(&[
+            ("response_type", "code"),
+            ("client_id", &client_id),
+            ("redirect_uri", REDIRECT),
+            ("code_challenge", &challenge),
+            ("code_challenge_method", "S256"),
+            ("scope", "flags:read"),
+            ("resource", "https://flags.otto.test/mcp"),
+            ("state", "s"),
+            ("org_id", &org_id.to_string()),
+            ("decision", "allow"),
+        ])
+        .send(&h.router)
+        .await;
+    decision.expect(StatusCode::BAD_REQUEST);
+    assert!(
+        decision.headers.get(http::header::LOCATION).is_none(),
+        "a refused resource must not redirect with a code"
+    );
+}
+
+// ------------------------------------------------- discovery under an outage
+
+/// The open discovery documents read the registry. A database that cannot
+/// answer is a "retry" condition (`503`), never a `500`.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn discovery_is_503_when_the_database_is_unreachable(pool: PgPool) {
+    let h = common::harness_with_unreachable_db(pool).await;
+
+    for path in [
+        "/.well-known/oauth-authorization-server",
+        "/.well-known/oauth-protected-resource",
+    ] {
+        let reply = Call::get(path).send(&h.router).await;
+        reply.expect(StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            reply.error_code(),
+            Some("temporarily_unavailable"),
+            "{path}"
+        );
+    }
+}
+
+/// A resource missing from the registry is a genuine misconfiguration (the
+/// service registers itself at startup), so it stays a `500`.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_missing_registry_row_is_a_500_not_a_503(pool: PgPool) {
+    let h = harness(pool).await;
+    sqlx::query("DELETE FROM resource_servers")
+        .execute(h.db.pool())
+        .await
+        .unwrap();
+    let reply = Call::get("/.well-known/oauth-protected-resource")
+        .send(&h.router)
+        .await;
+    reply.expect(StatusCode::INTERNAL_SERVER_ERROR);
 }

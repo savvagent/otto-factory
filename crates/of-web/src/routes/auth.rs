@@ -29,11 +29,13 @@
 use axum::extract::{Json, State};
 use axum::response::{IntoResponse, Response};
 use http::request::Parts;
-use of_auth::ratelimit::{self, CapPolicy, LOGIN_CRED_CAP, LOGIN_IP_CAP};
-use of_auth::{login, passkeys, sessions, AuthError};
-use of_core::audit::{action, Entry};
-use of_core::ids::UserId;
-use of_core::orgs::User;
+use otto_auth::ratelimit::{self, CapPolicy, LOGIN_CRED_CAP, LOGIN_IP_CAP};
+use otto_auth::{login, passkeys, sessions, AuthError};
+use otto_core::invites::AccountClaimsExt;
+use otto_core::orgs::OrgsExt;
+use otto_core::orgs::User;
+use otto_tenant::audit::{action, Entry};
+use otto_tenant::ids::UserId;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{ApiError, ApiResult};
@@ -231,7 +233,7 @@ pub async fn login_start(
 /// `POST /api/auth/login/finish` — present the signature and open a session.
 ///
 /// Throttled on two independent keys (savvagent/otto-factory#75), both billed
-/// through `of_auth::ratelimit`'s rate **cap** rather than its exponential
+/// through `otto_auth::ratelimit`'s rate **cap** rather than its exponential
 /// lockout — see that module's docs for why a lockout is the wrong tool here.
 /// `passkeys::finish_authentication` decides the credential's account from the
 /// credential id alone, before any signature is verified, so this endpoint
@@ -383,7 +385,7 @@ pub async fn claim_finish(
     // 2 (see `Db::begin`'s doc comment) does not apply to it at all.
     let mut tx = state.db.begin_unpinned().await?;
     let user =
-        of_core::invites::consume_account_claim_tx(tx.conn(), &hash_claim(&req.code)).await?;
+        otto_core::invites::consume_account_claim_tx(tx.conn(), &hash_claim(&req.code)).await?;
 
     let registered = match passkeys::finish_registration_tx(
         &mut tx,
@@ -474,7 +476,7 @@ async fn throttle_by_source(state: &AppState, parts: &Parts) -> ApiResult<()> {
     };
 
     let bucket = format!("signup:{ip}");
-    of_auth::ratelimit::check_and_charge(&state.db, &bucket).await?;
+    otto_auth::ratelimit::check_and_charge(&state.db, &bucket).await?;
     Ok(())
 }
 
@@ -498,7 +500,7 @@ async fn signed_in_response(state: &AppState, logged_in: login::LoggedIn) -> Api
 }
 
 fn hash_claim(code: &str) -> Vec<u8> {
-    of_auth::crypto::hash(code.trim())
+    otto_auth::crypto::hash(code.trim())
 }
 
 /// `POST /api/auth/logout` — end this session.
@@ -525,7 +527,7 @@ pub async fn logout(State(state): State<AppState>, parts: Parts) -> ApiResult<Re
 #[serde(rename_all = "camelCase")]
 pub struct Me {
     pub user: User,
-    pub orgs: Vec<of_core::orgs::Membership>,
+    pub orgs: Vec<otto_core::orgs::Membership>,
     /// One passkey. The console nags for a second; see [`SessionOpened`].
     pub should_add_passkey: bool,
     pub passkey_count: i64,
@@ -537,7 +539,7 @@ pub struct Me {
     /// with. A second copy of the precedence and the prefix in TypeScript would
     /// drift, and the drift would be silent — the signal is accepted either way
     /// and would write words subtly unlike what registering again writes. See
-    /// `of_auth::passkeys::credential_names`.
+    /// `otto_auth::passkeys::credential_names`.
     pub credential_name: String,
     /// The row a human reads when a vault asks them to choose a key. Same rule:
     /// the console must never compose it.

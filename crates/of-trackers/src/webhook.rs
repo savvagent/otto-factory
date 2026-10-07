@@ -8,8 +8,8 @@
 
 use hmac::{Hmac, Mac};
 use http::HeaderMap;
-use of_core::crypto::Cipher;
 use of_core::trackers::{decode_stored_secret, Provider};
+use otto_tenant::crypto::Cipher;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;

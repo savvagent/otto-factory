@@ -339,11 +339,11 @@ pub fn sign_id_token(claims: &serde_json::Value) -> String {
 /// Queues, in order: the discovery document (served once, at connection-bind
 /// time, by `PUT .../sso/connection`), the JWKS document (served once, at
 /// first `verify_id_token`, and cached after that — see
-/// `of_auth::oidc::fetch_jwks`), and the token-exchange response naming
+/// `otto_auth::oidc::fetch_jwks`), and the token-exchange response naming
 /// `id_token`.
 pub struct FixtureIdp {
     pub server: TestServer,
-    /// `of_auth::oidc`'s JWKS cache is process-wide and keyed by `jwks_uri`
+    /// `otto_auth::oidc`'s JWKS cache is process-wide and keyed by `jwks_uri`
     /// (`JWKS_CACHE_TTL` = 5 minutes) — the *second* `verify_id_token` call
     /// against the same connection serves the cache and never touches this
     /// mock server again. [`Self::push_token_response`] tracks that so it

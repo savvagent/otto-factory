@@ -1,4 +1,4 @@
-use of_core::crypto::{Cipher, Sealed};
+use otto_tenant::crypto::{Cipher, Sealed};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 

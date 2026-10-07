@@ -15,7 +15,7 @@
 //! ## Three decisions worth knowing before changing anything here
 //!
 //! **No SQL lives in this crate.** Every statement is a `of-core` method on a
-//! [`of_core::Tx`], which cannot be constructed without an org. A query written
+//! [`otto_tenant::Tx`], which cannot be constructed without an org. A query written
 //! here would bypass the pinning that tenant isolation's second guard depends
 //! on, so there is no "just this once" version of it.
 //!
@@ -42,7 +42,7 @@ use std::sync::Arc;
 use axum::routing::{any_service, get};
 use axum::Router;
 use of_core::watch::Watcher;
-use of_core::Db;
+use otto_tenant::Db;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 
@@ -117,6 +117,34 @@ impl Config {
     }
 }
 
+/// Register this service's resource server (name, scopes, default scopes) with
+/// the authorization server's registry.
+///
+/// Call at every startup, after migrations. It is an idempotent upsert of what
+/// this binary knows about itself (`of_core::scopes`), so a release that adds a
+/// scope reaches the registry on boot with no operator step, and it leaves
+/// alone the two things only an operator may change: whether the resource is
+/// disabled, and its introspection credential.
+///
+/// Without this row the authorization server refuses every `/oauth/authorize`,
+/// code redemption, refresh, and PAT for [`Config::resource_uri`] with
+/// `invalid_target`, which is why startup treats a failure here as fatal.
+pub async fn register_resource(
+    db: &Db,
+    resource_uri: &str,
+) -> otto_auth::Result<otto_auth::resources::ResourceServer> {
+    otto_auth::resources::register(
+        db,
+        otto_auth::resources::ResourceServerSpec {
+            resource_uri,
+            name: of_core::scopes::RESOURCE_NAME,
+            scopes: of_core::scopes::KNOWN,
+            default_scopes: of_core::scopes::DEFAULT,
+        },
+    )
+    .await
+}
+
 /// Build the MCP surface, ready to be nested into `of-server`'s router.
 ///
 /// Two routes, and only one of them is authenticated:
@@ -164,7 +192,7 @@ pub fn router(db: Db, watcher: Arc<Watcher>, config: Config) -> Router {
 /// serves `/.well-known/oauth-protected-resource` too, and when both crates are
 /// merged onto one origin `axum::Router::merge` panics on the collision rather
 /// than picking a winner. Which one wins does not matter — both call
-/// `of_auth::oauth::protected_resource_metadata` with the same configured
+/// `otto_auth::oauth::protected_resource_metadata` with the same configured
 /// resource URI and public URL, so the two documents are byte-identical — and
 /// `of-web`'s is the one the OpenAPI document describes, so that is the one
 /// `of-server` keeps.

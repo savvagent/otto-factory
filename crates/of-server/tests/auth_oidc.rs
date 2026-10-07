@@ -1,4 +1,4 @@
-//! Recorded-fixture tests for `of_auth::oidc` — discovery fetch, authorization
+//! Recorded-fixture tests for `otto_auth::oidc` — discovery fetch, authorization
 //! URL construction, code exchange, and `id_token` verification. No live
 //! network: every HTTP call in here goes to `support::TestServer`, a local
 //! mock server started fresh per test. See `docs/specs/2026-09-16-oidc-federation-design.md`
@@ -11,8 +11,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use of_auth::error::AuthError;
-use of_auth::oidc;
+use otto_auth::error::AuthError;
+use otto_auth::oidc;
 use serde_json::json;
 use support::{MockResponse, TestServer};
 

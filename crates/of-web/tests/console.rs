@@ -7,6 +7,10 @@
 //! a role boundary holds at the HTTP edge, and that removing someone actually
 //! disconnects their agents.
 
+use of_core::jobs::JobsExt;
+use of_core::leases::LeasesExt;
+use otto_billing::usage::UsageExt;
+use otto_core::orgs::OrgsExt;
 mod common;
 
 use base64::Engine;
@@ -15,7 +19,7 @@ use common::{
     present_credential, sign_in, unregistered_credential, Call, CLIENT_IP_HEADER,
 };
 use http::StatusCode;
-use of_core::orgs::Role;
+use otto_core::orgs::Role;
 use sqlx::PgPool;
 
 // ------------------------------------------------------------- onboarding
@@ -24,7 +28,7 @@ use sqlx::PgPool;
 /// product has no first five minutes.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn a_new_user_signs_up_enrols_and_registers_a_repo(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
 
     let me = Call::get("/api/me")
@@ -66,7 +70,7 @@ async fn a_new_user_signs_up_enrols_and_registers_a_repo(pool: PgPool) {
 }
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn signing_in_and_out_works_and_a_dead_cookie_is_refused(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let mut rob = onboard(&h, "rob@acme.test").await;
 
     let signed_in = sign_in(&h, &mut rob).await;
@@ -102,7 +106,7 @@ async fn signing_in_and_out_works_and_a_dead_cookie_is_refused(pool: PgPool) {
 }
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn signing_out_everywhere_ends_every_session(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let mut rob = onboard(&h, "rob@acme.test").await;
 
     let second = sign_in(&h, &mut rob).await.session_cookie().unwrap();
@@ -140,11 +144,11 @@ async fn signing_out_everywhere_ends_every_session(pool: PgPool) {
 /// test.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn a_shared_address_is_throttled_not_locked_out(pool: PgPool) {
-    let h = harness_behind_proxy(pool);
+    let h = harness_behind_proxy(pool).await;
     let office = "198.51.100.4";
 
-    let per_credential = (of_auth::ratelimit::LOGIN_CRED_CAP.hard_cap - 1) as usize;
-    let needed = of_auth::ratelimit::LOGIN_IP_CAP.hard_cap as usize;
+    let per_credential = (otto_auth::ratelimit::LOGIN_CRED_CAP.hard_cap - 1) as usize;
+    let needed = otto_auth::ratelimit::LOGIN_IP_CAP.hard_cap as usize;
     let mut sent = 0usize;
 
     'outer: loop {
@@ -210,11 +214,11 @@ async fn a_shared_address_is_throttled_not_locked_out(pool: PgPool) {
 /// that just tripped the credential cap is still answered.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn probing_one_credential_is_capped_independently_of_the_address(pool: PgPool) {
-    let h = harness_behind_proxy(pool);
+    let h = harness_behind_proxy(pool).await;
     let (mut stranger, credential_id) = unregistered_credential(&h).await;
     let prober = "203.0.113.7";
 
-    for attempt in 1..=of_auth::ratelimit::LOGIN_CRED_CAP.hard_cap {
+    for attempt in 1..=otto_auth::ratelimit::LOGIN_CRED_CAP.hard_cap {
         let reply = present_credential(&h, &mut stranger, &credential_id, Some(prober)).await;
         assert_eq!(
             reply.error_code(),
@@ -248,7 +252,7 @@ async fn probing_one_credential_is_capped_independently_of_the_address(pool: PgP
 /// no matter how many times it is retried, never `rate_limited`.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn ceremony_expired_is_never_charged_against_any_bucket(pool: PgPool) {
-    let h = harness_behind_proxy(pool);
+    let h = harness_behind_proxy(pool).await;
     let mut rob = onboard(&h, "rob@acme.test").await;
     let prober = "203.0.113.9";
 
@@ -284,7 +288,7 @@ async fn ceremony_expired_is_never_charged_against_any_bucket(pool: PgPool) {
     // Every further presentation of that same, now-consumed ceremony id must
     // report it as expired — well past the credential cap's hard limit —
     // and never once degrade into a rate-limit refusal.
-    let attempts = of_auth::ratelimit::LOGIN_CRED_CAP.hard_cap + 5;
+    let attempts = otto_auth::ratelimit::LOGIN_CRED_CAP.hard_cap + 5;
     for attempt in 1..=attempts {
         let reply = Call::post("/api/auth/login/finish")
             .header(CLIENT_IP_HEADER, prober)
@@ -312,7 +316,7 @@ async fn ceremony_expired_is_never_charged_against_any_bucket(pool: PgPool) {
 /// unauthenticated caller can ask for.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn the_relying_party_id_is_published_and_matches_the_challenge(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
 
     let config = Call::get("/api/auth/webauthn").send(&h.router).await;
     config.expect(StatusCode::OK);
@@ -337,7 +341,7 @@ async fn the_relying_party_id_is_published_and_matches_the_challenge(pool: PgPoo
 /// server composes — never one TypeScript composed from the same rule.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn console_signal_matches_the_challenge(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
 
     let started = Call::post("/api/me/passkeys/start")
@@ -365,7 +369,7 @@ async fn console_signal_matches_the_challenge(pool: PgPool) {
     assert!(!label.is_empty(), "every account carries generated words");
     assert_eq!(
         me.body["credentialDisplayName"],
-        format!("otto-factory · {label}"),
+        format!("Otto Platform · {label}"),
     );
 }
 
@@ -376,7 +380,8 @@ async fn console_signal_matches_the_challenge(pool: PgPool) {
 /// parameters exist to record — `via: "add"`, and an IP that is not null.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn add_passkey_finish_records_the_add_flow_and_its_ip(pool: PgPool) {
-    let db = of_core::Db::from_pool(pool);
+    let db = otto_tenant::Db::from_pool(pool);
+    common::register_resource(&db).await;
     let mut config = of_web::Config::new(common::PUBLIC_URL, common::RESOURCE);
     config.client_ip_header = Some("x-forwarded-for".into());
     let webauthn = of_web::relying_party(&config).expect("relying party");
@@ -432,7 +437,7 @@ async fn add_passkey_finish_records_the_add_flow_and_its_ip(pool: PgPool) {
          WHERE action = $1 AND actor_user_id = $2 \
          ORDER BY id DESC LIMIT 1",
     )
-    .bind(of_core::audit::action::PASSKEY_REGISTERED)
+    .bind(otto_tenant::audit::action::PASSKEY_REGISTERED)
     .bind(rob.user)
     .fetch_one(h.db.pool())
     .await
@@ -453,7 +458,7 @@ async fn add_passkey_finish_records_the_add_flow_and_its_ip(pool: PgPool) {
 /// deliberately — see `finish_registration`'s own doc comment.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn add_passkey_finish_refuses_a_ceremony_started_by_another_account(pool: PgPool) {
-    let h = common::harness(pool);
+    let h = common::harness(pool).await;
 
     // `onboard` itself drives a real signup ceremony for each account, so
     // each already has exactly one `passkeys` row and one
@@ -522,7 +527,7 @@ async fn add_passkey_finish_refuses_a_ceremony_started_by_another_account(pool: 
     let audit_count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM audit_events WHERE action = $1 AND actor_user_id = $2",
     )
-    .bind(of_core::audit::action::PASSKEY_REGISTERED)
+    .bind(otto_tenant::audit::action::PASSKEY_REGISTERED)
     .bind(owner.user)
     .fetch_one(h.db.pool())
     .await
@@ -536,9 +541,9 @@ async fn add_passkey_finish_refuses_a_ceremony_started_by_another_account(pool: 
     // The refusal itself still leaves a trace — on a separate connection from
     // the one that rolled back — naming both the ceremony's real account and
     // who attempted to finish it.
-    let refusal: (of_core::ids::UserId, serde_json::Value) =
+    let refusal: (otto_tenant::ids::UserId, serde_json::Value) =
         sqlx::query_as("SELECT actor_user_id, detail FROM audit_events WHERE action = $1")
-            .bind(of_core::audit::action::PASSKEY_REGISTRATION_REFUSED)
+            .bind(otto_tenant::audit::action::PASSKEY_REGISTRATION_REFUSED)
             .fetch_one(h.db.pool())
             .await
             .unwrap();
@@ -557,7 +562,7 @@ async fn add_passkey_finish_refuses_a_ceremony_started_by_another_account(pool: 
 /// against what the authenticator holds without re-encoding either.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn the_passkey_list_carries_the_credential_id_a_browser_matches_on(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
 
     let keys = Call::get("/api/me/passkeys")
@@ -604,7 +609,7 @@ async fn the_passkey_list_carries_the_credential_id_a_browser_matches_on(pool: P
 /// there turns any account into a customer directory.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn another_orgs_data_is_not_merely_forbidden_it_is_invisible(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     let mallory = onboard(&h, "mallory@evil.test").await;
 
@@ -640,7 +645,7 @@ async fn another_orgs_data_is_not_merely_forbidden_it_is_invisible(pool: PgPool)
 }
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn a_member_cannot_do_what_an_admin_can(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     let bob = onboard(&h, "bob@acme.test").await;
 
@@ -686,7 +691,7 @@ async fn a_member_cannot_do_what_an_admin_can(pool: PgPool) {
 /// database access could repair it.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn the_last_owner_cannot_be_removed_or_demoted(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     let bob = onboard(&h, "bob@acme.test").await;
     let org = org_with_owner(&h, "acme", &rob).await;
@@ -725,7 +730,7 @@ async fn the_last_owner_cannot_be_removed_or_demoted(pool: PgPool) {
 /// powers one request away.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn only_an_owner_may_create_another_owner(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     let bob = onboard(&h, "bob@acme.test").await;
     let org = org_with_owner(&h, "acme", &rob).await;
@@ -752,7 +757,7 @@ async fn only_an_owner_may_create_another_owner(pool: PgPool) {
 /// thing that blocks the request, isolating the privilege check.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn an_admin_cannot_remove_an_owner(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     let bob = onboard(&h, "bob@acme.test").await;
     let carol = onboard(&h, "carol@acme.test").await;
@@ -779,7 +784,7 @@ async fn an_admin_cannot_remove_an_owner(pool: PgPool) {
 /// console would show them gone while their agent kept working the queue.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn removing_a_member_revokes_their_tokens_for_that_org(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     let bob = onboard(&h, "bob@acme.test").await;
 
@@ -805,7 +810,7 @@ async fn removing_a_member_revokes_their_tokens_for_that_org(pool: PgPool) {
     let other_token = elsewhere.body["token"].as_str().unwrap().to_string();
 
     // The token works before removal.
-    of_auth::tokens::introspect(&h.db, &token, common::RESOURCE)
+    otto_auth::tokens::introspect(&h.db, &token, common::RESOURCE)
         .await
         .expect("a freshly minted token should introspect");
 
@@ -816,12 +821,12 @@ async fn removing_a_member_revokes_their_tokens_for_that_org(pool: PgPool) {
         .expect(StatusCode::NO_CONTENT);
 
     assert!(
-        of_auth::tokens::introspect(&h.db, &token, common::RESOURCE)
+        otto_auth::tokens::introspect(&h.db, &token, common::RESOURCE)
             .await
             .is_err(),
         "a removed member's agent kept a working token"
     );
-    of_auth::tokens::introspect(&h.db, &other_token, common::RESOURCE)
+    otto_auth::tokens::introspect(&h.db, &other_token, common::RESOURCE)
         .await
         .expect("their token for an unrelated org must survive");
 
@@ -843,7 +848,7 @@ async fn removing_a_member_revokes_their_tokens_for_that_org(pool: PgPool) {
 /// on `ProfileRequest`.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn the_console_language_is_set_cleared_and_left_alone(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
 
     let fresh = Call::get("/api/me")
@@ -891,7 +896,7 @@ async fn the_console_language_is_set_cleared_and_left_alone(pool: PgPool) {
 
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn an_unsupported_language_is_refused_by_name(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
 
     let refused = Call::patch("/api/me")
@@ -903,7 +908,7 @@ async fn an_unsupported_language_is_refused_by_name(pool: PgPool) {
     assert_eq!(refused.error_code(), Some("invalid_argument"));
 
     let message = refused.body["error"]["message"].as_str().unwrap();
-    for locale in of_core::i18n::SUPPORTED_LOCALES {
+    for locale in otto_core::i18n::SUPPORTED_LOCALES {
         assert!(
             message.contains(locale),
             "{message:?} should name the supported locale {locale}"
@@ -924,7 +929,7 @@ async fn an_unsupported_language_is_refused_by_name(pool: PgPool) {
 
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn an_invitation_code_is_handed_back_accepted_once_and_grants_its_role(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     org_with_owner(&h, "acme", &rob).await;
     let bob = onboard(&h, "bob@acme.test").await;
@@ -939,7 +944,7 @@ async fn an_invitation_code_is_handed_back_accepted_once_and_grants_its_role(poo
     // The code comes back to the admin — there is no mailbox it went to
     // instead — and the link is the same secret wrapped in a console URL.
     let token = invited.body["code"].as_str().expect("no code").to_string();
-    assert!(token.starts_with("of_inv_"), "unexpected code: {token}");
+    assert!(token.starts_with("otto_inv_"), "unexpected code: {token}");
     assert_eq!(
         invited.body["link"],
         format!("https://console.otto-factory.test/invite/acme?token={token}")
@@ -979,7 +984,7 @@ async fn an_invitation_code_is_handed_back_accepted_once_and_grants_its_role(poo
 /// A forwarded invitation mail must not be a way into someone else's org.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn an_invitation_cannot_be_accepted_by_the_wrong_account(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     org_with_owner(&h, "acme", &rob).await;
     let mallory = onboard(&h, "mallory@evil.test").await;
@@ -1022,7 +1027,7 @@ async fn an_invitation_cannot_be_accepted_by_the_wrong_account(pool: PgPool) {
 
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn a_withdrawn_invitation_stops_working(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     org_with_owner(&h, "acme", &rob).await;
     let bob = onboard(&h, "bob@acme.test").await;
@@ -1053,7 +1058,7 @@ async fn a_withdrawn_invitation_stops_working(pool: PgPool) {
 /// otherwise the invite endpoint is a way around the role check on members.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn an_admin_cannot_invite_an_owner(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     let bob = onboard(&h, "bob@acme.test").await;
     let org = org_with_owner(&h, "acme", &rob).await;
@@ -1079,7 +1084,7 @@ async fn an_admin_cannot_invite_an_owner(pool: PgPool) {
 
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn teams_scope_repos_and_refuse_to_widen_them_on_delete(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     org_with_owner(&h, "acme", &rob).await;
 
@@ -1143,7 +1148,7 @@ async fn teams_scope_repos_and_refuse_to_widen_them_on_delete(pool: PgPool) {
 
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn an_unknown_team_slug_names_the_alternatives(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     org_with_owner(&h, "acme", &rob).await;
 
@@ -1177,10 +1182,10 @@ async fn an_unknown_team_slug_names_the_alternatives(pool: PgPool) {
 /// be evidence of a route that should not be there.
 async fn enqueue(
     h: &common::Harness,
-    org: of_core::ids::OrgId,
+    org: otto_tenant::ids::OrgId,
     repo: of_core::ids::RepoId,
     title: &str,
-    created_by: of_core::ids::UserId,
+    created_by: otto_tenant::ids::UserId,
 ) -> of_core::jobs::Job {
     let mut tx = h.db.begin(org).await.unwrap();
     let job = tx
@@ -1198,7 +1203,7 @@ async fn enqueue(
 
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn the_queue_view_lists_filters_and_counts(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     let sam = onboard(&h, "sam@acme.test").await;
     let acme = org_with_owner(&h, "acme", &rob).await;
@@ -1315,7 +1320,7 @@ async fn the_queue_view_lists_filters_and_counts(pool: PgPool) {
 /// status already goes through.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn an_active_job_is_visible_in_the_queue_and_its_stats(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     let acme = org_with_owner(&h, "acme", &rob).await;
 
@@ -1364,7 +1369,7 @@ async fn an_active_job_is_visible_in_the_queue_and_its_stats(pool: PgPool) {
 
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn a_job_detail_names_what_it_is_waiting_for(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     let acme = org_with_owner(&h, "acme", &rob).await;
 
@@ -1414,7 +1419,7 @@ async fn a_job_detail_names_what_it_is_waiting_for(pool: PgPool) {
 
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn an_unknown_repo_filter_names_the_registered_slugs(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     org_with_owner(&h, "acme", &rob).await;
 
@@ -1452,7 +1457,7 @@ async fn an_unknown_repo_filter_names_the_registered_slugs(pool: PgPool) {
 
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn one_orgs_queue_is_invisible_to_another(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     let mal = onboard(&h, "mal@other.test").await;
     let acme = org_with_owner(&h, "acme", &rob).await;
@@ -1503,7 +1508,7 @@ async fn one_orgs_queue_is_invisible_to_another(pool: PgPool) {
 /// for jobs above.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn the_lease_route_reports_the_resource_field(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     let acme = org_with_owner(&h, "acme", &rob).await;
 
@@ -1549,7 +1554,7 @@ async fn the_lease_route_reports_the_resource_field(pool: PgPool) {
 
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn repos_list_reports_lease_presence_and_never_another_orgs(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     let mallory = onboard(&h, "mallory@evil.test").await;
     let acme = org_with_owner(&h, "acme", &rob).await;
@@ -1640,7 +1645,7 @@ async fn repos_list_reports_lease_presence_and_never_another_orgs(pool: PgPool) 
 
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn a_pat_is_shown_once_audienced_for_mcp_and_revocable(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     org_with_owner(&h, "acme", &rob).await;
 
@@ -1653,17 +1658,17 @@ async fn a_pat_is_shown_once_audienced_for_mcp_and_revocable(pool: PgPool) {
 
     let token = minted.body["token"].as_str().unwrap().to_string();
     let id = minted.body["id"].as_str().unwrap().to_string();
-    assert!(token.starts_with("of_pat_"));
+    assert!(token.starts_with("otto_pat_"));
     assert_eq!(minted.body["resource"], common::RESOURCE);
 
-    let principal = of_auth::tokens::introspect(&h.db, &token, common::RESOURCE)
+    let principal = otto_auth::tokens::introspect(&h.db, &token, common::RESOURCE)
         .await
         .expect("a minted PAT must introspect against the MCP resource");
     assert!(principal.has_scope("jobs:write"));
 
     // Audienced: a token for this resource is refused by any other.
     assert!(
-        of_auth::tokens::introspect(&h.db, &token, "https://someone-else.test/mcp")
+        otto_auth::tokens::introspect(&h.db, &token, "https://someone-else.test/mcp")
             .await
             .is_err(),
         "the audience check is what stops a confused deputy"
@@ -1688,7 +1693,7 @@ async fn a_pat_is_shown_once_audienced_for_mcp_and_revocable(pool: PgPool) {
         .expect(StatusCode::NO_CONTENT);
 
     assert!(
-        of_auth::tokens::introspect(&h.db, &token, common::RESOURCE)
+        otto_auth::tokens::introspect(&h.db, &token, common::RESOURCE)
             .await
             .is_err(),
         "revocation must take effect immediately"
@@ -1698,7 +1703,7 @@ async fn a_pat_is_shown_once_audienced_for_mcp_and_revocable(pool: PgPool) {
 /// A PAT must not be a way to obtain a scope the console would not grant.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn a_member_cannot_mint_an_admin_scoped_token(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     let bob = onboard(&h, "bob@acme.test").await;
     let org = org_with_owner(&h, "acme", &rob).await;
@@ -1727,7 +1732,7 @@ async fn a_member_cannot_mint_an_admin_scoped_token(pool: PgPool) {
 /// You cannot revoke another member's token even holding its id.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn one_member_cannot_revoke_anothers_token(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     let bob = onboard(&h, "bob@acme.test").await;
     let org = org_with_owner(&h, "acme", &rob).await;
@@ -1749,14 +1754,14 @@ async fn one_member_cannot_revoke_anothers_token(pool: PgPool) {
         .await
         .expect(StatusCode::NOT_FOUND);
 
-    of_auth::tokens::introspect(&h.db, &token, common::RESOURCE)
+    otto_auth::tokens::introspect(&h.db, &token, common::RESOURCE)
         .await
         .expect("the token should still be live");
 }
 
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn usage_reads_the_same_numbers_the_agent_sees(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     let org = org_with_owner(&h, "acme", &rob).await;
 
@@ -1791,7 +1796,7 @@ async fn usage_reads_the_same_numbers_the_agent_sees(pool: PgPool) {
 /// credential — a client generator cannot log in.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn the_openapi_document_is_public_and_describes_the_surface(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let doc = Call::get("/api/openapi.json").send(&h.router).await;
     doc.expect(StatusCode::OK);
 
@@ -1809,7 +1814,7 @@ async fn the_openapi_document_is_public_and_describes_the_surface(pool: PgPool) 
 /// `version.workspace = true`, so it reads from the workspace root.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn the_openapi_document_version_matches_workspace_version(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let doc = Call::get("/api/openapi.json").send(&h.router).await;
     doc.expect(StatusCode::OK);
 
@@ -1850,7 +1855,7 @@ fn the_console_and_the_server_agree_on_the_version() {
 /// empty one.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn every_documented_get_is_actually_mounted(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     org_with_owner(&h, "acme", &rob).await;
 
@@ -1901,11 +1906,11 @@ async fn every_documented_get_is_actually_mounted(pool: PgPool) {
 /// weight the mailed recovery link used to.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn an_admin_can_reset_a_members_authenticator_but_gains_nothing_by_it(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     let acme = org_with_owner(&h, "acme", &rob).await;
     let mut bob = onboard(&h, "bob@acme.test").await;
-    add_member(&h, acme, bob.user, of_core::orgs::Role::Member).await;
+    add_member(&h, acme, bob.user, otto_core::orgs::Role::Member).await;
 
     let reset = Call::post(format!(
         "/api/orgs/acme/members/{}/reset-passkeys",
@@ -1941,11 +1946,11 @@ async fn an_admin_can_reset_a_members_authenticator_but_gains_nothing_by_it(pool
     // and NULL-org, on the theory it mirrored a self-service clear (which
     // does not exist in production), and was dropped rather than merely
     // re-scoped when #134 made this call site atomic. See
-    // `of_auth::passkeys::clear`'s doc comment.
+    // `otto_auth::passkeys::clear`'s doc comment.
     let cleared: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM audit_events WHERE action = $1 AND target_id = $2",
     )
-    .bind(of_core::audit::action::PASSKEY_CLEARED)
+    .bind(otto_tenant::audit::action::PASSKEY_CLEARED)
     .bind(bob.user.to_string())
     .fetch_one(h.db.pool())
     .await
@@ -2025,11 +2030,11 @@ async fn an_admin_can_reset_a_members_authenticator_but_gains_nothing_by_it(pool
 /// either.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn a_forced_audit_failure_rolls_back_an_admin_assisted_reset(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     let acme = org_with_owner(&h, "acme", &rob).await;
     let mut bob = onboard(&h, "bob@acme.test").await;
-    add_member(&h, acme, bob.user, of_core::orgs::Role::Member).await;
+    add_member(&h, acme, bob.user, otto_core::orgs::Role::Member).await;
 
     sqlx::query(
         "CREATE FUNCTION reject_reset_audit() RETURNS trigger AS $$ \
@@ -2110,11 +2115,11 @@ async fn a_forced_audit_failure_rolls_back_an_admin_assisted_reset(pool: PgPool)
 /// race is the takeover the code exists to prevent.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn a_reset_account_cannot_be_claimed_without_the_code(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     let org = org_with_owner(&h, "acme", &rob).await;
     let bob = onboard(&h, "bob@acme.test").await;
-    add_member(&h, org, bob.user, of_core::orgs::Role::Member).await;
+    add_member(&h, org, bob.user, otto_core::orgs::Role::Member).await;
 
     Call::post(format!(
         "/api/orgs/acme/members/{}/reset-passkeys",
@@ -2127,7 +2132,7 @@ async fn a_reset_account_cannot_be_claimed_without_the_code(pool: PgPool) {
 
     // A stranger with a guessed code gets nowhere.
     let guessed = Call::post("/api/auth/claim/start")
-        .json(serde_json::json!({ "code": "of_inv_not-a-real-code" }))
+        .json(serde_json::json!({ "code": "otto_inv_not-a-real-code" }))
         .send(&h.router)
         .await;
     assert_ne!(guessed.status, StatusCode::OK);
@@ -2156,11 +2161,11 @@ async fn a_reset_account_cannot_be_claimed_without_the_code(pool: PgPool) {
 /// above them could issue a second one.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn a_credential_collision_during_claim_finish_leaves_the_claim_code_usable(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     let org = org_with_owner(&h, "acme", &rob).await;
     let bob = onboard(&h, "bob@acme.test").await;
-    add_member(&h, org, bob.user, of_core::orgs::Role::Member).await;
+    add_member(&h, org, bob.user, otto_core::orgs::Role::Member).await;
 
     let reset = Call::post(format!(
         "/api/orgs/acme/members/{}/reset-passkeys",
@@ -2264,13 +2269,13 @@ async fn a_credential_collision_during_claim_finish_leaves_the_claim_code_usable
 /// (Carol), the substitution the check exists to catch.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn a_ceremony_ownership_mismatch_leaves_the_claim_and_ceremony_usable(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     let org = org_with_owner(&h, "acme", &rob).await;
     let bob = onboard(&h, "bob@acme.test").await;
     let carol = onboard(&h, "carol@acme.test").await;
-    add_member(&h, org, bob.user, of_core::orgs::Role::Member).await;
-    add_member(&h, org, carol.user, of_core::orgs::Role::Member).await;
+    add_member(&h, org, bob.user, otto_core::orgs::Role::Member).await;
+    add_member(&h, org, carol.user, otto_core::orgs::Role::Member).await;
 
     let reset_bob = Call::post(format!(
         "/api/orgs/acme/members/{}/reset-passkeys",
@@ -2332,7 +2337,7 @@ async fn a_ceremony_ownership_mismatch_leaves_the_claim_and_ceremony_usable(pool
     let refused: (Option<String>,) = sqlx::query_as(
         "SELECT actor_user_id::text FROM audit_events WHERE action = $1 AND org_id IS NULL",
     )
-    .bind(of_core::audit::action::CLAIM_REFUSED)
+    .bind(otto_tenant::audit::action::CLAIM_REFUSED)
     .fetch_one(h.db.pool())
     .await
     .unwrap();
@@ -2392,11 +2397,11 @@ async fn a_ceremony_ownership_mismatch_leaves_the_claim_and_ceremony_usable(pool
 /// changed.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn a_forced_audit_failure_during_claim_finish_also_restores_the_claim(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     let org = org_with_owner(&h, "acme", &rob).await;
     let bob = onboard(&h, "bob@acme.test").await;
-    add_member(&h, org, bob.user, of_core::orgs::Role::Member).await;
+    add_member(&h, org, bob.user, otto_core::orgs::Role::Member).await;
 
     let reset = Call::post(format!(
         "/api/orgs/acme/members/{}/reset-passkeys",
@@ -2486,11 +2491,11 @@ async fn a_forced_audit_failure_during_claim_finish_also_restores_the_claim(pool
 /// everywhere else — resetting an owner is an owner's business.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn an_admin_cannot_reset_an_owners_authenticator(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let mut owner = onboard(&h, "owner@acme.test").await;
     let org = org_with_owner(&h, "acme", &owner).await;
     let admin = onboard(&h, "admin@acme.test").await;
-    add_member(&h, org, admin.user, of_core::orgs::Role::Admin).await;
+    add_member(&h, org, admin.user, otto_core::orgs::Role::Admin).await;
 
     let refused = Call::post(format!(
         "/api/orgs/acme/members/{}/reset-passkeys",
@@ -2512,7 +2517,7 @@ async fn an_admin_cannot_reset_an_owners_authenticator(pool: PgPool) {
 /// same reason `GET /repos` is: it describes a repo the member can already see.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn only_an_admin_can_connect_a_tracker_or_bind_a_repo(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     let bob = onboard(&h, "bob@acme.test").await;
 
@@ -2554,7 +2559,7 @@ async fn only_an_admin_can_connect_a_tracker_or_bind_a_repo(pool: PgPool) {
 /// binding names the customer's JIRA project key.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn another_orgs_tracker_routes_are_invisible(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     let mallory = onboard(&h, "mallory@evil.test").await;
 
@@ -2609,7 +2614,7 @@ async fn another_orgs_tracker_routes_are_invisible(pool: PgPool) {
 /// against; a project key is what it matches `fields.project.key` against.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn a_binding_that_could_never_match_an_event_is_refused(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     org_with_owner(&h, "acme", &rob).await;
 
@@ -2687,7 +2692,7 @@ async fn a_binding_that_could_never_match_an_event_is_refused(pool: PgPool) {
 /// protect. The listing is a view type for this reason, not the domain row.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn the_connection_listing_never_carries_stored_secrets(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     let org = org_with_owner(&h, "acme", &rob).await;
 
@@ -2732,7 +2737,7 @@ async fn the_connection_listing_never_carries_stored_secrets(pool: PgPool) {
 /// deployment shape being asserted.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn a_deployment_that_cannot_connect_a_provider_says_so(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     org_with_owner(&h, "acme", &rob).await;
 
@@ -2766,7 +2771,7 @@ async fn a_deployment_that_cannot_connect_a_provider_says_so(pool: PgPool) {
 /// call to GitHub, which is what lets this test run without a network.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn connecting_github_without_an_installation_id_is_refused(pool: PgPool) {
-    let h = harness_with_trackers(pool);
+    let h = harness_with_trackers(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     org_with_owner(&h, "acme", &rob).await;
 
@@ -2808,7 +2813,7 @@ async fn connecting_github_without_an_installation_id_is_refused(pool: PgPool) {
 /// silence — the same rule the MCP errors follow.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn an_unknown_provider_names_the_ones_that_exist(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     org_with_owner(&h, "acme", &rob).await;
 
@@ -2835,7 +2840,7 @@ async fn an_unknown_provider_names_the_ones_that_exist(pool: PgPool) {
 /// It is ignored, and the repo is created.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn the_console_ignores_the_retired_tracker_binding_field(pool: PgPool) {
-    let h = harness(pool);
+    let h = harness(pool).await;
     let rob = onboard(&h, "rob@acme.test").await;
     org_with_owner(&h, "acme", &rob).await;
 

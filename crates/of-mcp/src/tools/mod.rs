@@ -19,8 +19,9 @@
 //! mirrored into view structs.
 
 use of_core::ids::RepoId;
+use of_core::repos::ReposExt;
 use of_core::repos::{Repo, RepoRef};
-use of_core::Tx;
+use otto_tenant::Tx;
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::model::ErrorData;
 
@@ -44,14 +45,10 @@ pub fn router() -> ToolRouter<Factory> {
         + Factory::org_router()
 }
 
-/// Scope names, matching [`of_auth::oauth::KNOWN_SCOPES`].
+/// Scope names. Defined once, in [`of_core::scopes`], which is also what the
+/// resource registry is populated from at startup.
 pub mod scope {
-    pub const JOBS_READ: &str = "jobs:read";
-    pub const JOBS_WRITE: &str = "jobs:write";
-    pub const REPOS_READ: &str = "repos:read";
-    pub const REPOS_WRITE: &str = "repos:write";
-    pub const MESSAGES: &str = "messages";
-    pub const TRACKERS: &str = "trackers";
+    pub use of_core::scopes::{JOBS_READ, JOBS_WRITE, MESSAGES, REPOS_READ, REPOS_WRITE, TRACKERS};
 }
 
 /// Resolve a repo the caller named, or fail with the error that lists what is

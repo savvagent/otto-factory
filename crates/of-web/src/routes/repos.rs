@@ -17,10 +17,14 @@
 
 use axum::extract::{Json, Path, State};
 use axum::response::{IntoResponse, Response};
-use of_core::audit::{action, Entry};
-use of_core::ids::TeamId;
+use of_core::audit::action;
 use of_core::leases::Lease;
+use of_core::leases::LeasesExt;
+use of_core::repos::ReposExt;
 use of_core::repos::{NewRepo, Provider, Repo, RepoPatch};
+use otto_core::teams::TeamsExt;
+use otto_tenant::audit::Entry;
+use otto_tenant::ids::TeamId;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{ApiError, ApiResult};
@@ -96,7 +100,7 @@ pub struct ListReposQuery {
 /// every member — not just the assigned team — could read every team-scoped
 /// repo's leases and metadata through the console.
 async fn visible_repos(
-    tx: &mut of_core::Tx<'_>,
+    tx: &mut otto_tenant::Tx<'_>,
     ctx: &OrgCtx,
     repos: Vec<Repo>,
 ) -> ApiResult<Vec<Repo>> {
@@ -120,7 +124,7 @@ async fn visible_repos(
 /// "an org you are not in is 404" rule this file already applies to orgs
 /// extends to a team-scoped repo a non-member should not learn exists.
 pub(crate) async fn require_visible(
-    tx: &mut of_core::Tx<'_>,
+    tx: &mut otto_tenant::Tx<'_>,
     ctx: &OrgCtx,
     repo: Repo,
 ) -> ApiResult<Repo> {

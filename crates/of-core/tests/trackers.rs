@@ -5,12 +5,12 @@ mod common;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use common::{db, tenant};
-use of_core::crypto::Cipher;
 use of_core::trackers::{
     delete_binding, delete_connection, find_binding_by_external_ref, get_binding, get_connection,
     list_bindings_for_repo, list_connections, resolve_binding, resolve_connection_org,
     upsert_binding, upsert_connection, Provider,
 };
+use otto_tenant::crypto::Cipher;
 use sqlx::PgPool;
 
 #[sqlx::test]

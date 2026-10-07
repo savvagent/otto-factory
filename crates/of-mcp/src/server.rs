@@ -31,10 +31,10 @@
 
 use std::sync::Arc;
 
-use of_auth::tokens::Principal;
 use of_billing::Meter;
 use of_core::watch::Watcher;
-use of_core::{Db, Tx};
+use otto_auth::tokens::Principal;
+use otto_tenant::{Db, Tx};
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::model::{ErrorData, Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{tool_handler, ServerHandler};
@@ -233,7 +233,7 @@ impl Factory {
         self.db
             .begin(caller.org_id)
             .await
-            .map_err(|e| error::from_core(&e))
+            .map_err(|e| error::from_tenant(&e))
     }
 }
 
@@ -253,7 +253,7 @@ impl ServerHandler for Factory {
     }
 }
 
-/// Map a `of-core` or `of-auth` failure into the MCP envelope at the point of
+/// Map an `of-core`, `otto-core`, `otto-tenant`, or `otto-auth` failure into the MCP envelope at the point of
 /// the call.
 ///
 /// An extension trait rather than `From` impls plus `?`, because both error
@@ -272,7 +272,19 @@ impl<T> McpResult<T> for of_core::Result<T> {
     }
 }
 
-impl<T> McpResult<T> for of_auth::Result<T> {
+impl<T> McpResult<T> for otto_core::Result<T> {
+    fn mcp(self) -> Result<T, ErrorData> {
+        self.map_err(|e| error::from_identity(&e))
+    }
+}
+
+impl<T> McpResult<T> for otto_tenant::Result<T> {
+    fn mcp(self) -> Result<T, ErrorData> {
+        self.map_err(|e| error::from_tenant(&e))
+    }
+}
+
+impl<T> McpResult<T> for otto_auth::Result<T> {
     fn mcp(self) -> Result<T, ErrorData> {
         self.map_err(|e| error::from_auth(&e))
     }

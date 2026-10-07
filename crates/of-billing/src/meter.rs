@@ -24,9 +24,9 @@
 //! finish reasoning about it, and go and upgrade — rather than being locked out
 //! of its own data by a counter.
 
-use of_core::ids::UserId;
-use of_core::usage::{PeriodUsage, PlanLimits};
-use of_core::Tx;
+use otto_billing::usage::{PeriodUsage, PlanLimits, UsageExt};
+use otto_tenant::ids::UserId;
+use otto_tenant::Tx;
 use serde::Serialize;
 
 use crate::classify::{self, Class};

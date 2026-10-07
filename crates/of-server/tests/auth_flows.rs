@@ -7,11 +7,12 @@
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use of_auth::error::AuthError;
-use of_auth::{oauth, tokens};
-use of_core::ids::{OrgId, UserId};
-use of_core::orgs::Role;
-use of_core::Db;
+use otto_auth::error::AuthError;
+use otto_auth::{oauth, resources, tokens};
+use otto_core::orgs::OrgsExt;
+use otto_core::orgs::Role;
+use otto_tenant::ids::{OrgId, UserId};
+use otto_tenant::Db;
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 
@@ -19,8 +20,29 @@ const MIGRATIONS: &str = "../of-core/migrations";
 const RESOURCE: &str = "https://mcp.otto-factory.test/mcp";
 const OTHER_RESOURCE: &str = "https://mcp.someone-else.test/mcp";
 const EMAIL: &str = "rob@acme.test";
+
+/// Every authorize, code, refresh, and PAT is validated against the registry,
+/// so the resource a test names has to be registered, with the scopes this
+/// service really uses.
+async fn register_resources(db: &Db) {
+    for (uri, name) in [(RESOURCE, "otto-factory"), (OTHER_RESOURCE, "someone-else")] {
+        resources::register(
+            db,
+            resources::ResourceServerSpec {
+                resource_uri: uri,
+                name,
+                scopes: of_core::scopes::KNOWN,
+                default_scopes: of_core::scopes::DEFAULT,
+            },
+        )
+        .await
+        .unwrap();
+    }
+}
+
 async fn fixture(pool: PgPool) -> (Db, UserId, OrgId) {
     let db = Db::from_pool(pool);
+    register_resources(&db).await;
     let org = db.create_org("acme", "Acme").await.unwrap();
     let user = db.upsert_user(EMAIL, Some("Rob")).await.unwrap();
     db.add_member(org.id, user.id, Role::Owner).await.unwrap();
@@ -71,15 +93,13 @@ async fn authorization_code_flow_end_to_end(pool: PgPool) {
     let (verifier, challenge) = pkce();
     let req = authorize_req(&client_id, redirect, &challenge);
 
-    oauth::validate_authorize(&db, &req, RESOURCE)
-        .await
-        .unwrap();
+    oauth::validate_authorize(&db, &req).await.unwrap();
     let code = oauth::issue_authorization_code(&db, &req, user, org)
         .await
         .unwrap();
 
     let (issued, got_user, got_org) =
-        oauth::redeem_code(&db, &code, &client_id, redirect, &verifier, RESOURCE)
+        oauth::redeem_code(&db, &code, &client_id, redirect, &verifier, Some(RESOURCE))
             .await
             .unwrap();
 
@@ -107,15 +127,13 @@ async fn ephemeral_loopback_port_still_authorizes(pool: PgPool) {
 
     let moved = "http://127.0.0.1:49871/callback";
     let req = authorize_req(&client_id, moved, &challenge);
-    oauth::validate_authorize(&db, &req, RESOURCE)
-        .await
-        .unwrap();
+    oauth::validate_authorize(&db, &req).await.unwrap();
 
     let code = oauth::issue_authorization_code(&db, &req, user, org)
         .await
         .unwrap();
     assert!(
-        oauth::redeem_code(&db, &code, &client_id, moved, &verifier, RESOURCE)
+        oauth::redeem_code(&db, &code, &client_id, moved, &verifier, Some(RESOURCE))
             .await
             .is_ok()
     );
@@ -136,16 +154,17 @@ async fn authorization_code_is_single_use_and_replay_revokes(pool: PgPool) {
     let code = oauth::issue_authorization_code(&db, &req, user, org)
         .await
         .unwrap();
-    let (issued, _, _) = oauth::redeem_code(&db, &code, &client_id, redirect, &verifier, RESOURCE)
-        .await
-        .unwrap();
+    let (issued, _, _) =
+        oauth::redeem_code(&db, &code, &client_id, redirect, &verifier, Some(RESOURCE))
+            .await
+            .unwrap();
 
     // The token works before the replay.
     assert!(tokens::introspect(&db, &issued.access_token, RESOURCE)
         .await
         .is_ok());
 
-    let err = oauth::redeem_code(&db, &code, &client_id, redirect, &verifier, RESOURCE)
+    let err = oauth::redeem_code(&db, &code, &client_id, redirect, &verifier, Some(RESOURCE))
         .await
         .unwrap_err();
     assert!(matches!(err, AuthError::InvalidGrant(_)));
@@ -172,9 +191,16 @@ async fn code_redemption_checks_client_redirect_and_verifier(pool: PgPool) {
         .await
         .unwrap();
     assert!(
-        oauth::redeem_code(&db, &code, &client_id, redirect, &"y".repeat(64), RESOURCE)
-            .await
-            .is_err(),
+        oauth::redeem_code(
+            &db,
+            &code,
+            &client_id,
+            redirect,
+            &"y".repeat(64),
+            Some(RESOURCE)
+        )
+        .await
+        .is_err(),
         "a wrong code_verifier must not redeem"
     );
 
@@ -183,9 +209,16 @@ async fn code_redemption_checks_client_redirect_and_verifier(pool: PgPool) {
         .await
         .unwrap();
     assert!(
-        oauth::redeem_code(&db, &code, &other_client, redirect, &verifier, RESOURCE)
-            .await
-            .is_err(),
+        oauth::redeem_code(
+            &db,
+            &code,
+            &other_client,
+            redirect,
+            &verifier,
+            Some(RESOURCE)
+        )
+        .await
+        .is_err(),
         "a code must not be redeemable by a different client"
     );
 
@@ -200,7 +233,7 @@ async fn code_redemption_checks_client_redirect_and_verifier(pool: PgPool) {
             &client_id,
             "https://evil.test/cb",
             &verifier,
-            RESOURCE
+            Some(RESOURCE)
         )
         .await
         .is_err(),
@@ -216,25 +249,19 @@ async fn authorize_rejects_unregistered_redirect_and_bad_pkce(pool: PgPool) {
 
     let mut req = authorize_req(&client_id, "https://evil.test/cb", &challenge);
     assert!(
-        oauth::validate_authorize(&db, &req, RESOURCE)
-            .await
-            .is_err(),
+        oauth::validate_authorize(&db, &req).await.is_err(),
         "an unregistered redirect_uri must be refused before any consent screen"
     );
 
     req.redirect_uri = "https://app.acme.test/cb".into();
     req.code_challenge_method = "plain".into();
-    assert!(oauth::validate_authorize(&db, &req, RESOURCE)
-        .await
-        .is_err());
+    assert!(oauth::validate_authorize(&db, &req).await.is_err());
 
     req.code_challenge_method = "S256".into();
-    req.resource = OTHER_RESOURCE.into();
+    req.resource = "https://unregistered.test/mcp".into();
     assert!(
-        oauth::validate_authorize(&db, &req, RESOURCE)
-            .await
-            .is_err(),
-        "a resource indicator naming another server must be refused"
+        oauth::validate_authorize(&db, &req).await.is_err(),
+        "a resource indicator naming a server that is not in the registry must be refused"
     );
 }
 
@@ -252,7 +279,7 @@ async fn a_token_for_another_resource_is_refused(pool: PgPool) {
         tokens::IssueParams {
             user_id: user,
             org_id: org,
-            client_id: Some("of_client_x"),
+            client_id: Some("otto_client_x"),
             scopes: &["jobs:read".to_string()],
             resource: OTHER_RESOURCE,
             with_refresh: false,
@@ -330,13 +357,14 @@ async fn refresh_rotates_and_reuse_revokes_the_family(pool: PgPool) {
     let code = oauth::issue_authorization_code(&db, &req, user, org)
         .await
         .unwrap();
-    let (first, _, _) = oauth::redeem_code(&db, &code, &client_id, redirect, &verifier, RESOURCE)
-        .await
-        .unwrap();
+    let (first, _, _) =
+        oauth::redeem_code(&db, &code, &client_id, redirect, &verifier, Some(RESOURCE))
+            .await
+            .unwrap();
     let first_refresh = first.refresh_token.clone().unwrap();
 
     // Rotate once.
-    let (second, _, _, _) = tokens::redeem_refresh(&db, &first_refresh, &client_id, RESOURCE)
+    let (second, _, _, _) = tokens::redeem_refresh(&db, &first_refresh, &client_id, Some(RESOURCE))
         .await
         .unwrap();
     let second_refresh = second.refresh_token.clone().unwrap();
@@ -349,14 +377,14 @@ async fn refresh_rotates_and_reuse_revokes_the_family(pool: PgPool) {
         .is_ok());
 
     // Replay the spent one. This is theft, not a retry.
-    let err = tokens::redeem_refresh(&db, &first_refresh, &client_id, RESOURCE)
+    let err = tokens::redeem_refresh(&db, &first_refresh, &client_id, Some(RESOURCE))
         .await
         .unwrap_err();
     assert!(matches!(err, AuthError::InvalidGrant(_)));
 
     // The attacker's successor is dead too.
     assert!(
-        tokens::redeem_refresh(&db, &second_refresh, &client_id, RESOURCE)
+        tokens::redeem_refresh(&db, &second_refresh, &client_id, Some(RESOURCE))
             .await
             .is_err(),
         "reuse must revoke the whole family, not just the replayed token"
@@ -378,7 +406,7 @@ async fn refresh_is_bound_to_its_client_and_resource(pool: PgPool) {
         tokens::IssueParams {
             user_id: user,
             org_id: org,
-            client_id: Some("of_client_a"),
+            client_id: Some("otto_client_a"),
             scopes: &["jobs:read".to_string()],
             resource: RESOURCE,
             with_refresh: true,
@@ -389,19 +417,19 @@ async fn refresh_is_bound_to_its_client_and_resource(pool: PgPool) {
     let refresh = issued.refresh_token.unwrap();
 
     assert!(
-        tokens::redeem_refresh(&db, &refresh, "of_client_b", RESOURCE)
+        tokens::redeem_refresh(&db, &refresh, "otto_client_b", Some(RESOURCE))
             .await
             .is_err(),
         "a refresh token must not be redeemable by another client"
     );
     assert!(
-        tokens::redeem_refresh(&db, &refresh, "of_client_a", OTHER_RESOURCE)
+        tokens::redeem_refresh(&db, &refresh, "otto_client_a", Some(OTHER_RESOURCE))
             .await
             .is_err(),
         "a refresh token must not be redeemable for another resource"
     );
     assert!(
-        tokens::redeem_refresh(&db, &refresh, "of_client_a", RESOURCE)
+        tokens::redeem_refresh(&db, &refresh, "otto_client_a", Some(RESOURCE))
             .await
             .is_ok()
     );
@@ -427,7 +455,7 @@ async fn pat_is_equivalent_to_an_oauth_token(pool: PgPool) {
     .unwrap();
 
     assert!(
-        pat.starts_with("of_pat_"),
+        pat.starts_with("otto_pat_"),
         "PATs must be identifiable on sight"
     );
 
@@ -482,7 +510,7 @@ async fn revocation_is_scoped_to_the_owner(pool: PgPool) {
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn an_unknown_token_is_refused(pool: PgPool) {
     let (db, _, _) = fixture(pool).await;
-    assert!(tokens::introspect(&db, "of_at_totally-made-up", RESOURCE)
+    assert!(tokens::introspect(&db, "otto_at_totally-made-up", RESOURCE)
         .await
         .is_err());
 }

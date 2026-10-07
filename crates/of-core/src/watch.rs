@@ -12,7 +12,7 @@
 //! nothing.
 
 use crate::error::Result;
-use crate::ids::{OrgId, UserId};
+use otto_tenant::ids::{OrgId, UserId};
 use serde::Deserialize;
 use sqlx::postgres::PgListener;
 use sqlx::PgPool;
