@@ -678,3 +678,66 @@ async fn the_platform_route_does_not_collide_with_the_tracker_route(pool: PgPool
         .await
         .expect(StatusCode::UNAUTHORIZED);
 }
+
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn the_audit_log_needs_an_admin_and_the_org_admin_scope(pool: PgPool) {
+    let h = harness(pool).await;
+    let (org, admin) = (Uuid::new_v4(), Uuid::new_v4());
+    h.platform.add_org(org, "acme", "Acme");
+    h.platform
+        .add_member(org, admin, "ada@acme.test", Role::Admin);
+
+    let no_scope = h
+        .platform
+        .issue(org, admin, Role::Admin, &["repos:read", "jobs:read"]);
+    Call::get("/api/orgs/acme/audit")
+        .with_session(&no_scope)
+        .send(&h.router)
+        .await
+        .expect(StatusCode::FORBIDDEN);
+
+    let full = h.platform.issue(org, admin, Role::Admin, ALL);
+    Call::get("/api/orgs/acme/audit")
+        .with_session(&full)
+        .send(&h.router)
+        .await
+        .expect(StatusCode::OK);
+
+    // Demoted at the platform: admin routes close immediately, even though the
+    // introspection cache still holds the old role.
+    h.platform.set_role(org, admin, Role::Member);
+    Call::get("/api/orgs/acme/audit")
+        .with_session(&full)
+        .send(&h.router)
+        .await
+        .expect(StatusCode::FORBIDDEN);
+}
+
+/// Identity is only ever the platform's answer: headers and query strings that
+/// claim an org or user are ignored.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn nothing_but_the_token_decides_who_is_calling(pool: PgPool) {
+    let h = harness(pool).await;
+    let (acme, globex, rob) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    h.platform.add_org(acme, "acme", "Acme");
+    h.platform.add_org(globex, "globex", "Globex");
+    h.platform
+        .add_member(acme, rob, "rob@acme.test", Role::Member);
+    let token = h.platform.issue(acme, rob, Role::Member, ALL);
+
+    Call::get(format!("/api/orgs/globex/repos?org={acme}&user={rob}"))
+        .with_session(&token)
+        .header("x-org-id", globex.to_string())
+        .header("x-user-id", rob.to_string())
+        .header("cookie", "__Host-of_session=anything")
+        .send(&h.router)
+        .await
+        .expect(StatusCode::NOT_FOUND);
+    // No token, only claims in headers: unauthenticated.
+    Call::get("/api/orgs/acme/repos")
+        .header("x-org-id", acme.to_string())
+        .header("x-user-id", rob.to_string())
+        .send(&h.router)
+        .await
+        .expect(StatusCode::UNAUTHORIZED);
+}

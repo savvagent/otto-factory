@@ -166,13 +166,15 @@ where
 
         // The path may name the org by id or by slug. The platform is asked for
         // the slug rather than trusting anything the client sent.
-        let slug = match state
+        let (slug, role) = match state
             .platform
             .member(claims.org_id, claims.user_id)
             .await
             .map_err(|e| ApiError::platform_unavailable("look up the token's org", e))?
         {
-            Some(member) if member.org.id == claims.org_id => member.org.slug,
+            // The role comes from this fresh lookup, not the (up to 60 s old)
+            // introspection claims: a demoted admin loses admin routes at once.
+            Some(member) if member.org.id == claims.org_id => (member.org.slug, member.role),
             // The platform no longer sees this user in this org: the token is
             // dead, whatever the introspection cache still says.
             _ => return Err(ApiError::unauthenticated()),
@@ -192,7 +194,7 @@ where
                 id: claims.org_id.into(),
                 slug,
             },
-            role: claims.role,
+            role,
             scopes: claims.scopes,
         })
     }

@@ -502,11 +502,22 @@ async fn ingest_usage(
         return res;
     }
     inner.usage_calls.fetch_add(1, Ordering::SeqCst);
-    if inner
-        .fail_usage
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-        .is_ok()
-    {
+    // Toolchain-neutral: `fetch_update` was renamed `try_update` in newer Rust.
+    let mut left = inner.fail_usage.load(Ordering::SeqCst);
+    let mut fail = false;
+    while left > 0 {
+        match inner
+            .fail_usage
+            .compare_exchange(left, left - 1, Ordering::SeqCst, Ordering::SeqCst)
+        {
+            Ok(_) => {
+                fail = true;
+                break;
+            }
+            Err(now) => left = now,
+        }
+    }
+    if fail {
         return unavailable();
     }
 
