@@ -199,8 +199,8 @@ explains the reasoning behind each at length — read it, and treat the list her
 1. **Tenant isolation has two independent guards, and both are required.** Guard 1 is the API shape:
    tenant data is reachable only through `Tx`, which cannot be constructed without an `OrgId`, and
    every statement carries `org_id = $1` explicitly. Guard 2 is row-level security: `Db::begin`
-   issues `SET LOCAL ROLE of_app` **and** `SET LOCAL app.org_id`, and on managed Postgres (where
-   `of_app` cannot be created) `FORCE ROW LEVEL SECURITY` carries the guarantee instead —
+   issues `SET LOCAL ROLE otto_app` **and** `SET LOCAL app.org_id`, and on managed Postgres (where
+   `otto_app` cannot be created) `FORCE ROW LEVEL SECURITY` carries the guarantee instead —
    `Db::verify_tenant_isolation` reads back which shape it is in, and `of-server` refuses to bind a
    port unless one of them holds. A new tenant table needs a `NOT NULL org_id`, an entry in the
    `tenant_tables` array in `0007_rls.sql`, a policy named exactly `<table>_tenant_isolation`, and a
@@ -208,8 +208,8 @@ explains the reasoning behind each at length — read it, and treat the list her
 2. **Ordinary cross-org tests pass on guard 1 alone.** The tests that actually exercise RLS are the
    `rls_scopes_*` ones in `crates/of-core/tests/isolation.rs`, which issue deliberately unscoped SQL
    inside a pinned transaction. `#[sqlx::test]` connects as a superuser and bypasses RLS, so a test
-   of a policy **must** `SET LOCAL ROLE of_app` explicitly or it passes against no policy at all. A
-   privilege granted to or revoked from `of_app` is not a protection — express the rule as a policy.
+   of a policy **must** `SET LOCAL ROLE otto_app` explicitly or it passes against no policy at all. A
+   privilege granted to or revoked from `otto_app` is not a protection — express the rule as a policy.
 3. **Every SQL statement lives in `of-core`.** A query in `of-mcp`, `of-web`, `of-auth`, or
    `of-billing` is a bug: it bypasses the `Tx` pinning that guard 2 depends on. `of-core` has no
    HTTP and no auth; every tenant-scoped function takes an `OrgId`.

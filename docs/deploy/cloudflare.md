@@ -76,7 +76,7 @@ fetched, so the origin sees `Host: otto-factory-mcp.fly.dev` while `OF_PUBLIC_UR
 server that answers to any `Host` is DNS-rebindable — and rejects the mismatch:
 
 ```
-$ curl -X POST https://console.example.com/mcp -H "authorization: Bearer of_pat_…" …
+$ curl -X POST https://console.example.com/mcp -H "authorization: Bearer otto_pat_…" …
 Forbidden: Host header is not allowed
 ```
 

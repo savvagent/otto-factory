@@ -274,7 +274,7 @@ Agent tool:
       enum round-tripping, and #[sqlx::test] integration tests against a real Postgres (there are no
       database mocks, on purpose)
     - Tests: a tenant-scoped function needs a cross-org negative test; an RLS policy test must
-      SET LOCAL ROLE of_app explicitly or it passes against no policy at all; a test that spawns a
+      SET LOCAL ROLE otto_app explicitly or it passes against no policy at all; a test that spawns a
       Watcher must call shutdown() or it hangs at teardown
 
     Report: Strengths, Issues (Critical / Important / Minor), Assessment.
