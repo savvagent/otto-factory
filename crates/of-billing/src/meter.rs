@@ -54,6 +54,15 @@ use crate::classify::{self, Class};
 use crate::error::{BillingError, Result};
 use crate::outbox;
 
+/// How long the quota check waits on the platform before allowing the call.
+///
+/// The check runs inside the tool's transaction, so a slow platform would hold a
+/// pooled database connection for as long as it dawdles; the client's own 10 s
+/// timeout is far too long for that. A cache hit (the normal case) costs nothing
+/// and a miss gets this long, after which the call goes ahead and is recorded
+/// like any other — the same outcome as the platform being down.
+const QUOTA_LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Fraction of the bucket at which a caller starts being warned.
 ///
 /// Eighty percent is early enough that a team has time to do something about it
@@ -145,25 +154,38 @@ impl Meter {
         if !self.enforce || !class.is_billable() {
             return Ok(());
         }
-        match self.platform.usage_status(org.as_uuid()).await {
-            Ok(status) if status.is_blocked() => Err(BillingError::QuotaExceeded {
+        let status = match tokio::time::timeout(
+            QUOTA_LOOKUP_TIMEOUT,
+            self.platform.usage_status(org.as_uuid()),
+        )
+        .await
+        {
+            Ok(Ok(status)) => status,
+            Ok(Err(e)) => return self.allow_unchecked(org, tool, &e.to_string()),
+            Err(_) => return self.allow_unchecked(org, tool, "timed out"),
+        };
+        if status.is_blocked() {
+            return Err(BillingError::QuotaExceeded {
                 tool: tool.to_string(),
                 used: status.billable_count,
                 included: status.included_ops,
                 plan: plan_name(&status.plan),
                 upgrade_url: self.upgrade_url.clone(),
-            }),
-            Ok(_) => Ok(()),
-            Err(e) => {
-                tracing::warn!(
-                    org = %org,
-                    tool,
-                    error = %e,
-                    "could not read usage from the platform; allowing the call (it is still recorded)"
-                );
-                Ok(())
-            }
+            });
         }
+        Ok(())
+    }
+
+    /// The platform could not answer the quota question: let the call through.
+    /// It is still recorded in the outbox, so nothing is under-billed.
+    fn allow_unchecked(&self, org: OrgId, tool: &str, why: &str) -> Result<()> {
+        tracing::warn!(
+            org = %org,
+            tool,
+            reason = why,
+            "could not read usage from the platform in time; allowing the call (it is still recorded)"
+        );
+        Ok(())
     }
 
     /// Report an org's standing without charging for anything.
