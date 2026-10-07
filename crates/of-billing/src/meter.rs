@@ -1,36 +1,58 @@
 //! Charging a tool call against an org's bucket.
 //!
-//! ## Why this happens *before* the work rather than after
+//! ## Two halves, two systems
+//!
+//! The org's *standing* (plan, included operations, this month's count) lives in
+//! the platform, which is the system of record for billing. A call's *record*
+//! lives here, in the factory's own database, as a row in `usage_outbox`:
+//!
+//! - **Recording** is local and atomic. [`Meter::charge`] inserts the outbox row
+//!   in the tool's own transaction, so a failed call rolls its record back with
+//!   everything else (never billed) and a successful one is recorded even if the
+//!   platform is down at that instant (never lost). A background shipper
+//!   ([`crate::outbox`]) delivers the rows later, exactly once from the
+//!   platform's point of view because it dedupes on the row's `event_id`.
+//! - **Enforcing** reads the platform's last answer to "how much has this org
+//!   used", cached for a minute by `PlatformClient::usage_status`. The cross-
+//!   database atomicity the old in-transaction counter gave is gone, so a
+//!   hard-stop org can overrun its bucket by whatever it does inside that window
+//!   plus whatever is still in the outbox. That bound is the price of the split
+//!   and is deliberately accepted for a usage bucket (savvagent/otto-factory#192,
+//!   workstream 3).
+//!
+//! ## Why charging happens *before* the work
 //!
 //! [`Meter::charge`] is called immediately after the tool opens its
 //! transaction, before it does anything. That looks wrong for the rule "a
-//! failed call is not billed" — and it is exactly what makes the rule true.
-//! The usage row is written inside the tool's own transaction, so a tool that
-//! fails and returns an error rolls the transaction back and takes the meter
-//! with it. Charging afterwards would need a second transaction, which can fail
-//! on its own, be retried, or be forgotten — all three of which produce a bill
-//! that disagrees with what happened.
-//!
-//! Doing it first also puts the quota check where a refusal costs nothing: the
-//! caller is told no before any work is performed, rather than after.
+//! failed call is not billed" — and it is exactly what makes the rule true: the
+//! outbox row is in the tool's own transaction, so a tool that fails rolls the
+//! meter back with it. Charging afterwards would need a second transaction,
+//! which can fail on its own, be retried, or be forgotten. Doing it first also
+//! puts the quota check where a refusal costs nothing.
 //!
 //! ## What enforcement means
 //!
-//! Enforcement is off by default and behind a flag for milestone 1, because
-//! recording history is worth having long before anyone's work is refused over
-//! it. When it is on, only **billable** tools on a **hard-stop** plan are
-//! refused, and only past the bucket. Reads keep working in every case, so an
-//! org that hits its limit mid-task can still see the state of its queue,
-//! finish reasoning about it, and go and upgrade — rather than being locked out
-//! of its own data by a counter.
+//! Enforcement is off by default behind a flag. When it is on, only **billable**
+//! tools on a **hard-stop** plan are refused, and only past the bucket. Reads keep
+//! working in every case, so an org that hits its limit mid-task can still see
+//! the state of its queue and go and upgrade.
+//!
+//! **If the platform cannot answer the quota question, the call is allowed**
+//! (and logged). The alternative is refusing paying customers' work because a
+//! lookup failed; the call is still recorded in the outbox, so nothing is
+//! under-billed. Authentication already requires the platform, so this only
+//! matters in the window where a cached token outlives an outage.
 
-use otto_billing::usage::{PeriodUsage, PlanLimits, UsageExt};
-use otto_tenant::ids::UserId;
+use std::sync::Arc;
+
+use otto_resource::{PlatformClient, UsageStatus};
+use otto_tenant::ids::{OrgId, UserId};
 use otto_tenant::Tx;
 use serde::Serialize;
 
 use crate::classify::{self, Class};
 use crate::error::{BillingError, Result};
+use crate::outbox;
 
 /// Fraction of the bucket at which a caller starts being warned.
 ///
@@ -39,8 +61,9 @@ use crate::error::{BillingError, Result};
 pub const WARN_AT: f64 = 0.8;
 
 /// Configuration for the meter.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Meter {
+    platform: Arc<PlatformClient>,
     /// Refuse billable calls past a hard-stop bucket. Off by default.
     pub enforce: bool,
     /// Where a caller who has run out is told to go. Named in the refusal,
@@ -49,9 +72,23 @@ pub struct Meter {
     pub upgrade_url: String,
 }
 
+impl std::fmt::Debug for Meter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Meter")
+            .field("enforce", &self.enforce)
+            .field("upgrade_url", &self.upgrade_url)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Meter {
-    pub fn new(enforce: bool, upgrade_url: impl Into<String>) -> Self {
+    pub fn new(
+        platform: Arc<PlatformClient>,
+        enforce: bool,
+        upgrade_url: impl Into<String>,
+    ) -> Self {
         Self {
+            platform,
             enforce,
             upgrade_url: upgrade_url.into(),
         }
@@ -59,100 +96,94 @@ impl Meter {
 
     /// Charge one tool call, or refuse it.
     ///
-    /// Returns what the caller needs to report: whether it was billable, and
-    /// where the org now stands against its bucket.
+    /// On success the call is recorded in the outbox inside `tx`; on refusal
+    /// nothing is written.
     pub async fn charge(&self, tx: &mut Tx<'_>, user: UserId, tool: &str) -> Result<Charge> {
         let class = classify::classify(tool);
-        let limits = tx.plan_limits().await?;
-        self.check_quota(tx, tool, class, &limits).await?;
-
-        let usage = tx
-            .record_usage(Some(user), tool, class.is_billable())
-            .await?;
-
-        Ok(Charge::new(class, usage, limits))
+        self.check_quota(tx.org(), tool, class).await?;
+        outbox::enqueue(tx, Some(user), tool, class.is_billable()).await?;
+        Ok(Charge {
+            billable: class.is_billable(),
+        })
     }
 
     /// Record an idempotent replay of `tool` — always as `Free`, regardless
     /// of `tool`'s own classification, and with no quota check.
     ///
-    /// "Both classes are recorded regardless" (see this module's doc
-    /// comment) still has to hold for a replay: it is a real call that
-    /// reached the server and was served, just not new work. Charging it
-    /// again would double-bill the caller for one logical job/message; not
-    /// recording it at all would leave a gap in the history a future
-    /// repricing decision needs. Never enforced — a replay creates nothing,
-    /// so refusing it on a hard-stop plan would refuse a call that is, from
-    /// the bucket's perspective, free to serve (metering rule 3: enforcement
-    /// never blocks a read-shaped call).
+    /// "Both classes are recorded regardless" still has to hold for a replay: it
+    /// is a real call that reached the server and was served, just not new work.
+    /// Charging it again would double-bill the caller for one logical
+    /// job/message; not recording it at all would leave a gap in the history a
+    /// future repricing decision needs. Never enforced — a replay creates
+    /// nothing, so refusing it on a hard-stop plan would refuse a call that is,
+    /// from the bucket's perspective, free to serve.
     pub async fn record_replay(&self, tx: &mut Tx<'_>, user: UserId, tool: &str) -> Result<()> {
-        tx.record_usage(Some(user), tool, false).await?;
+        outbox::enqueue(tx, Some(user), tool, false).await?;
         Ok(())
     }
 
     /// Check whether a call would be refused, without recording any usage.
     ///
-    /// Used by `sync_ticket` (`of_mcp::tools::jobs`), whose "work" is an
-    /// outbound tracker write that has already happened by the time `charge`
-    /// runs (see `Factory::charge`'s doc comment) — without this, an org on a
-    /// hard-stop plan already over its bucket gets that write posted anyway,
-    /// only to be told afterwards that it wasn't billed. This reads the same
-    /// counters `charge` checks before recording usage, so the two can
-    /// disagree only if the count changes in between — a narrow, acceptable
-    /// race no different from any other check-then-act gap, and strictly
-    /// better than not checking at all.
-    ///
-    /// Short-circuits before querying `plan_limits()`/`current_usage()` when
-    /// enforcement is off (the milestone-1 default) or the tool isn't
-    /// billable — unlike `charge`, this has no `Status` to report back, so
-    /// there is nothing those queries are needed for in that case.
-    pub async fn would_refuse(&self, tx: &mut Tx<'_>, tool: &str) -> Result<()> {
-        let class = classify::classify(tool);
-        if !self.enforce || !class.is_billable() {
-            return Ok(());
-        }
-        let limits = tx.plan_limits().await?;
-        self.check_quota(tx, tool, class, &limits).await
+    /// Used by `sync_ticket`, whose "work" is an outbound tracker write that has
+    /// already happened by the time `charge` runs — without this, an org on a
+    /// hard-stop plan already over its bucket gets that write posted anyway, only
+    /// to be told afterwards that it wasn't billed. Short-circuits when
+    /// enforcement is off or the tool isn't billable, so it costs nothing in the
+    /// default configuration.
+    pub async fn would_refuse(&self, org: OrgId, tool: &str) -> Result<()> {
+        self.check_quota(org, tool, classify::classify(tool)).await
     }
 
     /// The enforcement/hard-stop/bucket check shared by [`Self::charge`] and
     /// [`Self::would_refuse`].
     ///
-    /// The check reads the count *before* this call is added, so the call
-    /// that lands exactly on the limit is allowed and the next one is not. An
+    /// The check reads the count *before* this call is added, so the call that
+    /// lands exactly on the limit is allowed and the next one is not. An
     /// off-by-one here is the difference between a plan advertised as 500
     /// operations delivering 500 or 499.
-    async fn check_quota(
-        &self,
-        tx: &mut Tx<'_>,
-        tool: &str,
-        class: Class,
-        limits: &PlanLimits,
-    ) -> Result<()> {
-        if self.enforce && class.is_billable() && limits.hard_stop {
-            let before = tx.current_usage().await?;
-            if before.billable_count >= limits.included_ops {
-                return Err(BillingError::QuotaExceeded {
-                    tool: tool.to_string(),
-                    used: before.billable_count,
-                    included: limits.included_ops,
-                    plan: limits.display_name.clone(),
-                    upgrade_url: self.upgrade_url.clone(),
-                });
+    async fn check_quota(&self, org: OrgId, tool: &str, class: Class) -> Result<()> {
+        if !self.enforce || !class.is_billable() {
+            return Ok(());
+        }
+        match self.platform.usage_status(org.as_uuid()).await {
+            Ok(status) if status.is_blocked() => Err(BillingError::QuotaExceeded {
+                tool: tool.to_string(),
+                used: status.billable_count,
+                included: status.included_ops,
+                plan: plan_name(&status.plan),
+                upgrade_url: self.upgrade_url.clone(),
+            }),
+            Ok(_) => Ok(()),
+            Err(e) => {
+                tracing::warn!(
+                    org = %org,
+                    tool,
+                    error = %e,
+                    "could not read usage from the platform; allowing the call (it is still recorded)"
+                );
+                Ok(())
             }
         }
-        Ok(())
     }
 
     /// Report an org's standing without charging for anything.
     ///
     /// Used by the `usage` and `whoami` tools, which are themselves free — a
     /// caller must never have to spend an operation to find out how many it has
-    /// left.
-    pub async fn report(&self, tx: &mut Tx<'_>) -> Result<Status> {
-        let usage = tx.current_usage().await?;
-        let limits = tx.plan_limits().await?;
-        Ok(Status::new(usage, limits, self.enforce))
+    /// left. Unlike the quota check this surfaces a platform failure, since an
+    /// answer was asked for and a made-up one would be worse than an error.
+    pub async fn report(&self, org: OrgId) -> Result<Status> {
+        let usage = self.platform.usage_status(org.as_uuid()).await?;
+        Ok(Status::new(usage, self.enforce))
+    }
+}
+
+/// `free` -> `Free`.
+fn plan_name(plan: &str) -> String {
+    let mut chars = plan.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
     }
 }
 
@@ -175,21 +206,20 @@ pub struct Status {
     /// overage.
     pub hard_stop: bool,
     /// Whether the server is currently refusing calls over the bucket at all.
-    /// False during milestone 1 unless the operator turns it on.
     pub enforced: bool,
 }
 
 impl Status {
-    fn new(usage: PeriodUsage, limits: PlanLimits, enforced: bool) -> Self {
+    fn new(usage: UsageStatus, enforced: bool) -> Self {
         Self {
-            plan: limits.display_name,
-            included_ops: limits.included_ops,
+            plan: plan_name(&usage.plan),
+            included_ops: usage.included_ops,
             billable_used: usage.billable_count,
-            remaining: remaining(usage.billable_count, limits.included_ops),
+            remaining: remaining(usage.billable_count, usage.included_ops),
             total_calls: usage.total_count,
             period_start: usage.period_start,
-            warning: warning(usage.billable_count, limits.included_ops),
-            hard_stop: limits.hard_stop,
+            warning: warning(usage.billable_count, usage.included_ops),
+            hard_stop: usage.hard_stop,
             enforced,
         }
     }
@@ -199,19 +229,6 @@ impl Status {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Charge {
     pub billable: bool,
-    pub status: Status,
-}
-
-impl Charge {
-    fn new(class: Class, usage: PeriodUsage, limits: PlanLimits) -> Self {
-        Self {
-            billable: class.is_billable(),
-            // `enforced` is not carried here: a `Charge` describes a call that
-            // was already allowed, and the flag only decides whether one is
-            // refused. `Status::enforced` is meaningful in a report.
-            status: Status::new(usage, limits, false),
-        }
-    }
 }
 
 /// Operations left in the bucket, floored at zero.
@@ -259,5 +276,12 @@ mod tests {
     fn an_empty_bucket_is_always_over() {
         assert!(warning(0, 0));
         assert_eq!(remaining(0, 0), 0);
+    }
+
+    #[test]
+    fn plans_are_shown_capitalised() {
+        assert_eq!(plan_name("free"), "Free");
+        assert_eq!(plan_name("enterprise"), "Enterprise");
+        assert_eq!(plan_name(""), "");
     }
 }

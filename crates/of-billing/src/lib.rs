@@ -6,22 +6,24 @@
 //! agent tens of thousands of operations a month for waiting quietly, which is
 //! precisely the behaviour the server asks of it.
 //!
-//! The split of responsibility with `otto-billing` is deliberate. Every
-//! statement against a tenant table lives there and goes through a pinned `Tx`
-//! (see `otto_billing::usage`); what lives here is policy — which tools cost
-//! anything, what a bucket is worth, when a call is refused. That leaves the
-//! interesting decisions unit-testable with no database at all, which is why
-//! the threshold arithmetic in [`meter`] and the price list in [`classify`]
-//! have tests that run in microseconds.
+//! The split of responsibility with the platform is deliberate. The platform
+//! owns plans, standing, and the monthly totals; this crate owns policy — which
+//! tools cost anything ([`classify`]), when a call is refused ([`meter`]) — and
+//! the *record* of every call, kept in the factory's own database as a
+//! transactional outbox ([`outbox`]) that a background task ships to the
+//! platform. That leaves the interesting decisions unit-testable with no
+//! database at all, which is why the threshold arithmetic in [`meter`] and the
+//! price list in [`classify`] have tests that run in microseconds.
 //!
-//! The one thing that must not be refactored apart: the counter is incremented
+//! The one thing that must not be refactored apart: the outbox row is written
 //! **in the same transaction as the tool's own work**. A failed call is not
-//! billed and a successful one is never billed twice, and both of those follow
-//! from that single fact rather than from any retry logic.
+//! billed and a successful one is never lost, and both of those follow from that
+//! single fact rather than from any retry logic.
 
 pub mod classify;
 pub mod error;
 pub mod meter;
+pub mod outbox;
 
 pub use classify::{classify, Class};
 pub use error::{BillingError, Result};

@@ -1213,17 +1213,14 @@ dependencies = [
 name = "of-billing"
 version = "0.9.0"
 dependencies = [
- "base64",
  "chrono",
- "hmac",
- "http",
+ "of-core",
+ "of-testkit",
  "otto-resource",
  "otto-tenant",
- "reqwest",
  "schemars",
  "serde",
  "serde_json",
- "sha2",
  "sqlx",
  "thiserror",
  "tokio",
