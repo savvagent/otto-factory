@@ -29,10 +29,10 @@
 //! without being told which one — that is browser behaviour rather than this
 //! server's, and it is what `residentKey: required` asks for in production.
 
-use of_auth::error::AuthError;
-use of_auth::{login, passkeys};
-use of_core::ids::UserId;
-use of_core::Db;
+use otto_auth::error::AuthError;
+use otto_auth::{login, passkeys};
+use otto_tenant::ids::UserId;
+use otto_tenant::Db;
 use sqlx::PgPool;
 use webauthn_authenticator_rs::softtoken::SoftToken;
 use webauthn_authenticator_rs::WebauthnAuthenticator;
@@ -147,7 +147,7 @@ async fn sign_in(
     db: &Db,
     auth: &mut WebauthnAuthenticator<SoftToken>,
     credential_id: &[u8],
-) -> of_auth::error::Result<UserId> {
+) -> otto_auth::error::Result<UserId> {
     let webauthn = rp();
     let ceremony = passkeys::start_authentication(db, &webauthn).await.unwrap();
     let credential = auth
@@ -404,7 +404,7 @@ async fn clearing_passkeys_leaves_no_way_in(pool: PgPool) {
 /// count is part of the assertion rather than a detail.
 async fn login_failures(db: &Db, user: UserId) -> i64 {
     sqlx::query_scalar("SELECT count(*) FROM audit_events WHERE action = $1 AND actor_user_id = $2")
-        .bind(of_core::audit::action::LOGIN_FAILED)
+        .bind(otto_tenant::audit::action::LOGIN_FAILED)
         .bind(user)
         .fetch_one(db.pool())
         .await
@@ -458,12 +458,12 @@ async fn registration_writes_the_passkey_registered_action(pool: PgPool) {
     let user = register_new(&db, &mut auth).await;
 
     assert_eq!(
-        action_count(&db, of_core::audit::action::PASSKEY_REGISTERED, user).await,
+        action_count(&db, otto_tenant::audit::action::PASSKEY_REGISTERED, user).await,
         1,
         "registration must write auth.passkey.registered"
     );
     assert_eq!(
-        action_count(&db, of_core::audit::action::TOTP_ENROLLED, user).await,
+        action_count(&db, otto_tenant::audit::action::TOTP_ENROLLED, user).await,
         0,
         "registration must not write the historical TOTP action"
     );
@@ -502,7 +502,7 @@ async fn registration_records_which_flow_wrote_it(pool: PgPool) {
 
     // One query for both columns, ordered by `id` rather than `created_at` —
     // `created_at` defaults to the transaction's start time and can tie, and
-    // `of_core::audit`'s own reader already orders by `created_at DESC, id
+    // `otto_tenant::audit`'s own reader already orders by `created_at DESC, id
     // DESC` for exactly that reason. Two separate queries could in principle
     // disagree about which row is "latest"; one query cannot.
     let row: (serde_json::Value, Option<String>) = sqlx::query_as(
@@ -510,7 +510,7 @@ async fn registration_records_which_flow_wrote_it(pool: PgPool) {
          WHERE action = $1 AND actor_user_id = $2 \
          ORDER BY id DESC LIMIT 1",
     )
-    .bind(of_core::audit::action::PASSKEY_REGISTERED)
+    .bind(otto_tenant::audit::action::PASSKEY_REGISTERED)
     .bind(user)
     .fetch_one(db.pool())
     .await
@@ -530,7 +530,7 @@ async fn a_forced_audit_failure_rolls_back_the_credential(pool: PgPool) {
     let webauthn = rp();
     let mut auth = authenticator();
 
-    reject_audit_writes(&db, of_core::audit::action::PASSKEY_REGISTERED).await;
+    reject_audit_writes(&db, otto_tenant::audit::action::PASSKEY_REGISTERED).await;
 
     let ceremony = passkeys::start_registration(&db, &webauthn, None)
         .await
@@ -636,7 +636,7 @@ async fn a_ceremony_account_mismatch_writes_a_refusal_but_no_credential(pool: Pg
 
     let audit_count: i64 =
         sqlx::query_scalar("SELECT count(*) FROM audit_events WHERE action = $1")
-            .bind(of_core::audit::action::PASSKEY_REGISTERED)
+            .bind(otto_tenant::audit::action::PASSKEY_REGISTERED)
             .fetch_one(db.pool())
             .await
             .unwrap();
@@ -662,9 +662,9 @@ async fn a_ceremony_account_mismatch_writes_a_refusal_but_no_credential(pool: Pg
     // The refusal itself is still traced, on a connection independent of the
     // rolled-back transaction — see `finish_registration`'s own doc comment
     // for why this is a deliberate exception to "nothing is written."
-    let refusal: (of_core::ids::UserId, serde_json::Value) =
+    let refusal: (otto_tenant::ids::UserId, serde_json::Value) =
         sqlx::query_as("SELECT actor_user_id, detail FROM audit_events WHERE action = $1")
-            .bind(of_core::audit::action::PASSKEY_REGISTRATION_REFUSED)
+            .bind(otto_tenant::audit::action::PASSKEY_REGISTRATION_REFUSED)
             .fetch_one(db.pool())
             .await
             .unwrap();
@@ -689,7 +689,7 @@ async fn a_forced_audit_failure_also_restores_the_ceremony(pool: PgPool) {
     let webauthn = rp();
     let mut auth = authenticator();
 
-    reject_audit_writes(&db, of_core::audit::action::PASSKEY_REGISTERED).await;
+    reject_audit_writes(&db, otto_tenant::audit::action::PASSKEY_REGISTERED).await;
 
     let ceremony = passkeys::start_registration(&db, &webauthn, None)
         .await
@@ -745,12 +745,12 @@ async fn clearing_writes_the_passkey_cleared_action(pool: PgPool) {
     passkeys::clear(&db, user, user, None).await.unwrap();
 
     assert_eq!(
-        action_count(&db, of_core::audit::action::PASSKEY_CLEARED, user).await,
+        action_count(&db, otto_tenant::audit::action::PASSKEY_CLEARED, user).await,
         1,
         "clearing must write auth.passkey.cleared"
     );
     assert_eq!(
-        action_count(&db, of_core::audit::action::TOTP_RESET, user).await,
+        action_count(&db, otto_tenant::audit::action::TOTP_RESET, user).await,
         0,
         "clearing must not write the historical TOTP action"
     );
@@ -773,7 +773,7 @@ async fn removing_a_passkey_writes_the_passkey_removed_action(pool: PgPool) {
         .unwrap();
 
     assert_eq!(
-        action_count(&db, of_core::audit::action::PASSKEY_REMOVED, user).await,
+        action_count(&db, otto_tenant::audit::action::PASSKEY_REMOVED, user).await,
         1,
         "removing a key must write auth.passkey.removed"
     );
@@ -795,7 +795,7 @@ async fn a_forced_audit_failure_rolls_back_a_passkey_removal(pool: PgPool) {
     let keys = passkeys::list(&db, user).await.unwrap();
     assert_eq!(keys.len(), 2);
 
-    reject_audit_writes(&db, of_core::audit::action::PASSKEY_REMOVED).await;
+    reject_audit_writes(&db, otto_tenant::audit::action::PASSKEY_REMOVED).await;
 
     let result = passkeys::remove(&db, user, keys[0].id, Some("203.0.113.9")).await;
     assert!(
@@ -870,7 +870,7 @@ async fn a_forced_audit_failure_rolls_back_a_passkey_clear(pool: PgPool) {
     let mut auth = authenticator();
     let user = register_new(&db, &mut auth).await;
 
-    reject_audit_writes(&db, of_core::audit::action::PASSKEY_CLEARED).await;
+    reject_audit_writes(&db, otto_tenant::audit::action::PASSKEY_CLEARED).await;
 
     let result = passkeys::clear(&db, user, user, None).await;
     assert!(
@@ -900,7 +900,7 @@ async fn renaming_a_passkey_writes_the_passkey_renamed_action(pool: PgPool) {
         .unwrap();
 
     assert_eq!(
-        action_count(&db, of_core::audit::action::PASSKEY_RENAMED, user).await,
+        action_count(&db, otto_tenant::audit::action::PASSKEY_RENAMED, user).await,
         1,
         "renaming a key must write auth.passkey.renamed"
     );
@@ -1040,8 +1040,8 @@ fn names_in(challenge: &webauthn_rs::prelude::CreationChallengeResponse) -> (Str
     )
 }
 
-fn a_user(email: Option<&str>, name: Option<&str>, label: &str) -> of_core::orgs::User {
-    of_core::orgs::User {
+fn a_user(email: Option<&str>, name: Option<&str>, label: &str) -> otto_core::orgs::User {
+    otto_core::orgs::User {
         id: UserId::new(),
         email: email.map(str::to_string),
         name: name.map(str::to_string),

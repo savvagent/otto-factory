@@ -6,7 +6,7 @@
 
 use axum::body::Body;
 use of_core::watch::Watcher;
-use of_core::Db;
+use otto_tenant::Db;
 use of_server::config::LogFormat;
 use of_server::Config;
 use sqlx::postgres::PgPoolOptions;

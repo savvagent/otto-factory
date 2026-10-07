@@ -7,11 +7,11 @@
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use of_auth::error::AuthError;
-use of_auth::{oauth, tokens};
-use of_core::ids::{OrgId, UserId};
-use of_core::orgs::Role;
-use of_core::Db;
+use otto_auth::error::AuthError;
+use otto_auth::{oauth, tokens};
+use otto_tenant::ids::{OrgId, UserId};
+use otto_core::orgs::Role;
+use otto_tenant::Db;
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 
