@@ -7,7 +7,7 @@ use of_core::messages::MessagesExt;
 use of_core::repos::ReposExt;
 mod common;
 
-use common::{db, job, tenant, Tenant};
+use common::{db, job, tenant};
 use of_core::ids::JobId;
 use of_core::jobs::{JobFilter, Status, DEFAULT_CLAIM_TTL_SECS, MAX_CLAIM_TTL_SECS};
 use of_core::messages::{InboxQuery, NewMessage};

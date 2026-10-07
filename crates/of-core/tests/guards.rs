@@ -67,3 +67,73 @@ fn nothing_runs_the_platforms_migrations_on_this_database() {
         offenders.join("\n")
     );
 }
+
+/// The factory's database is domain-only: identity, auth, and billing belong to
+/// the otto platform's database, and nothing here may grow a foreign key into
+/// them. A `REFERENCES orgs (...)` would compile, pass every test against a
+/// single database, and make the cutover to a separate platform database
+/// impossible; a `CREATE TABLE users` would quietly start a second source of
+/// truth for who someone is.
+#[test]
+fn the_schema_holds_no_identity_tables_and_no_foreign_keys_to_them() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    let mut offenders = Vec::new();
+    let mut files = 0;
+
+    for entry in fs::read_dir(&dir).expect("migrations dir") {
+        let path = entry.expect("dir entry").path();
+        if path.extension().is_none_or(|e| e != "sql") {
+            continue;
+        }
+        files += 1;
+        let text = fs::read_to_string(&path).expect("read migration");
+
+        for (n, line) in code_lines_sql(&text) {
+            let lower = line.to_lowercase();
+            for table in [
+                "users",
+                "orgs",
+                "teams",
+                "org_members",
+                "team_members",
+                "org_invites",
+                "access_tokens",
+                "refresh_tokens",
+                "oauth_clients",
+                "authorization_codes",
+                "sessions",
+                "passkeys",
+                "idp_connections",
+                "claimed_domains",
+                "user_identities",
+                "resource_servers",
+                "usage_events",
+                "org_period_usage",
+                "subscriptions",
+            ] {
+                let creates = lower.contains(&format!("create table {table} "))
+                    || lower.contains(&format!("create table {table}("));
+                let references = lower.contains(&format!("references {table} "))
+                    || lower.contains(&format!("references {table}("))
+                    || lower.contains(&format!("references public.{table}"));
+                if creates || references {
+                    offenders.push(format!("{}:{}: {}", path.display(), n + 1, line.trim()));
+                }
+            }
+        }
+    }
+
+    assert!(files > 0, "found no migrations to check");
+    assert!(
+        offenders.is_empty(),
+        "this database is domain-only; identity lives in the platform's database:\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// SQL lines that are code, not `--` comments.
+fn code_lines_sql(text: &str) -> impl Iterator<Item = (usize, &str)> {
+    text.lines()
+        .enumerate()
+        .filter(|(_, l)| !l.trim_start().starts_with("--"))
+}

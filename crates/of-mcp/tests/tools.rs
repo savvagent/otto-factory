@@ -2981,6 +2981,7 @@ async fn a_token_opens_exactly_its_own_org_over_the_wire(pool: PgPool) {
     platform.add_member(globex, eve, "eve@globex.test", Role::Owner);
     let rob_token = platform.issue(acme, rob, Role::Admin, of_core::scopes::KNOWN);
     let eve_token = platform.issue(globex, eve, Role::Owner, of_core::scopes::KNOWN);
+    let db = Db::from_pool(pool.clone());
     let app = front_door(pool, platform.client()).await;
 
     let whoami = call_tool(&app, &rob_token, "whoami", serde_json::json!({})).await;
@@ -3014,6 +3015,36 @@ async fn a_token_opens_exactly_its_own_org_over_the_wire(pool: PgPool) {
             .len(),
         1
     );
+
+    // And every one of those calls was recorded, in its own org's name, and
+    // reaches the platform exactly once when the shipper runs.
+    let cfg = of_billing::outbox::ShipperConfig::default();
+    let platform_client = platform.client();
+    while of_billing::outbox::pending(&db).await.unwrap() > 0 {
+        of_billing::outbox::ship_once(&db, &platform_client, &cfg)
+            .await
+            .unwrap();
+    }
+    let shipped = platform.counted_usage();
+    let by = |org: uuid::Uuid, tool: &str| {
+        shipped
+            .iter()
+            .filter(|e| e.org_id == org && e.tool == tool)
+            .count()
+    };
+    assert_eq!(by(acme, "register_repo"), 1, "{shipped:#?}");
+    assert_eq!(by(acme, "whoami"), 1);
+    assert_eq!(by(acme, "list_repos"), 1);
+    assert_eq!(by(globex, "list_repos"), 1);
+    assert_eq!(
+        by(globex, "register_repo"),
+        0,
+        "one org was billed for another's call"
+    );
+    assert!(shipped
+        .iter()
+        .filter(|e| e.tool == "register_repo")
+        .all(|e| e.billable && e.user_id == Some(rob)));
 }
 
 /// A name the platform cannot resolve because the platform is down must be an
