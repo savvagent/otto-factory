@@ -177,7 +177,8 @@ podman build -t otto-factory .   # console stage + rust stage + slim runtime
 ```
 
 `OF_PUBLIC_URL`, `OF_PLATFORM_URL`, `OF_INTROSPECTION_SECRET`, `OF_PLATFORM_WEBHOOK_SECRET`,
-and `OF_ENCRYPTION_KEY` are required with no defaults; `.env.example` says why for each. Build
+and `OF_ENCRYPTION_KEY` are required with no defaults; `.env.example` says why for each.
+`OF_CONSOLE_CLIENT_ID` is optional (console sign-in answers `503` without it). Build
 `web/` first or every console page answers `404` while the API works. `cargo test` needs only
 `DATABASE_URL`: the platform is `of-testkit`'s in-process mock, never a live service.
 
@@ -217,7 +218,7 @@ compile-time layering discipline, not separate services.
 | `of-mcp` | `rmcp` Streamable HTTP server, tool surface, bearer middleware (introspects at the platform). |
 | `of-billing` | The price list (`classify`), quota policy, and the usage outbox + shipper. |
 | `of-trackers` | GitHub App + JIRA clients, webhook ingest, two-way sync. |
-| `of-web` | Console REST API (platform bearer tokens), tracker webhooks, the platform's lifecycle webhook. |
+| `of-web` | Console REST API (console session cookie or platform bearer token), console sign-in (`/auth/*`), tracker webhooks, the platform's lifecycle webhook. |
 | `of-server` | Config, migrations, router assembly, the usage shipper task, graceful shutdown. |
 | `of-testkit` | Dev-only. `MockPlatform`: the platform's resource-server API, in process. |
 
@@ -261,13 +262,39 @@ by token: tracker webhooks (`/webhooks/{provider}`) and the platform's lifecycle
 members, invites, teams, SSO, tokens, or usage. Those are the platform's, and
 `the_identity_surface_is_not_served_here` fails if one comes back. Conventions:
 
-- **The credential is a platform bearer token, for now — and that is a seam.** The console used
-  to sign people in with a session cookie. Console login (an OAuth authorization-code + PKCE
-  flow against the platform, leaving this service holding its own session) is a separate,
-  later change. Until it lands, `/api/*` accepts the same platform token the MCP surface does,
-  introspected by the same call (`session::authenticate`, the one place a credential becomes an
-  identity — marked `SEAM`). The console UI in `web/` still targets the pre-split API and does
-  not work against this server until that change.
+- **Two credentials, one identity.** A script sends a platform bearer token; the console in a
+  browser holds a **session cookie** (`__Host-of_session`) that keys a platform token pair
+  stored server-side in `console_sessions` (sealed with `OF_ENCRYPTION_KEY`; the cookie
+  itself is only ever stored as a SHA-256). Both end in the same call: the platform
+  introspecting an access token (`session::authenticate`, the one place a credential becomes
+  an identity). A bearer, when sent, decides the request even if it is bad — it is never
+  rescued by a cookie. Nothing downstream of `OrgCtx` knows which it was, except that a
+  cookie session asking for another org is `401 org_session_mismatch` (not `404`: the person
+  is signed in, just not to that org, and the console's answer is to sign in again with an
+  `org_hint`).
+- **Console sign-in is an OAuth client of the platform, and it is optional.** `GET /auth/login`
+  (PKCE `S256` + `state` in a sealed, `HttpOnly`, ten-minute `__Host-of_oauth` cookie) → the
+  platform's `/oauth/authorize` → `GET /auth/callback` (state checked in constant time, code
+  redeemed server to server, access token introspected, session created, `next` honoured only
+  as a same-origin path) → `POST /auth/logout` (revokes the refresh token at the platform, best
+  effort). Every `/auth/*` failure is a redirect to `/?login_error=<code>` from a fixed set;
+  nothing from the query string is reflected. `OF_CONSOLE_CLIENT_ID` unset means
+  `503 console_login_disabled` and nothing else changes. `/auth` is an API prefix (JSON
+  `404`s, never the SPA); `/oauth` still is too and is served by no one here.
+- **Refresh is single-flight, because the platform rotates and punishes reuse.** Every use of
+  a refresh token consumes it, and presenting a consumed one revokes the whole token family.
+  `console::access_token` therefore refreshes under `SELECT … FOR UPDATE` on the session row,
+  rechecks expiry after taking the lock (the loser of a race finds the winner's fresh token
+  and refreshes nothing — across replicas, not just tasks), and runs in a spawned task so a
+  client disconnecting mid-refresh cannot drop a rotation on the floor. `invalid_grant`
+  deletes the session (`401`); a platform that cannot answer is `503` and the session is
+  untouched.
+- **Cookie-authenticated writes are CSRF-checked; bearer requests are exempt.** SameSite does
+  not cover same-site siblings (`otto.savvagent.com` and `otto-factory.savvagent.com`), so a
+  non-safe request carrying the session cookie and no bearer must have `Origin` equal to
+  `OF_PUBLIC_URL`'s origin (else `Sec-Fetch-Site: same-origin`, else a same-origin `Referer`),
+  or it is `403 cross_site_request` (`csrf.rs`, a port of the platform's). `/auth/logout` is
+  included. A bearer is not an ambient credential, so it needs no such proof.
 - **Authorization is an extractor, not a handler's first line.** `OrgCtx` resolves the
   caller (from the token), the `{org}` path segment (which must be the token's one org, by
   slug or id), and their role before any handler body runs; `require_admin()` and
@@ -312,12 +339,15 @@ audit trail that they did not observe.
 
 ## `web/` — the console UI
 
-> **Status.** Written against the pre-split API (cookie session, `/api/me`, `/api/auth/*`,
-> orgs, members, teams, tokens, usage). The identity half of that API is now the platform's,
-> and the console's own sign-in (OAuth + PKCE against the platform) is a separate change, so
-> this UI does not work against the current server until that lands. Its identity pages move
-> to `otto-platform`; what stays here is the queue, repos, trackers, connect, docs, and
-> overview. Nothing below has been updated for that yet.
+> **Status.** Signs in through the platform (`/auth/login`) and talks to the current API.
+> Everything identity-shaped — members, teams, SSO, usage, tokens, the account, switching
+> org — is a link into the platform's console (`web/src/lib/platform.ts`, from the
+> `platformUrl` that `GET /api/session` reports); the old identity pages and API calls are
+> gone. A session is signed in to **one org**: `/o/{slug}` for another is a sign-in for that
+> org (`/auth/login?org=`), and `$lib/login` refuses to repeat an attempt for the same org
+> within a minute so a platform that signs the visitor into a different org cannot loop the
+> tab. The paragraphs below still describe the older shape where they mention the account's
+> locale, members, or the connect page.
 
 Six things hold. The first explains the next four; the sixth stands on its own.
 
@@ -328,7 +358,7 @@ Six things hold. The first explains the next four; the sixth stands on its own.
   the user's behalf: a second process with the keys to every console session, for pages
   behind a login that cannot be cached anyway. `adapter-static` with an `index.html`
   fallback keeps the cookie in the browser and makes CORS a non-question. The same fact is
-  why `vite.config.ts` *proxies* `/api`, `/oauth`, and `/.well-known` in development — a
+  why `vite.config.ts` *proxies* `/api`, `/auth`, `/oauth`, and `/.well-known` in development — a
   cross-port `fetch` would not carry the cookie, and no CORS header could rescue it.
 
 - **The server's rules are mirrored, never re-implemented.** A `404` on an org renders as
@@ -401,8 +431,8 @@ the decisions no single crate could make.
   reaches that panic before a deployment does. `/.well-known/oauth-protected-resource` is
   `of-mcp`'s alone (it names the platform as the authorization server); `of-web` does not
   serve it.
-- **The console SPA is the fallback, but not under `/api`, `/oauth`, `/mcp`, `/.well-known`,
-  `/platform`, or `/webhooks`.** `index.html` answering an unknown path is what makes a hard refresh of a
+- **The console SPA is the fallback, but not under `/api`, `/auth`, `/oauth`, `/mcp`,
+  `/.well-known`, `/platform`, or `/webhooks`.** `index.html` answering an unknown path is what makes a hard refresh of a
   deep link work; `index.html` answering `/api/no/such/thing` with `200 text/html` is what
   makes an agent retry forever against a route that will never exist.
 - **`/healthz` never touches the database and `/readyz` always does.** They answer different

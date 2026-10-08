@@ -56,8 +56,8 @@ sessions, plans, or usage totals, and no foreign key to any of them. Every `org_
 | `OF_INTROSPECTION_SECRET` | `otto_rs_…`; authenticates every call this service makes to the platform | Printed once by `resource register` / `resource rotate-secret` |
 | `OF_PLATFORM_WEBHOOK_SECRET` | `otto_whsec_…`; verifies the platform's lifecycle webhooks | Printed once by `resource set-webhook` |
 
-Non-secret settings (`OF_PUBLIC_URL`, `OF_RESOURCE_URI`, `OF_PLATFORM_URL`, …) live in
-`fly.toml`'s `[env]`.
+Non-secret settings (`OF_PUBLIC_URL`, `OF_RESOURCE_URI`, `OF_PLATFORM_URL`,
+`OF_CONSOLE_CLIENT_ID`, …) live in `fly.toml`'s `[env]`.
 
 ## Registering with the platform
 
@@ -90,6 +90,40 @@ At startup `of-server` makes one harmless platform call and logs whether the pla
 accepted its credential (`REJECTED this service's credential` means a wrong secret or
 URI). It does not refuse to start on failure: a platform outage must not stop a restart
 that would otherwise serve cached tokens.
+
+## Registering the console's sign-in client
+
+The console signs people in with an OAuth authorization-code + PKCE flow against the
+platform, and then keeps its own session cookie (`__Host-of_session`) over a platform token
+pair it holds server-side. For that the platform needs to know the console as an OAuth
+client: a **public, first-party** client (no secret, no dynamic registration) whose only
+redirect URI is `{OF_PUBLIC_URL}/auth/callback`. Like the resource registration above, this
+is an operator step on the platform:
+
+```bash
+# Run on the platform's machine (it needs the platform's OTTO_* environment):
+fly ssh console -a otto-platform -C \
+  'otto-platform-server client register --name "otto-factory console" \
+     --redirect-uri https://otto-factory.savvagent.com/auth/callback --first-party'
+#   -> prints the client_id: set it as OF_CONSOLE_CLIENT_ID
+```
+
+The `client_id` is not a secret (a public client has nothing else to authenticate with, and
+PKCE is what binds a code to the browser that asked for it), so it goes in `fly.toml`'s
+`[env]`, beside `OF_PUBLIC_URL`. The redirect URI is registered **exactly**: a deployment
+that moves to another hostname registers a new one.
+
+`OF_CONSOLE_CLIENT_ID` is optional. While it is unset the server boots and serves everything
+else, and `GET /auth/login` answers `503 console_login_disabled`; the console then shows
+its sign-in failing with that message rather than redirecting somewhere that cannot work.
+Bearer tokens (scripts, CI) and the MCP surface do not depend on it.
+
+Sessions live in the `console_sessions` table (access and refresh tokens sealed with
+`OF_ENCRYPTION_KEY`; the cookie itself is stored only as a SHA-256). Because the key seals
+them, **rotating `OF_ENCRYPTION_KEY` signs every console user out**. The platform rotates a
+refresh token on every use and revokes the whole login if a spent one is replayed, so the
+factory refreshes under a row lock and each refresh happens exactly once, even across
+machines.
 
 ## Usage metering
 
@@ -184,10 +218,13 @@ Order matters; the platform goes first.
    tokens and registrations were the factory's and are gone). `docs/clients/matrix.md` and
    `client-skills/` need only the MCP URL, which is unchanged.
 
-**The console UI is not usable until the separate console-login change lands.** It still
-targets the pre-split API (`/api/me`, `/api/auth/*`, orgs and teams); this release serves
-the repo, queue, tracker, and audit endpoints it needs behind a platform bearer token only.
-Agents (`/mcp`) are unaffected.
+10. **Register the console's sign-in client** at the platform and set
+    `OF_CONSOLE_CLIENT_ID` (see *Registering the console's sign-in client* above), then
+    redeploy. The console is not usable until this is done: `/auth/login` answers
+    `503 console_login_disabled` and the UI shows its sign-in failing. Verify by opening
+    `https://otto-factory.savvagent.com/` in a browser: **Sign in** goes to the platform,
+    comes back to `/o/<your org>`, and the header shows your name and a **Manage** menu
+    linking into the platform's console. Agents (`/mcp`) never depended on this step.
 
 ## What's scaffolded
 
@@ -227,9 +264,10 @@ Agents (`/mcp`) are unaffected.
 ## What a deploy can and cannot do
 
 `/readyz` passes and the API works end to end for an MCP client once the resource is
-registered at the platform and its two secrets are set. The product sends no email and
-holds no accounts: signing in, passkeys, recovery, invitations, and SSO are the platform's.
-See the cutover checklist for the order, and for the console's interim state.
+registered at the platform and its two secrets are set; the console additionally needs
+`OF_CONSOLE_CLIENT_ID`. The product sends no email and holds no accounts: signing in,
+passkeys, recovery, invitations, SSO, members, and teams are the platform's, and the
+console links there. See the cutover checklist for the order.
 
 ## The hostname
 

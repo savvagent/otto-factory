@@ -82,15 +82,15 @@ plus the console UI for it) is complete —
 | `of-mcp` | ✅ Streamable HTTP MCP, 27 tools, platform-introspected bearer auth |
 | `of-billing` | ✅ price list, quota policy, usage outbox + shipper |
 | `of-trackers` | ✅ GitHub App + JIRA two-way sync (milestone 2) |
-| `of-web` | ✅ console API (platform bearer tokens), tracker console, platform webhooks |
+| `of-web` | ✅ console API (session cookie or platform bearer token), console sign-in, tracker console, platform webhooks |
 | `of-server` | ✅ config, startup migrations, router assembly, health, usage shipper |
 | `of-testkit` | ✅ in-process mock of the platform, for tests |
-| `web/` | ⚠️ SvelteKit 2 / Svelte 5 console — pending its platform sign-in change (see below) |
+| `web/` | ✅ SvelteKit 2 / Svelte 5 console — signs in through the platform |
 
-> The console UI still targets the pre-split API. Its identity pages move to the platform, and
-> its own sign-in (OAuth + PKCE against the platform) is a separate change; until then the
-> console API is usable with a platform bearer token and the UI is not. Agents (`/mcp`) are
-> unaffected.
+> The console signs in through the platform (OAuth authorization code + PKCE) and keeps its
+> own session cookie; members, teams, SSO, usage, and tokens are managed at the platform,
+> which the console links to. Sign-in needs `OF_CONSOLE_CLIENT_ID`
+> ([`docs/deploy/fly.md`](docs/deploy/fly.md)); agents (`/mcp`) never do.
 
 ## Tenant isolation
 
@@ -156,7 +156,8 @@ platform to authenticate anyone; a local one is `otto-platform-server` from
 |---|---|
 | `/healthz` | Liveness. Never touches the database. |
 | `/readyz` | Readiness. Probes the database; `503` when it cannot. |
-| `/api/…` | Console REST API (`/api/openapi.json` describes it). Platform bearer tokens. |
+| `/api/…` | Console REST API (`/api/openapi.json` describes it). Console session cookie or platform bearer token. |
+| `/auth/…` | Console sign-in: `login`, `callback` (OAuth code + PKCE against the platform), `logout`. |
 | `/webhooks/{provider}` | Tracker deliveries (GitHub, JIRA), provider-signed. |
 | `/platform/webhooks` | The platform's lifecycle events, `Otto-Signature`-signed. |
 | `/.well-known/oauth-protected-resource` | Discovery; names the platform as the authorization server. |
@@ -166,6 +167,8 @@ platform to authenticate anyone; a local one is `otto-platform-server` from
 `OF_PUBLIC_URL`, `OF_PLATFORM_URL`, `OF_INTROSPECTION_SECRET`, `OF_PLATFORM_WEBHOOK_SECRET`,
 and `OF_ENCRYPTION_KEY` are required and have no defaults, because a wrong value for any of
 them fails silently rather than loudly — see the comments in `.env.example`.
+`OF_CONSOLE_CLIENT_ID` is optional: without it the server runs and console sign-in answers
+`503 console_login_disabled`.
 Run `npm run build` in `web/` first, or every console page answers `404` while the API
 works perfectly.
 
