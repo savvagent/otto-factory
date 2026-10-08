@@ -207,3 +207,64 @@ async fn locking_serializes_a_rotation_and_the_loser_sees_the_new_tokens(pool: P
     assert_eq!(second.refresh_token(&cipher).unwrap(), "otto_rt_new");
     tx2.rollback().await.unwrap();
 }
+
+/// A sign-in that completes after the platform deleted the org, or removed the
+/// member, must not leave a session behind the clean-up that ran for it.
+#[sqlx::test]
+async fn no_session_is_created_for_a_deleted_org_or_a_removed_member(pool: PgPool) {
+    use of_core::platform_events::apply;
+    use of_testkit::MockPlatform;
+    use otto_resource::webhook;
+
+    let db = db(pool);
+    let cipher = cipher();
+    let deliver = |kind: &str, data: serde_json::Value| {
+        let (header, body) = MockPlatform::webhook(kind, data);
+        webhook::verify(of_testkit::WEBHOOK_SECRET, &header, &body).unwrap()
+    };
+    let new = |org: OrgId, user: UserId| NewSession {
+        id_hash: sessions::hash_cookie(&format!("{org}{user}")),
+        user_id: user,
+        org_id: org,
+        access_token: "otto_at_access",
+        refresh_token: "otto_rt_refresh",
+        access_expires_at: Utc::now() + Duration::hours(1),
+        scopes: &[],
+        expires_at: Utc::now() + Duration::days(30),
+    };
+
+    let (gone, user) = (OrgId::new(), UserId::new());
+    apply(
+        &db,
+        &deliver(
+            "org.deleted",
+            serde_json::json!({ "org_id": gone.as_uuid() }),
+        ),
+    )
+    .await
+    .unwrap();
+    let res = sessions::create(&db, &cipher, &new(gone, user)).await;
+    assert!(matches!(res, Err(of_core::Error::AccessRevoked)), "{res:?}");
+
+    let (org, removed, staying) = (OrgId::new(), UserId::new(), UserId::new());
+    apply(
+        &db,
+        &deliver(
+            "member.removed",
+            serde_json::json!({ "org_id": org.as_uuid(), "user_id": removed.as_uuid() }),
+        ),
+    )
+    .await
+    .unwrap();
+    let res = sessions::create(&db, &cipher, &new(org, removed)).await;
+    assert!(matches!(res, Err(of_core::Error::AccessRevoked)), "{res:?}");
+    sessions::create(&db, &cipher, &new(org, staying))
+        .await
+        .expect("another member of the org still signs in");
+
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM console_sessions")
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(rows, 1);
+}

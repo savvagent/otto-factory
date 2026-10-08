@@ -118,10 +118,13 @@ pub struct NewSession<'a> {
     pub expires_at: DateTime<Utc>,
 }
 
+/// Refused with `AccessRevoked` if the org was deleted or the user removed: a
+/// sign-in that completes while the platform's clean-up runs must not leave a
+/// session behind it (see `platform_events::begin_live`).
 pub async fn create(db: &Db, cipher: &Cipher, new: &NewSession<'_>) -> Result<()> {
     let access = seal(cipher, new.access_token)?;
     let refresh = seal(cipher, new.refresh_token)?;
-    let mut tx = db.begin(new.org_id).await?;
+    let mut tx = crate::platform_events::begin_live(db, new.org_id, Some(new.user_id)).await?;
     sqlx::query(
         "INSERT INTO console_sessions \
            (id_hash, user_id, org_id, access_token_enc, refresh_token_enc, \

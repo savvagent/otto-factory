@@ -243,7 +243,13 @@ pub async fn callback(
         }
     };
 
-    let cookie = console::create(&state, &tokens, &claims).await?;
+    let cookie = match console::create(&state, &tokens, &claims).await {
+        Ok(cookie) => cookie,
+        // The tombstone check above, lost to a clean-up that started since:
+        // the same answer it gives.
+        Err(e) if e.status == http::StatusCode::UNAUTHORIZED => return Ok(login_failed("failed")),
+        Err(e) => return Err(e),
+    };
 
     // `next` was checked when it went into the cookie; it is checked again,
     // because the cookie is the one thing here a browser could have tampered

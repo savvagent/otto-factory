@@ -37,7 +37,7 @@ pub async fn get_audit(
     ctx.require_admin()?;
     ctx.require_scope(scopes::ORG_ADMIN)?;
 
-    let mut tx = state.db.begin(ctx.org.id).await?;
+    let mut tx = ctx.begin(&state.db).await?;
     let events = tx
         .audit_trail(q.action_prefix.as_deref(), q.limit.unwrap_or(100))
         .await?;

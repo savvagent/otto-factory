@@ -9,8 +9,8 @@ use common::{db, job, tenant, Member};
 use of_core::jobs::{JobsExt, Status};
 use of_core::leases::LeasesExt;
 use of_core::messages::{MessagesExt, NewMessage};
-use of_core::platform_events::{apply, revoked, Outcome};
-use of_core::repos::{NewRepo, ReposExt};
+use of_core::platform_events::{apply, begin_live, revoked, Outcome};
+use of_core::repos::{NewRepo, RepoPatch, ReposExt};
 use of_core::teams::VerifiedTeam;
 use of_core::trackers::{upsert_binding, upsert_connection, Provider};
 use of_testkit::MockPlatform;
@@ -205,6 +205,123 @@ async fn a_redelivery_reruns_the_cleanup_and_catches_work_that_raced_the_purge(p
     );
 }
 
+/// A request that passed authentication before the tombstone and commits after
+/// it must still be purged by the one delivery, and a request that starts once
+/// the purge is under way must be refused, not written and left behind.
+#[sqlx::test]
+async fn a_write_in_flight_is_purged_and_a_later_one_refused_without_redelivery(pool: PgPool) {
+    let db = db(pool);
+    let a = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+    let b = tenant(&db, "globex", "git@github.com:globex/api.git").await;
+
+    // Past authentication, transaction open: the request is in flight.
+    let mut writer = begin_live(&db, a.org, Some(a.user)).await.unwrap();
+
+    let purge = {
+        let db = db.clone();
+        let ev = event(
+            "org.deleted",
+            serde_json::json!({ "org_id": a.org.as_uuid() }),
+        );
+        tokio::spawn(async move { apply(&db, &ev).await })
+    };
+
+    // The tombstone lands at once; the purge itself waits for the writer.
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !revoked(&db, a.org, a.user).await.unwrap() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the tombstone was never written");
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(
+        !purge.is_finished(),
+        "the purge ran while a request transaction for the org was still open"
+    );
+
+    // A request that starts now queues behind the purge rather than slipping
+    // in ahead of it, and is refused once the purge is done.
+    let late_user = {
+        let db = db.clone();
+        tokio::spawn(async move { begin_live(&db, a.org, Some(a.user)).await.map(|_| ()) })
+    };
+    let late_nobody = {
+        let db = db.clone();
+        tokio::spawn(async move { begin_live(&db, a.org, None).await.map(|_| ()) })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(!late_user.is_finished() && !late_nobody.is_finished());
+
+    writer
+        .register_repo(NewRepo {
+            slug: "late".into(),
+            remotes: vec!["git@github.com:acme/late.git".into()],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    writer.commit().await.unwrap();
+
+    assert!(matches!(
+        purge.await.unwrap().unwrap(),
+        Outcome::Applied { .. }
+    ));
+    assert_eq!(
+        count(&db, a.org, "repos").await,
+        0,
+        "a write that was in flight during the purge survived one delivery"
+    );
+    for late in [late_user, late_nobody] {
+        let res = late.await.unwrap();
+        assert!(
+            matches!(res, Err(of_core::Error::AccessRevoked)),
+            "a request that queued behind the purge was let in: {res:?}"
+        );
+    }
+    // Another org is neither blocked nor touched.
+    let tx = begin_live(&db, b.org, Some(b.user)).await.unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(count(&db, b.org, "repos").await, 1);
+}
+
+/// `member.removed` takes the same lock, and a removed member's next
+/// transaction is refused while the rest of the org carries on.
+#[sqlx::test]
+async fn a_removed_members_transaction_is_refused_and_others_are_not(pool: PgPool) {
+    let db = db(pool);
+    let a = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+    let other = Member::new();
+    apply(
+        &db,
+        &event(
+            "member.removed",
+            serde_json::json!({ "org_id": a.org.as_uuid(), "user_id": a.user.as_uuid() }),
+        ),
+    )
+    .await
+    .unwrap();
+
+    let res = begin_live(&db, a.org, Some(a.user)).await;
+    assert!(
+        matches!(res, Err(of_core::Error::AccessRevoked)),
+        "{:?}",
+        res.err()
+    );
+    begin_live(&db, a.org, Some(other.id))
+        .await
+        .unwrap()
+        .commit()
+        .await
+        .unwrap();
+    begin_live(&db, a.org, None)
+        .await
+        .unwrap()
+        .commit()
+        .await
+        .unwrap();
+}
+
 #[sqlx::test]
 async fn a_removed_member_is_refused_briefly_and_then_the_platform_decides(pool: PgPool) {
     let db = db(pool);
@@ -277,6 +394,100 @@ async fn the_sweep_forgets_old_event_markers_only(pool: PgPool) {
         .unwrap();
     assert_eq!(of_core::platform_events::sweep(&db, 30).await.unwrap(), 1);
     assert_eq!(count(&db, a.org, "platform_events").await, 1);
+}
+
+/// The housekeeping runs on the pool with no org pinned. `#[sqlx::test]`
+/// connects as a superuser, which bypasses row-level security, so the test above
+/// cannot tell a working sweep from one that matches zero rows. Here the pool
+/// runs as `otto_app`, a role RLS binds, which is the shape of a deployment
+/// whose connecting role neither is a superuser nor has `BYPASSRLS`.
+#[sqlx::test]
+async fn housekeeping_deletes_where_row_level_security_applies(pool: PgPool) {
+    let db = db(pool.clone());
+    let a = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+    let b = tenant(&db, "globex", "git@github.com:globex/api.git").await;
+
+    // On such a deployment the connecting role owns the tables and so holds
+    // DELETE on the audit trail; `otto_app` has it revoked. Grant it here, in
+    // this throwaway database, so that what is under test is the policies.
+    sqlx::query("GRANT DELETE ON audit_events TO otto_app")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let restricted = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(4)
+        .after_connect(|conn, _| {
+            Box::pin(async move {
+                sqlx::query("SET ROLE otto_app").execute(conn).await?;
+                Ok(())
+            })
+        })
+        .connect_with(pool.connect_options().as_ref().clone())
+        .await
+        .unwrap();
+    let rdb = otto_tenant::Db::from_pool(restricted);
+
+    // Old event markers in two orgs; the org-less sweep must reach both.
+    for t in [&a, &b] {
+        apply(
+            &rdb,
+            &event(
+                "team.deleted",
+                serde_json::json!({ "org_id": t.org.as_uuid(), "team_id": TeamId::new().as_uuid() }),
+            ),
+        )
+        .await
+        .unwrap();
+    }
+    sqlx::query("UPDATE platform_events SET received_at = now() - interval '40 days'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(of_core::platform_events::sweep(&rdb, 30).await.unwrap(), 2);
+    assert_eq!(count(&db, a.org, "platform_events").await, 0);
+    assert_eq!(count(&db, b.org, "platform_events").await, 0);
+
+    // A pinned transaction still sees only its own org's markers.
+    apply(
+        &rdb,
+        &event(
+            "team.deleted",
+            serde_json::json!({ "org_id": b.org.as_uuid(), "team_id": TeamId::new().as_uuid() }),
+        ),
+    )
+    .await
+    .unwrap();
+    let mut tx = rdb.begin(a.org).await.unwrap();
+    let seen: i64 = sqlx::query_scalar("SELECT count(*) FROM platform_events")
+        .fetch_one(tx.conn())
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(seen, 0, "org A saw org B's event markers");
+
+    // org.deleted purges the org's audit trail, and only that org's.
+    for t in [&a, &b] {
+        let mut tx = rdb.begin(t.org).await.unwrap();
+        tx.audit(otto_tenant::audit::Entry::new("repo.registered"))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    }
+    let theirs = count(&db, b.org, "audit_events").await;
+    assert!(count(&db, a.org, "audit_events").await > 0);
+    apply(
+        &rdb,
+        &event(
+            "org.deleted",
+            serde_json::json!({ "org_id": a.org.as_uuid() }),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(count(&db, a.org, "audit_events").await, 0);
+    assert_eq!(count(&db, b.org, "audit_events").await, theirs);
+
+    rdb.pool().close().await;
 }
 
 #[sqlx::test]
@@ -547,5 +758,154 @@ async fn a_team_verified_for_another_org_cannot_be_attached_here(pool: PgPool) {
     assert!(
         matches!(res, Err(of_core::Error::TeamNotFound { .. })),
         "{res:?}"
+    );
+}
+
+/// The three other places a `VerifiedTeam` is written: each must accept a team
+/// verified for this org and refuse one verified for another, writing nothing.
+async fn teams_in_two_orgs(
+    platform: &MockPlatform,
+    a: &common::Tenant,
+    b: &common::Tenant,
+) -> (VerifiedTeam, VerifiedTeam) {
+    let (ours, theirs) = (TeamId::new(), TeamId::new());
+    platform.add_org(a.org.as_uuid(), "acme", "Acme");
+    platform.add_org(b.org.as_uuid(), "globex", "Globex");
+    platform.add_team(a.org.as_uuid(), ours.as_uuid(), "ours", "Ours");
+    platform.add_team(b.org.as_uuid(), theirs.as_uuid(), "theirs", "Theirs");
+    let client = platform.client();
+    (
+        VerifiedTeam::verify(&client, a.org, ours).await.unwrap(),
+        VerifiedTeam::verify(&client, b.org, theirs).await.unwrap(),
+    )
+}
+
+#[sqlx::test]
+async fn a_job_takes_a_team_from_its_own_org_only(pool: PgPool) {
+    let platform = MockPlatform::start().await;
+    let db = db(pool);
+    let a = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+    let b = tenant(&db, "globex", "git@github.com:globex/api.git").await;
+    let (ours, theirs) = teams_in_two_orgs(&platform, &a, &b).await;
+
+    let mut tx = db.begin(a.org).await.unwrap();
+    let mut new = job(&a, "ours");
+    new.team_id = Some(ours);
+    let created = tx.add_job(new).await.unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(created.team_id, Some(ours.id()));
+
+    let mut tx = db.begin(a.org).await.unwrap();
+    let mut new = job(&a, "theirs");
+    new.team_id = Some(theirs);
+    let res = tx.add_job(new).await;
+    let _ = tx.rollback().await;
+    assert!(
+        matches!(res, Err(of_core::Error::TeamNotFound { .. })),
+        "{res:?}"
+    );
+    assert_eq!(
+        count(&db, a.org, "jobs").await,
+        1,
+        "the refused job was inserted"
+    );
+}
+
+#[sqlx::test]
+async fn a_message_takes_a_team_from_its_own_org_only_keyed_or_not(pool: PgPool) {
+    let platform = MockPlatform::start().await;
+    let db = db(pool);
+    let a = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+    let b = tenant(&db, "globex", "git@github.com:globex/api.git").await;
+    let (ours, theirs) = teams_in_two_orgs(&platform, &a, &b).await;
+
+    // Keyed and unkeyed sends insert on separate paths; both are checked.
+    for key in [None, Some("send-1".to_string())] {
+        let mut tx = db.begin(a.org).await.unwrap();
+        let sent = tx
+            .send_message(
+                a.user,
+                NewMessage {
+                    body: "to our team".into(),
+                    team_id: Some(ours),
+                    idempotency_key: key.clone(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        assert_eq!(sent.team_id, Some(ours.id()), "key {key:?}");
+
+        let mut tx = db.begin(a.org).await.unwrap();
+        let res = tx
+            .send_message(
+                a.user,
+                NewMessage {
+                    body: "to their team".into(),
+                    team_id: Some(theirs),
+                    idempotency_key: key.map(|k| format!("{k}-theirs")),
+                    ..Default::default()
+                },
+            )
+            .await;
+        let _ = tx.rollback().await;
+        assert!(
+            matches!(res, Err(of_core::Error::TeamNotFound { .. })),
+            "{res:?}"
+        );
+    }
+    assert_eq!(
+        count(&db, a.org, "messages").await,
+        2,
+        "a message addressed to another org's team was inserted"
+    );
+}
+
+#[sqlx::test]
+async fn a_repo_is_reassigned_to_a_team_from_its_own_org_only(pool: PgPool) {
+    let platform = MockPlatform::start().await;
+    let db = db(pool);
+    let a = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+    let b = tenant(&db, "globex", "git@github.com:globex/api.git").await;
+    let (ours, theirs) = teams_in_two_orgs(&platform, &a, &b).await;
+
+    let mut tx = db.begin(a.org).await.unwrap();
+    let repo = tx
+        .update_repo(
+            a.repo,
+            RepoPatch {
+                team_id: Some(Some(ours)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(repo.team_id, Some(ours.id()));
+
+    let mut tx = db.begin(a.org).await.unwrap();
+    let res = tx
+        .update_repo(
+            a.repo,
+            RepoPatch {
+                team_id: Some(Some(theirs)),
+                ..Default::default()
+            },
+        )
+        .await;
+    let _ = tx.rollback().await;
+    assert!(
+        matches!(res, Err(of_core::Error::TeamNotFound { .. })),
+        "{res:?}"
+    );
+
+    let mut tx = db.begin(a.org).await.unwrap();
+    let after = tx.get_repo(a.repo).await.unwrap().unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(
+        after.team_id,
+        Some(ours.id()),
+        "a refused reassignment changed the repo's team"
     );
 }

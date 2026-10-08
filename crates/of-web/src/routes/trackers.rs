@@ -183,7 +183,7 @@ pub async fn list_tracker_connections(
     ctx.require_admin()?;
     ctx.require_scope(of_core::scopes::TRACKERS)?;
 
-    let mut tx = state.db.begin(ctx.org.id).await?;
+    let mut tx = ctx.begin(&state.db).await?;
     let connections = list_connections(&mut tx).await?;
     tx.commit().await?;
 
@@ -225,7 +225,7 @@ pub async fn connect_tracker(
         }
     };
 
-    let mut tx = state.db.begin(ctx.org.id).await?;
+    let mut tx = ctx.begin(&state.db).await?;
     let connection = upsert_connection(&mut tx, provider, &external_id, sealed.as_ref(), None)
         .await
         .map_err(ApiError::from)?;
@@ -363,7 +363,7 @@ pub async fn disconnect_tracker(
     ctx.require_scope(of_core::scopes::TRACKERS)?;
     let provider = provider_from_path(&provider)?;
 
-    let mut tx = state.db.begin(ctx.org.id).await?;
+    let mut tx = ctx.begin(&state.db).await?;
     delete_connection(&mut tx, provider).await?;
     tx.audit(
         Entry::new(action::TRACKER_DISCONNECTED)
@@ -387,7 +387,7 @@ pub async fn list_repo_bindings(
     Path((_org, slug)): Path<(String, String)>,
 ) -> ApiResult<Json<Vec<TrackerBindingView>>> {
     ctx.require_scope(of_core::scopes::TRACKERS)?;
-    let mut tx = state.db.begin(ctx.org.id).await?;
+    let mut tx = ctx.begin(&state.db).await?;
     let repo = resolve_repo(&state, &mut tx, &ctx, slug).await?;
     let bindings = list_bindings_for_repo(&mut tx, repo.id).await?;
     tx.commit().await?;
@@ -415,7 +415,7 @@ pub async fn bind_repo(
         .unwrap_or(DEFAULT_TRIGGER_LABEL)
         .to_string();
 
-    let mut tx = state.db.begin(ctx.org.id).await?;
+    let mut tx = ctx.begin(&state.db).await?;
     let repo = resolve_repo(&state, &mut tx, &ctx, slug).await?;
 
     // The connection is looked up, never taken from the request. A binding
@@ -460,7 +460,7 @@ pub async fn unbind_repo(
     ctx.require_scope(of_core::scopes::TRACKERS)?;
     let provider = provider_from_path(&provider)?;
 
-    let mut tx = state.db.begin(ctx.org.id).await?;
+    let mut tx = ctx.begin(&state.db).await?;
     let repo = resolve_repo(&state, &mut tx, &ctx, slug).await?;
     if let Some(binding) = resolve_binding(&mut tx, repo.id, provider).await? {
         delete_binding(&mut tx, binding.id).await?;

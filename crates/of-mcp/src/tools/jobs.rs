@@ -363,9 +363,7 @@ impl Factory {
         repo_id: of_core::ids::RepoId,
         provider: Provider,
     ) -> Result<BindingLookup, String> {
-        let mut tx = self
-            .db()
-            .begin(org_id)
+        let mut tx = of_core::platform_events::begin_live(self.db(), org_id, None)
             .await
             .map_err(|error| error.to_string())?;
         let binding = resolve_binding(&mut tx, repo_id, provider)
@@ -463,9 +461,7 @@ impl Factory {
                     .sync_github_job(job, ticket_ref, &connection.external_id, &plan)
                     .await?;
                 if let Some(remote_revision) = outcome {
-                    let mut tx = self
-                        .db()
-                        .begin(job.org_id)
+                    let mut tx = of_core::platform_events::begin_live(self.db(), job.org_id, None)
                         .await
                         .map_err(|error| error.to_string())?;
                     tx.set_remote_revision(&job.id, &remote_revision)
@@ -479,9 +475,7 @@ impl Factory {
                     .sync_jira_job(job, ticket_ref, &binding.external_ref, &connection, &plan)
                     .await?;
                 if outcome.remote_revision.is_some() || outcome.rotated_credentials.is_some() {
-                    let mut tx = self
-                        .db()
-                        .begin(job.org_id)
+                    let mut tx = of_core::platform_events::begin_live(self.db(), job.org_id, None)
                         .await
                         .map_err(|error| error.to_string())?;
                     if let Some(remote_revision) = outcome.remote_revision.as_deref() {

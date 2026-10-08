@@ -96,9 +96,13 @@ with) — and `current_org()` is NULL for the statement's entire lifetime, so
 every tenant**, forever. (`tracker_connection_index` is the one `org_id NOT NULL` table with no policy at all, deliberately
 — the unauthenticated tracker webhook route has to resolve an org before one is known. It has no
 second branch: an unscoped rewrite of it always hits the first outcome, on every deployment shape.
-`usage_outbox`'s policy has two branches, `org_id = current_org() OR current_org() IS NULL`, so the
-org-less background shipper can drain every org's rows while a pinned transaction still sees only
-its own.)
+`usage_outbox`'s and `platform_events`' policies have two branches, `org_id = current_org() OR
+current_org() IS NULL`, so org-less background code (the shipper, the event sweep) can reach every
+org's rows while a pinned transaction still sees only its own. A DELETE-only policy is not enough for
+that: a DELETE's `WHERE` reads the rows it filters, so the table's SELECT policies apply to it too,
+which is why `audit_events` has `audit_events_retention_read` beside `audit_events_retention`
+(`0002_org_less_retention.sql`; `housekeeping_deletes_where_row_level_security_applies` runs it as
+`otto_app`).)
 `savvagent/otto-factory#70` is what the fallback shape produced for a since-squashed relabeling
 `UPDATE`; under this deployment's actual (bypassing) role it produced the first outcome instead,
 harmlessly, because that rewrite was genuinely meant to apply the same way to every org. There is no
@@ -326,7 +330,12 @@ members, invites, teams, SSO, tokens, or usage. Those are the platform's, and
   `member.removed` first write `deleted_orgs` / `removed_members` (the latter swept after minutes)
   and both HTTP surfaces refuse a tombstoned org or user on every request
   (`of_core::platform_events::revoked`; a database error there is a `503`). Only then does the
-  clean-up run.
+  clean-up run. A request already past that check can still be on its way to a transaction, so
+  every request-path tenant transaction opens through `platform_events::begin_live` (`Factory::tx`,
+  `OrgCtx::begin`), which holds the org's lifecycle advisory lock shared and re-checks the
+  tombstones under it; the clean-up takes it exclusively. A write in flight finishes first and is
+  purged with the rest; one that starts later is refused (`access_revoked`). **Never open a
+  request's transaction with `Db::begin` directly.**
 - **The router and the OpenAPI document are built from one list.** Adding a route means
   adding it to `catalog.rs` with its summary and description; `router()` mounts the list and
   `openapi::document` renders it. A route not in the catalog is not reachable, on purpose.

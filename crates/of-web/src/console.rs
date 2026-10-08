@@ -92,7 +92,11 @@ async fn store(
         },
     )
     .await
-    .map_err(|e| ApiError::unavailable("store a console session", e))
+    .map_err(|e| match e {
+        // The org was deleted or the member removed while they were signing in.
+        of_core::Error::AccessRevoked => ApiError::from(e),
+        e => ApiError::unavailable("store a console session", e),
+    })
 }
 
 /// A platform access token for the session behind `cookie` (and the org the

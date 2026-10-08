@@ -112,6 +112,16 @@ pub enum Error {
     )]
     IdempotencyKeyConflict { key: String, tool: &'static str },
 
+    /// The org was deleted, or the caller was removed from it, after the token
+    /// was introspected. Re-checked inside the transaction, under the org's
+    /// lifecycle lock, so a request already past authentication cannot write
+    /// into an org that is being purged. Not retriable: the token is done here.
+    #[error(
+        "this organization no longer exists, or you are no longer a member of it; \
+         nothing was changed. Sign in again to see which organizations you can use."
+    )]
+    AccessRevoked,
+
     #[error(transparent)]
     Db(#[from] sqlx::Error),
 
@@ -147,6 +157,7 @@ impl Error {
             Error::Invalid(_) => "invalid_argument",
             Error::RaceLost(_) => "race_lost",
             Error::IdempotencyKeyConflict { .. } => "idempotency_key_conflict",
+            Error::AccessRevoked => "access_revoked",
             Error::Db(_) => "internal_error",
             Error::Platform(_) => "platform_unavailable",
             Error::Tenant(e) => e.code(),

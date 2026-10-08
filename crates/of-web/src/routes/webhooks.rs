@@ -80,7 +80,9 @@ pub async fn receive(
                     webhook_not_found()
                 })?;
 
-            let mut tx = state.db.begin(org_id).await.map_err(ApiError::from)?;
+            let mut tx = of_core::platform_events::begin_live(&state.db, org_id, None)
+                .await
+                .map_err(ApiError::from)?;
             let connection = get_connection(&mut tx, provider)
                 .await
                 .map_err(ApiError::from)?
@@ -114,7 +116,9 @@ pub async fn receive(
                     webhook_not_found()
                 })?;
 
-            let mut tx = state.db.begin(org_id).await.map_err(ApiError::from)?;
+            let mut tx = of_core::platform_events::begin_live(&state.db, org_id, None)
+                .await
+                .map_err(ApiError::from)?;
             let connection = get_connection(&mut tx, provider)
                 .await
                 .map_err(ApiError::from)?

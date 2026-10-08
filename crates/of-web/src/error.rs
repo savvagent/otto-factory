@@ -152,6 +152,9 @@ impl From<CoreError> for ApiError {
             // The platform could not answer an identity question this request
             // depended on (is this team real?). Refused, and retriable.
             Platform(inner) => return ApiError::platform_unavailable("platform lookup", inner),
+            // The same answer authentication gives a tombstoned org or user;
+            // this is that check, re-run under the org's lifecycle lock.
+            AccessRevoked => return ApiError::unauthenticated(),
             other => other,
         };
 
@@ -182,7 +185,7 @@ impl From<CoreError> for ApiError {
             // (unlike Db's) is already safe to show as-is.
             RaceLost(_) => StatusCode::SERVICE_UNAVAILABLE,
 
-            Db(_) | Platform(_) | Tenant(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Db(_) | Platform(_) | Tenant(_) | AccessRevoked => StatusCode::INTERNAL_SERVER_ERROR,
         };
 
         let mut api = ApiError::new(status, e.code(), e.to_string());
