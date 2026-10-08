@@ -60,7 +60,10 @@ pub struct AcquireLeaseArgs {
     #[serde(default)]
     pub remote: Option<String>,
     /// How you want to appear to teammates who run list_leases, for example
-    /// "api-agent@ci-7".
+    /// "api-agent@ci-7". At most 128 characters on one line, with no
+    /// control, line-break, or invisible formatting characters; anything else
+    /// is refused with invalid_agent_label rather than shortened. Blank is the
+    /// same as omitting it.
     #[serde(default)]
     pub agent: Option<String>,
     /// The job this lease is for, if there is one.
@@ -206,7 +209,10 @@ impl Factory {
                        when it expires, so you can wait, message them, or pick different \
                        work. Leases are advisory: the server cannot see what you actually do \
                        with the resource, so this makes collisions visible rather than \
-                       impossible."
+                       impossible. agent is a short label (one line, at most 128 visible \
+                       characters) that teammates see as the lease's holder; a longer or \
+                       multi-line one is refused with invalid_agent_label rather than \
+                       shortened."
     )]
     pub async fn acquire_lease(
         &self,

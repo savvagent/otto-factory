@@ -38,6 +38,7 @@ implements it exactly.
 | **Modify.** `crates/of-core/src/leases.rs` | `acquire_lease` validates `label`; `LeaseHeld` renders via `agent_label::holder` |
 | **Modify.** `crates/of-core/tests/queue.rs` (also holds the `acquire_lease` tests) | claim and lease refusal, trim/blank, rendered-holder, legacy-label tests |
 | **Modify.** `crates/of-mcp/src/tools/jobs.rs`, `crates/of-mcp/src/tools/coord.rs` | `agent` field docs and tool descriptions |
+| **Modify.** `crates/of-web/src/error.rs` | map `InvalidAgentLabel` to `400` in the console's exhaustive status match (the console never claims or leases, but the match must stay exhaustive) |
 | **Modify.** `crates/of-mcp/tests/tools.rs` | end-to-end refusal surfaces `invalid_agent_label` |
 
 ## Task Order & Rationale

@@ -199,7 +199,10 @@ pub struct ClaimJobsArgs {
     /// The job ids to take. All or none succeed.
     pub jobs: Vec<String>,
     /// How you want to be identified to teammates looking at the queue, for
-    /// example "api-agent@ci-7". Free-form.
+    /// example "api-agent@ci-7". At most 128 characters on one line, with no
+    /// control, line-break, or invisible formatting characters; anything else
+    /// is refused with invalid_agent_label rather than shortened. Blank is the
+    /// same as omitting it.
     #[serde(default)]
     pub agent: Option<String>,
     /// Seconds before this claim expires if never renewed. Defaults to a
@@ -920,7 +923,10 @@ impl Factory {
                        fail_job, cancel_job, or renew_claim with expectedAttempts to guard \
                        against a same-account process having reclaimed the job out from under \
                        you in the meantime — it is your claim's generation number, and it is \
-                       not repeated anywhere else you would otherwise think to look."
+                       not repeated anywhere else you would otherwise think to look. agent is \
+                       a short label (one line, at most 128 visible characters) that teammates \
+                       see as the claim's holder; a longer or multi-line one is refused with \
+                       invalid_agent_label rather than shortened."
     )]
     pub async fn claim_jobs(
         &self,
@@ -945,8 +951,16 @@ impl Factory {
             .mcp()?;
         tx.commit().await.mcp()?;
         let out = Json(out::JobsOut { jobs: jobs.clone() });
-        self.sync_jobs_after_transition(&jobs, JobTransition::Claimed, args.agent.as_deref())
+        // The ticket comment names the label as stored — trimmed, and absent
+        // when blank — never the raw argument, the same as `sync_ticket` does.
+        for job in &jobs {
+            self.sync_jobs_after_transition(
+                std::slice::from_ref(job),
+                JobTransition::Claimed,
+                job.claimed_by_label.as_deref(),
+            )
             .await;
+        }
 
         Ok(out)
     }
