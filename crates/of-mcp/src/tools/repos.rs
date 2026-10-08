@@ -108,15 +108,11 @@ impl Factory {
         let caller = self.caller(&parts)?;
         caller.require_scope(scope::REPOS_WRITE).mcp()?;
 
-        // The console registers repos for administrators only; so does this.
+        // Any caller with repos:write may register: a repo registered here
+        // takes no team, so it is org-wide and opens nothing new to anyone. The
+        // scope still matters for the refusals, which must not name a repo of a
+        // team the caller is not on (a remote that one already owns).
         let team = self.team_scope(&caller).await?;
-        if !team.is_all() {
-            return Err(rmcp::model::ErrorData::new(
-                rmcp::model::ErrorCode::INVALID_REQUEST,
-                "registering a repository needs an owner or admin of this organization",
-                Some(serde_json::json!({ "code": "forbidden", "retriable": false })),
-            ));
-        }
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "register_repo").await?;
         let repo = tx

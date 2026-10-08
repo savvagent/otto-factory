@@ -3893,6 +3893,7 @@ async fn errors_do_not_name_what_the_caller_cannot_see(pool: PgPool) {
         )
     };
     let e = err(register(&t.carol).await);
+    assert_eq!(code_of(&e), "remote_taken");
     assert!(!e.message.contains("platform-repo"), "{}", e.message);
     let e = err(register(&t.owner).await);
     assert!(
@@ -4273,7 +4274,7 @@ async fn deleting_a_job_a_hidden_job_depends_on_is_refused(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "../of-core/migrations")]
-async fn only_admins_register_repos_over_mcp_and_conflicts_are_generic(pool: PgPool) {
+async fn members_register_repos_over_mcp_and_conflicts_are_generic(pool: PgPool) {
     let t = teams_world(pool).await;
     let f = &t.env.factory;
     let register = |who: &Principal, slug: &str, remote: &str| {
@@ -4288,9 +4289,16 @@ async fn only_admins_register_repos_over_mcp_and_conflicts_are_generic(pool: PgP
             }),
         )
     };
-    let e = err(register(&t.alice, "mine", "git@github.com:acme/mine.git").await);
-    assert_eq!(code_of(&e), "forbidden");
-    ok(register(&t.owner, "mine", "git@github.com:acme/mine.git").await);
+    // `repos:write` is enough; a registered repo is org-wide.
+    let repo = ok(register(&t.alice, "mine", "git@github.com:acme/mine.git").await);
+    assert_eq!(repo["repo"]["teamId"], serde_json::Value::Null);
+    assert!(t.repos(&t.carol).await.contains(&"mine".to_string()));
+
+    // A remote a hidden repo already owns is refused without naming that repo,
+    // under the original code.
+    let e = err(register(&t.carol, "theirs", "git@github.com:acme/growth-repo.git").await);
+    assert_eq!(code_of(&e), "remote_taken");
+    assert!(!e.message.contains("growth-repo"), "{}", e.message);
 
     // Attaching a remote a hidden repo owns is the same generic refusal as a
     // slug conflict would be.
