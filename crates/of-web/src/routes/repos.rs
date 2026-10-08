@@ -177,7 +177,7 @@ pub async fn list_repos(
     if q.include_lease_status {
         ctx.require_scope(scopes::JOBS_READ)?;
     }
-    let mut tx = state.db.begin(ctx.org.id).await?;
+    let mut tx = ctx.begin(&state.db).await?;
     let repos = tx.list_repos(q.include_inactive, None).await?;
     let repos = visible_repos(&state, &ctx, repos).await;
 
@@ -223,7 +223,7 @@ pub async fn register_repo(
         None => None,
     };
 
-    let mut tx = state.db.begin(ctx.org.id).await?;
+    let mut tx = ctx.begin(&state.db).await?;
     let repo = tx
         .register_repo(NewRepo {
             slug: req.slug,
@@ -263,7 +263,7 @@ pub async fn get_repo(
     Path((_org, slug)): Path<(String, String)>,
 ) -> ApiResult<Json<Repo>> {
     ctx.require_scope(scopes::REPOS_READ)?;
-    let mut tx = state.db.begin(ctx.org.id).await?;
+    let mut tx = ctx.begin(&state.db).await?;
     let repo = tx
         .resolve_repo(&of_core::repos::RepoRef {
             slug: Some(slug),
@@ -296,7 +296,7 @@ pub async fn update_repo(
         None => None,
     };
 
-    let mut tx = state.db.begin(ctx.org.id).await?;
+    let mut tx = ctx.begin(&state.db).await?;
     let repo = tx
         .resolve_repo(&of_core::repos::RepoRef {
             slug: Some(slug),
@@ -347,7 +347,7 @@ pub async fn list_leases(
     // The same scope MCP `list_leases` requires, so switching transports
     // cannot widen what a token may read.
     ctx.require_scope(scopes::JOBS_READ)?;
-    let mut tx = state.db.begin(ctx.org.id).await?;
+    let mut tx = ctx.begin(&state.db).await?;
     let repo = tx
         .resolve_repo(&of_core::repos::RepoRef {
             slug: Some(slug),

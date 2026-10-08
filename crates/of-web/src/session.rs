@@ -106,6 +106,14 @@ pub struct OrgCtx {
 }
 
 impl OrgCtx {
+    /// Open a transaction pinned to this org, refused if the org was deleted or
+    /// the caller removed since authentication (see
+    /// `of_core::platform_events::begin_live`). Every handler opens its
+    /// transaction here, never with `Db::begin` directly.
+    pub async fn begin(&self, db: &otto_tenant::Db) -> Result<otto_tenant::Tx<'static>, ApiError> {
+        Ok(of_core::platform_events::begin_live(db, self.org.id, Some(self.user.id)).await?)
+    }
+
     /// Refuse unless the caller administers this org.
     ///
     /// The message names the role they have, because "you need to be an admin"

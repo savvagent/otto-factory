@@ -106,7 +106,7 @@ pub async fn list_jobs(
         None => None,
     };
 
-    let mut tx = state.db.begin(ctx.org.id).await?;
+    let mut tx = ctx.begin(&state.db).await?;
 
     let repo_id = match &q.repo {
         Some(slug) => Some(
@@ -146,7 +146,7 @@ pub async fn job_stats(
     Query(q): Query<StatsQuery>,
 ) -> ApiResult<Json<Stats>> {
     ctx.require_scope(scopes::JOBS_READ)?;
-    let mut tx = state.db.begin(ctx.org.id).await?;
+    let mut tx = ctx.begin(&state.db).await?;
 
     let repo_id = match &q.repo {
         Some(slug) => Some(
@@ -175,7 +175,7 @@ pub async fn get_job(
     ctx.require_scope(scopes::JOBS_READ)?;
     let id = JobId::from(id);
 
-    let mut tx = state.db.begin(ctx.org.id).await?;
+    let mut tx = ctx.begin(&state.db).await?;
     let job = tx.get_job(&id).await?;
     let depends_on = tx.dependencies_of(&id).await?;
     tx.commit().await?;

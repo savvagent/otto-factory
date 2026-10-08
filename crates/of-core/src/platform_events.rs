@@ -15,6 +15,19 @@
 //! | `team.deleted` | **Scope is kept, not widened.** Repos, jobs, and messages keep their `team_id`. See below. |
 //! | `member.removed` | The user's live leases are released, their in-progress or active job claims go back to `pending`, and their message read cursor is dropped. History they authored (jobs they created, messages they sent) is kept. |
 //!
+//! # Why clean-up and requests take a lock
+//!
+//! Authentication refuses a tombstoned org or user ([`revoked`]), but a request
+//! that passed that check a moment before the tombstone was written can still
+//! be on its way to a transaction. Without the org being gone as a foreign key,
+//! nothing would stop it from re-creating rows after the purge. So every tenant
+//! transaction is opened with [`begin_live`], which takes the org's lifecycle
+//! lock *shared* and re-checks the tombstones while holding it, and `org.deleted`
+//! / `member.removed` take the same lock *exclusively* after writing their
+//! tombstone. A transaction already in flight finishes first and is cleaned up
+//! with everything else; one that starts later sees the tombstone and is
+//! refused. No redelivery is needed for either.
+//!
 //! # Why `team.deleted` keeps the team id
 //!
 //! A null `team_id` means *org-wide*. The obvious cleanup, "null out the deleted
@@ -36,7 +49,7 @@ use crate::error::Result;
 use otto_resource::webhook::{LifecycleEvent, WebhookEvent};
 use otto_tenant::audit::Entry;
 use otto_tenant::ids::{OrgId, TeamId, UserId};
-use otto_tenant::Db;
+use otto_tenant::{Db, Tx};
 use serde::Serialize;
 
 /// What handling a delivery did.
@@ -65,6 +78,16 @@ pub const REMOVED_MEMBER_TTL_SECS: i64 = 300;
 /// Called by both HTTP surfaces on every authenticated request. An `Err` is a
 /// database failure and must be answered `503`, not treated as "not revoked".
 pub async fn revoked(db: &Db, org: OrgId, user: UserId) -> Result<bool> {
+    let mut conn = db.pool().acquire().await?;
+    revoked_on(&mut conn, org, Some(user)).await
+}
+
+/// [`revoked`] on a given connection. With no user, only the org is checked.
+async fn revoked_on(
+    conn: &mut sqlx::PgConnection,
+    org: OrgId,
+    user: Option<UserId>,
+) -> Result<bool> {
     let hit: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM deleted_orgs WHERE org_id = $1) \
              OR EXISTS (SELECT 1 FROM removed_members \
@@ -74,9 +97,49 @@ pub async fn revoked(db: &Db, org: OrgId, user: UserId) -> Result<bool> {
     .bind(org)
     .bind(user)
     .bind(REMOVED_MEMBER_TTL_SECS as f64)
-    .fetch_one(db.pool())
+    .fetch_one(conn)
     .await?;
     Ok(hit)
+}
+
+/// The advisory-lock namespace for an org's lifecycle lock; the org id is hashed
+/// into the second key. The two-key form never overlaps sqlx's single-key
+/// migration lock. A hash collision between two orgs only serializes them.
+const LIFECYCLE_LOCK: i32 = 0x6f66_6c63; // "oflc"
+
+/// Open a transaction pinned to `org` that no lifecycle clean-up can interleave
+/// with, refusing it if the org was deleted or `user` was just removed.
+///
+/// Every request-path tenant transaction opens here rather than with
+/// `Db::begin` directly: see the module docs. `user` is `None` for work done on
+/// nobody's behalf (an inbound tracker webhook, a background write-back), which
+/// is refused only for a deleted org. The lock is held until the transaction
+/// ends, so keep the transaction short; it is shared, so requests never wait on
+/// each other, only on a clean-up in progress.
+pub async fn begin_live(db: &Db, org: OrgId, user: Option<UserId>) -> Result<Tx<'static>> {
+    let mut tx = db.begin(org).await?;
+    sqlx::query("SELECT pg_advisory_xact_lock_shared($1, hashtext($2::text))")
+        .bind(LIFECYCLE_LOCK)
+        .bind(org)
+        .execute(tx.conn())
+        .await?;
+    if revoked_on(tx.conn(), org, user).await? {
+        // Dropping `tx` rolls it back and releases the lock.
+        return Err(crate::Error::AccessRevoked);
+    }
+    Ok(tx)
+}
+
+/// Wait for every transaction [`begin_live`] opened for `org` to finish, and
+/// keep new ones out until `tx` ends. Called right after the tombstone is
+/// written, so whatever starts after this sees it.
+async fn exclude_requests(tx: &mut Tx<'_>, org: OrgId) -> Result<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock($1, hashtext($2::text))")
+        .bind(LIFECYCLE_LOCK)
+        .bind(org)
+        .execute(tx.conn())
+        .await?;
+    Ok(())
 }
 
 /// Housekeeping: forget dedupe markers older than `keep_days` and expired
@@ -148,17 +211,22 @@ async fn org_deleted(db: &Db, event: &WebhookEvent, org: OrgId) -> Result<Outcom
         .execute(db.pool())
         .await?;
 
+    // From here until commit no request transaction for this org is open, and
+    // any that opens afterwards finds the tombstone.
+    let mut tx = db.begin(org).await?;
+    exclude_requests(&mut tx, org).await?;
+
     // The org's audit trail is append-only to a pinned transaction (there is no
-    // UPDATE policy and DELETE needs `current_org() IS NULL`), so it goes first,
-    // on the pool, unpinned. Idempotent, and a failure here aborts before the
-    // dedupe marker exists, so the platform's retry runs it again.
+    // UPDATE policy and DELETE needs `current_org() IS NULL`), so it is deleted
+    // on the pool, unpinned -- under the lock above, so no request can add to
+    // it afterwards. Idempotent, and a failure here aborts before the dedupe
+    // marker exists, so the platform's retry runs it again.
     let audit = sqlx::query("DELETE FROM audit_events WHERE org_id = $1")
         .bind(org)
         .execute(db.pool())
         .await?
         .rows_affected();
 
-    let mut tx = db.begin(org).await?;
     let first = first_delivery(&mut tx, event, "org.deleted").await?;
 
     // Children before parents: messages reference jobs and repos, jobs and
@@ -256,6 +324,7 @@ async fn member_removed(
     .await?;
 
     let mut tx = db.begin(org).await?;
+    exclude_requests(&mut tx, org).await?;
     let first = first_delivery(&mut tx, event, "member.removed").await?;
 
     let leases = sqlx::query(

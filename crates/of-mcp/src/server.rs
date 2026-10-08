@@ -237,15 +237,16 @@ impl Factory {
         crate::auth::principal_from(parts).ok_or_else(error::unauthenticated)
     }
 
-    /// Open a transaction pinned to the caller's org.
+    /// Open a transaction pinned to the caller's org, refused if the org was
+    /// deleted or the caller removed since their token was introspected (see
+    /// `of_core::platform_events::begin_live`).
     pub async fn tx(&self, caller: &Principal) -> Result<Tx<'static>, ErrorData> {
         // The quota lookup is a network call: do it before a pooled connection
         // is held, so a slow platform costs this call time and nothing else.
         self.meter.warm(caller.org_id).await;
-        self.db
-            .begin(caller.org_id)
+        of_core::platform_events::begin_live(&self.db, caller.org_id, Some(caller.user_id))
             .await
-            .map_err(|e| error::from_tenant(&e))
+            .map_err(|e| error::from_core(&e))
     }
 }
 
