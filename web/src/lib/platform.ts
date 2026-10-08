@@ -10,7 +10,7 @@
  * moves it.
  */
 
-export type PlatformPage = 'members' | 'teams' | 'sso' | 'usage' | 'tokens' | 'account' | 'orgs';
+export type PlatformPage = 'members' | 'teams' | 'sso' | 'usage' | 'account' | 'orgs';
 
 /** The platform console page for `page`, for the org `slug` where it is org-scoped. */
 export function platformLink(platformUrl: string, page: PlatformPage, slug: string): string {
@@ -21,7 +21,6 @@ export function platformLink(platformUrl: string, page: PlatformPage, slug: stri
     case 'teams':
     case 'sso':
     case 'usage':
-    case 'tokens':
       return `${org}/${page}`;
     case 'account':
       return `${base}/settings`;

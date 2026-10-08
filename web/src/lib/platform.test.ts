@@ -4,7 +4,7 @@ import { platformLink } from './platform';
 
 describe('platformLink', () => {
   it('points org-scoped pages at the org on the platform', () => {
-    for (const page of ['members', 'teams', 'sso', 'usage', 'tokens'] as const) {
+    for (const page of ['members', 'teams', 'sso', 'usage'] as const) {
       expect(platformLink('https://otto.example', page, 'acme')).toBe(
         `https://otto.example/o/acme/${page}`
       );

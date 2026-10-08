@@ -110,7 +110,6 @@
     { page: 'teams', label: () => m.nav_platform_teams() },
     { page: 'sso', label: () => m.nav_platform_sso() },
     { page: 'usage', label: () => m.nav_platform_usage() },
-    { page: 'tokens', label: () => m.nav_platform_tokens() },
     { page: 'account', label: () => m.nav_platform_account() },
     { page: 'orgs', label: () => m.nav_platform_switch_org() }
   ];

@@ -271,7 +271,6 @@
   "nav_platform_teams": "Teams",
   "nav_platform_sso": "Single sign-on",
   "nav_platform_usage": "Usage and billing",
-  "nav_platform_tokens": "API tokens",
   "nav_platform_account": "Account settings",
   "nav_platform_switch_org": "Switch organization",
   "nav_sign_in_stuck": "Signing in did not complete. If this keeps happening, check that your browser accepts cookies for this site.",

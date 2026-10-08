@@ -273,7 +273,6 @@
   "nav_platform_teams": "Équipes",
   "nav_platform_sso": "Authentification unique",
   "nav_platform_usage": "Utilisation et facturation",
-  "nav_platform_tokens": "Jetons d’API",
   "nav_platform_account": "Paramètres du compte",
   "nav_platform_switch_org": "Changer d’organisation",
   "nav_sign_in_stuck": "La connexion n’a pas abouti. Si cela se reproduit, vérifiez que votre navigateur accepte les cookies de ce site.",
