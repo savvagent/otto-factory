@@ -30,6 +30,7 @@
 //! [`Tx`]: otto_tenant::Tx
 //! [`Db`]: otto_tenant::Db
 
+pub mod agent_label;
 pub mod audit;
 pub mod console_sessions;
 pub mod error;

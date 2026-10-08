@@ -82,6 +82,19 @@ pub enum Error {
     #[error("lease {0} is not held by you")]
     LeaseNotHeld(String),
 
+    /// A caller-chosen `agent` label failed [`crate::agent_label::validate`].
+    /// `problem` describes what is wrong (its length, or the offending code
+    /// point and position) and deliberately never contains the label itself:
+    /// the label is exactly the text being refused, and echoing it would hand
+    /// it straight back as tool output.
+    #[error(
+        "the agent label {problem}. Pass agent as a single line of at most {max} visible \
+         characters with no control, line-break, or invisible formatting characters (for \
+         example \"api-agent@ci-7\"), or omit it; nothing was changed.",
+        max = crate::agent_label::MAX_LEN
+    )]
+    InvalidAgentLabel { problem: String },
+
     /// The platform does not know this team in this org (never existed, other
     /// tenant's, or deleted). Raised by `VerifiedTeam::verify`, and it is a
     /// refusal: an unknown team is never read as "org-wide".
@@ -164,6 +177,7 @@ impl Error {
             Error::DependencyCycle(..) => "dependency_cycle",
             Error::LeaseHeld { .. } => "lease_held",
             Error::LeaseNotHeld(_) => "lease_not_held",
+            Error::InvalidAgentLabel { .. } => "invalid_agent_label",
             Error::TeamNotFound { .. } => "team_not_found",
             Error::Invalid(_) => "invalid_argument",
             Error::RaceLost(_) => "race_lost",
