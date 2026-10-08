@@ -1,14 +1,21 @@
-//! `of-web` — the console API and the authorization server's browser surface.
+//! `of-web` — the console API.
 //!
-//! Everything a human touches. `of-mcp` serves agents over bearer tokens;
-//! this crate serves people over session cookies, and hosts the one place the
-//! two meet — the OAuth consent screen, where a signed-in human grants an agent
-//! a token.
+//! Everything a human's browser asks of otto-factory *about its own domain*:
+//! repos, the queue, tracker connections, and this service's audit trail. Plus
+//! two machine endpoints, both authenticated by signature rather than by token:
+//! tracker webhooks (`/webhooks/{provider}`) and the otto platform's lifecycle
+//! webhooks (`/platform/webhooks`).
+//!
+//! Identity is not here. Accounts, sign-in, orgs, members, teams, SSO, tokens,
+//! and the usage meter live in the otto platform, which is also the OAuth
+//! authorization server for the MCP surface. This crate is a *resource server*:
+//! it asks the platform who a bearer token belongs to, and that is all it knows
+//! about identity.
 //!
 //! ```text
-//!   Browser ──► /api/…            session cookie ──► CurrentUser / OrgCtx ──► of-core
-//!           └─► /oauth/authorize  session cookie ──► consent ──► authorization code
-//!   Agent   ──► /oauth/token      PKCE verifier  ──► access + refresh tokens
+//!   Browser/script ──► /api/orgs/{org}/…   platform bearer token ──► OrgCtx ──► of-core
+//!   Tracker        ──► /webhooks/{provider}  provider signature
+//!   Platform       ──► /platform/webhooks    Otto-Signature ──► platform_events
 //! ```
 //!
 //! ## What holds across the whole crate
@@ -23,8 +30,8 @@
 //! says so in one line. A handler that forgets is a handler that serves another
 //! tenant's data, and a type is a better place for that than a review checklist.
 //!
-//! **An org you are not in is `404`.** Answering `403` on a real slug and `404`
-//! on a fake one turns any signed-in account into a directory of who uses the
+//! **An org that is not the token's is `404`.** Answering `403` on a real slug
+//! and `404` on a fake one turns any token into a directory of who uses the
 //! product.
 //!
 //! **The router and the OpenAPI document come from one list.** See
@@ -33,8 +40,6 @@
 
 pub mod catalog;
 pub mod error;
-pub mod i18n;
-pub mod oauth;
 pub mod openapi;
 pub mod routes;
 pub mod session;
@@ -44,25 +49,6 @@ use axum::Router;
 
 pub use error::{ApiError, ApiResult};
 pub use state::{AppState, Config};
-
-/// Build the WebAuthn relying party this deployment signs with.
-///
-/// Fails loudly at startup rather than at somebody's first sign-in: an rp_id
-/// that is not a registrable suffix of the origin produces ceremonies that no
-/// browser will complete, and the error a user sees for that looks like their
-/// device is broken.
-pub fn relying_party(
-    config: &Config,
-) -> anyhow::Result<std::sync::Arc<otto_auth::passkeys::Webauthn>> {
-    let rp_id = config.rp_id().ok_or_else(|| {
-        anyhow::anyhow!(
-            "OF_PUBLIC_URL ({}) has no host, so there is nothing to bind passkeys to",
-            config.public_url
-        )
-    })?;
-    let webauthn = otto_auth::passkeys::relying_party(&rp_id, &config.public_url)?;
-    Ok(std::sync::Arc::new(webauthn))
-}
 
 /// Build the console surface, ready to be merged into `of-server`'s router.
 ///
@@ -109,15 +95,28 @@ mod tests {
                 .connect_lazy("postgres://localhost/does-not-exist")
                 .expect("lazy pool"),
         );
+        let platform = std::sync::Arc::new(
+            otto_resource::PlatformClient::new(otto_resource::ClientConfig::new(
+                "http://127.0.0.1:1",
+                "https://mcp.test/mcp",
+                "secret",
+            ))
+            .expect("platform client"),
+        );
 
-        let config = Config::new("https://console.test", "https://mcp.test/mcp");
+        let config = Config::new(
+            "https://console.test",
+            "https://mcp.test/mcp",
+            "https://otto.test",
+            "whsec",
+        );
         let state = AppState::new(
             db,
             otto_tenant::crypto::Cipher::from_base64_key(
                 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
             )
             .expect("test key"),
-            relying_party(&config).expect("test relying party"),
+            platform,
             config,
         );
 

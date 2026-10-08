@@ -181,8 +181,9 @@ pub async fn list_tracker_connections(
     ctx: OrgCtx,
 ) -> ApiResult<Json<TrackerConnectionsView>> {
     ctx.require_admin()?;
+    ctx.require_scope(of_core::scopes::TRACKERS)?;
 
-    let mut tx = state.db.begin(ctx.org.id).await?;
+    let mut tx = ctx.begin(&state.db).await?;
     let connections = list_connections(&mut tx).await?;
     tx.commit().await?;
 
@@ -212,6 +213,7 @@ pub async fn connect_tracker(
     Json(req): Json<ConnectTrackerRequest>,
 ) -> ApiResult<Json<TrackerConnectionView>> {
     ctx.require_admin()?;
+    ctx.require_scope(of_core::scopes::TRACKERS)?;
     let provider = provider_from_path(&provider)?;
 
     // Every provider round trip happens here, outside any transaction.
@@ -223,7 +225,7 @@ pub async fn connect_tracker(
         }
     };
 
-    let mut tx = state.db.begin(ctx.org.id).await?;
+    let mut tx = ctx.begin(&state.db).await?;
     let connection = upsert_connection(&mut tx, provider, &external_id, sealed.as_ref(), None)
         .await
         .map_err(ApiError::from)?;
@@ -358,9 +360,10 @@ pub async fn disconnect_tracker(
     Path((_org, provider)): Path<(String, String)>,
 ) -> ApiResult<Response> {
     ctx.require_admin()?;
+    ctx.require_scope(of_core::scopes::TRACKERS)?;
     let provider = provider_from_path(&provider)?;
 
-    let mut tx = state.db.begin(ctx.org.id).await?;
+    let mut tx = ctx.begin(&state.db).await?;
     delete_connection(&mut tx, provider).await?;
     tx.audit(
         Entry::new(action::TRACKER_DISCONNECTED)
@@ -383,8 +386,9 @@ pub async fn list_repo_bindings(
     ctx: OrgCtx,
     Path((_org, slug)): Path<(String, String)>,
 ) -> ApiResult<Json<Vec<TrackerBindingView>>> {
-    let mut tx = state.db.begin(ctx.org.id).await?;
-    let repo = resolve_repo(&mut tx, &ctx, slug).await?;
+    ctx.require_scope(of_core::scopes::TRACKERS)?;
+    let mut tx = ctx.begin(&state.db).await?;
+    let repo = resolve_repo(&state, &mut tx, &ctx, slug).await?;
     let bindings = list_bindings_for_repo(&mut tx, repo.id).await?;
     tx.commit().await?;
 
@@ -399,6 +403,7 @@ pub async fn bind_repo(
     Json(req): Json<BindRepoRequest>,
 ) -> ApiResult<Json<TrackerBindingView>> {
     ctx.require_admin()?;
+    ctx.require_scope(of_core::scopes::TRACKERS)?;
     let provider = provider_from_path(&provider)?;
     validate_external_ref(provider, &req.external_ref)?;
 
@@ -410,8 +415,8 @@ pub async fn bind_repo(
         .unwrap_or(DEFAULT_TRIGGER_LABEL)
         .to_string();
 
-    let mut tx = state.db.begin(ctx.org.id).await?;
-    let repo = resolve_repo(&mut tx, &ctx, slug).await?;
+    let mut tx = ctx.begin(&state.db).await?;
+    let repo = resolve_repo(&state, &mut tx, &ctx, slug).await?;
 
     // The connection is looked up, never taken from the request. A binding
     // pointing at another provider's connection is not a shape any caller
@@ -452,10 +457,11 @@ pub async fn unbind_repo(
     Path((_org, slug, provider)): Path<(String, String, String)>,
 ) -> ApiResult<Response> {
     ctx.require_admin()?;
+    ctx.require_scope(of_core::scopes::TRACKERS)?;
     let provider = provider_from_path(&provider)?;
 
-    let mut tx = state.db.begin(ctx.org.id).await?;
-    let repo = resolve_repo(&mut tx, &ctx, slug).await?;
+    let mut tx = ctx.begin(&state.db).await?;
+    let repo = resolve_repo(&state, &mut tx, &ctx, slug).await?;
     if let Some(binding) = resolve_binding(&mut tx, repo.id, provider).await? {
         delete_binding(&mut tx, binding.id).await?;
         tx.audit(
@@ -475,6 +481,7 @@ pub async fn unbind_repo(
 /// applies, so a team-scoped repo's tracker binding is not readable by members
 /// of other teams — the binding names the customer's JIRA project.
 async fn resolve_repo(
+    state: &AppState,
     tx: &mut otto_tenant::Tx<'_>,
     ctx: &OrgCtx,
     slug: String,
@@ -485,7 +492,7 @@ async fn resolve_repo(
             remote: None,
         })
         .await?;
-    super::repos::require_visible(tx, ctx, repo).await
+    super::repos::require_visible(state, ctx, repo).await
 }
 
 /// Refuse a binding that could never match an inbound event.

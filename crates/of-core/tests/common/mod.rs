@@ -8,8 +8,6 @@ use of_core::ids::RepoId;
 use of_core::jobs::NewJob;
 use of_core::repos::NewRepo;
 use of_core::repos::ReposExt;
-use otto_core::orgs::OrgsExt;
-use otto_core::orgs::Role;
 use otto_tenant::ids::{OrgId, UserId};
 use otto_tenant::Db;
 use sqlx::PgPool;
@@ -20,24 +18,22 @@ pub struct Tenant {
     pub repo: RepoId,
 }
 
-/// Create an org with one owner and one registered repo.
+/// An org with one user and one registered repo.
+///
+/// Orgs and users are the platform's, not this database's: an `OrgId` is just a
+/// uuid the platform would have issued, so a fixture mints one. Nothing here
+/// needs a row to exist first because nothing in this schema references one.
 pub async fn tenant(db: &Db, slug: &str, remote: &str) -> Tenant {
-    let org = db.create_org(slug, slug).await.expect("create org");
-    let user = db
-        .upsert_user(&format!("owner@{slug}.test"), Some("Owner"))
-        .await
-        .expect("create user");
-    db.add_member(org.id, user.id, Role::Owner)
-        .await
-        .expect("add member");
+    let org = OrgId::new();
+    let user = UserId::new();
 
-    let mut tx = db.begin(org.id).await.expect("begin");
+    let mut tx = db.begin(org).await.expect("begin");
     let repo = tx
         .register_repo(NewRepo {
             slug: "api".into(),
             name: Some(format!("{slug} api")),
             remotes: vec![remote.into()],
-            created_by: Some(user.id),
+            created_by: Some(user),
             ..Default::default()
         })
         .await
@@ -45,8 +41,8 @@ pub async fn tenant(db: &Db, slug: &str, remote: &str) -> Tenant {
     tx.commit().await.expect("commit");
 
     Tenant {
-        org: org.id,
-        user: user.id,
+        org,
+        user,
         repo: repo.id,
     }
 }
@@ -62,5 +58,16 @@ pub fn job(t: &Tenant, title: &str) -> NewJob {
         title: title.into(),
         created_by: Some(t.user),
         ..Default::default()
+    }
+}
+
+/// A second member of a fixture org. Only an id: membership is the platform's.
+pub struct Member {
+    pub id: UserId,
+}
+
+impl Member {
+    pub fn new() -> Self {
+        Self { id: UserId::new() }
     }
 }

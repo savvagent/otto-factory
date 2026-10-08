@@ -22,7 +22,8 @@ use of_core::leases::Lease;
 use of_core::leases::LeasesExt;
 use of_core::repos::ReposExt;
 use of_core::repos::{NewRepo, Provider, Repo, RepoPatch};
-use otto_core::teams::TeamsExt;
+use of_core::scopes;
+use of_core::teams::VerifiedTeam;
 use otto_tenant::audit::Entry;
 use otto_tenant::ids::TeamId;
 use serde::{Deserialize, Serialize};
@@ -64,7 +65,7 @@ pub struct UpdateRepoRequest {
     pub default_branch: Option<String>,
     /// Absent leaves the team alone; an explicit `null` makes the repo
     /// org-wide. The two have to be distinguishable, or a team-scoped repo can
-    /// never be unscoped — and a team with repos still on it cannot be deleted.
+    /// never be unscoped, including after its team has been deleted at the platform.
     #[serde(default, deserialize_with = "super::double_option")]
     pub team_id: Option<Option<TeamId>>,
     #[serde(default)]
@@ -92,6 +93,20 @@ pub struct ListReposQuery {
     pub include_lease_status: bool,
 }
 
+/// The teams the caller belongs to.
+///
+/// **SEAM / gap, and it fails closed.** Team *membership* is the platform's, and
+/// the platform's resource-server API (`otto-resource`) can say whether a team
+/// exists in an org but not which teams a user is in. Until it can, nobody is
+/// known to be in any team, so a non-admin sees org-wide repos only and a
+/// team-scoped repo is visible to owners and admins. That is the safe direction:
+/// the alternative failure, guessing someone into a team, would show a team's
+/// repos, jobs, and leases to people outside it. When the platform grows a
+/// "teams of this member" lookup, this is the one function that changes.
+async fn callers_teams(_state: &AppState, _ctx: &OrgCtx) -> std::collections::HashSet<TeamId> {
+    std::collections::HashSet::new()
+}
+
 /// Filter repos down to what the caller is allowed to see.
 ///
 /// Per `docs/specs/2026-09-01-otto-factory-design.md`: a repo with a
@@ -99,47 +114,33 @@ pub struct ListReposQuery {
 /// `team_id` is org-wide. `OrgCtx` only proves org membership, so without this
 /// every member — not just the assigned team — could read every team-scoped
 /// repo's leases and metadata through the console.
-async fn visible_repos(
-    tx: &mut otto_tenant::Tx<'_>,
-    ctx: &OrgCtx,
-    repos: Vec<Repo>,
-) -> ApiResult<Vec<Repo>> {
+///
+/// A repo whose team the platform has since deleted keeps its dangling
+/// `team_id` (see `of_core::platform_events`), which matches nobody's team list,
+/// so it is admin-only until reassigned.
+async fn visible_repos(state: &AppState, ctx: &OrgCtx, repos: Vec<Repo>) -> Vec<Repo> {
     if ctx.role.can_administer() {
-        return Ok(repos);
+        return repos;
     }
-    let my_teams: std::collections::HashSet<TeamId> = tx
-        .list_user_teams(ctx.user.id)
-        .await?
-        .into_iter()
-        .map(|t| t.id)
-        .collect();
-    Ok(repos
+    let my_teams = callers_teams(state, ctx).await;
+    repos
         .into_iter()
         .filter(|r| r.team_id.is_none_or(|t| my_teams.contains(&t)))
-        .collect())
+        .collect()
 }
 
 /// As [`visible_repos`], for a single already-resolved repo. A repo the
 /// caller may not see is reported as not found, not forbidden — the same
 /// "an org you are not in is 404" rule this file already applies to orgs
 /// extends to a team-scoped repo a non-member should not learn exists.
-pub(crate) async fn require_visible(
-    tx: &mut otto_tenant::Tx<'_>,
-    ctx: &OrgCtx,
-    repo: Repo,
-) -> ApiResult<Repo> {
+pub(crate) async fn require_visible(state: &AppState, ctx: &OrgCtx, repo: Repo) -> ApiResult<Repo> {
     if ctx.role.can_administer() {
         return Ok(repo);
     }
     match repo.team_id {
         None => Ok(repo),
         Some(team) => {
-            let is_member = tx
-                .list_user_teams(ctx.user.id)
-                .await?
-                .iter()
-                .any(|t| t.id == team);
-            if is_member {
+            if callers_teams(state, ctx).await.contains(&team) {
                 Ok(repo)
             } else {
                 Err(ApiError::not_found("no repo with that slug in this org"))
@@ -170,9 +171,15 @@ pub async fn list_repos(
     ctx: OrgCtx,
     axum::extract::Query(q): axum::extract::Query<ListReposQuery>,
 ) -> ApiResult<Json<Vec<RepoListItem>>> {
-    let mut tx = state.db.begin(ctx.org.id).await?;
+    ctx.require_scope(scopes::REPOS_READ)?;
+    // Lease activity is a `jobs:read` fact on the MCP surface (`list_leases`);
+    // asking for it here must not be a way around that.
+    if q.include_lease_status {
+        ctx.require_scope(scopes::JOBS_READ)?;
+    }
+    let mut tx = ctx.begin(&state.db).await?;
     let repos = tx.list_repos(q.include_inactive, None).await?;
-    let repos = visible_repos(&mut tx, &ctx, repos).await?;
+    let repos = visible_repos(&state, &ctx, repos).await;
 
     let active: Option<std::collections::HashSet<_>> = if q.include_lease_status {
         Some(
@@ -205,8 +212,18 @@ pub async fn register_repo(
     Json(req): Json<RegisterRepoRequest>,
 ) -> ApiResult<Response> {
     ctx.require_admin()?;
+    ctx.require_scope(scopes::REPOS_WRITE)?;
 
-    let mut tx = state.db.begin(ctx.org.id).await?;
+    // Fail closed. A team id is written onto the repo only after the platform
+    // confirms it exists in this org: an unknown, foreign, or deleted team is
+    // refused (404), and a platform that cannot answer is a 503. Neither is ever
+    // read as "no team" -- a null team is org-wide.
+    let team_id = match req.team_id {
+        Some(team) => Some(VerifiedTeam::verify(&state.platform, ctx.org.id, team).await?),
+        None => None,
+    };
+
+    let mut tx = ctx.begin(&state.db).await?;
     let repo = tx
         .register_repo(NewRepo {
             slug: req.slug,
@@ -214,7 +231,7 @@ pub async fn register_repo(
             remotes: req.remotes,
             provider: req.provider,
             default_branch: req.default_branch,
-            team_id: req.team_id,
+            team_id,
             default_agent_type: req.default_agent_type,
             // The free-form `repos.tracker_binding` JSON blob is not writable
             // from the console. `tracker_bindings` — structured, linked to a
@@ -245,14 +262,15 @@ pub async fn get_repo(
     ctx: OrgCtx,
     Path((_org, slug)): Path<(String, String)>,
 ) -> ApiResult<Json<Repo>> {
-    let mut tx = state.db.begin(ctx.org.id).await?;
+    ctx.require_scope(scopes::REPOS_READ)?;
+    let mut tx = ctx.begin(&state.db).await?;
     let repo = tx
         .resolve_repo(&of_core::repos::RepoRef {
             slug: Some(slug),
             remote: None,
         })
         .await?;
-    let repo = require_visible(&mut tx, &ctx, repo).await?;
+    let repo = require_visible(&state, &ctx, repo).await?;
     tx.commit().await?;
     Ok(Json(repo))
 }
@@ -265,8 +283,20 @@ pub async fn update_repo(
     Json(req): Json<UpdateRepoRequest>,
 ) -> ApiResult<Json<Repo>> {
     ctx.require_admin()?;
+    ctx.require_scope(scopes::REPOS_WRITE)?;
 
-    let mut tx = state.db.begin(ctx.org.id).await?;
+    // Same rule as registration. `Some(None)` (an explicit null) makes the repo
+    // org-wide, which needs no verification because it names no team; that is
+    // also how an admin releases a repo whose team the platform has deleted.
+    let team_id = match req.team_id {
+        Some(Some(team)) => Some(Some(
+            VerifiedTeam::verify(&state.platform, ctx.org.id, team).await?,
+        )),
+        Some(None) => Some(None),
+        None => None,
+    };
+
+    let mut tx = ctx.begin(&state.db).await?;
     let repo = tx
         .resolve_repo(&of_core::repos::RepoRef {
             slug: Some(slug),
@@ -280,7 +310,7 @@ pub async fn update_repo(
             RepoPatch {
                 name: req.name,
                 default_branch: req.default_branch,
-                team_id: req.team_id,
+                team_id,
                 default_agent_type: req.default_agent_type,
                 // Not writable from the console — see `register_repo`.
                 tracker_binding: None,
@@ -313,14 +343,18 @@ pub async fn list_leases(
     ctx: OrgCtx,
     Path((_org, slug)): Path<(String, String)>,
 ) -> ApiResult<Json<Vec<Lease>>> {
-    let mut tx = state.db.begin(ctx.org.id).await?;
+    ctx.require_scope(scopes::REPOS_READ)?;
+    // The same scope MCP `list_leases` requires, so switching transports
+    // cannot widen what a token may read.
+    ctx.require_scope(scopes::JOBS_READ)?;
+    let mut tx = ctx.begin(&state.db).await?;
     let repo = tx
         .resolve_repo(&of_core::repos::RepoRef {
             slug: Some(slug),
             remote: None,
         })
         .await?;
-    let repo = require_visible(&mut tx, &ctx, repo).await?;
+    let repo = require_visible(&state, &ctx, repo).await?;
     let leases = tx.list_leases(Some(repo.id)).await?;
     tx.commit().await?;
     Ok(Json(leases))

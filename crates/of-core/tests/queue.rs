@@ -5,15 +5,13 @@ use of_core::jobs::JobsExt;
 use of_core::leases::LeasesExt;
 use of_core::messages::MessagesExt;
 use of_core::repos::ReposExt;
-use otto_core::orgs::OrgsExt;
 mod common;
 
-use common::{db, job, tenant, Tenant};
+use common::{db, job, tenant};
 use of_core::ids::JobId;
 use of_core::jobs::{JobFilter, Status, DEFAULT_CLAIM_TTL_SECS, MAX_CLAIM_TTL_SECS};
 use of_core::messages::{InboxQuery, NewMessage};
 use of_core::repos::{NewRepo, RepoPatch, RepoRef};
-use otto_core::orgs::Role;
 use sqlx::PgPool;
 
 #[sqlx::test]
@@ -776,7 +774,7 @@ async fn request_cancel_on_pending_leaves_dependents_blocked(pool: PgPool) {
 async fn a_stale_holder_cannot_cancel_after_someone_else_reclaims(pool: PgPool) {
     let db = db(pool);
     let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
-    let user_b = second_user(&db, &t, "second@acme.test").await;
+    let user_b = second_user().await;
 
     let mut tx = db.begin(t.org).await.unwrap();
     let j = tx.add_job(job(&t, "stranded")).await.unwrap();
@@ -903,12 +901,10 @@ async fn stats_reports_cancelled_and_the_total_reconciles(pool: PgPool) {
 // stranded claim, TTL clamping, and the fencing that stops a stale holder
 // from finalizing work someone else has since reclaimed.
 
-/// Add a second member to `t`'s org, for the fencing tests below that need two
-/// distinct claimants.
-async fn second_user(db: &otto_tenant::Db, t: &Tenant, email: &str) -> otto_tenant::ids::UserId {
-    let user = db.upsert_user(email, Some("Second")).await.unwrap();
-    db.add_member(t.org, user.id, Role::Member).await.unwrap();
-    user.id
+/// A second user for the fencing tests below that need two distinct claimants.
+/// Membership is the platform's; this database only ever sees the id.
+async fn second_user() -> otto_tenant::ids::UserId {
+    common::Member::new().id
 }
 
 /// Force a job's claim into the past, bypassing the public API — there is no
@@ -1072,7 +1068,7 @@ async fn an_expired_claim_reappears_in_ready(pool: PgPool) {
 async fn an_expired_claim_can_be_reclaimed_by_someone_else(pool: PgPool) {
     let db = db(pool);
     let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
-    let user_b = second_user(&db, &t, "second@acme.test").await;
+    let user_b = second_user().await;
 
     let mut tx = db.begin(t.org).await.unwrap();
     let j = tx.add_job(job(&t, "stranded")).await.unwrap();
@@ -1105,7 +1101,7 @@ async fn an_expired_claim_can_be_reclaimed_by_someone_else(pool: PgPool) {
 async fn an_expired_active_claim_reaps_reappears_and_fences_like_in_progress(pool: PgPool) {
     let db = db(pool);
     let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
-    let user_b = second_user(&db, &t, "second@acme.test").await;
+    let user_b = second_user().await;
 
     let mut tx = db.begin(t.org).await.unwrap();
     let j = tx
@@ -1155,7 +1151,7 @@ async fn an_expired_active_claim_reaps_reappears_and_fences_like_in_progress(poo
 async fn reaping_an_expired_claim_clears_its_cancellation_request(pool: PgPool) {
     let db = db(pool);
     let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
-    let user_b = second_user(&db, &t, "second@acme.test").await;
+    let user_b = second_user().await;
 
     let mut tx = db.begin(t.org).await.unwrap();
     let j = tx
@@ -1213,7 +1209,7 @@ async fn renew_claim_by_the_holder_extends_the_expiry(pool: PgPool) {
 async fn renew_claim_by_someone_else_is_refused(pool: PgPool) {
     let db = db(pool);
     let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
-    let user_b = second_user(&db, &t, "second@acme.test").await;
+    let user_b = second_user().await;
 
     let mut tx = db.begin(t.org).await.unwrap();
     let j = tx.add_job(job(&t, "long task")).await.unwrap();
@@ -1309,7 +1305,7 @@ async fn renew_claim_on_a_terminal_job_is_wrong_status(pool: PgPool) {
 async fn a_stale_holder_cannot_finalize_after_someone_else_reclaims(pool: PgPool) {
     let db = db(pool);
     let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
-    let user_b = second_user(&db, &t, "second@acme.test").await;
+    let user_b = second_user().await;
 
     let mut tx = db.begin(t.org).await.unwrap();
     let j = tx.add_job(job(&t, "contested")).await.unwrap();
@@ -1589,7 +1585,7 @@ async fn a_holder_cannot_act_on_their_own_expired_unreclaimed_claim(pool: PgPool
 async fn an_account_that_never_held_the_claim_is_not_told_its_own_claim_expired(pool: PgPool) {
     let db = db(pool);
     let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
-    let stranger = second_user(&db, &t, "stranger@acme.test").await;
+    let stranger = second_user().await;
 
     let mut tx = db.begin(t.org).await.unwrap();
     let j = tx
@@ -1896,10 +1892,7 @@ async fn a_remote_cannot_be_claimed_by_two_repos(pool: PgPool) {
 async fn a_second_agent_cannot_take_a_held_lease(pool: PgPool) {
     let db = db(pool);
     let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
-    let other = db.upsert_user("other@acme.test", None).await.unwrap();
-    db.add_member(t.org, other.id, otto_core::orgs::Role::Member)
-        .await
-        .unwrap();
+    let other = common::Member::new();
 
     let mut tx = db.begin(t.org).await.unwrap();
     tx.acquire_lease(t.repo, "main", t.user, Some("agent-a"), None, None)
@@ -1927,10 +1920,7 @@ async fn a_second_agent_cannot_take_a_held_lease(pool: PgPool) {
 async fn leases_are_per_branch(pool: PgPool) {
     let db = db(pool);
     let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
-    let other = db.upsert_user("other@acme.test", None).await.unwrap();
-    db.add_member(t.org, other.id, otto_core::orgs::Role::Member)
-        .await
-        .unwrap();
+    let other = common::Member::new();
 
     let mut tx = db.begin(t.org).await.unwrap();
     tx.acquire_lease(t.repo, "main", t.user, Some("a"), None, None)
@@ -1952,10 +1942,7 @@ async fn leases_are_per_branch(pool: PgPool) {
 async fn leases_are_per_resource_not_just_branch(pool: PgPool) {
     let db = db(pool);
     let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
-    let other = db.upsert_user("other@acme.test", None).await.unwrap();
-    db.add_member(t.org, other.id, otto_core::orgs::Role::Member)
-        .await
-        .unwrap();
+    let other = common::Member::new();
 
     let mut tx = db.begin(t.org).await.unwrap();
     tx.acquire_lease(t.repo, "branch:main", t.user, Some("a"), None, None)
@@ -1968,10 +1955,7 @@ async fn leases_are_per_resource_not_just_branch(pool: PgPool) {
     tx.commit().await.unwrap();
     assert_eq!(live.len(), 2);
 
-    let third = db.upsert_user("third@acme.test", None).await.unwrap();
-    db.add_member(t.org, third.id, otto_core::orgs::Role::Member)
-        .await
-        .unwrap();
+    let third = common::Member::new();
 
     let mut tx = db.begin(t.org).await.unwrap();
     let err = tx
@@ -2044,10 +2028,7 @@ async fn reacquiring_your_own_lease_renews_it(pool: PgPool) {
 async fn only_the_holder_can_release(pool: PgPool) {
     let db = db(pool);
     let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
-    let other = db.upsert_user("other@acme.test", None).await.unwrap();
-    db.add_member(t.org, other.id, otto_core::orgs::Role::Member)
-        .await
-        .unwrap();
+    let other = common::Member::new();
 
     let mut tx = db.begin(t.org).await.unwrap();
     let lease = tx
@@ -2072,13 +2053,8 @@ async fn only_the_holder_can_release(pool: PgPool) {
 async fn directed_messages_are_private_within_the_org(pool: PgPool) {
     let db = db(pool);
     let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
-    let bob = db.upsert_user("bob@acme.test", None).await.unwrap();
-    let eve = db.upsert_user("eve@acme.test", None).await.unwrap();
-    for u in [bob.id, eve.id] {
-        db.add_member(t.org, u, otto_core::orgs::Role::Member)
-            .await
-            .unwrap();
-    }
+    let bob = common::Member::new();
+    let eve = common::Member::new();
 
     let mut tx = db.begin(t.org).await.unwrap();
     tx.send_message(
@@ -2130,10 +2106,7 @@ async fn directed_messages_are_private_within_the_org(pool: PgPool) {
 async fn unread_excludes_self_and_ack_is_clamped(pool: PgPool) {
     let db = db(pool);
     let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
-    let bob = db.upsert_user("bob@acme.test", None).await.unwrap();
-    db.add_member(t.org, bob.id, otto_core::orgs::Role::Member)
-        .await
-        .unwrap();
+    let bob = common::Member::new();
 
     let mut tx = db.begin(t.org).await.unwrap();
     tx.send_message(

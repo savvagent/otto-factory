@@ -1,10 +1,16 @@
-//! Test harness: the assembled router, driven the way a browser drives it.
+//! Test harness: the assembled router, driven the way a client drives it.
 //!
 //! Requests go through `tower::ServiceExt::oneshot` against the real router
 //! rather than calling handlers directly, so extractors, path matching, method
-//! routing, status codes, and `Set-Cookie` are all under test. A handler tested
-//! in isolation cannot tell you that its route is mounted, that its extractor
-//! resolves, or that its `404` is not a `403`.
+//! routing, and status codes are all under test. A handler tested in isolation
+//! cannot tell you that its route is mounted, that its extractor resolves, or
+//! that its `404` is not a `403`.
+//!
+//! Identity is the platform's, so the harness stands up a mock of it
+//! (`of_testkit::MockPlatform`) and "signs people in" by minting them platform
+//! tokens. A fixture person ([`Account`]) holds one token that opens whichever
+//! org they joined most recently; tests about *which* org a token opens use
+//! explicit tokens from `h.platform.issue(..)`.
 
 #![allow(dead_code)]
 
@@ -12,57 +18,48 @@ use axum::body::Body;
 use axum::Router;
 use base64::Engine;
 use http::{Request, Response, StatusCode};
+use of_testkit::MockPlatform;
 use of_web::{AppState, Config};
-use otto_core::orgs::OrgsExt;
-use otto_core::orgs::Role;
+use otto_resource::Role;
 use otto_tenant::crypto::Cipher;
 use otto_tenant::ids::{OrgId, UserId};
 use otto_tenant::Db;
 use serde_json::Value;
 use sqlx::PgPool;
 use tower::ServiceExt;
-use webauthn_authenticator_rs::softtoken::SoftToken;
-use webauthn_authenticator_rs::WebauthnAuthenticator;
 
-pub const RESOURCE: &str = "https://mcp.otto-factory.test/mcp";
+pub const RESOURCE: &str = of_testkit::RESOURCE_URI;
 pub const PUBLIC_URL: &str = "https://console.otto-factory.test";
-pub const ISSUER: &str = "otto-factory";
-
-/// Register this service's resource with the authorization server's registry,
-/// as `of-server` does at every startup. Without the row every
-/// `/oauth/authorize`, token, refresh, and PAT request for [`RESOURCE`] is
-/// refused as `invalid_target`.
-pub async fn register_resource(db: &Db) {
-    otto_auth::resources::register(
-        db,
-        otto_auth::resources::ResourceServerSpec {
-            resource_uri: RESOURCE,
-            name: of_core::scopes::RESOURCE_NAME,
-            scopes: of_core::scopes::KNOWN,
-            default_scopes: of_core::scopes::DEFAULT,
-        },
-    )
-    .await
-    .expect("register the resource server");
-}
+pub const PLATFORM_URL: &str = "https://otto.test";
 
 pub struct Harness {
     pub db: Db,
     pub router: Router,
     pub cipher: Cipher,
+    pub platform: MockPlatform,
 }
 
 pub async fn harness(pool: PgPool) -> Harness {
+    harness_with(pool, |_| {}).await
+}
+
+pub async fn harness_with(pool: PgPool, configure: impl FnOnce(&mut Config)) -> Harness {
     let db = Db::from_pool(pool);
-    register_resource(&db).await;
-    let config = Config::new(PUBLIC_URL, RESOURCE);
-    let webauthn = of_web::relying_party(&config).expect("relying party");
-    let state = AppState::new(db.clone(), cipher(), webauthn, config);
+    let platform = MockPlatform::start().await;
+    let mut config = Config::new(
+        PUBLIC_URL,
+        RESOURCE,
+        PLATFORM_URL,
+        of_testkit::WEBHOOK_SECRET,
+    );
+    configure(&mut config);
+    let state = AppState::new(db.clone(), cipher(), platform.client(), config);
 
     Harness {
         db,
         router: of_web::router(state),
         cipher: cipher(),
+        platform,
     }
 }
 
@@ -74,22 +71,14 @@ pub async fn harness(pool: PgPool) -> Harness {
 /// asserts) — but it means every connect request is refused for the deployment's
 /// gap before the request itself is ever looked at. This one gets past that.
 pub async fn harness_with_trackers(pool: PgPool) -> Harness {
-    let db = Db::from_pool(pool);
-    register_resource(&db).await;
-    let mut config = Config::new(PUBLIC_URL, RESOURCE);
-    config.github_app_slug = Some("otto-factory".into());
-    config.github_app_client_id = Some("gh-client".into());
-    config.github_app_client_secret = Some("gh-secret".into());
-    config.jira_client_id = Some("jira-client".into());
-    config.jira_client_secret = Some("jira-secret".into());
-    let webauthn = of_web::relying_party(&config).expect("relying party");
-    let state = AppState::new(db.clone(), cipher(), webauthn, config);
-
-    Harness {
-        db,
-        router: of_web::router(state),
-        cipher: cipher(),
-    }
+    harness_with(pool, |config| {
+        config.github_app_slug = Some("otto-factory".into());
+        config.github_app_client_id = Some("gh-client".into());
+        config.github_app_client_secret = Some("gh-secret".into());
+        config.jira_client_id = Some("jira-client".into());
+        config.jira_client_secret = Some("jira-secret".into());
+    })
+    .await
 }
 
 pub fn cipher() -> Cipher {
@@ -107,19 +96,6 @@ pub struct Reply {
 }
 
 impl Reply {
-    /// The session cookie value this response set, if it set one.
-    pub fn session_cookie(&self) -> Option<String> {
-        self.headers
-            .get_all(http::header::SET_COOKIE)
-            .iter()
-            .filter_map(|v| v.to_str().ok())
-            .find_map(|v| {
-                let value = v.strip_prefix("__Host-of_session=")?;
-                let value = value.split(';').next()?;
-                (!value.is_empty()).then(|| value.to_string())
-            })
-    }
-
     pub fn error_code(&self) -> Option<&str> {
         self.body.get("error")?.get("code")?.as_str()
     }
@@ -180,10 +156,6 @@ impl Call {
     }
 
     /// An arbitrary request header.
-    ///
-    /// Added for `Accept-Language`, which is the only input the browser-facing
-    /// pages take that is neither a cookie, a path, nor a body — and the one
-    /// the consent screen's language falls back to.
     pub fn header(mut self, name: &'static str, value: impl Into<String>) -> Self {
         self.headers.push((name, value.into()));
         self
@@ -195,18 +167,15 @@ impl Call {
         self
     }
 
-    /// A form-encoded body — what the OAuth endpoints take, per RFC 6749.
-    pub fn form(mut self, pairs: &[(&str, &str)]) -> Self {
-        let encoded = pairs
-            .iter()
-            .map(|(k, v)| format!("{}={}", urlencode(k), urlencode(v)))
-            .collect::<Vec<_>>()
-            .join("&");
-        self.body = Some(Body::from(encoded));
-        self.content_type = Some("application/x-www-form-urlencoded");
+    /// A raw JSON body, byte for byte -- for the signed webhook, where
+    /// re-serializing would change the bytes the signature covers.
+    pub fn raw_json(mut self, body: Vec<u8>) -> Self {
+        self.body = Some(Body::from(body));
+        self.content_type = Some("application/json");
         self
     }
 
+    /// Authenticate as the holder of this platform token.
     pub fn with_session(mut self, token: &str) -> Self {
         self.session = Some(token.to_string());
         self
@@ -219,10 +188,7 @@ impl Call {
             builder = builder.header(http::header::CONTENT_TYPE, ct);
         }
         if let Some(token) = &self.session {
-            builder = builder.header(
-                http::header::COOKIE,
-                format!("__Host-of_session={token}; theme=dark"),
-            );
+            builder = builder.header(http::header::AUTHORIZATION, format!("Bearer {token}"));
         }
         for (name, value) in &self.headers {
             builder = builder.header(*name, value.as_str());
@@ -248,332 +214,59 @@ impl Call {
     }
 }
 
-fn urlencode(raw: &str) -> String {
-    let mut out = String::new();
-    for byte in raw.as_bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(*byte as char)
-            }
-            _ => out.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    out
-}
-
 // ---------------------------------------------------------------------------
 // Account fixtures
 // ---------------------------------------------------------------------------
 
-/// An account that has been through the whole front door: signed up, verified,
-/// enrolled, signed in.
+/// A fixture person: an id, an address, and a platform token that opens
+/// whichever org they joined most recently.
 pub struct Account {
     pub user: UserId,
     pub email: String,
+    /// The bearer token. Named for the cookie it replaced.
     pub session: String,
-    /// The account's authenticator, kept so a test can sign in again.
-    pub auth: Authenticator,
-    /// base64url, for `allowCredentials`.
-    pub credential_id: String,
 }
 
-/// A software authenticator, standing in for a browser's.
-///
-/// `SoftToken` produces real COSE signatures over the challenges this server
-/// issued, so these tests exercise the actual verification path. It cannot hold
-/// *discoverable* credentials — see `of-auth`'s `tests/passkeys.rs` for the full
-/// note — so [`soften`] and [`offer`] adjust what is handed to it. Only what
-/// the fake authenticator sees is adjusted; every server-side step is the
-/// production one.
-pub type Authenticator = WebauthnAuthenticator<SoftToken>;
-
-pub fn authenticator() -> Authenticator {
-    WebauthnAuthenticator::new(SoftToken::new(true).unwrap().0)
-}
-
-/// Drop the resident-key requirement before handing a challenge to SoftToken.
-fn soften(mut challenge: Value) -> Value {
-    if let Some(sel) = challenge
-        .get_mut("publicKey")
-        .and_then(|pk| pk.get_mut("authenticatorSelection"))
-    {
-        sel["requireResidentKey"] = Value::Bool(false);
-        sel["residentKey"] = Value::Null;
-    }
-    challenge
-}
-
-/// Name a credential in `allowCredentials`, so a token holding no discoverable
-/// credentials can find the right key. Production sends this list empty.
-fn offer(mut challenge: Value, credential_id: &str) -> Value {
-    challenge["publicKey"]["allowCredentials"] = serde_json::json!([
-        { "type": "public-key", "id": credential_id }
-    ]);
-    challenge
-}
-
-/// Create an account the way a person does: register a passkey, get a session.
-///
-/// Deliberately not a shortcut that inserts rows. The point of most of these
-/// tests is that the sequence works end to end, and a fixture that skipped it
-/// would test a state the product cannot reach.
+/// Create a person. They belong to no org until [`org_with_owner`] or
+/// [`add_member`] places them in one.
 pub async fn onboard(h: &Harness, email: &str) -> Account {
-    let mut auth = authenticator();
-
-    let started = Call::post("/api/auth/signup/start").send(&h.router).await;
-    started.expect(StatusCode::OK);
-    assert!(
-        started.session_cookie().is_none(),
-        "a challenge must not open a session"
-    );
-
-    let ceremony_id = started.body["ceremonyId"].as_str().unwrap().to_string();
-    let challenge: webauthn_rs::prelude::CreationChallengeResponse =
-        serde_json::from_value(soften(started.body["challenge"].clone())).unwrap();
-
-    let credential = auth
-        .do_registration(
-            webauthn_rs::prelude::Url::parse(PUBLIC_URL).unwrap(),
-            challenge,
-        )
-        .expect("the authenticator refused the registration challenge");
-
-    let finished = Call::post("/api/auth/signup/finish")
-        .json(serde_json::json!({
-            "ceremonyId": ceremony_id,
-            "credential": credential,
-            "nickname": "test key",
-        }))
-        .send(&h.router)
-        .await;
-    finished.expect(StatusCode::OK);
-
-    let session = finished
-        .session_cookie()
-        .expect("finishing signup must open the account's first session");
-
-    let user: UserId = finished.body["user"]["id"]
-        .as_str()
-        .unwrap()
-        .parse()
-        .unwrap();
-
-    // Every test that predates passkeys assumes an addressable account, and an
-    // invitation names an address — so set one here rather than in each test.
-    Call::patch("/api/me")
-        .with_session(&session)
-        .json(serde_json::json!({ "email": email, "name": "Test User" }))
-        .send(&h.router)
-        .await
-        .expect(StatusCode::OK);
-
-    let credential_id = credential_id_of(h, user).await;
-
+    let user = UserId::new();
+    let session = h
+        .platform
+        .issue_floating(user.as_uuid(), of_core::scopes::KNOWN);
     Account {
         user,
         email: email.to_string(),
         session,
-        auth,
-        credential_id,
-    }
-}
-
-/// The base64url credential id of an account's first passkey, for `offer`.
-async fn credential_id_of(h: &Harness, user: UserId) -> String {
-    use base64::Engine;
-    let raw: Vec<u8> = sqlx::query_scalar(
-        "SELECT credential_id FROM passkeys WHERE user_id = $1 ORDER BY created_at LIMIT 1",
-    )
-    .bind(user)
-    .fetch_one(h.db.pool())
-    .await
-    .unwrap();
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw)
-}
-
-/// Drive a registration ceremony to a `…/finish` endpoint, merging any extra
-/// fields the endpoint needs (a claim code, for instance).
-pub async fn finish_registration(
-    h: &Harness,
-    auth: &mut Authenticator,
-    finish_path: &str,
-    started: &Value,
-    extra: Value,
-) -> Reply {
-    let ceremony_id = started["ceremonyId"].as_str().unwrap().to_string();
-    let challenge: webauthn_rs::prelude::CreationChallengeResponse =
-        serde_json::from_value(soften(started["challenge"].clone())).unwrap();
-
-    let credential = auth
-        .do_registration(
-            webauthn_rs::prelude::Url::parse(PUBLIC_URL).unwrap(),
-            challenge,
-        )
-        .expect("the authenticator refused the registration challenge");
-
-    let mut body = serde_json::json!({
-        "ceremonyId": ceremony_id,
-        "credential": credential,
-    });
-    if let (Some(b), Some(e)) = (body.as_object_mut(), extra.as_object()) {
-        for (k, v) in e {
-            b.insert(k.clone(), v.clone());
-        }
-    }
-
-    Call::post(finish_path.to_string())
-        .json(body)
-        .send(&h.router)
-        .await
-}
-
-/// Drive a registration ceremony far enough to produce a real credential,
-/// without submitting it anywhere.
-///
-/// For a test that needs to inspect or pre-empt the credential (its raw id,
-/// say) before a `…/finish` endpoint ever sees it — [`finish_registration`]
-/// above drives the ceremony and posts it in one step, which cannot express
-/// that. Returns the ceremony id alongside the credential since callers of
-/// this need both to build their own `…/finish` request body.
-pub fn register_credential(
-    auth: &mut Authenticator,
-    started: &Value,
-) -> (String, webauthn_rs::prelude::RegisterPublicKeyCredential) {
-    let ceremony_id = started["ceremonyId"].as_str().unwrap().to_string();
-    let challenge: webauthn_rs::prelude::CreationChallengeResponse =
-        serde_json::from_value(soften(started["challenge"].clone())).unwrap();
-
-    let credential = auth
-        .do_registration(
-            webauthn_rs::prelude::Url::parse(PUBLIC_URL).unwrap(),
-            challenge,
-        )
-        .expect("the authenticator refused the registration challenge");
-
-    (ceremony_id, credential)
-}
-
-/// Sign in again with an account's own authenticator.
-pub async fn sign_in(h: &Harness, account: &mut Account) -> Reply {
-    let credential_id = account.credential_id.clone();
-    present_credential(h, &mut account.auth, &credential_id, None).await
-}
-
-/// Drive a whole authentication ceremony and present the result to
-/// `login/finish`, as though the request arrived from `from`.
-pub async fn present_credential(
-    h: &Harness,
-    auth: &mut Authenticator,
-    credential_id: &str,
-    from: Option<&str>,
-) -> Reply {
-    let started = Call::post("/api/auth/login/start").send(&h.router).await;
-    started.expect(StatusCode::OK);
-
-    let ceremony_id = started.body["ceremonyId"].as_str().unwrap().to_string();
-    let challenge: webauthn_rs::prelude::RequestChallengeResponse =
-        serde_json::from_value(offer(started.body["challenge"].clone(), credential_id)).unwrap();
-
-    let credential = auth
-        .do_authentication(
-            webauthn_rs::prelude::Url::parse(PUBLIC_URL).unwrap(),
-            challenge,
-        )
-        .expect("the authenticator refused the sign-in challenge");
-
-    let mut call = Call::post("/api/auth/login/finish")
-        .json(serde_json::json!({ "ceremonyId": ceremony_id, "credential": credential }));
-    if let Some(ip) = from {
-        call = call.header(CLIENT_IP_HEADER, ip);
-    }
-    call.send(&h.router).await
-}
-
-/// A key an authenticator will sign with and this server has no row for.
-///
-/// Registered against a signup ceremony that is deliberately never finished,
-/// so `passkeys` has nothing to resolve it to. That is what a stranger probing
-/// `login/finish` looks like — except the signature is genuine, so a refusal
-/// can only be the lookup and never the verification.
-pub async fn unregistered_credential(h: &Harness) -> (Authenticator, String) {
-    use base64::Engine;
-
-    let mut auth = authenticator();
-
-    let started = Call::post("/api/auth/signup/start").send(&h.router).await;
-    started.expect(StatusCode::OK);
-    let challenge: webauthn_rs::prelude::CreationChallengeResponse =
-        serde_json::from_value(soften(started.body["challenge"].clone())).unwrap();
-
-    let credential = auth
-        .do_registration(
-            webauthn_rs::prelude::Url::parse(PUBLIC_URL).unwrap(),
-            challenge,
-        )
-        .expect("the authenticator refused the registration challenge");
-
-    let id = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(credential.raw_id.as_ref());
-    (auth, id)
-}
-
-/// The client-address header [`harness_behind_proxy`] is configured to trust.
-///
-/// A real one: on Fly the proxy *overwrites* `fly-client-ip`, which is the
-/// only property that makes a throttle keyed on it worth anything.
-pub const CLIENT_IP_HEADER: &str = "fly-client-ip";
-
-/// A harness whose database cannot be reached, for outage behavior.
-pub async fn harness_with_unreachable_db(_pool: PgPool) -> Harness {
-    let unreachable = sqlx::postgres::PgPoolOptions::new()
-        .acquire_timeout(std::time::Duration::from_secs(2))
-        .connect_lazy("postgres://nobody:nothing@127.0.0.1:1/none")
-        .expect("lazy pool");
-    let db = Db::from_pool(unreachable);
-    let config = Config::new(PUBLIC_URL, RESOURCE);
-    let webauthn = of_web::relying_party(&config).expect("relying party");
-    let state = AppState::new(db.clone(), cipher(), webauthn, config);
-    Harness {
-        db,
-        router: of_web::router(state),
-        cipher: cipher(),
-    }
-}
-
-/// A harness deployed the way production is — behind a proxy that stamps the
-/// caller's address onto every request.
-///
-/// The plain [`harness`] configures no header, and `oneshot` attaches no
-/// `ConnectInfo`, so under it every request arrives with **no** client
-/// address and every throttle keyed on one is silently a no-op. A test about
-/// rate limiting has to be able to say where the request came from.
-pub async fn harness_behind_proxy(pool: PgPool) -> Harness {
-    let db = Db::from_pool(pool);
-    register_resource(&db).await;
-    let mut config = Config::new(PUBLIC_URL, RESOURCE);
-    config.client_ip_header = Some(CLIENT_IP_HEADER.into());
-    let webauthn = of_web::relying_party(&config).expect("relying party");
-    let state = AppState::new(db.clone(), cipher(), webauthn, config);
-
-    Harness {
-        db,
-        router: of_web::router(state),
-        cipher: cipher(),
     }
 }
 
 /// An org with `owner` as its owner.
 pub async fn org_with_owner(h: &Harness, slug: &str, owner: &Account) -> OrgId {
-    let created = Call::post("/api/orgs")
-        .with_session(&owner.session)
-        .json(serde_json::json!({ "slug": slug, "name": slug }))
-        .send(&h.router)
-        .await;
-    created.expect(StatusCode::CREATED);
-    created.body["id"].as_str().unwrap().parse().unwrap()
+    let org = OrgId::new();
+    h.platform.add_org(org.as_uuid(), slug, slug);
+    h.platform.add_member(
+        org.as_uuid(),
+        owner.user.as_uuid(),
+        &owner.email,
+        Role::Owner,
+    );
+    org
 }
 
-/// Add someone to an org directly, for tests about what a role may do rather
-/// than about how someone got it.
+/// Put someone in an org, for tests about what a role may do rather than about
+/// how someone got it. The email is derived from the id; use
+/// [`add_member_as`] when a test cares about it.
 pub async fn add_member(h: &Harness, org: OrgId, user: UserId, role: Role) {
-    h.db.add_member(org, user, role).await.unwrap();
+    h.platform.add_member(
+        org.as_uuid(),
+        user.as_uuid(),
+        &format!("{}@test.example", &user.to_string()[..8]),
+        role,
+    );
+}
+
+pub async fn add_member_as(h: &Harness, org: OrgId, who: &Account, role: Role) {
+    h.platform
+        .add_member(org.as_uuid(), who.user.as_uuid(), &who.email, role);
 }

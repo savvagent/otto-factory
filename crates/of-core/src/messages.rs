@@ -94,7 +94,7 @@ pub struct NewMessage {
     pub body: String,
     /// `None` broadcasts to the org (or the team, when `team_id` is set).
     pub recipient_user_id: Option<UserId>,
-    pub team_id: Option<TeamId>,
+    pub team_id: Option<crate::teams::VerifiedTeam>,
     pub kind: MessageKind,
     pub sender_kind: SenderKind,
     pub sender_label: Option<String>,
@@ -156,7 +156,7 @@ fn message_idempotency_fingerprint(sender: UserId, new: &NewMessage) -> Vec<u8> 
         "sender": sender,
         "body": body.trim(),
         "recipientUserId": recipient_user_id,
-        "teamId": team_id,
+        "teamId": team_id.map(|t| t.id()),
         "kind": kind,
         "senderKind": sender_kind,
         "senderLabel": sender_label,
@@ -302,7 +302,7 @@ impl MessagesExt for Tx<'_> {
             .bind(new.sender_label.as_deref())
             .bind(new.sender_kind)
             .bind(new.recipient_user_id)
-            .bind(new.team_id)
+            .bind(new.team_id.map(|t| t.in_org(self.org())).transpose()?)
             .bind(new.kind)
             .bind(body)
             .bind(new.repo_id)
@@ -411,7 +411,7 @@ impl MessagesExt for Tx<'_> {
             .bind(new.sender_label.as_deref())
             .bind(new.sender_kind)
             .bind(new.recipient_user_id)
-            .bind(new.team_id)
+            .bind(new.team_id.map(|t| t.in_org(self.org())).transpose()?)
             .bind(new.kind)
             .bind(body)
             .bind(new.repo_id)

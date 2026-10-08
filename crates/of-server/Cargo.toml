@@ -19,14 +19,13 @@ path = "src/main.rs"
 [dependencies]
 of-core.workspace = true
 otto-tenant.workspace = true
-otto-core.workspace = true
-otto-auth.workspace = true
+otto-resource.workspace = true
 of-mcp.workspace = true
 of-billing.workspace = true
 of-trackers.workspace = true
 of-web.workspace = true
 sqlx.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["sync"] }
 axum.workspace = true
 tower.workspace = true
 tower-http.workspace = true
@@ -37,30 +36,22 @@ tracing-subscriber.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 url.workspace = true
+uuid.workspace = true
 dotenvy.workspace = true
 
 [dev-dependencies]
 # Integration tests link of-server as an external crate, so anything they name
 # directly has to be declared here too.
 of-core.workspace = true
+of-billing.workspace = true
+of-testkit.workspace = true
 otto-tenant.workspace = true
-otto-core.workspace = true
-# test-support relaxes otto-auth::oidc's SSRF guard for loopback addresses only,
-# so the mock-IdP tests (tests/auth_oidc.rs) can run against a local server.
-# Never enabled by the production dependency above.
-otto-auth = { workspace = true, features = ["test-support"] }
+otto-resource.workspace = true
 sqlx.workspace = true
 tokio = { workspace = true, features = ["full"] }
 tower.workspace = true
 http.workspace = true
 axum.workspace = true
 serde_json.workspace = true
-futures.workspace = true
-sha2.workspace = true
-base64.workspace = true
 uuid.workspace = true
 chrono.workspace = true
-jsonwebtoken.workspace = true
-webauthn-authenticator-rs = { version = "0.5.4", default-features = false, features = ["softtoken"] }
-webauthn-rs = { version = "0.5.4", features = ["danger-allow-state-serialisation", "resident-key-support", "conditional-ui"] }
-webauthn-rs-proto = "0.5.5"

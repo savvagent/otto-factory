@@ -4,7 +4,9 @@ A hosted, multi-tenant **MCP server for coordinating agentic coding work** acros
 enterprises and teams.
 
 Server-only: no TUI, no PTY, no local bridge binary, no plugin. A team member adds one
-HTTPS endpoint to their coding agent, signs in through the browser once, and from inside
+HTTPS endpoint to their coding agent, signs in through the browser once (at the
+[otto platform](https://github.com/savvagent/otto-platform), which owns accounts, orgs, teams,
+SSO, and billing), and from inside
 any registered git repository gets tools to add, claim, and complete jobs; to see what
 every other agent on the team is working on and where; and to keep GitHub Issues / JIRA in
 sync with that work.
@@ -40,6 +42,31 @@ support is incomplete.
 Full design: [`docs/specs/2026-09-01-otto-factory-design.md`](docs/specs/2026-09-01-otto-factory-design.md).
 Build order: [`docs/plans/2026-09-01-milestone-1.md`](docs/plans/2026-09-01-milestone-1.md).
 
+## A resource server of the otto platform
+
+otto-factory does not sign anyone in and does not store who anyone is. The **otto platform**
+is the OAuth 2.1 authorization server and the system of record for identity and billing;
+otto-factory is one of the *resource servers* it protects, and keeps only its own domain —
+repos, jobs, leases, messages, trackers — in its own database.
+
+```
+  agent ──Bearer──► POST /mcp ──introspect (cached 60 s)──► platform
+                       │  usage_outbox ──background shipper──► platform /internal/usage
+  platform ──signed webhook──► POST /platform/webhooks   (org.deleted, team.deleted, member.removed)
+```
+
+- **Tokens** are opaque and validated by RFC 7662 introspection. A platform outage is a `503`,
+  never a `401`.
+- **Identity reads** (who am I, is this email a member, does this team exist) go to the
+  platform and fail closed: an unknown or unreachable answer is a refusal, never "org-wide".
+- **Metering** writes an outbox row in the tool's own transaction and ships it later;
+  quota checks read the platform's cached usage status.
+- **Cleanup** after the platform deletes an org, team, or member is driven by its signed
+  lifecycle webhooks, since there are no foreign keys across databases.
+
+Registering this service with a platform, and the one-time cutover, are in
+[`docs/deploy/fly.md`](docs/deploy/fly.md).
+
 ## Status
 
 Milestone 1, tasks 2–12 of 13 complete. `of-server` binds a port and serves every surface
@@ -51,14 +78,19 @@ plus the console UI for it) is complete —
 
 | Crate | State |
 |---|---|
-| `of-core` | ✅ orgs, repos, jobs, leases, messages, change-watch |
-| `of-auth` | ✅ OAuth 2.1 AS, TOTP + recovery, PATs |
-| `of-mcp` | ✅ Streamable HTTP MCP, 27 tools, resource-server middleware |
-| `of-billing` | ✅ usage metering, free/billable split, tier buckets |
+| `of-core` | ✅ repos, jobs, leases, messages, change-watch, platform lifecycle events |
+| `of-mcp` | ✅ Streamable HTTP MCP, 27 tools, platform-introspected bearer auth |
+| `of-billing` | ✅ price list, quota policy, usage outbox + shipper |
 | `of-trackers` | ✅ GitHub App + JIRA two-way sync (milestone 2) |
-| `of-web` | ✅ console API, session cookies, the AS's browser endpoints, tracker console |
-| `of-server` | ✅ config, startup migrations, router assembly, health, deploy |
-| `web/` | ✅ SvelteKit 2 / Svelte 5 console |
+| `of-web` | ✅ console API (platform bearer tokens), tracker console, platform webhooks |
+| `of-server` | ✅ config, startup migrations, router assembly, health, usage shipper |
+| `of-testkit` | ✅ in-process mock of the platform, for tests |
+| `web/` | ⚠️ SvelteKit 2 / Svelte 5 console — pending its platform sign-in change (see below) |
+
+> The console UI still targets the pre-split API. Its identity pages move to the platform, and
+> its own sign-in (OAuth + PKCE against the platform) is a separate change; until then the
+> console API is usable with a platform bearer token and the UI is not. Agents (`/mcp`) are
+> unaffected.
 
 ## Tenant isolation
 
@@ -82,8 +114,8 @@ tests go red while the other eight stay green.
 
 ```bash
 podman compose up -d                  # Postgres 16 on host port 15433
-cp .env.example .env                  # DATABASE_URL for sqlx
-cargo test                            # unit + integration tests
+cp .env.example .env                  # DATABASE_URL for sqlx (and the platform settings, to run the server)
+cargo test                            # unit + integration tests; the platform is an in-process mock
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all
 ```
@@ -108,8 +140,7 @@ npm run build     # static bundle into web/build
 ```
 
 `npm run dev` proxies `/api`, `/oauth`, and `/.well-known` to `OF_API_ORIGIN` (default
-`http://127.0.0.1:8080`) so every request stays on one origin — the session cookie carries
-the `__Host-` prefix and cannot cross ports. See [`web/README.md`](web/README.md).
+`http://127.0.0.1:8080`). See [`web/README.md`](web/README.md).
 
 ### Running the server
 
@@ -117,19 +148,24 @@ the `__Host-` prefix and cannot cross ports. See [`web/README.md`](web/README.md
 cargo run -p of-server
 ```
 
-It reads `.env`, applies migrations, and serves everything on one port:
+It reads `.env`, applies migrations, and serves everything on one port (it needs a reachable
+platform to authenticate anyone; a local one is `otto-platform-server` from
+[`savvagent/otto-platform`](https://github.com/savvagent/otto-platform)):
 
 | Path | Surface |
 |---|---|
 | `/healthz` | Liveness. Never touches the database. |
 | `/readyz` | Readiness. Probes the database; `503` when it cannot. |
-| `/api/…` | Console REST API (`/api/openapi.json` describes it). |
-| `/oauth/…`, `/.well-known/…` | Authorization server and discovery. |
-| `/mcp` | The MCP endpoint. Bearer tokens only. |
+| `/api/…` | Console REST API (`/api/openapi.json` describes it). Platform bearer tokens. |
+| `/webhooks/{provider}` | Tracker deliveries (GitHub, JIRA), provider-signed. |
+| `/platform/webhooks` | The platform's lifecycle events, `Otto-Signature`-signed. |
+| `/.well-known/oauth-protected-resource` | Discovery; names the platform as the authorization server. |
+| `/mcp` | The MCP endpoint. Bearer tokens only, introspected at the platform. |
 | everything else | The console SPA, with an `index.html` fallback. |
 
-`OF_PUBLIC_URL` and `OF_ENCRYPTION_KEY` are required and have no defaults, because a wrong
-value for either fails silently rather than loudly — see the comments in `.env.example`.
+`OF_PUBLIC_URL`, `OF_PLATFORM_URL`, `OF_INTROSPECTION_SECRET`, `OF_PLATFORM_WEBHOOK_SECRET`,
+and `OF_ENCRYPTION_KEY` are required and have no defaults, because a wrong value for any of
+them fails silently rather than loudly — see the comments in `.env.example`.
 Run `npm run build` in `web/` first, or every console page answers `404` while the API
 works perfectly.
 
@@ -151,36 +187,41 @@ The rest are secrets:
 fly secrets set \
   DATABASE_URL="postgres://…" \
   OF_ENCRYPTION_KEY="$(openssl rand -base64 32)" \
-  OF_PUBLIC_URL="https://factory.example.com"
+  OF_INTROSPECTION_SECRET="otto_rs_…" \
+  OF_PLATFORM_WEBHOOK_SECRET="otto_whsec_…"
 fly deploy
 ```
 
 Migrations run at startup under a Postgres advisory lock, so several machines booting
 together is safe: the losers wait rather than racing through the same DDL.
 
-Two settings are deployment-specific and easy to get subtly wrong:
+The last two secrets come from registering this service at the platform
+(`otto-platform-server resource register` and `resource set-webhook`), and `fly.toml` sets
+`OF_PLATFORM_URL`, `OF_PUBLIC_URL`, and `OF_RESOURCE_URI`. Two of those are easy to get
+subtly wrong:
 
-- **`OF_CLIENT_IP_HEADER`** decides what every per-IP throttle and audit entry is keyed on.
-  Leave it unset with no proxy in front. Behind Fly's proxy it must be `fly-client-ip` and
-  **not** `x-forwarded-for`: fly-proxy *appends* to `X-Forwarded-For`, so a caller sending
-  its own value arrives left-most, and a rate limiter keyed on that is worse than none
-  because it looks like it is working. `fly.toml` sets it.
-- **`OF_PUBLIC_URL`** is the audience every token is bound to and the origin every issued
-  link points at. It is not derived from the `Host` header on purpose — that header is
+- **`OF_RESOURCE_URI`** is the audience every token is bound to, and it must be *exactly* the
+  `resource_uri` registered at the platform: it is also the HTTP Basic user on every call this
+  service makes there. It is not derived from the `Host` header on purpose — that header is
   attacker-controlled, and an audience derived from one is not an audience check.
+- **`OF_PUBLIC_URL`** is the origin of the discovery pointer in a `401` and of the tracker OAuth
+  callbacks.
+
+The one-time cutover from the pre-split deployment (empty database, new baseline, register the
+resource, set the secrets) is a checklist in [`docs/deploy/fly.md`](docs/deploy/fly.md).
 
 ## Repository layout
 
 | Path | What it is |
 |---|---|
 | `crates/of-core` | Domain + all SQL. Every tenant operation takes an `OrgId`. |
-| `crates/of-core/migrations` | Forward-only schema, one file per concern. |
-| `crates/of-auth` | OAuth 2.1 AS, TOTP, enterprise OIDC, personal access tokens. |
+| `crates/of-core/migrations` | Append-only schema, from a domain-only baseline. |
 | `crates/of-mcp` | MCP server and tool surface. |
-| `crates/of-billing` | Usage metering and tier enforcement. |
+| `crates/of-billing` | The price list, quota policy, and the usage outbox/shipper. |
 | `crates/of-trackers` | GitHub App + JIRA sync. |
-| `crates/of-web` | Console REST API. |
-| `crates/of-server` | The binary: config, migrations, router assembly, health. |
+| `crates/of-web` | Console REST API, tracker and platform webhooks. |
+| `crates/of-server` | The binary: config, migrations, router assembly, health, usage shipper. |
+| `crates/of-testkit` | Dev-only mock of the platform's resource-server API. |
 | `Dockerfile`, `fly.toml` | The image and its Fly.io deployment. |
 | `web/` | SvelteKit 2 + Svelte 5 console. |
 
@@ -192,6 +233,10 @@ idle agent ~86,000 calls a month for doing nothing. Tools are classified as free
 polls) or billable (work); both are recorded so the classification can be repriced later
 without losing history. The rule customers are told: **you pay for work performed, not for
 looking.**
+
+Each call is recorded in a local outbox in the same transaction as its work (so a failed call
+is never billed) and shipped to the platform, which owns plans and totals, by a background
+task that can retry forever without double-counting.
 
 ## Relationship to dark-agent
 

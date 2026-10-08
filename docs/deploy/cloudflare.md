@@ -58,15 +58,14 @@ below follows from that.
 
 ## What must change on the origin
 
-Three environment variables on `of-server`, and none of them is optional.
+Two environment variables on `of-server`, and neither is optional.
 
 | Variable | Value | Why |
 |---|---|---|
-| `OF_PUBLIC_URL` | `https://console.example.com` | The Worker's hostname, never the origin's. The OAuth issuer and both discovery documents are built from it. Point it at the origin and the console tells agents to connect to a host the browser never uses. |
+| `OF_PUBLIC_URL` | `https://console.example.com` | The Worker's hostname, never the origin's. The discovery pointer in a `401` and the tracker OAuth callbacks are built from it. Point it at the origin and the console tells agents to connect to a host the browser never uses. |
 | `OF_ALLOWED_HOSTS` | the origin's hostname, e.g. `otto-factory-mcp.fly.dev` | **See the trap below.** Without it every authenticated MCP call fails. |
-| `OF_CLIENT_IP_HEADER` | `cf-connecting-ip` | Cloudflare overwrites this header inbound. `fly-client-ip` would now hold a Cloudflare edge address, and every per-IP throttle would count all of Cloudflare as one caller. |
 
-`OF_RESOURCE_URI` defaults to `$OF_PUBLIC_URL/mcp` and needs nothing.
+`OF_RESOURCE_URI` defaults to `$OF_PUBLIC_URL/mcp` and needs nothing here (it must still be the URI registered at the otto platform). Sign-in itself is the platform's and is not proxied through this Worker.
 
 ### Trap 1 — `OF_ALLOWED_HOSTS`, or the MCP endpoint refuses every call
 
@@ -90,11 +89,11 @@ any port, which is what the local verification below relies on.
 
 ### Trap 2 — the origin must refuse traffic that did not come through Cloudflare
 
-`OF_CLIENT_IP_HEADER=cf-connecting-ip` is safe only because Cloudflare overwrites that
-header. Anyone who can reach the Fly app directly sets it themselves, and then every
-per-IP throttle — on login, on passkey ceremonies, on client registration — counts a value
-the attacker chose, which is worse than having no throttle because it looks like it is
-working.
+Anyone who can reach the Fly app directly skips whatever Cloudflare enforces at the edge
+(WAF rules, rate limits, bot management), so the edge protections are only as good as the
+origin's refusal to talk to anyone else. (This service no longer trusts a client-address
+header for anything; the per-IP login throttles that once made this urgent moved to the
+platform with the login surface.)
 
 Lock the origin to Cloudflare. In rough order of strength:
 
@@ -116,7 +115,7 @@ thing minus Cloudflare's own edge:
 ```bash
 # origin
 OF_PUBLIC_URL=http://localhost:8788 OF_BIND=127.0.0.1:8080 \
-OF_ALLOWED_HOSTS=127.0.0.1 OF_CLIENT_IP_HEADER=cf-connecting-ip \
+OF_ALLOWED_HOSTS=127.0.0.1 \
   cargo run -p of-server
 
 # edge

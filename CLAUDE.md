@@ -7,6 +7,12 @@ Guidance for Claude Code working in this repository.
 **otto-factory** is a hosted, multi-tenant MCP server for coordinating agentic coding work
 across enterprises and teams. Server-only — no TUI, no PTY, no local binary, no plugin.
 
+It is a **resource server of the otto platform** (`savvagent/otto-platform`). The platform
+is the OAuth authorization server and the system of record for identity (accounts, orgs,
+teams, members), SSO, and billing; otto-factory holds only the coordination domain, in its
+own database, and asks the platform who a token belongs to. Nothing in this repository
+issues a token, signs anyone in, or stores who a person is.
+
 Read [`docs/specs/2026-09-01-otto-factory-design.md`](docs/specs/2026-09-01-otto-factory-design.md)
 before any non-trivial change. The build order is in
 [`docs/plans/2026-09-01-milestone-1.md`](docs/plans/2026-09-01-milestone-1.md).
@@ -53,7 +59,8 @@ required for any new tenant table:
    startup rather than trusted.
 
 When you add a tenant table: give it a `NOT NULL org_id`, add it to the `tenant_tables`
-array in `0007_rls.sql`, and add a cross-org negative test. A tenant-scoped function
+array in the migration that creates it (the baseline's is in `0001_baseline.sql`), and add a
+cross-org negative test. A tenant-scoped function
 without a cross-org negative test is not done. The policy must be named
 `<table>_tenant_isolation` — `verify_tenant_isolation` discovers tenant tables by that
 convention rather than from a list it would have to be told about, so a differently named
@@ -75,28 +82,32 @@ bypasses RLS, so a test of such a policy **must** `SET LOCAL ROLE otto_app` expl
 passes against no policy at all.
 
 **A migration that touches a tenant table's data needs its own `org_id` scoping — RLS is not
-available to supply one.** `Db::migrate` runs every migration statement on the connection pool
+available to supply one.** `of_core::migrate` runs every migration statement on the connection pool
 directly, never through `Db::begin`: `app.org_id` is never set and `otto_app` is never assumed.
 What that means depends on which side of guard 2 the connecting role is on. If it is a
 superuser or has `BYPASSRLS` — this deployment's actual shape today, per `docs/deploy/fly.md`
 — RLS does not apply at all, `FORCE` included; an unscoped `UPDATE`/`DELETE` against a tenant
 table silently rewrites **every org's matching rows in one statement**, a cross-tenant write,
 not a no-op. Otherwise RLS does apply — every table carrying a `<table>_tenant_isolation` policy
-is `ENABLE`/`FORCE ROW LEVEL SECURITY` unconditionally (`0007_rls.sql`, `0008_audit.sql`,
-`0011_trackers.sql`), which holds whether the migrating role happens to own the table (where
+is `ENABLE`/`FORCE ROW LEVEL SECURITY` unconditionally (`0001_baseline.sql`), which holds whether the migrating role happens to own the table (where
 `FORCE` is what removes its exemption) or not (where a non-owner has no exemption to begin
 with) — and `current_org()` is NULL for the statement's entire lifetime, so
 `org_id = current_org()` is never true and the statement silently matches **zero rows, for
-every tenant**, forever. (A handful of `org_id NOT NULL` tables — `org_members`,
-`access_tokens`, `refresh_tokens`, `authorization_codes`, `idp_connections`, `claimed_domains`,
-`tracker_connection_index`, `sso_ceremonies` — carry no `*_tenant_isolation` policy at all, deliberately (auth has
-to resolve a principal before an org is known; see `0007_rls.sql`'s own note on this). Those have
-no second branch: an unscoped rewrite of one of them always hits the first outcome, on every
-deployment shape.)
-`savvagent/otto-factory#70` is what the fallback shape would have produced for
-`0020_rename_trigger_label_default.sql`'s relabeling `UPDATE`; under this deployment's actual
-(bypassing) role it produced the first outcome instead, harmlessly, because that rewrite was
-genuinely meant to apply the same way to every org.
+every tenant**, forever. (`tracker_connection_index` is the one `org_id NOT NULL` table with no policy at all, deliberately
+— the unauthenticated tracker webhook route has to resolve an org before one is known. It has no
+second branch: an unscoped rewrite of it always hits the first outcome, on every deployment shape.
+`usage_outbox`'s and `platform_events`' policies have two branches, `org_id = current_org() OR
+current_org() IS NULL`, so org-less background code (the shipper, the event sweep) can reach every
+org's rows while a pinned transaction still sees only its own. A DELETE-only policy is not enough for
+that: a DELETE's `WHERE` reads the rows it filters, so the table's SELECT policies apply to it too,
+which is why `audit_events` has `audit_events_retention_read` beside `audit_events_retention`
+(`0002_org_less_retention.sql`; `housekeeping_deletes_where_row_level_security_applies` runs it as
+`otto_app`).)
+`savvagent/otto-factory#70` is what the fallback shape produced for a since-squashed relabeling
+`UPDATE`; under this deployment's actual (bypassing) role it produced the first outcome instead,
+harmlessly, because that rewrite was genuinely meant to apply the same way to every org. There is no
+`orgs` table to loop over any more (orgs are the platform's): iterate the distinct `org_id`s of a
+domain table, as above.
 `rls_scopes_a_migration_style_update_with_no_org_context` in `tests/isolation.rs` reproduces the
 zero-rows outcome directly, as a non-owner role — which needs no `FORCE` to be bound — using the
 real tenant tables, whose owner is this deployment's own connecting role.
@@ -113,7 +124,7 @@ DO $$
 DECLARE
   o uuid;
 BEGIN
-  FOR o IN SELECT id FROM orgs LOOP
+  FOR o IN SELECT DISTINCT org_id FROM repos LOOP
     PERFORM set_config('app.org_id', o::text, true);
     UPDATE tracker_bindings SET trigger_label = 'otto-factory'
       WHERE org_id = o AND trigger_label = 'dark-factory';
@@ -152,7 +163,7 @@ suite that cannot tell the two guards apart cannot tell you when one has broken.
 
 ```bash
 podman compose up -d          # Postgres 16 on host port 15433
-cp .env.example .env          # DATABASE_URL for sqlx
+cp .env.example .env          # DATABASE_URL for sqlx, and the platform settings for `cargo run`
 cargo test                    # everything
 cargo test -p of-core --test isolation   # tenant isolation
 cargo test -p of-core --test queue       # queue behaviour
@@ -169,13 +180,23 @@ cargo run -p of-server        # everything on one port, reading .env
 podman build -t otto-factory .   # console stage + rust stage + slim runtime
 ```
 
-`OF_PUBLIC_URL` and `OF_ENCRYPTION_KEY` are required with no defaults; `.env.example` says
-why for each. Build `web/` first or every console page answers `404` while the API works.
+`OF_PUBLIC_URL`, `OF_PLATFORM_URL`, `OF_INTROSPECTION_SECRET`, `OF_PLATFORM_WEBHOOK_SECRET`,
+and `OF_ENCRYPTION_KEY` are required with no defaults; `.env.example` says why for each. Build
+`web/` first or every console page answers `404` while the API works. `cargo test` needs only
+`DATABASE_URL`: the platform is `of-testkit`'s in-process mock, never a live service.
 
 Integration tests are `#[sqlx::test]` against a real Postgres — one fresh throwaway
 database per test, migrations auto-applied. There are no mocks for the database, on
 purpose: RLS, `FOR UPDATE`, `LISTEN`/`NOTIFY`, and enum round-tripping are the things most
 likely to be wrong, and a mock cannot tell you about any of them.
+
+The **platform**, by contrast, is mocked — over real HTTP. `crates/of-testkit`'s
+`MockPlatform` is an axum server on a loopback port speaking the platform's wire format (it
+reuses `otto-resource`'s own types, so the two cannot drift silently), and tests hand the code
+under test the *real* `PlatformClient` pointed at it. It models audience (a token is active
+only for the resource server it was minted for), outages (`set_down`), usage dedupe by event
+id, and signed webhooks. A test about identity behavior belongs against it; a test about the
+platform's own behavior belongs in `savvagent/otto-platform`.
 
 ## Development skills
 
@@ -196,12 +217,13 @@ compile-time layering discipline, not separate services.
 | Crate | Responsibility |
 |---|---|
 | `of-core` | Domain + **all** SQL. No HTTP, no auth. Every tenant fn takes an `OrgId`. |
-| (otto-platform) | Identity, tenancy, auth, and plan usage are the `otto-tenant`, `otto-core`, `otto-auth`, and `otto-billing` crates from `savvagent/otto-platform`, pinned by rev in the workspace `Cargo.toml`. There is no `of-auth` crate. Never call `otto_tenant::Db::migrate` on this database; use `of_core::migrate`. Delete teams only through `of_core::teams::delete_team`. |
-| `of-mcp` | `rmcp` Streamable HTTP server, tool surface, resource-server middleware. |
-| `of-billing` | Usage recording, period counters, tier limits. |
+| (otto-platform) | Two crates from `savvagent/otto-platform`, pinned by one rev in the workspace `Cargo.toml`: `otto-tenant` (the pinned-transaction/RLS substrate, `Cipher`, the audit-trail pattern) and `otto-resource` (the resource-server client: introspection, usage shipping, member/team lookups, webhook verification). Nothing else — no `otto-core`/`otto-auth`/`otto-billing`, and no identity tables. Never call `otto_tenant::Db::migrate` on this database; use `of_core::migrate`. |
+| `of-mcp` | `rmcp` Streamable HTTP server, tool surface, bearer middleware (introspects at the platform). |
+| `of-billing` | The price list (`classify`), quota policy, and the usage outbox + shipper. |
 | `of-trackers` | GitHub App + JIRA clients, webhook ingest, two-way sync. |
-| `of-web` | Console REST API, session cookies, the AS's HTML endpoints. |
-| `of-server` | Config, migrations, router assembly, graceful shutdown. |
+| `of-web` | Console REST API (platform bearer tokens), tracker webhooks, the platform's lifecycle webhook. |
+| `of-server` | Config, migrations, router assembly, the usage shipper task, graceful shutdown. |
+| `of-testkit` | Dev-only. `MockPlatform`: the platform's resource-server API, in process. |
 
 `web/` is the console UI — SvelteKit 2 / Svelte 5 runes / Tailwind v4, TypeScript strict —
 built to static files that `of-server` serves beside `/api`. See `web/README.md`.
@@ -215,10 +237,16 @@ bypasses the `Tx` pinning that guard 2 depends on.
 every tool in it:
 
 - **The caller comes from the request, not the session.** An MCP session spans many HTTP
-  requests; `require_bearer` introspects the token on each one and puts the `Principal` in
-  the request extensions, which the transport carries into the handler as
-  `Extension<http::request::Parts>`. This is what makes revocation take effect on the next
-  call instead of at some unbounded later point — do not cache a principal on the service.
+  requests; `require_bearer` asks the platform about the token on each one
+  (`PlatformClient::introspect`, which caches a positive answer for 60 s) and puts the
+  `Principal` in the request extensions, which the transport carries into the handler as
+  `Extension<http::request::Parts>`. That 60 s is the whole revocation delay — do not cache a
+  principal on the service.
+- **A platform failure is a `503`, never a `401`.** `401` tells an agent its token is dead and
+  sends it to re-authenticate against the very platform that is down. Only the platform
+  *answering* "inactive" is a `401`. Anything else (transport error, 5xx, our own credential
+  being rejected) is `503` with `Retry-After`. Identity questions a tool asks — whoami,
+  resolving a message recipient — **fail closed** the same way: an error, never a guess.
 - **The org comes from the token and nowhere else.** No tool takes an org argument.
 - **Every result is a one-field object** — `{"job": …}`, `{"jobs": […]}` — defined in
   `tools::out`. MCP requires `outputSchema` to be rooted at `object`, so a bare array is
@@ -230,43 +258,60 @@ every tool in it:
 
 ## The console surface
 
-`of-web` serves everything a human touches, plus the authorization server's HTTP endpoints
-— `/oauth/authorize` is a browser surface that needs the console's session cookie, which is
-why it lives here and not in `of-mcp`. Five conventions:
+`of-web` serves the console's REST API — repos, the queue, tracker connections, this
+service's audit trail — plus two machine endpoints that authenticate by signature rather than
+by token: tracker webhooks (`/webhooks/{provider}`) and the platform's lifecycle webhooks
+(`/platform/webhooks`). It serves **no identity**: no `/oauth/*`, `/api/auth/*`, `/api/me*`,
+members, invites, teams, SSO, tokens, or usage. Those are the platform's, and
+`the_identity_surface_is_not_served_here` fails if one comes back. Conventions:
 
-- **The two browser-facing HTML pages negotiate a language.** `/oauth/authorize`'s consent
-  screen and its error page have no client-side JS to swap strings, so `crates/of-web/src/i18n.rs`
-  holds a hand-written `match` on `(Key, Locale)` — a new key with no Hindi translation fails to
-  compile. Both pages use one rule, resolved once per request: the caller's stored `locale`
-  first, `Accept-Language` second. **Both**, not just the consent page: every `error_page` call
-  site is downstream of a resolved `CurrentUser`, so splitting the rule would give one flow a
-  German consent screen and an English error page.
-
+- **The credential is a platform bearer token, for now — and that is a seam.** The console used
+  to sign people in with a session cookie. Console login (an OAuth authorization-code + PKCE
+  flow against the platform, leaving this service holding its own session) is a separate,
+  later change. Until it lands, `/api/*` accepts the same platform token the MCP surface does,
+  introspected by the same call (`session::authenticate`, the one place a credential becomes an
+  identity — marked `SEAM`). The console UI in `web/` still targets the pre-split API and does
+  not work against this server until that change.
 - **Authorization is an extractor, not a handler's first line.** `OrgCtx` resolves the
-  caller, the `{org}` path segment, and their role before any handler body runs;
-  `require_admin()` / `require_owner()` narrow it. A handler that forgets is a handler that
-  serves another tenant's data, and a type catches that where a review checklist does not.
-- **An org you are not in is `404`, never `403`.** A `403` on a real slug and a `404` on a
-  fake one turns any signed-in account into a directory of who uses the product.
+  caller (from the token), the `{org}` path segment (which must be the token's one org, by
+  slug or id), and their role before any handler body runs; `require_admin()` and
+  `require_scope()` narrow it. A handler that forgets is a handler that serves another
+  tenant's data, and a type catches that where a review checklist does not. Scopes are checked
+  as the MCP tools check them, so the console cannot do what an agent's token could not.
+- **An org that is not the token's is `404`, never `403`.** A `403` on a real slug and a `404`
+  on a fake one turns any token into a directory of who uses the product.
+- **A team id earns its way onto a row, and fails closed.** `repos.team_id` null means
+  org-wide, so an unchecked id is dangerous in both directions. `NewRepo`, `RepoPatch`, and
+  `NewJob` take an `of_core::teams::VerifiedTeam`, whose only constructor asks the platform
+  whether the team exists in the caller's org: unknown or foreign is a `404`, an unreachable
+  platform is a `503`, and neither is ever read as "no team". Team *slugs* in query strings
+  (`?team=`) resolve the same way. When the platform deletes a team, its repos stay scoped to the
+  dangling id (a tombstone nobody matches) rather than going org-wide — see
+  `of_core::platform_events`.
+- **Team membership is not known here yet, and that fails closed too.** The platform's resource
+  API can say a team exists but not who is in it, so non-admins see org-wide repos only and
+  team-scoped repos are admin-only (`callers_teams` in `routes/repos.rs` is the one function to
+  change when the platform exposes "teams of this member").
+- **The platform's webhooks are idempotent and signature-first.** `/platform/webhooks` verifies
+  `Otto-Signature` (HMAC over timestamp and raw body, replay-bounded) before parsing anything;
+  a bad signature is `401` and does nothing. A handled event, a repeat (the event id is recorded in the same transaction as its effects, `platform_events`;
+  a redelivery **re-runs** the idempotent clean-up to catch work that raced the first run), and an
+  unknown event type are all `200`; a failure to apply is `5xx` so the platform retries. It is mounted at
+  `/platform/webhooks`, not under `/webhooks/{provider}`, so a platform event can never be
+  mistaken for a tracker one.
+- **Tombstones close the cache window.** Introspection is cached for 60 s, so `org.deleted` and
+  `member.removed` first write `deleted_orgs` / `removed_members` (the latter swept after minutes)
+  and both HTTP surfaces refuse a tombstoned org or user on every request
+  (`of_core::platform_events::revoked`; a database error there is a `503`). Only then does the
+  clean-up run. A request already past that check can still be on its way to a transaction, so
+  every request-path tenant transaction opens through `platform_events::begin_live` (`Factory::tx`,
+  `OrgCtx::begin`), which holds the org's lifecycle advisory lock shared and re-checks the
+  tombstones under it; the clean-up takes it exclusively. A write in flight finishes first and is
+  purged with the rest; one that starts later is refused (`access_revoked`). **Never open a
+  request's transaction with `Db::begin` directly.**
 - **The router and the OpenAPI document are built from one list.** Adding a route means
   adding it to `catalog.rs` with its summary and description; `router()` mounts the list and
   `openapi::document` renders it. A route not in the catalog is not reachable, on purpose.
-- **No credential is ever spent on a `GET`.** Link-preview fetchers follow every URL in
-  every message, so an invitation link points at a console *page* that renders a button, and
-  the button `POST`s the token. The product sends no mail, which narrows the list but does
-  not retire the rule — a code pasted into Slack gets unfurled just as eagerly. `every_single_use_redemption_is_a_post` asserts
-  it. The session cookie's attributes — `HttpOnly`, `Secure`, `Path=/`, `SameSite=Lax`, and
-  the `__Host-` prefix — are asserted for the same reason: losing one is a silent
-  regression that no other test would notice. `Lax` specifically, because `Strict` would
-  drop the cookie on the top-level navigation into `/oauth/authorize`.
-
-**There is no mailer, and adding one is a product decision, not a convenience.** Nothing in
-this product sends email: a passkey is the only factor, a second passkey is the only
-self-service way back in, an org admin clearing a member's passkeys
-(`reset_member_passkeys`) is the only assisted one, and invitations are codes the admin
-delivers themselves. `users.email` is a unique key and a label in the audit trail — never a
-destination. A `Mailer` trait reappearing here means somebody has reintroduced a dependency
-the design removed on purpose.
 
 The console API is read-only over the queue, and a unit test
 (`the_queue_is_read_only_over_the_console`) fails if a write ever appears under `/jobs`.
@@ -275,6 +320,13 @@ say when it is done, and a "mark complete" button would let a human put somethin
 audit trail that they did not observe.
 
 ## `web/` — the console UI
+
+> **Status.** Written against the pre-split API (cookie session, `/api/me`, `/api/auth/*`,
+> orgs, members, teams, tokens, usage). The identity half of that API is now the platform's,
+> and the console's own sign-in (OAuth + PKCE against the platform) is a separate change, so
+> this UI does not work against the current server until that lands. Its identity pages move
+> to `otto-platform`; what stays here is the queue, repos, trackers, connect, docs, and
+> overview. Nothing below has been updated for that yet.
 
 Six things hold. The first explains the next four; the sixth stands on its own.
 
@@ -353,32 +405,36 @@ The paths the *server* names — `/login`, `/verify`, `/recover`, `/invite/{org}
 One binary mounts every surface on one port. Nothing here has business logic; what it has is
 the decisions no single crate could make.
 
-- **Route collisions are a startup panic, so a test builds the router.** `of-web` and
-  `of-mcp` both serve `/.well-known/oauth-protected-resource`, each for a good reason, and
-  `Router::merge` panics rather than choosing. `of-server` mounts `of_mcp::mcp_endpoint`
-  (the MCP route alone) beside `of-web`'s catalog, and `the_whole_router_assembles` reaches
-  that panic before a deployment does.
-- **The console SPA is the fallback, but not under `/api`, `/oauth`, `/mcp`, or
-  `/.well-known`.** `index.html` answering an unknown path is what makes a hard refresh of a
+- **Route collisions are a startup panic, so a test builds the router.** `Router::merge`
+  panics on a path registered twice rather than choosing, and `the_whole_router_assembles`
+  reaches that panic before a deployment does. `/.well-known/oauth-protected-resource` is
+  `of-mcp`'s alone (it names the platform as the authorization server); `of-web` does not
+  serve it.
+- **The console SPA is the fallback, but not under `/api`, `/oauth`, `/mcp`, `/.well-known`,
+  `/platform`, or `/webhooks`.** `index.html` answering an unknown path is what makes a hard refresh of a
   deep link work; `index.html` answering `/api/no/such/thing` with `200 text/html` is what
   makes an agent retry forever against a route that will never exist.
 - **`/healthz` never touches the database and `/readyz` always does.** They answer different
   questions — "should this process be killed?" and "should traffic come here?" — and wiring
   liveness to the database turns a brief database blip into a simultaneous cold start of
   every replica.
-- **`into_make_service_with_connect_info` is load-bearing.** `of_web::state::client_ip`
-  reads the peer address out of `ConnectInfo`, and that address keys every per-IP throttle
-  and every audit entry. Serve without it and `client_ip` returns `None` for every request,
-  silently disabling rate limiting on login and client registration.
+- **One `PlatformClient`, built once in `main` and shared.** It holds the introspection and
+  usage-status caches, so a second client would be a second, colder cache. `of-mcp`, `of-web`,
+  and the usage shipper all take the same `Arc`.
+- **The usage shipper is a task of this binary** (`of_billing::outbox::run`, spawned in
+  `main`), draining `usage_outbox` to the platform with per-row backoff. It stops on shutdown
+  after a final flush; anything undelivered stays in the table for the next process.
+- **Startup checks the platform credential but never requires the platform.** One harmless
+  `usage_status` call logs whether the credential was accepted (a `REJECTED` line is a
+  deployment fault), and a transport failure only warns: a platform outage must not stop a
+  restart.
 - **`Config::from_env` never falls back quietly.** A variable that is *set* but unparseable
   is a startup error naming it, not a default — `OF_ENFORCE_QUOTAS=yes-please` reading as
-  "off" is how a billing control gets deployed switched off for a year. `OF_PUBLIC_URL` and
-  `OF_ENCRYPTION_KEY` have no defaults at all, because a wrong value for either fails
-  silently: bad links in somebody's inbox, or tokens minted for an audience nothing accepts.
-- **`OF_CLIENT_IP_HEADER` names the header, and which header is not a matter of taste.**
-  Only a header the proxy *overwrites* can be trusted. On Fly.io that is `fly-client-ip`,
-  never `x-forwarded-for` — fly-proxy appends, so a caller's own value arrives left-most and
-  every throttle keys on something the attacker chose.
+  "off" is how a billing control gets deployed switched off for a year. `OF_PUBLIC_URL`,
+  `OF_PLATFORM_URL`, `OF_INTROSPECTION_SECRET`, `OF_PLATFORM_WEBHOOK_SECRET`, and
+  `OF_ENCRYPTION_KEY` have no defaults at all, because a wrong value for any of them fails
+  silently: a discovery pointer that goes nowhere, tokens validated against the wrong
+  audience, or webhooks nobody can verify. `Config`'s `Debug` prints no secret.
 - **Graceful shutdown outlives the server.** `axum::serve(...).with_graceful_shutdown(...)`
   returns, and only then does `watcher.shutdown().await` run — see the trap below.
 
@@ -393,68 +449,52 @@ released before it continues — graceful shutdown, a test tearing down — call
 
 ## Migrations
 
-Forward-only, one file per concern, in `crates/of-core/migrations/`. Never edit a migration
-that has been applied anywhere; add a new one. `0007_rls.sql` runs last so earlier
-migrations' tests are not fighting policies mid-build.
+Append-only, one file per concern, in `crates/of-core/migrations/`. Never edit a migration
+that has been applied anywhere; add a new one.
+
+**There is exactly one exception, and it is done.** `0001_baseline.sql` is a squashed,
+domain-only baseline that replaced the original `0001`–`0034` history at the platform cutover
+(`savvagent/otto-factory#192`): production data was disposable, so rather than carry the
+identity/auth/billing interleaving (and a three-step role rename, `df_app` → `of_app` →
+`otto_app`) the history was retired and the database recreated empty. The baseline creates
+`otto_app` itself if missing, tolerating a concurrent creator and a missing `CREATEROLE`.
+Nothing in CI enforces append-only mechanically (it is a convention), so there was no check to
+relax; CI's role setup shrank to one optional `CREATE ROLE otto_app`.
+`the_schema_holds_no_identity_tables_and_no_foreign_keys_to_them` (`tests/guards.rs`) keeps the
+baseline's promise: no migration may create an identity table or reference one.
+
+The schema has **no foreign keys to anything the platform owns** (orgs, users, teams): they are
+in another database. Intra-domain keys (jobs → repos, and so on) are kept. Cleanup after a
+platform-side deletion is the platform's lifecycle webhooks' job (`of_core::platform_events`),
+not `ON DELETE CASCADE`'s.
 
 ## Authentication
 
-Two layers that must not be conflated:
+There is none here; it is the platform's, and this service is its resource server. What that
+means in this repository:
 
-- **Layer 1 — what a client may do**: OAuth 2.1 (PKCE S256 mandatory, RFC 7591 dynamic
-  registration, RFC 8707 resource indicators enforced), plus personal access tokens for
-  clients with incomplete OAuth support. Tokens are opaque and stored only as SHA-256
-  hashes. A token's org is fixed at issuance and cannot be pivoted.
-- **Layer 2 — who the human is**: **passkeys** (WebAuthn) for individuals, enterprise OIDC
-  federation for orgs that bind an IdP. No password is ever accepted or stored, and **no
-  email is ever sent**.
-
-  A passkey creates the account: `POST /api/auth/signup/start` takes **no body at all**,
-  and the address is a profile field set afterwards by someone already holding the key.
-  That ordering is what finally closed the account-enumeration oracle — a password leaks
-  through "already registered", and TOTP leaked because the secret had to come back in the
-  response and so had to be refused for an address that already had one. Nothing is
-  submitted before a ceremony, so there is nothing to answer differently about. The one
-  place the product says "that address is taken" is `PATCH /api/me`, which needs a session.
-
-  Sign-in is **usernameless**: credentials are discoverable, `allowCredentials` is empty,
-  and the browser resolves the account from the key it offers. Verified in a real browser
-  with a CDP virtual authenticator — `isResidentCredential: true`, and the login page has
-  zero input fields.
-
-Redirect URI matching is exact, with one carve-out: `http://127.0.0.1`, `http://[::1]` and
-`http://localhost` ignore the port (RFC 8252 §7.3) and match on everything else. Do not
-tighten that without registering the change against a real client first — `localhost` was
-once excluded on sound-sounding reasoning, and it silently removed the OAuth path for Claude
-Code, which registers `http://localhost:<port>/callback`. `docs/clients/matrix.md` records
-what each client actually sends.
-
-**Recovery is a second passkey, and there is no static secret anywhere.** Recovery codes
-were dropped rather than carried over: a code that bypasses a phishing-resistant credential
-is the weakest link, and keeping one would undo the reason for passkeys. The console pushes
-for a second key from the moment there is one (`shouldAddPasskey`), and `passkeys::remove`
-refuses to delete the last one — that click looks like tidying up and is a permanent
-lockout.
-
-The assisted path is `POST /api/orgs/{org}/members/{user}/reset-passkeys`. **It clears the
-keys and issues a claim code in the same operation, and that coupling is the point.** An
-account with no passkeys and no outstanding claim is claimable by whoever reaches
-registration first — which is exactly the takeover an earlier draft of this endpoint opened,
-where a stranger who knew the address could win the race against the member. Assisted
-recovery always means the assistant *could* impersonate; the honest mitigations are that it
-is auditable, single-use, and expiring. An org's last owner has nobody above them, and the
-console says so.
-
-**Two places `otto_auth::passkeys` overrides webauthn-rs, both on the challenge and never on
-the verification state.** `start_passkey_registration` sets `require_resident_key(false)`,
-which would produce credentials that cannot be found without naming the account first;
-`start_discoverable_authentication` forces `mediation: conditional`, which is the autofill
-flow and shows no prompt. Removing either override silently breaks usernameless sign-in.
-
-**Account resolution is by credential ID, not the user handle.** webauthn-rs offers
-`identify_discoverable_authentication`, which reads the handle — the one field an
-authenticator may omit, and every software authenticator does. Neither is evidence; the
-signature is.
+- **Tokens are opaque and validated by introspection** (RFC 7662): `POST /oauth/introspect` at the
+  platform, authenticated by this service's registered credential (`OF_INTROSPECTION_SECRET`,
+  HTTP Basic with `OF_RESOURCE_URI` as the user). The answer carries the user, the one org the
+  token opens (fixed at issuance — it cannot be pivoted), the user's role in it *today*, and the
+  scopes. A token for a different resource server, or whose user has left the org, comes back
+  inactive. `PlatformClient` caches a positive answer for 60 s (never past the token's own
+  expiry) and an inactive one for 5 s; failures are never cached.
+- **The audience is configuration, not the request.** `OF_RESOURCE_URI` is what the platform
+  mints tokens for; it is never derived from a `Host` header, which an attacker controls.
+- **Discovery.** `/.well-known/oauth-protected-resource` (RFC 9728) names the platform in
+  `authorization_servers` and lists `of_core::scopes::KNOWN`; the `401` challenge points at it.
+  This service serves no authorization-server metadata, registration, authorize, or token endpoint.
+- **Registration is an operator step at the platform** (`otto-platform-server resource register`,
+  `set-webhook`), not something this binary does at startup. The scope list registered there must
+  match `of_core::scopes`. See `docs/deploy/fly.md`.
+- **Identity reads go through `PlatformClient`**: `member` (whoami), `member_by_email` (message
+  recipients), `team` / `team_by_slug` (team checks). Each treats "the platform could not answer"
+  as a refusal, never as an empty result.
+- **Passkeys, recovery, SSO, invitations, account claiming, sessions** — all the platform's.
+  `docs/clients/matrix.md` records what each MCP client sent against the pre-split authorization
+  server; the redirect-URI rules it documents (`http://localhost:<port>/callback` must match
+  ignoring the port) are the platform's to keep (`otto-auth`).
 
 ## Metering
 
@@ -463,21 +503,35 @@ The billable unit is the MCP tool call, but the free/billable classification in
 flat would charge an idle agent tens of thousands of calls a month. Record every call
 regardless of class so the classification can be repriced without losing history.
 
-Three rules hold, and the first is what makes the other two true:
+The platform owns plans, standing, and monthly totals; this service owns the price list and
+the *record*. Four rules hold, and the first is what makes the others true:
 
-1. **The meter runs inside the tool's own transaction, before the work.** `Factory::charge`
-   is the first thing after `self.tx(...)`. A failed call rolls the meter back with
+1. **The record is written inside the tool's own transaction, before the work.**
+   `Factory::charge` is the first thing after `self.tx(...)` and inserts a `usage_outbox` row
+   (with a fresh `event_id`) in that transaction. A failed call rolls the row back with
    everything else, so it is never billed; a successful one has no second transaction to
-   retry, so it is never billed twice. `watch` is the one exception — it meters in a short
-   transaction of its own, because holding one open across a thirty-second poll would pin
-   a connection per idle agent.
-2. **A new tool must be classified.** `exhaustive_over` compares the router against the
+   retry, so it is never lost. `watch` is the one exception — it meters in a short
+   transaction of its own, because holding one open across a thirty-second poll would pin a
+   connection per idle agent.
+2. **Delivery is a background task, and it is idempotent.** `of_billing::outbox::run` claims due
+   rows (`FOR UPDATE SKIP LOCKED`, `next_attempt_at` as claim lease and retry backoff), posts them
+   with `PlatformClient::ship_usage`, and deletes what the platform answered for (accepted,
+   duplicate, or rejected — all final; a rejected event is moved to `usage_outbox_rejected` with the
+   platform's reason and an error log, never dropped, and a receipt whose counts do not add up to the
+   batch deletes nothing). The platform dedupes on `event_id`, so any retry, from
+   any replica, counts once. A platform outage delays billing and never loses it, and never
+   affects a tool call.
+3. **A new tool must be classified.** `exhaustive_over` compares the router against the
    price list and `every_tool_has_a_price` fails when they disagree. An unclassified tool
    is treated as free and logged: over-billing a customer for something nobody decided to
    charge for is a worse failure than under-billing ourselves.
-3. **Enforcement never blocks a read.** It is behind `OF_ENFORCE_QUOTAS`, off by default,
-   and refuses only billable tools on hard-stop plans. An org that runs out mid-task keeps
-   full read access to its own queue.
+4. **Enforcement never blocks a read, and a lookup failure never blocks work.** It is behind
+   `OF_ENFORCE_QUOTAS`, off by default, and refuses only billable tools on hard-stop plans, judged
+   against the platform's usage status cached for 60 s (`UsageStatus::is_blocked`) plus the org's
+   unshipped billable outbox rows, looked up in `Factory::tx` before the transaction opens, and a
+   failed lookup is remembered per org for 5 s. That makes
+   overrun bounded by one cache window plus the unshipped outbox — an accepted cost of the split.
+   If the platform cannot answer, the call is allowed (and still recorded).
 
 ## Style
 

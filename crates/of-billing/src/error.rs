@@ -25,17 +25,28 @@ pub enum BillingError {
         upgrade_url: String,
     },
 
+    /// The platform could not report the org's standing (`whoami`, `usage`).
+    /// Never raised by the quota check itself, which fails open — see
+    /// [`crate::Meter`].
+    #[error("the otto platform could not be reached to read this organization's usage ({0})")]
+    Platform(#[from] otto_resource::Error),
+
     #[error(transparent)]
-    Core(#[from] otto_core::Error),
+    Tenant(#[from] otto_tenant::Error),
+
+    #[error(transparent)]
+    Db(#[from] sqlx::Error),
 }
 
 impl BillingError {
-    /// Stable machine-readable code, for the same reason `otto_core::Error` has
+    /// Stable machine-readable code, for the same reason `of_core::Error` has
     /// one: agents branch on this, humans read the message.
     pub fn code(&self) -> &'static str {
         match self {
             BillingError::QuotaExceeded { .. } => "quota_exceeded",
-            BillingError::Core(e) => e.code(),
+            BillingError::Platform(_) => "platform_unavailable",
+            BillingError::Tenant(e) => e.code(),
+            BillingError::Db(_) => "internal_error",
         }
     }
 
@@ -45,10 +56,9 @@ impl BillingError {
     pub fn retriable(&self) -> bool {
         match self {
             BillingError::QuotaExceeded { .. } => false,
-            BillingError::Core(e) => matches!(
-                e,
-                otto_core::Error::Db(_) | otto_core::Error::Tenant(otto_tenant::Error::Db(_))
-            ),
+            BillingError::Platform(e) => e.is_retriable(),
+            BillingError::Tenant(e) => matches!(e, otto_tenant::Error::Db(_)),
+            BillingError::Db(_) => true,
         }
     }
 }

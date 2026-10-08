@@ -9,7 +9,6 @@
 //! Both tools here are free, and deliberately so: a caller must never have to
 //! spend an operation to find out how many it has left.
 
-use otto_core::orgs::OrgsExt;
 use rmcp::handler::server::tool::Extension;
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::model::ErrorData;
@@ -42,36 +41,43 @@ impl Factory {
         // No scope check. A token that cannot ask what it is cannot report a
         // useful error either, and there is nothing here the holder of the
         // token does not already have.
-        let user = self.db().get_user(caller.user_id).await.mcp()?;
-        let org = self.db().get_org(caller.org_id).await.mcp()?;
-        let role = self
-            .db()
-            .member_role(caller.org_id, caller.user_id)
+        // Who and what the token says it is comes from the platform: the user
+        // and org are its records, not ours. A `None` means the platform no
+        // longer sees an active membership (removed since the token was last
+        // introspected), and the identity fields are simply left empty.
+        let member = self
+            .platform()
+            .member(caller.org_id.as_uuid(), caller.user_id.as_uuid())
             .await
             .mcp()?;
 
+        // Every platform read comes before the meter, so a lookup that fails
+        // leaves no record of a call that was never served.
+        let usage = self.meter().report(caller.org_id).await.mcp()?;
+
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "whoami").await?;
-        let usage = self.meter().report(&mut tx).await.mcp()?;
         tx.commit().await.mcp()?;
 
+        let user = member.as_ref().map(|m| &m.user);
+        let org = member.as_ref().map(|m| &m.org);
         Ok(Json(out::WhoAmI {
             user: out::UserOut {
                 id: caller.user_id,
-                email: user.as_ref().and_then(|u| u.email.clone()),
-                name: user.as_ref().and_then(|u| u.name.clone()),
+                email: user.and_then(|u| u.email.clone()),
+                name: user.and_then(|u| u.name.clone()),
             },
             org: out::OrgOut {
                 id: caller.org_id,
-                slug: org.as_ref().map(|o| o.slug.clone()),
-                name: org.as_ref().map(|o| o.name.clone()),
-                plan: org.as_ref().map(|o| o.plan),
+                slug: org.map(|o| o.slug.clone()),
+                name: org.map(|o| o.name.clone()),
+                plan: org.map(|o| o.plan.clone()),
             },
-            role,
+            role: member.as_ref().map(|m| m.role.into()),
             token: out::TokenOut {
                 kind: match caller.kind {
-                    otto_auth::tokens::TokenKind::Oauth => "oauth",
-                    otto_auth::tokens::TokenKind::Pat => "pat",
+                    otto_resource::TokenKind::Oauth => "oauth",
+                    otto_resource::TokenKind::Pat => "pat",
                 },
                 client_id: caller.client_id,
                 scopes: caller.scopes,
@@ -97,9 +103,12 @@ impl Factory {
     ) -> Result<Json<out::UsageOut>, ErrorData> {
         let caller = self.caller(&parts)?;
 
+        // Read first: a failed lookup must leave no record of a call that was
+        // never served.
+        let usage = self.meter().report(caller.org_id).await.mcp()?;
+
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "usage").await?;
-        let usage = self.meter().report(&mut tx).await.mcp()?;
         tx.commit().await.mcp()?;
 
         Ok(Json(out::UsageOut { usage }))

@@ -8,8 +8,7 @@ rust-version.workspace = true
 [dependencies]
 of-core.workspace = true
 otto-tenant.workspace = true
-otto-core.workspace = true
-otto-auth.workspace = true
+otto-resource.workspace = true
 of-billing.workspace = true
 of-trackers.workspace = true
 sqlx.workspace = true
@@ -33,14 +32,8 @@ anyhow.workspace = true
 tokio = { workspace = true, features = ["full"] }
 of-core.workspace = true
 otto-tenant.workspace = true
-otto-core.workspace = true
-# test-support relaxes of-auth::oidc's SSRF guard for loopback addresses
-# only, so this crate's own mock-IdP tests (crates/of-web/tests/sso.rs) can
-# run against a local server — never enabled by the production dependency
-# above. See that feature's doc comment in crates/of-auth/Cargo.toml.
-otto-auth = { workspace = true, features = ["test-support"] }
+otto-resource.workspace = true
 of-billing.workspace = true
-otto-billing.workspace = true
 sqlx.workspace = true
 http.workspace = true
 axum.workspace = true
@@ -50,9 +43,6 @@ chrono.workspace = true
 base64.workspace = true
 sha2.workspace = true
 hmac.workspace = true
-jsonwebtoken.workspace = true
 # `ServiceExt::oneshot`, for driving the assembled router without binding a port.
 tower = { workspace = true, features = ["util"] }
-webauthn-authenticator-rs = { version = "0.5.5", default-features = false, features = ["softtoken"] }
-webauthn-rs = { version = "0.5.5", features = ["danger-allow-state-serialisation", "resident-key-support", "conditional-ui"] }
-webauthn-rs-proto = "0.5.5"
+of-testkit.workspace = true

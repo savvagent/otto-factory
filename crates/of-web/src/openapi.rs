@@ -67,7 +67,7 @@ pub fn document(endpoints: &[Endpoint]) -> Value {
         }
 
         if endpoint.auth != Auth::Public {
-            operation["security"] = json!([{ "sessionCookie": [] }]);
+            operation["security"] = json!([{ "platformBearer": [] }]);
         }
         operation["x-otto-factory-auth"] = json!(endpoint.auth.as_str());
 
@@ -80,21 +80,25 @@ pub fn document(endpoints: &[Endpoint]) -> Value {
             "title": "otto-factory console API",
             "version": env!("CARGO_PKG_VERSION"),
             "description":
-                "The console's REST surface, and the OAuth 2.1 authorization server \
-                 in front of the MCP endpoint. Authentication is a session cookie \
-                 (`__Host-of_session`), set by the sign-in endpoints; the MCP surface \
-                 itself uses bearer tokens and is described by its own metadata \
-                 documents.",
+                "The console's REST surface: repos, the queue, tracker connections, and \
+                 this service's domain audit trail. Identity (sign-in, accounts, orgs, \
+                 members, teams, SSO, tokens, usage) and the OAuth 2.1 authorization \
+                 server live in the otto platform, not here. Authentication is a bearer \
+                 token issued by the platform and introspected on every request; the \
+                 console's own sign-in (an OAuth authorization-code flow against the \
+                 platform) is a later change. The MCP surface uses the same tokens and \
+                 is described by its own metadata document, \
+                 `/.well-known/oauth-protected-resource`.",
         },
         "components": {
             "securitySchemes": {
-                "sessionCookie": {
-                    "type": "apiKey",
-                    "in": "cookie",
-                    "name": crate::session::COOKIE_NAME,
+                "platformBearer": {
+                    "type": "http",
+                    "scheme": "bearer",
                     "description":
-                        "Set on sign-in. HttpOnly, Secure, SameSite=Lax — browsers \
-                         send it automatically; it cannot be read from script.",
+                        "A token issued by the otto platform for this resource server \
+                         (OAuth access token or personal access token). Its org is fixed \
+                         when it is issued; the `{org}` path segment must name that org.",
                 },
             },
             "schemas": components(),
@@ -153,28 +157,24 @@ fn param_description(name: &str) -> &'static str {
 }
 
 fn tag_for(path: &str) -> &'static str {
-    if path.starts_with("/oauth") || path.starts_with("/.well-known") {
-        "oauth"
+    if path.starts_with("/.well-known") {
+        "discovery"
     } else if path.starts_with("/webhooks") {
         "trackers"
-    } else if path.starts_with("/sso") || path.contains("/sso/") {
-        "sso"
-    } else if path.starts_with("/api/auth") {
-        "auth"
-    } else if path.starts_with("/api/me") {
-        "me"
-    } else if path.contains("/teams") {
-        "teams"
+    } else if path.starts_with("/platform") {
+        "platform"
+    } else if path.contains("/repos") && path.contains("/tracker") {
+        "trackers"
     } else if path.contains("/repos") {
         "repos"
-    } else if path.contains("/tokens") {
-        "tokens"
-    } else if path.contains("/invites") {
-        "invites"
-    } else if path.contains("/usage") || path.contains("/audit") {
-        "billing"
+    } else if path.contains("/trackers") {
+        "trackers"
+    } else if path.contains("/jobs") {
+        "queue"
+    } else if path.contains("/audit") {
+        "audit"
     } else {
-        "orgs"
+        "meta"
     }
 }
 
@@ -191,7 +191,6 @@ fn components() -> Value {
         entity_schemas(),
         queue_schemas(),
         tracker_schemas(),
-        sso_schemas(),
         response_schemas(),
         request_schemas(),
     ] {
@@ -345,215 +344,9 @@ fn tracker_schemas() -> Value {
     })
 }
 
-/// Enterprise OIDC federation — connection/domain admin, and the two sign-in
-/// ceremonies. Its own group for the same reason [`tracker_schemas`] is: the
-/// entity literal is already at the `json!` recursion limit.
-fn sso_schemas() -> Value {
-    let uuid = json!({ "type": "string", "format": "uuid" });
-    let timestamp = json!({ "type": "string", "format": "date-time" });
-
-    let idp_connection = json!({
-        "type": "object",
-        "description":
-            "One org's bound identity provider. The client secret is never returned by any \
-             endpoint — it is sealed at rest and opened only for the duration of a token \
-             exchange.",
-        "properties": {
-            "id": uuid,
-            "orgId": uuid,
-            "issuer": { "type": "string" },
-            "clientId": { "type": "string" },
-            "discovery": {
-                "type": "object",
-                "description": "The fetched /.well-known/openid-configuration document, cached.",
-            },
-            "createdAt": timestamp,
-        },
-        "required": ["id", "orgId", "issuer", "clientId", "discovery", "createdAt"],
-    });
-
-    let claimed_domain = json!({
-        "type": "object",
-        "description":
-            "A globally-unique email domain claimed by this org, with the exact TXT record \
-             to publish. verifiedAt is null until the DNS lookup succeeds.",
-        "properties": {
-            "orgId": uuid,
-            "domain": { "type": "string" },
-            "verificationToken": { "type": "string" },
-            "verifiedAt": { "type": ["string", "null"], "format": "date-time" },
-            "createdAt": timestamp,
-            "txtRecordName": {
-                "type": "string",
-                "description": "The TXT record name to publish, e.g. _otto-verify.acme.com.",
-            },
-            "txtRecordValue": {
-                "type": "string",
-                "description": "The exact TXT record value to publish.",
-            },
-        },
-        "required": [
-            "orgId",
-            "domain",
-            "verificationToken",
-            "createdAt",
-            "txtRecordName",
-            "txtRecordValue",
-        ],
-    });
-
-    json!({
-        "SsoStartRequest": {
-            "type": "object",
-            "description":
-                "Only used by /api/auth/sso/start — /api/me/sso/link/start takes no body, \
-                 it derives the domain from the caller's own account email.",
-            "properties": { "email": { "type": "string" } },
-            "required": ["email"],
-        },
-        "SsoStartResponse": {
-            "type": "object",
-            "properties": {
-                "redirectUrl": {
-                    "type": "string",
-                    "description": "Navigate the browser here to begin the IdP's authorization-code flow.",
-                },
-            },
-            "required": ["redirectUrl"],
-        },
-        "SsoConnectionRequest": {
-            "type": "object",
-            "properties": {
-                "issuer": { "type": "string" },
-                "clientId": { "type": "string" },
-                "clientSecret": {
-                    "type": "string",
-                    "description": "Write-only. Never round-tripped back from any endpoint.",
-                },
-            },
-            "required": ["issuer", "clientId", "clientSecret"],
-        },
-        "IdpConnection": idp_connection,
-        "ClaimDomainRequest": {
-            "type": "object",
-            "properties": { "domain": { "type": "string" } },
-            "required": ["domain"],
-        },
-        "ClaimedDomain": claimed_domain,
-        "ClaimedDomainList": { "type": "array", "items": reference("ClaimedDomain") },
-        "VerifyDomainResponse": {
-            "type": "object",
-            "description":
-                "false is not an error — DNS has not propagated yet, and the admin can retry.",
-            "properties": { "verified": { "type": "boolean" } },
-            "required": ["verified"],
-        },
-        "EnforceSsoRequest": {
-            "type": "object",
-            "properties": { "enforceSso": { "type": "boolean" } },
-            "required": ["enforceSso"],
-        },
-    })
-}
-
-/// The domain objects — what `of-core` returns, as the wire sees it.
 fn entity_schemas() -> Value {
     let timestamp = json!({ "type": "string", "format": "date-time" });
     let uuid = json!({ "type": "string", "format": "uuid" });
-    let role = json!({ "type": "string", "enum": ["owner", "admin", "member"] });
-
-    let locale = {
-        let mut values: Vec<Value> = otto_core::i18n::SUPPORTED_LOCALES
-            .iter()
-            .map(|l| json!(l))
-            .collect();
-        values.push(Value::Null);
-        json!({
-            "type": ["string", "null"],
-            "enum": values,
-            "description": "The console language, or null to follow the browser's Accept-Language.",
-        })
-    };
-
-    let user = json!({
-        "type": "object",
-        "properties": {
-            "id": uuid,
-            "email": {
-                "type": ["string", "null"],
-                "format": "email",
-                "description":
-                    "Absent until the account sets one. A passkey is what creates an \
-                     account, so there is a real window — and, for anyone who never \
-                     bothers, a permanent state — with no address.",
-            },
-            "name": { "type": ["string", "null"] },
-            "label": {
-                "type": "string",
-                "description":
-                    "Generated words that name this account in a credential vault's \
-                     picker — never an identifier, and never unique.",
-                "examples": ["brisk-harbor-42"],
-            },
-            "locale": locale,
-            "createdAt": timestamp,
-            "disabledAt": { "type": ["string", "null"], "format": "date-time" },
-        },
-        "required": ["id", "label", "createdAt"],
-    });
-
-    let org = json!({
-        "type": "object",
-        "properties": {
-            "id": uuid,
-            "slug": { "type": "string" },
-            "name": { "type": "string" },
-            "plan": { "type": "string", "enum": ["free", "team", "business", "enterprise"] },
-            "enforceSso": { "type": "boolean" },
-            "createdAt": timestamp,
-        },
-        "required": ["id", "slug", "name", "plan"],
-    });
-
-    let membership = json!({
-        "type": "object",
-        "description": "One org this account belongs to, and the role it holds there.",
-        "properties": {
-            "orgId": uuid,
-            "userId": uuid,
-            "role": role,
-            "orgSlug": { "type": "string" },
-            "orgName": { "type": "string" },
-            "plan": { "type": "string" },
-        },
-        "required": ["orgId", "userId", "role", "orgSlug", "orgName"],
-    });
-
-    let org_member = json!({
-        "type": "object",
-        "properties": {
-            "id": uuid,
-            "email": { "type": ["string", "null"] },
-            "name": { "type": ["string", "null"] },
-            "label": { "type": "string", "examples": ["brisk-harbor-42"] },
-            "role": role,
-            "joinedAt": timestamp,
-            "disabledAt": { "type": ["string", "null"], "format": "date-time" },
-        },
-        "required": ["id", "label", "role", "joinedAt"],
-    });
-
-    let team = json!({
-        "type": "object",
-        "properties": {
-            "id": uuid,
-            "orgId": uuid,
-            "slug": { "type": "string" },
-            "name": { "type": "string" },
-            "createdAt": timestamp,
-        },
-        "required": ["id", "orgId", "slug", "name"],
-    });
 
     let repo = json!({
         "type": "object",
@@ -564,7 +357,7 @@ fn entity_schemas() -> Value {
             "name": { "type": "string" },
             "provider": { "type": "string", "enum": ["github", "gitlab", "bitbucket", "other"] },
             "defaultBranch": { "type": "string" },
-            "teamId": { "type": ["string", "null"], "format": "uuid" },
+            "teamId": { "type": ["string", "null"], "format": "uuid", "description": "A team id from the otto platform. Checked against the platform before it is stored; an unknown team is refused, never read as org-wide." },
             "defaultAgentType": { "type": ["string", "null"] },
             "trackerBinding": {
                 "type": "object",
@@ -583,21 +376,6 @@ fn entity_schemas() -> Value {
         "required": ["id", "orgId", "slug", "name", "provider", "defaultBranch", "active"],
     });
 
-    let invite = json!({
-        "type": "object",
-        "properties": {
-            "id": uuid,
-            "orgId": uuid,
-            "email": { "type": "string" },
-            "role": role,
-            "invitedBy": { "type": ["string", "null"], "format": "uuid" },
-            "expiresAt": timestamp,
-            "acceptedAt": { "type": ["string", "null"], "format": "date-time" },
-            "createdAt": timestamp,
-        },
-        "required": ["id", "orgId", "email", "role", "expiresAt"],
-    });
-
     json!({
         "Error": {
             "type": "object",
@@ -608,7 +386,7 @@ fn entity_schemas() -> Value {
                 "error": {
                     "type": "object",
                     "properties": {
-                        "code": { "type": "string", "examples": ["invalid_credentials"] },
+                        "code": { "type": "string", "examples": ["not_found"] },
                         "message": { "type": "string" },
                     },
                     "required": ["code", "message"],
@@ -616,26 +394,6 @@ fn entity_schemas() -> Value {
             },
             "required": ["error"],
         },
-        "User": user,
-        "Org": org,
-        "Membership": membership,
-        "MembershipList": { "type": "array", "items": reference("Membership") },
-        "OrgMember": org_member,
-        "OrgMemberList": { "type": "array", "items": reference("OrgMember") },
-        "Team": team,
-        "TeamList": { "type": "array", "items": reference("Team") },
-        "TeamMember": {
-            "type": "object",
-            "properties": {
-                "userId": uuid,
-                "email": { "type": ["string", "null"] },
-                "name": { "type": ["string", "null"] },
-                "label": { "type": "string", "examples": ["brisk-harbor-42"] },
-                "joinedAt": timestamp,
-            },
-            "required": ["userId", "label", "joinedAt"],
-        },
-        "TeamMemberList": { "type": "array", "items": reference("TeamMember") },
         "Repo": repo,
         "RepoListItem": {
             "allOf": [
@@ -656,8 +414,6 @@ fn entity_schemas() -> Value {
             ],
         },
         "RepoList": { "type": "array", "items": reference("RepoListItem") },
-        "Invite": invite,
-        "InviteList": { "type": "array", "items": reference("Invite") },
         "Lease": {
             "type": "object",
             "description":
@@ -679,74 +435,16 @@ fn entity_schemas() -> Value {
             "required": ["id", "repoId", "resource", "holderUserId", "expiresAt"],
         },
         "LeaseList": { "type": "array", "items": reference("Lease") },
-        "Session": {
-            "type": "object",
-            "properties": {
-                "id": uuid,
-                "userId": uuid,
-                "expiresAt": timestamp,
-                "createdAt": timestamp,
-            },
-            "required": ["id", "userId", "expiresAt", "createdAt"],
-        },
-        "SessionList": { "type": "array", "items": reference("Session") },
-        "TokenSummary": {
-            "type": "object",
-            "description": "A live credential. Never includes the token itself.",
-            "properties": {
-                "id": uuid,
-                "name": { "type": ["string", "null"] },
-                "kind": { "type": "string", "enum": ["oauth", "pat"] },
-                "clientId": { "type": ["string", "null"] },
-                "scopes": { "type": "array", "items": { "type": "string" } },
-                "createdAt": timestamp,
-                "lastUsedAt": { "type": ["string", "null"], "format": "date-time" },
-                "expiresAt": timestamp,
-            },
-            "required": ["id", "kind", "scopes", "createdAt", "expiresAt"],
-        },
-        "TokenSummaryList": { "type": "array", "items": reference("TokenSummary") },
-        "MintedToken": {
-            "type": "object",
-            "description": "Shown once. Only a SHA-256 hash of `token` is stored.",
-            "properties": {
-                "token": { "type": "string", "examples": ["otto_pat_…"] },
-                "id": uuid,
-                "name": { "type": "string" },
-                "scopes": { "type": "array", "items": { "type": "string" } },
-                "resource": {
-                    "type": "string",
-                    "description": "The MCP endpoint this token is audienced for.",
-                },
-            },
-            "required": ["token", "id", "scopes", "resource"],
-        },
-        "UsageStatus": {
-            "type": "object",
-            "description":
-                "This period's metered usage. `billableUsed` counts only billable \
-                 tool calls; `totalCalls` counts every call, free ones included.",
-            "properties": {
-                "plan": { "type": "string" },
-                "includedOps": { "type": "integer" },
-                "billableUsed": { "type": "integer" },
-                "remaining": { "type": "integer" },
-                "totalCalls": { "type": "integer" },
-                "periodStart": { "type": "string", "format": "date" },
-                "warning": { "type": "boolean" },
-                "hardStop": { "type": "boolean" },
-                "enforced": { "type": "boolean" },
-            },
-            "required": ["plan", "includedOps", "billableUsed", "remaining"],
-        },
         "AuditEvent": {
             "type": "object",
+            "description": "One entry in this service's domain audit trail (repo, tracker, \
+                            and job events). Identity events are the platform's.",
             "properties": {
                 "id": { "type": "integer" },
                 "orgId": { "type": ["string", "null"], "format": "uuid" },
                 "actorUserId": { "type": ["string", "null"], "format": "uuid" },
                 "actorLabel": { "type": ["string", "null"] },
-                "action": { "type": "string", "examples": ["org.member.invited"] },
+                "action": { "type": "string", "examples": ["repo.registered"] },
                 "targetType": { "type": ["string", "null"] },
                 "targetId": { "type": ["string", "null"] },
                 "ip": { "type": ["string", "null"] },
@@ -781,7 +479,7 @@ fn queue_schemas() -> Value {
                 "id": { "type": "string", "examples": ["job-42"] },
                 "orgId": uuid,
                 "repoId": uuid,
-                "teamId": { "type": ["string", "null"], "format": "uuid" },
+                "teamId": { "type": ["string", "null"], "format": "uuid", "description": "A team id from the otto platform. Checked against the platform before it is stored; an unknown team is refused, never read as org-wide." },
                 "title": { "type": "string" },
                 "description": { "type": ["string", "null"] },
                 "status": {
@@ -857,252 +555,29 @@ fn queue_schemas() -> Value {
     })
 }
 
-/// Wrappers the console reads back from an action.
+/// Responses that are not entities.
 fn response_schemas() -> Value {
-    let role = json!({ "type": "string", "enum": ["owner", "admin", "member"] });
-
     json!({
-        "Me": {
-            "type": "object",
-            "properties": {
-                "user": reference("User"),
-                "orgs": reference("MembershipList"),
-                "shouldAddPasskey": { "type": "boolean" },
-                "passkeyCount": { "type": "integer" },
-                "credentialName": {
-                    "type": "string",
-                    "description":
-                        "What a fresh registration would file this account's credential \
-                         under. Send it back verbatim through \
-                         PublicKeyCredential.signalCurrentUserDetails — composing it in \
-                         the browser gives a second copy of a rule that will drift.",
-                },
-                "credentialDisplayName": { "type": "string" },
-            },
-            "required": [
-                "user", "orgs", "shouldAddPasskey", "passkeyCount",
-                "credentialName", "credentialDisplayName",
-            ],
-        },
-        "Joined": {
-            "type": "object",
-            "properties": { "org": reference("Org"), "role": role },
-            "required": ["org", "role"],
-        },
-        "SessionOpened": {
-            "type": "object",
-            "properties": {
-                "user": reference("User"),
-                "shouldAddPasskey": { "type": "boolean" },
-            },
-            "required": ["user", "shouldAddPasskey"],
-        },
-        "WebauthnConfig": {
+        "PlatformEventAck": {
             "type": "object",
             "description":
-                "The relying party every passkey on this deployment is bound to.",
+                "Acknowledgement of a platform lifecycle webhook. Any 2xx stops the \
+                 platform's retries.",
             "properties": {
-                "rpId": {
-                    "type": "string",
-                    "description":
-                        "Name this when signalling credential state. It is the origin's \
-                         host or a registrable parent of it — not necessarily the host \
-                         the console was served from.",
-                },
-            },
-            "required": ["rpId"],
-        },
-        "RegistrationChallenge": {
-            "type": "object",
-            "description":
-                "A WebAuthn creation challenge. Pass `challenge` to \
-                 navigator.credentials.create() and send the result back with the \
-                 same ceremonyId.",
-            "properties": {
-                "ceremonyId": { "type": "string", "format": "uuid" },
-                "challenge": {
+                "result": { "type": "string", "enum": ["applied", "duplicate", "ignored"] },
+                "detail": {
                     "type": "object",
-                    "description": "PublicKeyCredentialCreationOptions, as the W3C defines it.",
+                    "description": "What was done, as counts. Present when `result` is `applied`.",
                 },
             },
-            "required": ["ceremonyId", "challenge"],
-        },
-        "AuthenticationChallenge": {
-            "type": "object",
-            "description":
-                "A WebAuthn request challenge. allowCredentials is empty: the \
-                 credential the browser picks is what identifies the account.",
-            "properties": {
-                "ceremonyId": { "type": "string", "format": "uuid" },
-                "challenge": {
-                    "type": "object",
-                    "description": "PublicKeyCredentialRequestOptions, as the W3C defines it.",
-                },
-            },
-            "required": ["ceremonyId", "challenge"],
-        },
-        "Passkey": {
-            "type": "object",
-            "properties": {
-                "id": { "type": "string", "format": "uuid" },
-                "credentialId": {
-                    "type": "string",
-                    "description":
-                        "The credential's own id, base64url without padding — what \
-                         `signalAllAcceptedCredentials` matches a browser's stored \
-                         credentials against.",
-                },
-                "nickname": { "type": ["string", "null"] },
-                "createdAt": { "type": "string", "format": "date-time" },
-                "lastUsedAt": { "type": ["string", "null"], "format": "date-time" },
-            },
-            "required": ["id", "credentialId", "nickname", "createdAt", "lastUsedAt"],
-        },
-        "PasskeyList": { "type": "array", "items": reference("Passkey") },
-        "ClaimCode": {
-            "type": "object",
-            "description":
-                "A one-time code letting an account register a passkey again. \
-                 Returned once, to the admin who asked for it.",
-            "properties": {
-                "code": { "type": "string" },
-                "link": { "type": "string" },
-            },
-            "required": ["code", "link"],
-        },
-        "CreatedInvite": {
-            "type": "object",
-            "description":
-                "An invitation plus its one-time code, returned only from the call \
-                 that mints it. Nothing is emailed; the admin delivers the code.",
-            "allOf": [reference("Invite")],
-            "properties": {
-                "code": {
-                    "type": "string",
-                    "description": "The single-use code. Shown once — only its hash is stored.",
-                },
-                "link": {
-                    "type": "string",
-                    "description": "The same code as a console URL that redeems it.",
-                },
-            },
-            "required": ["code", "link"],
+            "required": ["result"],
         },
     })
 }
 
 /// Request bodies.
 fn request_schemas() -> Value {
-    let role = json!({ "type": "string", "enum": ["owner", "admin", "member"] });
-    let locale = {
-        let mut values: Vec<Value> = otto_core::i18n::SUPPORTED_LOCALES
-            .iter()
-            .map(|l| json!(l))
-            .collect();
-        values.push(Value::Null);
-        json!({
-            "type": ["string", "null"],
-            "enum": values,
-            "description": "Absent leaves the stored locale alone; a supported locale sets it; \
-                null clears it back to following the browser's Accept-Language.",
-        })
-    };
-
     json!({
-        "FinishRegistration": {
-            "type": "object",
-            "properties": {
-                "ceremonyId": { "type": "string", "format": "uuid" },
-                "credential": {
-                    "type": "object",
-                    "description": "The PublicKeyCredential from navigator.credentials.create().",
-                },
-                "nickname": { "type": ["string", "null"] },
-            },
-            "required": ["ceremonyId", "credential"],
-        },
-        "FinishAuthentication": {
-            "type": "object",
-            "properties": {
-                "ceremonyId": { "type": "string", "format": "uuid" },
-                "credential": {
-                    "type": "object",
-                    "description": "The PublicKeyCredential from navigator.credentials.get().",
-                },
-            },
-            "required": ["ceremonyId", "credential"],
-        },
-        "ClaimRequest": {
-            "type": "object",
-            "properties": { "code": { "type": "string" } },
-            "required": ["code"],
-        },
-        "FinishClaim": {
-            "type": "object",
-            "description": "The code is spent here, not at claim/start.",
-            "properties": {
-                "ceremonyId": { "type": "string", "format": "uuid" },
-                "code": { "type": "string" },
-                "credential": { "type": "object" },
-                "nickname": { "type": ["string", "null"] },
-            },
-            "required": ["ceremonyId", "code", "credential"],
-        },
-        "ProfileRequest": {
-            "type": "object",
-            "properties": {
-                "email": { "type": ["string", "null"], "format": "email" },
-                "name": { "type": ["string", "null"] },
-                "locale": locale,
-            },
-        },
-        "RenameKeyRequest": {
-            "type": "object",
-            "properties": { "nickname": { "type": "string" } },
-            "required": ["nickname"],
-        },
-        "CreateOrgRequest": {
-            "type": "object",
-            "properties": {
-                "slug": { "type": "string" },
-                "name": { "type": "string" },
-            },
-            "required": ["slug", "name"],
-        },
-        "RoleRequest": {
-            "type": "object",
-            "properties": { "role": role },
-            "required": ["role"],
-        },
-        "InviteRequest": {
-            "type": "object",
-            "properties": {
-                "email": { "type": "string", "format": "email" },
-                "role": role,
-            },
-            "required": ["email"],
-        },
-        "AcceptInviteRequest": {
-            "type": "object",
-            "properties": { "token": { "type": "string" } },
-            "required": ["token"],
-        },
-        "CreateTeamRequest": {
-            "type": "object",
-            "properties": {
-                "slug": { "type": "string" },
-                "name": { "type": ["string", "null"] },
-            },
-            "required": ["slug"],
-        },
-        "TeamPatch": {
-            "type": "object",
-            "description": "Absent fields are left alone.",
-            "properties": {
-                "slug": { "type": ["string", "null"] },
-                "name": { "type": ["string", "null"] },
-            },
-        },
         "RegisterRepoRequest": {
             "type": "object",
             "properties": {
@@ -1117,7 +592,7 @@ fn request_schemas() -> Value {
                 },
                 "provider": { "type": ["string", "null"] },
                 "defaultBranch": { "type": ["string", "null"] },
-                "teamId": { "type": ["string", "null"], "format": "uuid" },
+                "teamId": { "type": ["string", "null"], "format": "uuid", "description": "A team id from the otto platform. Checked against the platform before it is stored; an unknown team is refused, never read as org-wide." },
                 "defaultAgentType": {
                     "type": ["string", "null"],
                     "description": "A free-form hint. Never validated against a list.",
@@ -1133,24 +608,11 @@ fn request_schemas() -> Value {
             "properties": {
                 "name": { "type": ["string", "null"] },
                 "defaultBranch": { "type": ["string", "null"] },
-                "teamId": { "type": ["string", "null"], "format": "uuid" },
+                "teamId": { "type": ["string", "null"], "format": "uuid", "description": "A team id from the otto platform. Checked against the platform before it is stored; an unknown team is refused, never read as org-wide." },
                 "defaultAgentType": { "type": ["string", "null"] },
                 "active": { "type": ["boolean", "null"] },
                 "addRemotes": { "type": "array", "items": { "type": "string" } },
             },
-        },
-        "MintTokenRequest": {
-            "type": "object",
-            "properties": {
-                "name": { "type": "string" },
-                "scopes": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Defaults to the read-only set when empty.",
-                },
-                "ttlDays": { "type": ["integer", "null"], "minimum": 1, "maximum": 365 },
-            },
-            "required": ["name"],
         },
     })
 }
@@ -1349,61 +811,48 @@ mod tests {
         assert_eq!(before, ids.len(), "duplicate operationId in the catalog");
     }
 
-    /// **The rule from the plan, as a test.** No credential is ever spent on a
-    /// `GET`: link-preview fetchers follow every URL in every message, and a
-    /// single-use `GET` is burned before the human ever clicks it — a failure
-    /// that looks exactly like an attack and is not.
-    ///
-    /// The product sends no mail any more, which narrows the list but does not
-    /// retire the rule: an invitation code now travels through Slack, a ticket,
-    /// or a chat window, and every one of those unfurls links too.
-    ///
-    /// Named endpoints rather than a pattern match, because the property is
-    /// about these specific redemptions. Moving one to `GET`, or deleting it,
-    /// fails here.
+    /// Webhook receivers are `POST`s that authenticate by signature, and the
+    /// identity surface that used to share this file is gone from it for good.
+    /// Re-adding any of these here means somebody has quietly rebuilt the
+    /// platform inside a resource server.
     #[test]
-    fn every_single_use_redemption_is_a_post() {
-        let redemptions = [
-            "/api/auth/signup/finish",
-            "/api/auth/login/finish",
-            "/api/auth/claim/finish",
-            "/api/orgs/{org}/invites/accept",
-            "/oauth/token",
-        ];
-
-        let catalog = catalog();
-        for path in redemptions {
-            let mounted: Vec<_> = catalog.iter().filter(|e| e.path == path).collect();
-            assert!(!mounted.is_empty(), "{path} is not mounted at all");
-
-            for endpoint in mounted {
-                assert_eq!(
-                    endpoint.verb,
-                    crate::catalog::Verb::Post,
-                    "{path} spends a single-use credential, so it must be a POST — \
-                     mail scanners and link previews follow every URL they see"
+    fn the_identity_surface_is_not_served_here() {
+        for endpoint in catalog() {
+            for prefix in ["/oauth", "/sso", "/api/auth", "/api/me"] {
+                assert!(
+                    !endpoint.path.starts_with(prefix),
+                    "{} is identity surface and belongs to the platform",
+                    endpoint.path
+                );
+            }
+            for segment in [
+                "/members", "/invites", "/teams", "/sso", "/tokens", "/usage",
+            ] {
+                assert!(
+                    !endpoint.path.contains(segment),
+                    "{} is identity surface and belongs to the platform",
+                    endpoint.path
                 );
             }
         }
+        assert!(
+            !catalog()
+                .iter()
+                .any(|e| e.path == "/.well-known/oauth-authorization-server"),
+            "this service is not an authorization server"
+        );
     }
 
-    /// The other half: the page an invitation link points at is not a route
-    /// here at all. `/invite/{org}` is a console page that renders a button; the
-    /// server sees nothing until the button is pressed.
-    ///
-    /// `/verify` and `/recover` are listed too, and must stay absent for a
-    /// different reason — they are gone. There is no email, so there is nothing
-    /// to verify an address with and no recovery link to spend. Re-adding either
-    /// as a route means somebody has quietly reintroduced a mailer.
     #[test]
-    fn redeemable_urls_are_pages_not_endpoints() {
-        for path in ["/invite/{org}", "/claim", "/verify", "/recover"] {
-            assert!(
-                !catalog().iter().any(|e| e.path == path),
-                "{path} is a URL handed to a human. It must stay a client-side page — \
-                 mounting it as a handler is how a link gets spent by a link preview."
-            );
-        }
+    fn the_platform_webhook_is_a_post() {
+        let endpoints = catalog();
+        let hooks: Vec<_> = endpoints
+            .iter()
+            .filter(|e| e.path == "/platform/webhooks")
+            .collect();
+        assert_eq!(hooks.len(), 1, "the platform webhook is not mounted once");
+        assert_eq!(hooks[0].verb, crate::catalog::Verb::Post);
+        assert_eq!(hooks[0].auth, Auth::Public, "authenticated by signature");
     }
 
     /// The console watches the queue; it does not drive it. Every write to a
@@ -1428,19 +877,19 @@ mod tests {
     }
 
     #[test]
-    fn the_document_is_openapi_31_with_a_session_scheme() {
+    fn the_document_is_openapi_31_with_a_bearer_scheme() {
         let doc = doc();
         assert_eq!(doc["openapi"], "3.1.0");
         assert_eq!(
-            doc["components"]["securitySchemes"]["sessionCookie"]["name"],
-            crate::session::COOKIE_NAME
+            doc["components"]["securitySchemes"]["platformBearer"]["scheme"],
+            "bearer"
         );
-        assert!(doc["paths"]["/api/me"]["get"]["security"].is_array());
+        assert!(doc["paths"]["/api/orgs/{org}/repos"]["get"]["security"].is_array());
         assert!(
-            doc["paths"]["/api/auth/login"]["post"]
+            doc["paths"]["/platform/webhooks"]["post"]
                 .get("security")
                 .is_none(),
-            "a public endpoint must not require a session"
+            "a public endpoint must not require a token"
         );
     }
 
@@ -1493,8 +942,8 @@ mod tests {
     #[test]
     fn a_path_with_several_methods_keeps_all_of_them() {
         let doc = doc();
-        let sessions = &doc["paths"]["/api/me/sessions"];
-        assert!(sessions["get"].is_object(), "GET was lost");
-        assert!(sessions["delete"].is_object(), "DELETE was lost");
+        let repos = &doc["paths"]["/api/orgs/{org}/repos"];
+        assert!(repos["get"].is_object(), "GET was lost");
+        assert!(repos["post"].is_object(), "POST was lost");
     }
 }

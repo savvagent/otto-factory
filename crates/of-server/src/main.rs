@@ -1,10 +1,9 @@
 //! otto-factory server binary. Assembles every HTTP surface on one port.
 
-use std::net::SocketAddr;
-
 use anyhow::{Context, Result};
+use of_billing::outbox::ShipperConfig;
 use of_core::watch::Watcher;
-use of_server::{router, Config, LogFormat};
+use of_server::{platform_client, router, Config, LogFormat};
 use otto_tenant::Db;
 use tokio::net::TcpListener;
 use tracing_subscriber::layer::SubscriberExt;
@@ -62,20 +61,14 @@ async fn main() -> Result<()> {
         .context("refusing to serve: tenant isolation is not enforced by this database")?;
     tracing::info!("{}", isolation.summary());
 
-    // Tell the authorization server what this resource server is and which
-    // scopes it understands. The registry replaced a scope list that used to be
-    // compiled into the AS, so until this row exists every authorize, token,
-    // refresh, and PAT request for this resource is refused. Idempotent, and it
-    // never re-enables a resource an operator disabled.
-    let resource = of_mcp::register_resource(&db, &config.resource_uri)
-        .await
-        .context("could not register this resource server (OF_RESOURCE_URI)")?;
-    tracing::info!(
-        resource_uri = %resource.resource_uri,
-        scopes = %resource.scopes.join(" "),
-        disabled = resource.disabled,
-        "resource server registered"
-    );
+    // The platform is the authorization server and the identity directory, and
+    // every request this service authenticates goes through it. Reachable or
+    // not, the process still starts (a platform outage must not stop a restart
+    // that would otherwise serve cached tokens and reads), but a *wrong
+    // credential* is a deployment fault worth shouting about now rather than at
+    // the first request.
+    let platform = platform_client(&config)?;
+    check_platform(&platform, &config).await;
 
     let watcher = Watcher::spawn(db.pool().clone())
         .await
@@ -93,7 +86,22 @@ async fn main() -> Result<()> {
         );
     }
 
-    let app = router(db, watcher.clone(), &config)?;
+    // Delivers the usage outbox to the platform. See `of_billing::outbox`: rows
+    // are written in the tools' own transactions and shipped here, so the
+    // platform being down delays billing and never loses it.
+    let (stop_shipper, shipper_shutdown) = tokio::sync::watch::channel(false);
+    let shipper = tokio::spawn(of_billing::outbox::run(
+        db.clone(),
+        platform.clone(),
+        ShipperConfig::default(),
+        shipper_shutdown,
+    ));
+
+    // Hourly housekeeping: forget old platform-event dedupe markers (30 days)
+    // and expired removed-member tombstones.
+    let sweeper = tokio::spawn(sweep_loop(db.clone(), stop_shipper.subscribe()));
+
+    let app = router(db, watcher.clone(), platform, &config)?;
 
     let listener = TcpListener::bind(config.bind)
         .await
@@ -103,22 +111,25 @@ async fn main() -> Result<()> {
         bind = %config.bind,
         public_url = %config.public_url,
         resource_uri = %config.resource_uri,
+        platform_url = %config.platform_url,
         enforce_quotas = config.enforce_quotas,
         "of-server listening"
     );
 
-    // `ConnectInfo` is not decoration: `of_web::state::client_ip` reads the peer
-    // address out of it, and that address is what every per-IP throttle and
-    // every audit entry is keyed on. Serve without this and `client_ip` returns
-    // `None` for every request, which silently disables rate limiting on the
-    // login and registration endpoints.
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown_signal())
-    .await
-    .context("server error")?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .context("server error")?;
+
+    // The shipper makes a last attempt on the way out so a clean shutdown does
+    // not strand rows that were one request from delivered. Anything it cannot
+    // deliver stays in the outbox for the next process.
+    tracing::info!("flushing usage");
+    stop_shipper.send(true).ok();
+    if let Err(e) = shipper.await {
+        tracing::warn!(error = %e, "the usage shipper did not stop cleanly");
+    }
+    sweeper.abort();
 
     // After the server, deliberately. `Watcher::spawn` takes a connection out of
     // the pool for `LISTEN` and detaches it, so dropping the pool does not
@@ -130,6 +141,49 @@ async fn main() -> Result<()> {
     tracing::info!("stopped");
 
     Ok(())
+}
+
+/// How long platform-event dedupe markers are kept.
+const PLATFORM_EVENT_RETENTION_DAYS: i32 = 30;
+
+/// Run [`of_core::platform_events::sweep`] hourly until shutdown.
+async fn sweep_loop(db: Db, mut shutdown: tokio::sync::watch::Receiver<bool>) {
+    loop {
+        match of_core::platform_events::sweep(&db, PLATFORM_EVENT_RETENTION_DAYS).await {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(rows = n, "swept old platform-event records"),
+            Err(e) => tracing::warn!(error = %e, "platform-event sweep failed"),
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_secs(3600)) => {}
+            _ = shutdown.changed() => return,
+        }
+    }
+}
+
+/// Ask the platform something harmless, to learn whether our credential works.
+///
+/// Non-fatal on purpose. The usage-status lookup for an org that cannot exist
+/// answers `404` to a good credential and `401` to a bad one, and touches no
+/// data. A transport failure only means the platform is not up yet.
+async fn check_platform(platform: &otto_resource::PlatformClient, config: &Config) {
+    match platform.usage_status(uuid::Uuid::nil()).await {
+        Ok(_) | Err(otto_resource::Error::NotFound) => {
+            tracing::info!(platform = %config.platform_url, "the otto platform accepted this service's credential")
+        }
+        Err(otto_resource::Error::Unauthorized) => tracing::error!(
+            platform = %config.platform_url,
+            resource_uri = %config.resource_uri,
+            "the otto platform REJECTED this service's credential: no token can be \
+             validated and no usage can be shipped. Check OF_INTROSPECTION_SECRET and that \
+             OF_RESOURCE_URI is the resource_uri this service was registered with"
+        ),
+        Err(e) => tracing::warn!(
+            platform = %config.platform_url,
+            error = %e,
+            "could not reach the otto platform at startup; continuing"
+        ),
+    }
 }
 
 fn init_tracing(format: LogFormat) -> Result<()> {

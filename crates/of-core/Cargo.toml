@@ -7,7 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 otto-tenant.workspace = true
-otto-core.workspace = true
+otto-resource.workspace = true
 sqlx.workspace = true
 serde.workspace = true
 schemars.workspace = true
@@ -25,3 +25,4 @@ tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
+of-testkit.workspace = true

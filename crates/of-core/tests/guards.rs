@@ -1,17 +1,10 @@
-//! Source-level guards for two calls that compile fine and must never be made.
+//! Source-level guard for a call that compiles fine and must never be made.
 //!
-//! Both are cases where otto-platform ships a perfectly reasonable method that
-//! is wrong *for this deployment*, and the only thing between a caller and the
-//! mistake is that nobody reaches for it. A test that reads the source is crude
-//! but it is the one thing that fails when someone does.
-//!
-//! - `TeamsExt::delete_team` has no "team in use" guard: `repos.team_id`,
-//!   `jobs.team_id`, and `messages.team_id` are `ON DELETE SET NULL`, and a null
-//!   `team_id` means *org-wide*, so deleting a team through the platform method
-//!   silently publishes everything scoped to it to the whole org. Go through
-//!   `of_core::teams::delete_team`.
-//! - `otto_tenant::Db::migrate` would apply otto-platform's own migration
-//!   history to this database. Go through `of_core::migrate`.
+//! `otto_tenant::Db::migrate` is a perfectly reasonable method that is wrong
+//! *for this deployment*: it would apply otto-platform's own migration history
+//! to this database, and the only thing between a caller and the mistake is that
+//! nobody reaches for it. A test that reads the source is crude but it is the one
+//! thing that fails when someone does. Go through `of_core::migrate`.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -52,35 +45,6 @@ fn code_lines(text: &str) -> impl Iterator<Item = (usize, &str)> {
 }
 
 #[test]
-fn nothing_deletes_a_team_except_through_the_guarded_wrapper() {
-    let this_file = Path::new(file!()).file_name().unwrap().to_owned();
-    let mut offenders = Vec::new();
-
-    for (path, text) in workspace_sources() {
-        if path.file_name() == Some(&this_file) {
-            continue;
-        }
-        // The wrapper itself calls the platform method, once, after its checks.
-        // Component-wise match: only of-core's wrapper, not any crate's src/teams.rs.
-        let is_wrapper = path.ends_with("of-core/src/teams.rs");
-        for (n, line) in code_lines(&text) {
-            let method_call = line.contains(".delete_team(");
-            let path_call = line.contains("TeamsExt::delete_team(");
-            if method_call || (path_call && !is_wrapper) {
-                offenders.push(format!("{}:{}: {}", path.display(), n + 1, line.trim()));
-            }
-        }
-    }
-
-    assert!(
-        offenders.is_empty(),
-        "call `of_core::teams::delete_team(&mut tx, id)`, not the platform's \
-         `TeamsExt::delete_team`, which has no team-in-use guard:\n{}",
-        offenders.join("\n")
-    );
-}
-
-#[test]
 fn nothing_runs_the_platforms_migrations_on_this_database() {
     let this_file = Path::new(file!()).file_name().unwrap().to_owned();
     let mut offenders = Vec::new();
@@ -102,4 +66,74 @@ fn nothing_runs_the_platforms_migrations_on_this_database() {
          `of_core::MIGRATOR`); otto-platform's would collide with it:\n{}",
         offenders.join("\n")
     );
+}
+
+/// The factory's database is domain-only: identity, auth, and billing belong to
+/// the otto platform's database, and nothing here may grow a foreign key into
+/// them. A `REFERENCES orgs (...)` would compile, pass every test against a
+/// single database, and make the cutover to a separate platform database
+/// impossible; a `CREATE TABLE users` would quietly start a second source of
+/// truth for who someone is.
+#[test]
+fn the_schema_holds_no_identity_tables_and_no_foreign_keys_to_them() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    let mut offenders = Vec::new();
+    let mut files = 0;
+
+    for entry in fs::read_dir(&dir).expect("migrations dir") {
+        let path = entry.expect("dir entry").path();
+        if path.extension().is_none_or(|e| e != "sql") {
+            continue;
+        }
+        files += 1;
+        let text = fs::read_to_string(&path).expect("read migration");
+
+        for (n, line) in code_lines_sql(&text) {
+            let lower = line.to_lowercase();
+            for table in [
+                "users",
+                "orgs",
+                "teams",
+                "org_members",
+                "team_members",
+                "org_invites",
+                "access_tokens",
+                "refresh_tokens",
+                "oauth_clients",
+                "authorization_codes",
+                "sessions",
+                "passkeys",
+                "idp_connections",
+                "claimed_domains",
+                "user_identities",
+                "resource_servers",
+                "usage_events",
+                "org_period_usage",
+                "subscriptions",
+            ] {
+                let creates = lower.contains(&format!("create table {table} "))
+                    || lower.contains(&format!("create table {table}("));
+                let references = lower.contains(&format!("references {table} "))
+                    || lower.contains(&format!("references {table}("))
+                    || lower.contains(&format!("references public.{table}"));
+                if creates || references {
+                    offenders.push(format!("{}:{}: {}", path.display(), n + 1, line.trim()));
+                }
+            }
+        }
+    }
+
+    assert!(files > 0, "found no migrations to check");
+    assert!(
+        offenders.is_empty(),
+        "this database is domain-only; identity lives in the platform's database:\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// SQL lines that are code, not `--` comments.
+fn code_lines_sql(text: &str) -> impl Iterator<Item = (usize, &str)> {
+    text.lines()
+        .enumerate()
+        .filter(|(_, l)| !l.trim_start().starts_with("--"))
 }

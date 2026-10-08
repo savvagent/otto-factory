@@ -33,12 +33,13 @@ use std::sync::Arc;
 
 use of_billing::Meter;
 use of_core::watch::Watcher;
-use otto_auth::tokens::Principal;
+use otto_resource::PlatformClient;
 use otto_tenant::{Db, Tx};
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::model::{ErrorData, Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{tool_handler, ServerHandler};
 
+use crate::auth::{MissingScope, Principal};
 use crate::error;
 
 /// What the MCP surface tells a client it is, in the client's own words.
@@ -95,25 +96,28 @@ pub struct TrackerSyncConfig {
 pub struct Factory {
     db: Db,
     watcher: Arc<Watcher>,
+    platform: Arc<PlatformClient>,
     meter: Arc<Meter>,
     tracker_sync: Arc<TrackerSyncConfig>,
     tool_router: ToolRouter<Self>,
 }
 
 impl Factory {
-    pub fn new(db: Db, watcher: Arc<Watcher>, meter: Meter) -> Self {
-        Self::new_with_tracker_sync(db, watcher, meter, TrackerSyncConfig::default())
+    pub fn new(db: Db, watcher: Arc<Watcher>, platform: Arc<PlatformClient>, meter: Meter) -> Self {
+        Self::new_with_tracker_sync(db, watcher, platform, meter, TrackerSyncConfig::default())
     }
 
     pub fn new_with_tracker_sync(
         db: Db,
         watcher: Arc<Watcher>,
+        platform: Arc<PlatformClient>,
         meter: Meter,
         tracker_sync: TrackerSyncConfig,
     ) -> Self {
         Self {
             db,
             watcher,
+            platform,
             meter: Arc::new(meter),
             tracker_sync: Arc::new(tracker_sync),
             tool_router: crate::tools::router(),
@@ -122,6 +126,11 @@ impl Factory {
 
     pub fn db(&self) -> &Db {
         &self.db
+    }
+
+    /// The otto platform: identity lookups (members, teams) and billing.
+    pub fn platform(&self) -> &Arc<PlatformClient> {
+        &self.platform
     }
 
     pub fn watcher(&self) -> &Arc<Watcher> {
@@ -228,12 +237,16 @@ impl Factory {
         crate::auth::principal_from(parts).ok_or_else(error::unauthenticated)
     }
 
-    /// Open a transaction pinned to the caller's org.
+    /// Open a transaction pinned to the caller's org, refused if the org was
+    /// deleted or the caller removed since their token was introspected (see
+    /// `of_core::platform_events::begin_live`).
     pub async fn tx(&self, caller: &Principal) -> Result<Tx<'static>, ErrorData> {
-        self.db
-            .begin(caller.org_id)
+        // The quota lookup is a network call: do it before a pooled connection
+        // is held, so a slow platform costs this call time and nothing else.
+        self.meter.warm(caller.org_id).await;
+        of_core::platform_events::begin_live(&self.db, caller.org_id, Some(caller.user_id))
             .await
-            .map_err(|e| error::from_tenant(&e))
+            .map_err(|e| error::from_core(&e))
     }
 }
 
@@ -253,8 +266,8 @@ impl ServerHandler for Factory {
     }
 }
 
-/// Map an `of-core`, `otto-core`, `otto-tenant`, or `otto-auth` failure into the MCP envelope at the point of
-/// the call.
+/// Map an `of-core`, `otto-tenant`, or billing failure into the MCP envelope at
+/// the point of the call.
 ///
 /// An extension trait rather than `From` impls plus `?`, because both error
 /// types and the target are foreign to this crate and the orphan rule forbids
@@ -272,21 +285,21 @@ impl<T> McpResult<T> for of_core::Result<T> {
     }
 }
 
-impl<T> McpResult<T> for otto_core::Result<T> {
-    fn mcp(self) -> Result<T, ErrorData> {
-        self.map_err(|e| error::from_identity(&e))
-    }
-}
-
 impl<T> McpResult<T> for otto_tenant::Result<T> {
     fn mcp(self) -> Result<T, ErrorData> {
         self.map_err(|e| error::from_tenant(&e))
     }
 }
 
-impl<T> McpResult<T> for otto_auth::Result<T> {
+impl<T> McpResult<T> for Result<T, MissingScope> {
     fn mcp(self) -> Result<T, ErrorData> {
-        self.map_err(|e| error::from_auth(&e))
+        self.map_err(|e| error::from_scope(&e))
+    }
+}
+
+impl<T> McpResult<T> for otto_resource::Result<T> {
+    fn mcp(self) -> Result<T, ErrorData> {
+        self.map_err(|e| error::from_platform(&e))
     }
 }
 

@@ -1,10 +1,11 @@
 //! Domain errors.
 //!
-//! Identity and tenancy failures are not redefined here: they arrive as
-//! [`Error::Identity`] (`otto_core::Error`) and [`Error::Tenant`]
-//! (`otto_tenant::Error`), wrapped rather than flattened, so that the platform
-//! owns their codes and wording. [`Error::code`] and [`Error::retriable`]
-//! delegate to them.
+//! Tenancy failures are not redefined here: they arrive as [`Error::Tenant`]
+//! (`otto_tenant::Error`), wrapped rather than flattened, so that the substrate
+//! owns their codes and wording. Identity questions are the platform's:
+//! [`Error::Platform`] is "the platform could not answer", and every caller
+//! treats it as a refusal. [`Error::code`] and [`Error::retriable`] delegate to
+//! the wrapped errors.
 //!
 //! These are written to be readable by an LLM tool caller that has never seen
 //! the docs: a failure says what went wrong, what the valid options were, and
@@ -81,14 +82,15 @@ pub enum Error {
     #[error("lease {0} is not held by you")]
     LeaseNotHeld(String),
 
-    /// Refused rather than cascaded: a null `team_id` means org-wide, so
-    /// deleting a team that still owns repos would publish them to the whole
-    /// org without saying so.
+    /// The platform does not know this team in this org (never existed, other
+    /// tenant's, or deleted). Raised by `VerifiedTeam::verify`, and it is a
+    /// refusal: an unknown team is never read as "org-wide".
     #[error(
-        "this team still owns repos ({repos}). Reassign or unassign them first, \
-         then delete the team — deleting it now would make them visible org-wide."
+        "team {team} was not found in this organization. Teams are managed in the \
+         otto platform console; use a team id from there, or omit the team to make \
+         the repo organization-wide."
     )]
-    TeamInUse { repos: String },
+    TeamNotFound { team: String },
 
     #[error("{0}")]
     Invalid(String),
@@ -110,13 +112,24 @@ pub enum Error {
     )]
     IdempotencyKeyConflict { key: String, tool: &'static str },
 
+    /// The org was deleted, or the caller was removed from it, after the token
+    /// was introspected. Re-checked inside the transaction, under the org's
+    /// lifecycle lock, so a request already past authentication cannot write
+    /// into an org that is being purged. Not retriable: the token is done here.
+    #[error(
+        "this organization no longer exists, or you are no longer a member of it; \
+         nothing was changed. Sign in again to see which organizations you can use."
+    )]
+    AccessRevoked,
+
     #[error(transparent)]
     Db(#[from] sqlx::Error),
 
-    /// An identity-domain failure from `otto-core`: an unknown team, a duplicate
-    /// slug, a non-member, an invite that is no longer valid.
-    #[error(transparent)]
-    Identity(#[from] otto_core::Error),
+    /// The platform could not answer an identity question (unreachable, 5xx,
+    /// rejected our credential, unreadable body). Whatever was being decided is
+    /// refused: callers fail closed on this, never open.
+    #[error("the otto platform could not be reached to check this ({0}); nothing was changed")]
+    Platform(#[from] otto_resource::Error),
 
     /// A failure from the tenant substrate (`otto-tenant`): an unknown org, a
     /// crypto or configuration fault, an isolation failure at startup.
@@ -140,12 +153,13 @@ impl Error {
             Error::DependencyCycle(..) => "dependency_cycle",
             Error::LeaseHeld { .. } => "lease_held",
             Error::LeaseNotHeld(_) => "lease_not_held",
-            Error::TeamInUse { .. } => "team_in_use",
+            Error::TeamNotFound { .. } => "team_not_found",
             Error::Invalid(_) => "invalid_argument",
             Error::RaceLost(_) => "race_lost",
             Error::IdempotencyKeyConflict { .. } => "idempotency_key_conflict",
+            Error::AccessRevoked => "access_revoked",
             Error::Db(_) => "internal_error",
-            Error::Identity(e) => e.code(),
+            Error::Platform(_) => "platform_unavailable",
             Error::Tenant(e) => e.code(),
         }
     }
@@ -175,8 +189,7 @@ impl Error {
             // A database fault is the same transient condition however many
             // crates it passed through on the way up.
             Error::Tenant(otto_tenant::Error::Db(_)) => true,
-            Error::Identity(otto_core::Error::Db(_)) => true,
-            Error::Identity(otto_core::Error::Tenant(otto_tenant::Error::Db(_))) => true,
+            Error::Platform(e) => e.is_retriable(),
             _ => false,
         }
     }
