@@ -338,6 +338,11 @@ protection or a human re-opens the PR changes that picture. The real gate on the
 unaffected either way — the push that merges the release PR still runs `rust`/`web`/`docker-build`
 (via `release-please`'s own `needs:`) before `deploy` can fire.
 
+*Superseded 2026-10-08 (savvagent/otto-factory#117):* release-please now authenticates as a
+GitHub App installation token rather than `GITHUB_TOKEN`, because the repo setting that let
+`GITHUB_TOKEN` open pull requests also let it approve them and is now off. App-authored PRs do
+fire `pull_request`, so the release PR now runs CI, `pr-title` included.
+
 ## §3 MCP identity + OpenAPI version regression test
 
 `crates/of-mcp/src/server.rs`, in `get_info()`:
