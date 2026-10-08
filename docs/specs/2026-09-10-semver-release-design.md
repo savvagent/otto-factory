@@ -114,6 +114,9 @@ bump).
   (`docs/specs/2026-09-08-master-autodeploy-design.md`'s `superfly/flyctl-actions` pin) for any
   action running with elevated permissions — here `contents: write` + `pull-requests: write` on
   `GITHUB_TOKEN`, scoped to just the `release-please` job via a job-level `permissions:` block.
+  *(Superseded 2026-10-08, savvagent/otto-factory#117: the writes now go through a GitHub App
+  installation token minted in the `release` environment, and the job's `GITHUB_TOKEN` has no
+  permissions — see the note at the end of §2.)*
   Confirmed via the GitHub API immediately before writing this spec; v5.0.0's only breaking change
   vs v4 is a Node 24 runtime bump, no config-schema change.
 - **`amannn/action-semantic-pull-request` pinned to the exact commit behind `v6.1.1`
@@ -240,7 +243,8 @@ without it, release-please's default pre-1.0 behavior folds `feat` into patch-le
 would make "feature vs fix" invisible in the version number for a product that (by the reporter's
 own framing) has been running as `0.1.0` for a while and isn't imminently cutting `1.0.0`.
 
-Appended to `.github/workflows/ci.yml`, after `docker-build`:
+Appended to `.github/workflows/ci.yml`, after `docker-build` (as first shipped — the job has since
+moved to a GitHub App token; `ci.yml` is current, see the note at the end of §2):
 
 ```yaml
   release-please:
@@ -337,6 +341,13 @@ that eventually lands on `master` looks like, and it's cheap insurance for the d
 protection or a human re-opens the PR changes that picture. The real gate on the release path is
 unaffected either way — the push that merges the release PR still runs `rust`/`web`/`docker-build`
 (via `release-please`'s own `needs:`) before `deploy` can fire.
+
+*Superseded 2026-10-08 (savvagent/otto-factory#117):* release-please now authenticates as a
+GitHub App installation token (contents + pull-requests write; labels need nothing more) rather
+than `GITHUB_TOKEN`, because the repo setting that let `GITHUB_TOKEN` open pull requests also let
+it approve them and is now off. The App's private key is a secret of the `release` environment,
+which admits only `master`. App-authored PRs do fire `pull_request`, so the release PR now runs
+CI, `pr-title` included.
 
 ## §3 MCP identity + OpenAPI version regression test
 
