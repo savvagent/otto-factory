@@ -63,9 +63,9 @@ server's own prose.
 - **Repo slugs and names in `Error::RepoUnresolved`'s "Registered repos: …" list.** Same
   pattern (peer-chosen text in error prose), but a different input (`register_repo`, gated by
   `repos:write`), with its own compatibility question (existing slugs are identifiers that
-  agents pass back, so refusing or re-rendering them is not a label policy). Filed as a
-  follow-up issue per the skill's "same bug pattern elsewhere" rule rather than widening this
-  change.
+  agents pass back, so refusing or re-rendering them is not a label policy). Filed as
+  savvagent/otto-factory#206 per the skill's "same bug pattern elsewhere" rule rather than
+  widening this change.
 - **The caller's own input echoed back** (`LeaseHeld`'s `resource`, `TicketAlreadyLinked`'s
   `ticket_ref`): these repeat what *this* caller just sent, so they cannot carry another
   member's text.
@@ -255,4 +255,4 @@ wire level) needs no entry.
   (newlines, bidi overrides, zero-width joiners, tag characters); the quoting in §3 is the
   backstop for anything it misses.
 - Repo slugs in `RepoUnresolved` remain unbounded peer-chosen text in error prose until the
-  follow-up issue lands.
+  follow-up issue (savvagent/otto-factory#206) lands.

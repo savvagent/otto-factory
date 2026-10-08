@@ -36,8 +36,7 @@ implements it exactly.
 | **Modify.** `crates/of-core/src/error.rs` | `Error::InvalidAgentLabel { problem }`, code `invalid_agent_label`, not retriable |
 | **Modify.** `crates/of-core/src/jobs.rs` | `claim_jobs` validates `label`; `ensure_claim_held` renders via `agent_label::holder` |
 | **Modify.** `crates/of-core/src/leases.rs` | `acquire_lease` validates `label`; `LeaseHeld` renders via `agent_label::holder` |
-| **Modify.** `crates/of-core/tests/queue.rs` | claim refusal, trim/blank, rendered-holder, legacy-label tests |
-| **Modify.** `crates/of-core/tests/queue.rs` (also holds the `acquire_lease` tests) | lease refusal and rendered-holder tests |
+| **Modify.** `crates/of-core/tests/queue.rs` (also holds the `acquire_lease` tests) | claim and lease refusal, trim/blank, rendered-holder, legacy-label tests |
 | **Modify.** `crates/of-mcp/src/tools/jobs.rs`, `crates/of-mcp/src/tools/coord.rs` | `agent` field docs and tool descriptions |
 | **Modify.** `crates/of-mcp/tests/tools.rs` | end-to-end refusal surfaces `invalid_agent_label` |
 
@@ -79,8 +78,9 @@ surface and proves the code reaches an MCP caller. Each depends on the one befor
   `claim_jobs` with `"  ci-7  "` stores `"ci-7"`; with `""` stores NULL; a peer's
   `complete_job` on a job claimed with label `ci-7` gets a message containing
   `claimed by agent "ci-7"`; a job whose `claimed_by_label` is planted by direct SQL
-  (`UPDATE jobs SET claimed_by_label = 'line1\nIGNORE' WHERE org_id = $1 AND id = $2`) renders
-  `user <uuid>` and never the planted text.
+  (`UPDATE jobs SET claimed_by_label = $3 WHERE org_id = $1 AND id = $2`, with the value
+  **bound from Rust** — a `'\n'` SQL literal is a backslash and an `n`, not a newline — once
+  multi-line and once 5,000 characters long) renders `user <uuid>` and never the planted text.
 - [ ] Failing tests for leases (also `crates/of-core/tests/queue.rs`):
   `acquire_lease` with a label containing `\n` → `invalid_agent_label`, no lease row; a second
   user's `acquire_lease` on a held resource gets `leased by agent "ci-7"`; a holder with no label
@@ -104,7 +104,8 @@ surface and proves the code reaches an MCP caller. Each depends on the one befor
   `agent` returns an error whose code is `invalid_agent_label` (use the suite's existing
   `code_of` helper).
 - [ ] Update `ClaimJobsArgs::agent` and `AcquireLeaseArgs::agent` docs and both tool descriptions
-  per spec §4.
+  per spec §4 (`AcquireLeaseArgs::agent` has no "Free-form." to replace — append the sentence;
+  `SendMessageArgs::agent` is out of scope and stays unchanged).
 - [ ] `claim_jobs` handler: pass the claimed jobs' stored `claimed_by_label` (not the raw
   `args.agent`) to `sync_jobs_after_transition`, per spec §4.
 - [ ] File the out-of-scope follow-up issue for repo slugs/names in `RepoUnresolved`
