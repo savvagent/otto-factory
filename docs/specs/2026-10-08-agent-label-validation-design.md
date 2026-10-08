@@ -1,6 +1,9 @@
 # Agent label validation design
 
-> **Status:** DRAFT — bound and validate the caller-chosen `agent` label on `claim_jobs`,
+> **Status:** IMPLEMENTED — shipped in savvagent/otto-factory#208 (merged as `6a8c770`, a
+> **breaking** change: `fix(of-core)!: ...`), closing savvagent/otto-factory#163. Follow-ups
+> filed: savvagent/otto-factory#206 (repo slugs in `RepoUnresolved`) and
+> savvagent/otto-factory#209 (lease `resource` names). Bound and validate the caller-chosen `agent` label on `claim_jobs`,
 > `acquire_lease`, and `send_message` at write time, render it quoted wherever it is
 > interpolated into error prose a peer agent reads, and withhold a non-conforming legacy label
 > from every other output. Closes savvagent/otto-factory#163. See the Addendum for what changed
