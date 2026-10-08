@@ -10,11 +10,18 @@ implements it exactly.
 
 ## Status — 2026-10-08
 
-🚧 Tasks 1–3 implemented on PR #208. Review round 1 added work beyond these tasks, recorded in the
+✅ Shipped in savvagent/otto-factory#208, merged as `6a8c770`
+(`fix(of-core)!: bound and quote the agent label on claims, leases, and messages`), closing
+savvagent/otto-factory#163. Tasks 1–3 were implemented as planned. Review round 1 added work beyond these tasks, recorded in the
 spec's Addendum: the policy now covers `send_message` too, a non-conforming legacy label is
 withheld from every serialized job, lease, and message (`agent_label::serialize_stored`) and from
 `sync_ticket`, `holder` quotes explicitly instead of with `{:?}`, the deny-list is wider, and a test
-pins the "128" in the tool descriptions to `MAX_LEN`.
+pins the "128" in the tool descriptions to `MAX_LEN`. Later Copilot rounds made `validate` trim
+only the plain space, so forbidden edge characters are refused rather than stripped, and let a
+keyed message stored before the policy still replay (spec Addendum items 5 and 6). That replay
+exception applies only to an exact idempotency-key and fingerprint match on a row that already
+exists, and the replayed message's label is still withheld (`null`) by
+`agent_label::serialize_stored`. Every call that inserts is validated.
 
 ## Global Constraints
 
@@ -51,34 +58,34 @@ Task 1 builds the pure policy and error with unit tests (no database). Task 2 wi
 two write paths and two error renderings, against Postgres. Task 3 documents it on the MCP
 surface and proves the code reaches an MCP caller. Each depends on the one before.
 
-## Task 1 — The policy module and error ⬜
+## Task 1 — The policy module and error ✅
 
 **Files:** `crates/of-core/src/agent_label.rs`, `crates/of-core/src/lib.rs`,
 `crates/of-core/src/error.rs`.
 **Interfaces:** produces `agent_label::{MAX_LEN, validate, holder}` and
 `Error::InvalidAgentLabel`.
 
-- [ ] Write unit tests in `agent_label.rs` (`#[cfg(test)]`): `None`/`""`/`"  "` → `Ok(None)`;
+- [x] Write unit tests in `agent_label.rs` (`#[cfg(test)]`): `None`/`""`/`"  "` → `Ok(None)`;
   `"  a  "` → `Ok(Some("a"))`; 128 chars accepted, 129 refused; 128 × `é` accepted; `\n`,
   `\r`, `\t`, `\u{0}`, `\u{7f}`, `\u{85}`, `\u{2028}`, `\u{200b}`, `\u{202e}`, `\u{feff}`,
   `\u{e0041}` each refused with code `invalid_agent_label`; the refusal's `to_string()` never
   contains the label text (use a distinctive sentinel substring); the problem names the code
   point and 1-based position; `holder(Some("a\"b"), u)` → `agent "a\"b"`; `holder(None, u)` and
   `holder(Some("x\ny"), u)` and `holder(Some(&"x".repeat(200)), u)` → `user <u>`.
-- [ ] Run `cargo test -p of-core --lib agent_label` — expect compile failure.
-- [ ] Implement `validate` and `holder` per spec §1/§3; add the variant per §2 with `code()` and
+- [x] Run `cargo test -p of-core --lib agent_label` — expect compile failure.
+- [x] Implement `validate` and `holder` per spec §1/§3; add the variant per §2 with `code()` and
   `retriable()` arms; `pub mod agent_label;` in `lib.rs`.
-- [ ] Run `cargo test -p of-core --lib agent_label` — expect pass.
-- [ ] `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, commit
+- [x] Run `cargo test -p of-core --lib agent_label` — expect pass.
+- [x] `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, commit
   `of-core: add agent label validation policy`.
 
-## Task 2 — Enforce at write, render at error ⬜
+## Task 2 — Enforce at write, render at error ✅
 
 **Files:** `crates/of-core/src/jobs.rs`, `crates/of-core/src/leases.rs`,
 `crates/of-core/tests/queue.rs`, lease tests.
 **Interfaces:** consumes Task 1.
 
-- [ ] Failing tests (`crates/of-core/tests/queue.rs`): `claim_jobs` with a 129-char label →
+- [x] Failing tests (`crates/of-core/tests/queue.rs`): `claim_jobs` with a 129-char label →
   `invalid_agent_label`, and the job is still `pending` with `claimed_by_label` NULL;
   `claim_jobs` with `"  ci-7  "` stores `"ci-7"`; with `""` stores NULL; a peer's
   `complete_job` on a job claimed with label `ci-7` gets a message containing
@@ -86,41 +93,42 @@ surface and proves the code reaches an MCP caller. Each depends on the one befor
   (`UPDATE jobs SET claimed_by_label = $3 WHERE org_id = $1 AND id = $2`, with the value
   **bound from Rust** — a `'\n'` SQL literal is a backslash and an `n`, not a newline — once
   multi-line and once 5,000 characters long) renders `user <uuid>` and never the planted text.
-- [ ] Failing tests for leases (also `crates/of-core/tests/queue.rs`):
+- [x] Failing tests for leases (also `crates/of-core/tests/queue.rs`):
   `acquire_lease` with a label containing `\n` → `invalid_agent_label`, no lease row; a second
   user's `acquire_lease` on a held resource gets `leased by agent "ci-7"`; a holder with no label
   renders `leased by user <uuid>`.
-- [ ] Run `cargo test -p of-core --test queue` — expect failures.
-- [ ] Implement: `claim_jobs` calls `agent_label::validate(label)?` after the empty-list check and
+- [x] Run `cargo test -p of-core --test queue` — expect failures.
+- [x] Implement: `claim_jobs` calls `agent_label::validate(label)?` after the empty-list check and
   binds the result; `acquire_lease` does the same after its resource checks; both error sites use
   `agent_label::holder`.
-- [ ] Update any existing test asserting the bare-label wording.
-- [ ] Run `cargo test -p of-core` — expect pass. No tenant table or tenant-scoped function is
+- [x] Update any existing test asserting the bare-label wording.
+- [x] Run `cargo test -p of-core` — expect pass. No tenant table or tenant-scoped function is
   added, so no new cross-org test is needed; the existing `isolation` suite must stay green
   (`cargo test -p of-core --test isolation`).
-- [ ] `cargo fmt --all`, clippy, commit `of-core: enforce agent label policy on claims and leases`.
+- [x] `cargo fmt --all`, clippy, commit `of-core: enforce agent label policy on claims and leases`.
 
-## Task 3 — MCP surface ⬜
+## Task 3 — MCP surface ✅
 
 **Files:** `crates/of-mcp/src/tools/jobs.rs`, `crates/of-mcp/src/tools/coord.rs`,
 `crates/of-mcp/tests/tools.rs`.
 
-- [ ] Failing test in `crates/of-mcp/tests/tools.rs`: `claim_jobs` over MCP with a multi-line
+- [x] Failing test in `crates/of-mcp/tests/tools.rs`: `claim_jobs` over MCP with a multi-line
   `agent` returns an error whose code is `invalid_agent_label` (use the suite's existing
   `code_of` helper).
-- [ ] Update `ClaimJobsArgs::agent` and `AcquireLeaseArgs::agent` docs and both tool descriptions
+- [x] Update `ClaimJobsArgs::agent` and `AcquireLeaseArgs::agent` docs and both tool descriptions
   per spec §4 (`AcquireLeaseArgs::agent` has no "Free-form." to replace — append the sentence;
-  `SendMessageArgs::agent` is out of scope and stays unchanged).
-- [ ] `claim_jobs` handler: pass the claimed jobs' stored `claimed_by_label` (not the raw
+  `SendMessageArgs::agent` is out of scope and stays unchanged — **superseded** by spec
+  Addendum item 1: `send_message` is covered, and its `agent` doc states the rule).
+- [x] `claim_jobs` handler: pass the claimed jobs' stored `claimed_by_label` (not the raw
   `args.agent`) to `sync_jobs_after_transition`, per spec §4.
-- [ ] File the out-of-scope follow-up issue for repo slugs/names in `RepoUnresolved`
+- [x] File the out-of-scope follow-up issue for repo slugs/names in `RepoUnresolved`
   (`gh issue create --repo savvagent/otto-factory --label enhancement`) and record its number
   in the spec's Scope/Out and in the PR body.
-- [ ] Run `cargo test -p of-mcp --test tools` — expect pass.
-- [ ] Breaking-change step: confirm the spec's "Public interface note" records the break; the PR
+- [x] Run `cargo test -p of-mcp --test tools` — expect pass.
+- [x] Breaking-change step: confirm the spec's "Public interface note" records the break; the PR
   title carries `!` and the body a `BREAKING CHANGE:` footer; `docs/clients/matrix.md` needs no
   entry (no client is known to send such a label).
-- [ ] Out-of-band: none — no `Dockerfile`, `fly.toml`, `web/`, worker, migration, or `OF_*`
+- [x] Out-of-band: none — no `Dockerfile`, `fly.toml`, `web/`, worker, migration, or `OF_*`
   change.
-- [ ] `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, commit
+- [x] `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, commit
   `of-mcp: document the agent label limit on claim_jobs and acquire_lease`.

@@ -1,6 +1,10 @@
 # Agent label validation design
 
-> **Status:** DRAFT — bound and validate the caller-chosen `agent` label on `claim_jobs`,
+> **Status:** IMPLEMENTED — shipped in savvagent/otto-factory#208 (merged as `6a8c770`, a
+> **breaking** change: `fix(of-core)!: ...`), closing savvagent/otto-factory#163. Follow-ups
+> filed: savvagent/otto-factory#206 (repo slugs in `RepoUnresolved`) and
+> savvagent/otto-factory#209 (lease `resource` names). The wider class of problem (peer-chosen
+> text that other agents read) is only partly closed until those land. Bound and validate the caller-chosen `agent` label on `claim_jobs`,
 > `acquire_lease`, and `send_message` at write time, render it quoted wherever it is
 > interpolated into error prose a peer agent reads, and withhold a non-conforming legacy label
 > from every other output. Closes savvagent/otto-factory#163. See the Addendum for what changed
@@ -137,6 +141,10 @@ server's own prose.
   agents pass back, so refusing or re-rendering them is not a label policy). Filed as
   savvagent/otto-factory#206 per the skill's "same bug pattern elsewhere" rule rather than
   widening this change.
+- **Lease `resource` names.** These have a byte limit but no character-shape check, and
+  `list_leases` returns a peer's stored resource unfiltered. They are identifiers that agents pass
+  back verbatim, so a read-side `null` does not transfer to them. Filed as
+  savvagent/otto-factory#209 after the PR #208 security re-review.
 - **The caller's own input echoed back** (`LeaseHeld`'s `resource`, `TicketAlreadyLinked`'s
   `ticket_ref`): these repeat what *this* caller just sent, so they cannot carry another
   member's text.
@@ -154,7 +162,8 @@ server's own prose.
 `of_core::agent_label::validate(label: Option<&str>) -> Result<Option<&str>>`:
 
 1. `None` → `Ok(None)`.
-2. Trim surrounding whitespace (`str::trim`). Empty → `Ok(None)`. This matches
+2. Trim surrounding whitespace (*superseded by Addendum item 5: only the plain space U+0020 is
+   trimmed*). Empty → `Ok(None)`. This matches
    `acquire_lease`'s existing rule in `of-mcp` that a blank string and an absent field are the
    same request, and keeps any client that sends `""` for "no label" working.
 3. More than `MAX_LEN = 128` characters (Unicode scalar values, `chars().count()`, not bytes —
