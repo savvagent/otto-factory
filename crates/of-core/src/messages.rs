@@ -405,9 +405,11 @@ impl MessagesExt for Tx<'_> {
             crate::idempotency::validate(key)?;
         }
         // Recipients read the label beside the body (#163). The normalized
-        // form is what is stored; the idempotency fingerprint below still
-        // hashes the label as sent, so a replay of the identical call matches
-        // its own earlier fingerprint whichever form it took.
+        // form is what is stored, but the idempotency fingerprint below still
+        // hashes the label exactly as sent — unchanged from before this
+        // policy, so keyed messages stored earlier still replay. A byte-for-
+        // byte retry therefore matches; a retry that changes only the label's
+        // padding is a different call and gets idempotency_key_conflict.
         let sender_label = crate::agent_label::validate(new.sender_label.as_deref())?;
 
         let org = self.org();

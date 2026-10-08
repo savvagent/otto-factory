@@ -37,21 +37,25 @@ pub const MAX_LEN: usize = 128;
 
 /// Checks a caller-supplied label and returns what to store.
 ///
-/// Surrounding whitespace is trimmed, and a blank label is the same as none
-/// (`Ok(None)`), the rule `acquire_lease` already applies to a blank resource.
-/// Anything longer than [`MAX_LEN`] characters, or containing a character
-/// [`is_forbidden`] names, is refused with [`Error::InvalidAgentLabel`] —
-/// whose message describes the problem but never repeats the label, since
-/// echoing it would hand the refused text straight back as tool output.
+/// Surrounding plain spaces (U+0020) are trimmed, and a label of nothing but
+/// spaces is the same as none (`Ok(None)`), the rule `acquire_lease` already
+/// applies to a blank resource. Only the plain space: a leading or trailing
+/// newline, tab, or other forbidden character is refused like any other, not
+/// quietly stripped. Anything longer than [`MAX_LEN`] characters, or
+/// containing a character [`is_forbidden`] names, is refused with
+/// [`Error::InvalidAgentLabel`] — whose message describes the problem but
+/// never repeats the label, since echoing it would hand the refused text
+/// straight back as tool output.
 ///
 /// ```
 /// use of_core::agent_label::validate;
 /// assert_eq!(validate(Some("  ci-7 ")).unwrap(), Some("ci-7"));
 /// assert_eq!(validate(Some("")).unwrap(), None);
 /// assert_eq!(validate(Some("a\nb")).unwrap_err().code(), "invalid_agent_label");
+/// assert_eq!(validate(Some("ci-7\n")).unwrap_err().code(), "invalid_agent_label");
 /// ```
 pub fn validate(label: Option<&str>) -> Result<Option<&str>> {
-    let Some(label) = label.map(str::trim).filter(|l| !l.is_empty()) else {
+    let Some(label) = label.map(|l| l.trim_matches(' ')).filter(|l| !l.is_empty()) else {
         return Ok(None);
     };
     let len = label.chars().count();
@@ -63,8 +67,8 @@ pub fn validate(label: Option<&str>) -> Result<Option<&str>> {
     if let Some((i, c)) = label.chars().enumerate().find(|(_, c)| is_forbidden(*c)) {
         return Err(Error::InvalidAgentLabel {
             problem: format!(
-                "contains U+{:04X} at character {} (counting after surrounding whitespace \
-                 is trimmed)",
+                "contains U+{:04X} at character {} (counting after surrounding spaces are \
+                 trimmed)",
                 c as u32,
                 i + 1
             ),
@@ -164,7 +168,7 @@ fn is_forbidden(c: char) -> bool {
                 | '\u{FE00}'..='\u{FE0F}'
                 | '\u{FEFF}'
                 | '\u{FFA0}'
-                | '\u{FFF0}'..='\u{FFFB}'
+                | '\u{FFF0}'..='\u{FFFC}'
                 | '\u{110BD}'
                 | '\u{110CD}'
                 | '\u{13430}'..='\u{1343F}'
@@ -194,8 +198,25 @@ mod tests {
     }
 
     #[test]
-    fn surrounding_whitespace_is_trimmed() {
+    fn surrounding_spaces_are_trimmed() {
         assert_eq!(validate(Some("  ci-7  ")).unwrap(), Some("ci-7"));
+    }
+
+    /// Only the plain space is trimmed: a forbidden character at either edge,
+    /// or a label made only of forbidden whitespace, is refused rather than
+    /// stripped away into an accepted label.
+    #[test]
+    fn forbidden_characters_at_the_edges_are_refused_not_trimmed() {
+        for label in [
+            "ci-7\n",
+            "\tci-7",
+            " ci-7\r\n",
+            "\u{2028}",
+            "\u{A0}ci-7",
+            "\n",
+        ] {
+            assert_eq!(refused(label).code(), "invalid_agent_label", "{label:?}");
+        }
     }
 
     #[test]
@@ -275,6 +296,7 @@ mod tests {
             '\u{FFA0}',
             '\u{FFF0}',
             '\u{FFFB}',
+            '\u{FFFC}',
             '\u{110BD}',
             '\u{110CD}',
             '\u{13430}',

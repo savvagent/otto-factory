@@ -43,6 +43,13 @@ with this section, this section wins.
    detecting them needs a Unicode version table this crate does not carry, and quoting is the
    backstop. The refusal's "at character N" now says it counts after trimming.
 
+5. **Only the plain space is trimmed** (Copilot review). `str::trim` strips all Unicode
+   whitespace, so `"ci-7\n"`, `"\tci-7"`, or a bare U+2028 used to be accepted as `"ci-7"` or no
+   label, contradicting §1's "any control or line-break character is refused". `validate` now
+   trims only U+0020, so a forbidden character at either edge is refused like one in the middle,
+   and a label made only of plain spaces is the only blank that means "no label". U+FFFC (object
+   replacement) joins the deny-list in the same round.
+
 Also from review: `claim_jobs` makes a single `sync_jobs_after_transition` call, passing the label
 stored on the first claimed job, instead of a per-job loop. A test pins the "128" written in the
 three tool descriptions to `MAX_LEN`.
