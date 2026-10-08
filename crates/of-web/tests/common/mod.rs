@@ -45,6 +45,21 @@ pub async fn harness(pool: PgPool) -> Harness {
 }
 
 pub async fn harness_with(pool: PgPool, configure: impl FnOnce(&mut Config)) -> Harness {
+    harness_with_client(pool, configure, |_| {}).await
+}
+
+/// A harness whose platform client does not cache member lookups, for tests
+/// about a role change or a removal taking effect on the very next request.
+/// (The real client reuses a member's role and teams for `MEMBER_TTL`.)
+pub async fn harness_uncached_members(pool: PgPool) -> Harness {
+    harness_with_client(pool, |_| {}, |c| c.member_ttl = std::time::Duration::ZERO).await
+}
+
+pub async fn harness_with_client(
+    pool: PgPool,
+    configure: impl FnOnce(&mut Config),
+    configure_client: impl FnOnce(&mut otto_resource::ClientConfig),
+) -> Harness {
     let db = Db::from_pool(pool);
     let platform = MockPlatform::start().await;
     let mut config = Config::new(
@@ -57,7 +72,18 @@ pub async fn harness_with(pool: PgPool, configure: impl FnOnce(&mut Config)) -> 
         of_testkit::WEBHOOK_SECRET,
     );
     configure(&mut config);
-    let state = AppState::new(db.clone(), cipher(), platform.client(), config);
+    let mut client_config = otto_resource::ClientConfig::new(
+        &platform.url,
+        of_testkit::RESOURCE_URI,
+        of_testkit::SECRET,
+    );
+    configure_client(&mut client_config);
+    let state = AppState::new(
+        db.clone(),
+        cipher(),
+        platform.client_with(client_config),
+        config,
+    );
 
     Harness {
         db,
