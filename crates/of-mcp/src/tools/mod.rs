@@ -18,9 +18,11 @@
 //! it is an envelope rather than the bare value, and why the payloads are not
 //! mirrored into view structs.
 
-use of_core::ids::RepoId;
+use of_core::ids::{JobId, RepoId};
+use of_core::jobs::{Job, JobsExt};
 use of_core::repos::ReposExt;
 use of_core::repos::{Repo, RepoRef};
+use of_core::teams::TeamScope;
 use otto_tenant::Tx;
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::model::ErrorData;
@@ -53,12 +55,19 @@ pub mod scope {
 
 /// Resolve a repo the caller named, or fail with the error that lists what is
 /// registered.
+///
+/// Resolved as `team` may see it: a repo of a team the caller is not on is
+/// reported exactly like an unregistered one, and the list of registered slugs
+/// leaves it out.
 pub(crate) async fn repo_of(
     tx: &mut Tx<'_>,
+    team: &TeamScope,
     slug: Option<String>,
     remote: Option<String>,
 ) -> Result<Repo, ErrorData> {
-    tx.resolve_repo(&RepoRef { slug, remote }).await.mcp()
+    tx.resolve_repo_visible(&RepoRef { slug, remote }, team)
+        .await
+        .mcp()
 }
 
 /// Resolve a repo only if the caller named one.
@@ -70,6 +79,7 @@ pub(crate) async fn repo_of(
 /// answer a question the caller did not ask.
 pub(crate) async fn maybe_repo_of(
     tx: &mut Tx<'_>,
+    team: &TeamScope,
     slug: Option<String>,
     remote: Option<String>,
 ) -> Result<Option<RepoId>, ErrorData> {
@@ -79,5 +89,46 @@ pub(crate) async fn maybe_repo_of(
     if !named {
         return Ok(None);
     }
-    Ok(Some(repo_of(tx, slug, remote).await?.id))
+    Ok(Some(repo_of(tx, team, slug, remote).await?.id))
+}
+
+/// Fetch a job the caller may see. A job of a team the caller is not on is
+/// `job_not_found`, the same as one that does not exist.
+pub(crate) async fn visible_job(
+    tx: &mut Tx<'_>,
+    team: &TeamScope,
+    id: &JobId,
+) -> Result<Job, ErrorData> {
+    let job = tx.get_job(id).await.mcp()?;
+    if team.allows(job.team_id) {
+        Ok(job)
+    } else {
+        Err(of_core::Error::JobNotFound(id.clone())).mcp()
+    }
+}
+
+/// Refuse unless every job named is one the caller may see, so a write cannot
+/// reach into a team the caller is not on. Unrestricted callers cost nothing
+/// extra; a job that does not exist is left to the write itself to report.
+pub(crate) async fn ensure_jobs_visible(
+    tx: &mut Tx<'_>,
+    team: &TeamScope,
+    ids: &[JobId],
+) -> Result<(), ErrorData> {
+    if team.is_all() {
+        return Ok(());
+    }
+    for id in ids {
+        visible_job(tx, team, id).await?;
+    }
+    Ok(())
+}
+
+/// [`ensure_jobs_visible`] for one job.
+pub(crate) async fn ensure_job_visible(
+    tx: &mut Tx<'_>,
+    team: &TeamScope,
+    id: &JobId,
+) -> Result<(), ErrorData> {
+    ensure_jobs_visible(tx, team, std::slice::from_ref(id)).await
 }

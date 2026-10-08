@@ -141,12 +141,18 @@ impl Factory {
         let caller = self.caller(&parts)?;
         caller.require_scope(scope::REPOS_READ).mcp()?;
 
+        let team = self.team_scope(&caller).await?;
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "list_repos").await?;
-        let repos = tx
-            .list_repos(args.include_inactive, args.limit)
+        // The limit applies to what the caller may see, so the cut is made after
+        // the team filter rather than in SQL.
+        let limit = args.limit.unwrap_or(200).clamp(1, 1000);
+        let mut repos = tx
+            .list_repos(args.include_inactive, Some(1000))
             .await
             .mcp()?;
+        repos.retain(|r| team.allows(r.team_id));
+        repos.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
         tx.commit().await.mcp()?;
 
         Ok(Json(out::ReposOut { repos }))
@@ -167,9 +173,10 @@ impl Factory {
         let caller = self.caller(&parts)?;
         caller.require_scope(scope::REPOS_READ).mcp()?;
 
+        let team = self.team_scope(&caller).await?;
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "resolve_repo").await?;
-        let repo = repo_of(&mut tx, args.repo, args.remote).await?;
+        let repo = repo_of(&mut tx, &team, args.repo, args.remote).await?;
         tx.commit().await.mcp()?;
 
         Ok(Json(out::RepoOut { repo }))
@@ -191,9 +198,10 @@ impl Factory {
         let caller = self.caller(&parts)?;
         caller.require_scope(scope::REPOS_WRITE).mcp()?;
 
+        let team = self.team_scope(&caller).await?;
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "update_repo").await?;
-        let repo = repo_of(&mut tx, args.repo, args.remote).await?;
+        let repo = repo_of(&mut tx, &team, args.repo, args.remote).await?;
         let updated = tx
             .update_repo(
                 repo.id,

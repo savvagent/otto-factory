@@ -17,7 +17,6 @@
 use axum::extract::{Json, Path, State};
 use axum::response::{IntoResponse, Response};
 use of_core::audit::action;
-use of_core::repos::ReposExt;
 use of_core::trackers::{
     delete_binding, delete_connection, get_connection, list_bindings_for_repo, list_connections,
     resolve_binding, upsert_binding, upsert_connection, Provider, TrackerBinding,
@@ -486,13 +485,7 @@ async fn resolve_repo(
     ctx: &OrgCtx,
     slug: String,
 ) -> ApiResult<of_core::repos::Repo> {
-    let repo = tx
-        .resolve_repo(&of_core::repos::RepoRef {
-            slug: Some(slug),
-            remote: None,
-        })
-        .await?;
-    super::repos::require_visible(state, ctx, repo).await
+    super::repos::resolve_visible(state, ctx, tx, slug).await
 }
 
 /// Refuse a binding that could never match an inbound event.

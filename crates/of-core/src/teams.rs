@@ -20,9 +20,11 @@
 //! The reverse direction (a team deleted *after* repos were scoped to it) is
 //! handled by the platform's `team.deleted` webhook; see [`crate::platform_events`].
 
+use std::collections::HashSet;
+
 use crate::error::{Error, Result};
-use otto_resource::PlatformClient;
-use otto_tenant::ids::{OrgId, TeamId};
+use otto_resource::{PlatformClient, Role};
+use otto_tenant::ids::{OrgId, TeamId, UserId};
 
 /// A team id the platform confirmed exists in a particular org.
 ///
@@ -79,5 +81,85 @@ impl VerifiedTeam {
                 team: self.team.to_string(),
             })
         }
+    }
+}
+
+/// Which team-scoped rows a caller may see or touch.
+///
+/// A row with a null `team_id` is org-wide and open to every member; a row with
+/// a `team_id` is open to that team's members and to org owners and admins.
+/// Membership is the platform's, so [`TeamScope::for_member`] asks it, and
+/// **fails closed**: a platform that cannot answer is an [`Error::Platform`],
+/// never a guess and never [`TeamScope::All`]. A team id the platform does not
+/// list (unknown, foreign, or deleted) is simply not matched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TeamScope {
+    /// Owners and admins: every row.
+    All,
+    /// Everyone else: org-wide rows, plus rows of exactly these teams.
+    Teams(HashSet<TeamId>),
+}
+
+impl TeamScope {
+    /// The scope of `user`, a member of `org` with `role`.
+    ///
+    /// Administrators are [`TeamScope::All`] without a platform call. Anyone
+    /// else costs one `member_teams` lookup (cached by the client for
+    /// `MEMBER_TTL`). A user the platform no longer knows as a member gets the
+    /// empty team set: org-wide rows only.
+    ///
+    /// ```no_run
+    /// # async fn demo(platform: &otto_resource::PlatformClient, org: otto_tenant::OrgId,
+    /// #     user: otto_tenant::UserId) -> of_core::Result<()> {
+    /// use of_core::teams::TeamScope;
+    ///
+    /// let scope = TeamScope::for_member(platform, org, user, otto_resource::Role::Member).await?;
+    /// assert!(scope.allows(None)); // org-wide rows are everyone's
+    /// # Ok(()) }
+    /// ```
+    pub async fn for_member(
+        platform: &PlatformClient,
+        org: OrgId,
+        user: UserId,
+        role: Role,
+    ) -> Result<Self> {
+        if role.can_administer() {
+            return Ok(Self::All);
+        }
+        let teams = platform
+            .member_teams(org.as_uuid(), user.as_uuid())
+            .await?
+            .unwrap_or_default();
+        Ok(Self::Teams(
+            teams
+                .into_iter()
+                // The platform scopes the lookup by org already; checking the
+                // answer too means a confused response cannot widen the set.
+                .filter(|t| t.org_id == org.as_uuid())
+                .map(|t| TeamId::from(t.id))
+                .collect(),
+        ))
+    }
+
+    /// Whether a row with this `team_id` is visible.
+    pub fn allows(&self, team: Option<TeamId>) -> bool {
+        match (self, team) {
+            (Self::All, _) | (_, None) => true,
+            (Self::Teams(mine), Some(t)) => mine.contains(&t),
+        }
+    }
+
+    /// The team ids to restrict a query to besides org-wide rows, or `None`
+    /// when nothing is restricted.
+    pub fn restriction(&self) -> Option<Vec<TeamId>> {
+        match self {
+            Self::All => None,
+            Self::Teams(mine) => Some(mine.iter().copied().collect()),
+        }
+    }
+
+    /// Whether this scope sees every row (an administrator's).
+    pub fn is_all(&self) -> bool {
+        matches!(self, Self::All)
     }
 }

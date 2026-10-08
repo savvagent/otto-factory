@@ -21,6 +21,7 @@
 use of_core::jobs::JobsExt;
 use of_core::repos::ReposExt;
 use of_core::scopes;
+use of_core::Error as CoreError;
 use std::str::FromStr;
 
 use axum::extract::{Json, Path, Query, State};
@@ -106,14 +107,21 @@ pub async fn list_jobs(
         None => None,
     };
 
+    // Which teams' jobs the caller may see, from the platform and failing
+    // closed (503), for the same reason and at the same point as the slug above.
+    let scope = ctx.team_scope(&state.platform).await?;
+
     let mut tx = ctx.begin(&state.db).await?;
 
     let repo_id = match &q.repo {
         Some(slug) => Some(
-            tx.resolve_repo(&of_core::repos::RepoRef {
-                slug: Some(slug.clone()),
-                remote: None,
-            })
+            tx.resolve_repo_visible(
+                &of_core::repos::RepoRef {
+                    slug: Some(slug.clone()),
+                    remote: None,
+                },
+                &scope,
+            )
             .await?
             .id,
         ),
@@ -125,6 +133,7 @@ pub async fn list_jobs(
             status,
             repo_id,
             team_id,
+            visible_teams: scope.restriction(),
             created_by: q.mine.then_some(ctx.user.id),
             agent_type: None,
             limit: q.limit,
@@ -146,21 +155,30 @@ pub async fn job_stats(
     Query(q): Query<StatsQuery>,
 ) -> ApiResult<Json<Stats>> {
     ctx.require_scope(scopes::JOBS_READ)?;
+    let scope = ctx.team_scope(&state.platform).await?;
     let mut tx = ctx.begin(&state.db).await?;
 
     let repo_id = match &q.repo {
         Some(slug) => Some(
-            tx.resolve_repo(&of_core::repos::RepoRef {
-                slug: Some(slug.clone()),
-                remote: None,
-            })
+            tx.resolve_repo_visible(
+                &of_core::repos::RepoRef {
+                    slug: Some(slug.clone()),
+                    remote: None,
+                },
+                &scope,
+            )
             .await?
             .id,
         ),
         None => None,
     };
 
-    let stats = tx.stats(repo_id).await?;
+    // The org-wide counters have no team dimension, so a member's numbers are
+    // counted from the jobs they may see.
+    let stats = match scope.restriction() {
+        None => tx.stats(repo_id).await?,
+        Some(teams) => tx.stats_for_teams(repo_id, &teams).await?,
+    };
     tx.commit().await?;
 
     Ok(Json(stats))
@@ -175,8 +193,14 @@ pub async fn get_job(
     ctx.require_scope(scopes::JOBS_READ)?;
     let id = JobId::from(id);
 
+    let scope = ctx.team_scope(&state.platform).await?;
     let mut tx = ctx.begin(&state.db).await?;
     let job = tx.get_job(&id).await?;
+    // A job of a team the caller is not on is not found, not forbidden: they
+    // should not learn it exists.
+    if !scope.allows(job.team_id) {
+        return Err(CoreError::JobNotFound(id).into());
+    }
     let depends_on = tx.dependencies_of(&id).await?;
     tx.commit().await?;
 

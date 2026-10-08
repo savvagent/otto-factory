@@ -6,7 +6,7 @@
 
 use crate::error::{Error, Result};
 use crate::ids::RepoId;
-use crate::teams::VerifiedTeam;
+use crate::teams::{TeamScope, VerifiedTeam};
 use otto_tenant::ids::{OrgId, TeamId, UserId};
 use otto_tenant::Tx;
 use serde::{Deserialize, Serialize};
@@ -262,6 +262,17 @@ pub trait ReposExt {
         r: &RepoRef,
     ) -> impl std::future::Future<Output = Result<Repo>> + Send;
 
+    /// [`Self::resolve_repo`] for a caller with a [`TeamScope`]: a repo of a
+    /// team the caller is not on resolves exactly like a repo that does not
+    /// exist, and the "registered repos" list in the error names only the repos
+    /// the caller may see, so neither the answer nor the error reveals that a
+    /// hidden repo exists.
+    fn resolve_repo_visible(
+        &mut self,
+        r: &RepoRef,
+        scope: &TeamScope,
+    ) -> impl std::future::Future<Output = Result<Repo>> + Send;
+
     /// Apply a partial update.
     ///
     /// `COALESCE($n, column)` per field: an omitted field keeps its stored
@@ -394,6 +405,23 @@ impl ReposExt for Tx<'_> {
         Ok(repo)
     }
 
+    async fn resolve_repo_visible(&mut self, r: &RepoRef, scope: &TeamScope) -> Result<Repo> {
+        let attempted = r
+            .slug
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| r.remote.clone())
+            .unwrap_or_else(|| "(nothing supplied)".into());
+        match self.resolve_repo(r).await {
+            Ok(repo) if scope.allows(repo.team_id) => Ok(repo),
+            Ok(_) => Err(self.unresolved(&attempted, scope).await?),
+            Err(Error::RepoUnresolved { attempted, .. }) if !scope.is_all() => {
+                Err(self.unresolved(&attempted, scope).await?)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     async fn resolve_repo(&mut self, r: &RepoRef) -> Result<Repo> {
         if let Some(slug) = r.slug.as_deref().filter(|s| !s.trim().is_empty()) {
             if let Some(repo) = self.get_repo_by_slug(slug).await? {
@@ -409,7 +437,7 @@ impl ReposExt for Tx<'_> {
             // commonest way to reach it and the one the caller can actually fix
             // from the answer, so answering "repo not found: apo" and stopping
             // there makes them go and look the name up somewhere else.
-            return Err(self.unresolved(slug).await?);
+            return Err(self.unresolved(slug, &TeamScope::All).await?);
         }
 
         if let Some(remote) = r.remote.as_deref().filter(|s| !s.trim().is_empty()) {
@@ -440,7 +468,7 @@ impl ReposExt for Tx<'_> {
             .or_else(|| r.remote.clone())
             .unwrap_or_else(|| "(nothing supplied)".into());
 
-        Err(self.unresolved(&attempted).await?)
+        Err(self.unresolved(&attempted, &TeamScope::All).await?)
     }
 
     async fn update_repo(&mut self, id: RepoId, patch: RepoPatch) -> Result<Repo> {
@@ -508,7 +536,7 @@ pub(crate) trait ReposInternal {
     /// itself a query: a database failure while composing an error message is a
     /// database failure, and reporting it as "no such repo" would send someone
     /// looking for a typo that is not there.
-    async fn unresolved(&mut self, attempted: &str) -> Result<Error>;
+    async fn unresolved(&mut self, attempted: &str, scope: &TeamScope) -> Result<Error>;
 }
 
 impl ReposInternal for Tx<'_> {
@@ -556,11 +584,12 @@ impl ReposInternal for Tx<'_> {
         Ok(())
     }
 
-    async fn unresolved(&mut self, attempted: &str) -> Result<Error> {
+    async fn unresolved(&mut self, attempted: &str, scope: &TeamScope) -> Result<Error> {
         let known = self
             .list_repos(false, None)
             .await?
             .into_iter()
+            .filter(|r| scope.allows(r.team_id))
             .map(|r| r.slug)
             .collect::<Vec<_>>();
 

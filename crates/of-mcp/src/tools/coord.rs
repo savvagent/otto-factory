@@ -7,6 +7,7 @@
 
 use of_core::leases::LeasesExt;
 use of_core::messages::MessagesExt;
+use of_core::repos::ReposExt;
 use std::time::Duration;
 
 use of_core::ids::JobId;
@@ -255,9 +256,10 @@ impl Factory {
         };
 
         let job = args.job.map(JobId::from);
+        let team = self.team_scope(&caller).await?;
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "acquire_lease").await?;
-        let repo = repo_of(&mut tx, args.repo, args.remote).await?;
+        let repo = repo_of(&mut tx, &team, args.repo, args.remote).await?;
         let lease = tx
             .acquire_lease(
                 repo.id,
@@ -336,10 +338,23 @@ impl Factory {
         let caller = self.caller(&parts)?;
         caller.require_scope(scope::JOBS_READ).mcp()?;
 
+        let team = self.team_scope(&caller).await?;
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "list_leases").await?;
-        let repo_id = maybe_repo_of(&mut tx, args.repo, args.remote).await?;
-        let leases = tx.list_leases(repo_id).await.mcp()?;
+        let repo_id = maybe_repo_of(&mut tx, &team, args.repo, args.remote).await?;
+        let mut leases = tx.list_leases(repo_id).await.mcp()?;
+        if !team.is_all() {
+            // Leases hang off repos: keep those of repos the caller may see.
+            let visible: std::collections::HashSet<_> = tx
+                .list_repos(true, Some(1000))
+                .await
+                .mcp()?
+                .into_iter()
+                .filter(|r| team.allows(r.team_id))
+                .map(|r| r.id)
+                .collect();
+            leases.retain(|l| visible.contains(&l.repo_id));
+        }
         tx.commit().await.mcp()?;
 
         Ok(Json(out::LeasesOut { leases }))
@@ -368,6 +383,7 @@ impl Factory {
             None => None,
         };
 
+        let team = self.team_scope(&caller).await?;
         let mut tx = self.tx(&caller).await?;
 
         // No key: reproduce today's behavior exactly, charging as the
@@ -375,7 +391,7 @@ impl Factory {
         // identical comment (tools::jobs) and Factory::charge's doc comment.
         let Some(key) = args.idempotency_key else {
             self.charge(&mut tx, &caller, "send_message").await?;
-            let repo_id = maybe_repo_of(&mut tx, args.repo, args.remote).await?;
+            let repo_id = maybe_repo_of(&mut tx, &team, args.repo, args.remote).await?;
             let message = tx
                 .send_message(
                     caller.user_id,
@@ -404,7 +420,7 @@ impl Factory {
 
         // A key was supplied: replay-vs-new must be resolved before
         // charging, which needs `repo_id` to build the payload to check.
-        let repo_id = maybe_repo_of(&mut tx, args.repo, args.remote).await?;
+        let repo_id = maybe_repo_of(&mut tx, &team, args.repo, args.remote).await?;
         let new_message = NewMessage {
             body: args.body,
             recipient_user_id: recipient,

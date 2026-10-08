@@ -151,6 +151,21 @@ impl OrgCtx {
         Ok(of_core::platform_events::begin_live(db, self.org.id, Some(self.user.id)).await?)
     }
 
+    /// Which team-scoped rows this caller may see: everything for an owner or
+    /// admin, otherwise org-wide rows plus those of the teams the platform says
+    /// they belong to. Fails closed: a platform that cannot answer is a `503`,
+    /// never "all teams". Ask before opening a transaction, so a slow platform
+    /// holds no pooled connection.
+    pub async fn team_scope(
+        &self,
+        platform: &otto_resource::PlatformClient,
+    ) -> Result<of_core::teams::TeamScope, ApiError> {
+        Ok(
+            of_core::teams::TeamScope::for_member(platform, self.org.id, self.user.id, self.role)
+                .await?,
+        )
+    }
+
     /// Refuse unless the caller administers this org.
     ///
     /// The message names the role they have, because "you need to be an admin"

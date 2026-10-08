@@ -218,6 +218,10 @@ pub struct JobFilter {
     pub status: Option<Status>,
     pub repo_id: Option<RepoId>,
     pub team_id: Option<TeamId>,
+    /// The caller's team visibility: when set, only org-wide jobs and jobs of
+    /// these teams. `None` is unrestricted (an administrator's). Distinct from
+    /// `team_id`, which is a filter the caller asked for.
+    pub visible_teams: Option<Vec<TeamId>>,
     /// Restrict to jobs this user created. Used by "what did I queue?" views.
     pub created_by: Option<UserId>,
     /// A routing hint, not access control: matches jobs with this exact
@@ -556,6 +560,15 @@ pub trait JobsExt {
     fn stats(
         &mut self,
         repo_id: Option<RepoId>,
+    ) -> impl std::future::Future<Output = Result<Stats>> + Send;
+
+    /// [`Self::stats`], counting only org-wide jobs and jobs of `teams`: what a
+    /// non-administrator may see. Always a full scan, because the org-wide
+    /// counters have no team dimension.
+    fn stats_for_teams(
+        &mut self,
+        repo_id: Option<RepoId>,
+        teams: &[TeamId],
     ) -> impl std::future::Future<Output = Result<Stats>> + Send;
 }
 
@@ -1058,6 +1071,7 @@ impl JobsExt for Tx<'_> {
                AND ($4::uuid IS NULL OR team_id = $4) \
                AND ($5::uuid IS NULL OR created_by = $5) \
                AND ($6::text IS NULL OR agent_type = $6 OR agent_type IS NULL) \
+               AND ($8::uuid[] IS NULL OR team_id IS NULL OR team_id = ANY($8)) \
              ORDER BY created_at DESC \
              LIMIT $7"
         ))
@@ -1068,6 +1082,11 @@ impl JobsExt for Tx<'_> {
         .bind(f.created_by)
         .bind(&f.agent_type)
         .bind(f.limit.unwrap_or(200).clamp(1, 1000))
+        .bind(
+            f.visible_teams
+                .as_ref()
+                .map(|v| v.iter().map(|t| t.as_uuid()).collect::<Vec<uuid::Uuid>>()),
+        )
         .fetch_all(self.conn())
         .await?;
         Ok(jobs)
@@ -1698,6 +1717,39 @@ impl JobsExt for Tx<'_> {
         )
         .bind(org)
         .bind(repo_id)
+        .fetch_one(self.conn())
+        .await?;
+        Ok(stats)
+    }
+
+    async fn stats_for_teams(
+        &mut self,
+        repo_id: Option<RepoId>,
+        teams: &[TeamId],
+    ) -> Result<Stats> {
+        let org = self.org();
+        let teams: Vec<uuid::Uuid> = teams.iter().map(|t| t.as_uuid()).collect();
+        let stats = sqlx::query_as(
+            "SELECT \
+               COUNT(*) FILTER (WHERE status = 'pending')     AS pending, \
+               COUNT(*) FILTER (WHERE status = 'in-progress') AS in_progress, \
+               COUNT(*) FILTER (WHERE status = 'active')      AS active, \
+               COUNT(*) FILTER (WHERE status = 'completed')   AS completed, \
+               COUNT(*) FILTER (WHERE status = 'failed')      AS failed, \
+               COUNT(*) FILTER (WHERE status = 'cancelled')   AS cancelled, \
+               COUNT(*) FILTER (WHERE status = 'pending' AND EXISTS ( \
+                 SELECT 1 FROM job_dependencies d \
+                 JOIN jobs dep ON dep.org_id = d.org_id AND dep.id = d.depends_on \
+                 WHERE d.org_id = j.org_id AND d.job_id = j.id \
+                   AND dep.status <> 'completed'))            AS blocked, \
+               COUNT(*)                                       AS total \
+             FROM jobs j WHERE j.org_id = $1 \
+               AND ($2::uuid IS NULL OR j.repo_id = $2) \
+               AND (j.team_id IS NULL OR j.team_id = ANY($3))",
+        )
+        .bind(org)
+        .bind(repo_id)
+        .bind(teams)
         .fetch_one(self.conn())
         .await?;
         Ok(stats)

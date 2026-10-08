@@ -3232,3 +3232,472 @@ async fn tombstoned_orgs_and_members_are_refused_despite_a_warm_cache(pool: PgPo
         );
     }
 }
+
+// ------------------------------------------------------------ team scoping
+
+/// An org with two teams and, per team plus one org-wide, a repo holding one job.
+/// Returns the owner, a member of `platform`, a member of `growth`, and a member
+/// of neither, each as the principal the middleware would build for them.
+struct Teams {
+    env: Env,
+    owner: Principal,
+    alice: Principal,
+    bob: Principal,
+    carol: Principal,
+    jobs: std::collections::HashMap<&'static str, String>,
+}
+
+async fn teams_world(pool: PgPool) -> Teams {
+    use of_core::jobs::{JobsExt, NewJob};
+    use of_core::leases::LeasesExt;
+    use of_core::repos::{NewRepo, ReposExt};
+    use of_core::teams::VerifiedTeam;
+
+    let (env, owner) = env(pool).await;
+    let org = owner.org_id;
+    let member = |email: &str| {
+        let user = env.member(org, email, Role::Member);
+        Principal {
+            role: Role::Member,
+            ..principal(user.id, org, all_scopes())
+        }
+    };
+    let (alice, bob, carol) = (
+        member("alice@acme.test"),
+        member("bob@acme.test"),
+        member("carol@acme.test"),
+    );
+
+    let (platform_team, growth_team) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+    env.platform
+        .add_team(org.as_uuid(), platform_team, "platform", "Platform");
+    env.platform
+        .add_team(org.as_uuid(), growth_team, "growth", "Growth");
+    env.platform
+        .add_team_member(org.as_uuid(), alice.user_id.as_uuid(), platform_team);
+    env.platform
+        .add_team_member(org.as_uuid(), bob.user_id.as_uuid(), growth_team);
+
+    let mut jobs = std::collections::HashMap::new();
+    for (slug, team) in [
+        ("shared", None),
+        ("platform-repo", Some(platform_team)),
+        ("growth-repo", Some(growth_team)),
+    ] {
+        let team_id = match team {
+            Some(t) => Some(
+                VerifiedTeam::verify(&env.client, org, t.into())
+                    .await
+                    .unwrap(),
+            ),
+            None => None,
+        };
+        let mut tx = env.db.begin(org).await.unwrap();
+        let repo = tx
+            .register_repo(NewRepo {
+                slug: slug.into(),
+                team_id,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let job = tx
+            .add_job(NewJob {
+                repo_id: repo.id,
+                title: format!("job in {slug}"),
+                created_by: Some(owner.user_id),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        tx.acquire_lease(repo.id, "branch:main", owner.user_id, None, None, None)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        jobs.insert(slug, job.id.to_string());
+    }
+
+    Teams {
+        env,
+        owner,
+        alice,
+        bob,
+        carol,
+        jobs,
+    }
+}
+
+impl Teams {
+    async fn repos(&self, who: &Principal) -> Vec<String> {
+        let out = ok(self
+            .env
+            .factory
+            .list_repos(
+                Extension(parts(who)),
+                Parameters(tools::repos::ListReposArgs {
+                    include_inactive: false,
+                    limit: None,
+                }),
+            )
+            .await);
+        let mut v: Vec<String> = out["repos"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["slug"].as_str().unwrap().to_string())
+            .collect();
+        v.sort();
+        v
+    }
+
+    async fn list_jobs(&self, who: &Principal) -> Vec<String> {
+        let out = ok(self
+            .env
+            .factory
+            .list_jobs(
+                Extension(parts(who)),
+                Parameters(tools::jobs::ListJobsArgs {
+                    status: None,
+                    repo: None,
+                    remote: None,
+                    mine: false,
+                    agent_type: None,
+                    limit: None,
+                }),
+            )
+            .await);
+        titles(&out)
+    }
+
+    async fn ready(&self, who: &Principal) -> Vec<String> {
+        let out = ok(self
+            .env
+            .factory
+            .ready(
+                Extension(parts(who)),
+                Parameters(tools::jobs::ReadyArgs {
+                    repo: None,
+                    remote: None,
+                    agent_type: None,
+                }),
+            )
+            .await);
+        titles(&out)
+    }
+
+    async fn get_job(
+        &self,
+        who: &Principal,
+        repo: &str,
+    ) -> Result<Json<tools::out::JobOut>, ErrorData> {
+        self.env
+            .factory
+            .get_job(
+                Extension(parts(who)),
+                Parameters(tools::jobs::JobArgs {
+                    job: self.jobs[repo].clone(),
+                }),
+            )
+            .await
+    }
+
+    async fn stats_total(&self, who: &Principal) -> i64 {
+        ok(self
+            .env
+            .factory
+            .stats(
+                Extension(parts(who)),
+                Parameters(tools::jobs::RepoScopeArgs {
+                    repo: None,
+                    remote: None,
+                }),
+            )
+            .await)["stats"]["total"]
+            .as_i64()
+            .unwrap()
+    }
+}
+
+fn titles(out: &serde_json::Value) -> Vec<String> {
+    let mut v: Vec<String> = out["jobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|j| j["title"].as_str().unwrap().to_string())
+        .collect();
+    v.sort();
+    v
+}
+
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn repos_and_jobs_are_listed_to_org_wide_plus_the_callers_teams(pool: PgPool) {
+    let t = teams_world(pool).await;
+
+    assert_eq!(
+        t.repos(&t.owner).await,
+        ["growth-repo", "platform-repo", "shared"],
+        "an owner sees everything"
+    );
+    assert_eq!(t.repos(&t.alice).await, ["platform-repo", "shared"]);
+    assert_eq!(t.repos(&t.bob).await, ["growth-repo", "shared"]);
+    assert_eq!(t.repos(&t.carol).await, ["shared"]);
+
+    assert_eq!(t.list_jobs(&t.owner).await.len(), 3);
+    assert_eq!(
+        t.list_jobs(&t.alice).await,
+        ["job in platform-repo", "job in shared"]
+    );
+    assert_eq!(
+        t.list_jobs(&t.bob).await,
+        ["job in growth-repo", "job in shared"]
+    );
+    assert_eq!(t.list_jobs(&t.carol).await, ["job in shared"]);
+
+    assert_eq!(t.ready(&t.owner).await.len(), 3);
+    assert_eq!(
+        t.ready(&t.alice).await,
+        ["job in platform-repo", "job in shared"]
+    );
+    assert_eq!(t.ready(&t.carol).await, ["job in shared"]);
+
+    assert_eq!(t.stats_total(&t.owner).await, 3);
+    assert_eq!(t.stats_total(&t.alice).await, 2);
+    assert_eq!(t.stats_total(&t.carol).await, 1);
+}
+
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_job_of_another_team_is_not_found(pool: PgPool) {
+    let t = teams_world(pool).await;
+
+    ok(t.get_job(&t.alice, "platform-repo").await);
+    ok(t.get_job(&t.owner, "platform-repo").await);
+    ok(t.get_job(&t.carol, "shared").await);
+    for who in [&t.bob, &t.carol] {
+        let e = err(t.get_job(who, "platform-repo").await);
+        assert_eq!(code_of(&e), "job_not_found");
+    }
+}
+
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_repo_of_another_team_resolves_like_one_that_does_not_exist(pool: PgPool) {
+    let t = teams_world(pool).await;
+    let resolve = |who: &Principal, slug: &str| {
+        t.env.factory.resolve_repo(
+            Extension(parts(who)),
+            Parameters(tools::repos::RepoRefArgs {
+                repo: Some(slug.into()),
+                remote: None,
+            }),
+        )
+    };
+
+    ok(resolve(&t.alice, "platform-repo").await);
+    ok(resolve(&t.owner, "platform-repo").await);
+    let e = err(resolve(&t.bob, "platform-repo").await);
+    assert_eq!(code_of(&e), "repo_unresolved");
+    assert!(
+        e.message.contains("growth-repo, shared") && !e.message.contains("platform-repo,"),
+        "the registered list must leave out what the caller cannot see: {}",
+        e.message
+    );
+}
+
+/// Writes follow reads: a member cannot queue into, change, claim, or lease in a
+/// team they are not on.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_member_cannot_write_into_a_team_they_are_not_on(pool: PgPool) {
+    let t = teams_world(pool).await;
+    let f = &t.env.factory;
+
+    // Queue into the hidden repo.
+    let add = |who: &Principal| {
+        f.add_job(
+            Extension(parts(who)),
+            Parameters(tools::jobs::AddJobArgs {
+                title: "sneaky".into(),
+                description: None,
+                repo: Some("platform-repo".into()),
+                remote: None,
+                ticket_ref: None,
+                agent_type: None,
+                metadata: None,
+                depends_on: vec![],
+                idempotency_key: None,
+            }),
+        )
+    };
+    assert_eq!(code_of(&err(add(&t.bob).await)), "repo_unresolved");
+    ok(add(&t.alice).await);
+
+    // Change a hidden repo.
+    let update_repo = |who: &Principal| {
+        f.update_repo(
+            Extension(parts(who)),
+            Parameters(tools::repos::UpdateRepoArgs {
+                repo: Some("platform-repo".into()),
+                remote: None,
+                name: Some("mine now".into()),
+                default_branch: None,
+                default_agent_type: None,
+                active: None,
+                add_remotes: vec![],
+            }),
+        )
+    };
+    assert_eq!(code_of(&err(update_repo(&t.bob).await)), "repo_unresolved");
+    ok(update_repo(&t.alice).await);
+
+    // Change, claim, and re-queue a hidden job.
+    let job = t.jobs["platform-repo"].clone();
+    let e = err(f
+        .update_job(
+            Extension(parts(&t.bob)),
+            Parameters(tools::jobs::UpdateJobArgs {
+                job: job.clone(),
+                title: Some("hijacked".into()),
+                description: None,
+                agent_type: None,
+                metadata: None,
+            }),
+        )
+        .await);
+    assert_eq!(code_of(&e), "job_not_found");
+    let e = err(f
+        .claim_jobs(
+            Extension(parts(&t.carol)),
+            Parameters(tools::jobs::ClaimJobsArgs {
+                jobs: vec![job.clone()],
+                agent: None,
+                ttl: None,
+            }),
+        )
+        .await);
+    assert_eq!(code_of(&e), "job_not_found");
+    let e = err(f
+        .repend_job(
+            Extension(parts(&t.bob)),
+            Parameters(tools::jobs::JobArgs { job: job.clone() }),
+        )
+        .await);
+    assert_eq!(code_of(&e), "job_not_found");
+    let e = err(f
+        .delete_job(
+            Extension(parts(&t.bob)),
+            Parameters(tools::jobs::JobArgs { job: job.clone() }),
+        )
+        .await);
+    assert_eq!(code_of(&e), "job_not_found");
+    ok(f.claim_jobs(
+        Extension(parts(&t.alice)),
+        Parameters(tools::jobs::ClaimJobsArgs {
+            jobs: vec![job],
+            agent: None,
+            ttl: None,
+        }),
+    )
+    .await);
+
+    // Take a lease in, or look at the leases of, a hidden repo.
+    let e = err(f
+        .acquire_lease(
+            Extension(parts(&t.bob)),
+            Parameters(tools::coord::AcquireLeaseArgs {
+                resource: Some("branch:main".into()),
+                branch: None,
+                repo: Some("platform-repo".into()),
+                remote: None,
+                agent: None,
+                job: None,
+                ttl_seconds: None,
+            }),
+        )
+        .await);
+    assert_eq!(code_of(&e), "repo_unresolved");
+    let leases = |who: &Principal| {
+        f.list_leases(
+            Extension(parts(who)),
+            Parameters(tools::coord::RepoScopeArgs::default()),
+        )
+    };
+    assert_eq!(
+        ok(leases(&t.owner).await)["leases"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    assert_eq!(
+        ok(leases(&t.alice).await)["leases"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        ok(leases(&t.carol).await)["leases"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+/// A platform that cannot say which teams someone is on is `platform_unavailable`:
+/// never "all teams", never "org-wide only" presented as the whole answer.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_platform_outage_refuses_team_scoped_reads_and_writes(pool: PgPool) {
+    let t = teams_world(pool).await;
+    let f = &t.env.factory;
+    t.env.platform.set_down(true);
+
+    let unavailable = |e: ErrorData| {
+        assert_eq!(code_of(&e), "platform_unavailable");
+        assert!(
+            !e.message.contains("platform-repo") && !e.message.contains("job in"),
+            "leaked: {}",
+            e.message
+        );
+    };
+    unavailable(err(f
+        .list_repos(
+            Extension(parts(&t.alice)),
+            Parameters(tools::repos::ListReposArgs {
+                include_inactive: false,
+                limit: None,
+            }),
+        )
+        .await));
+    unavailable(err(f
+        .list_jobs(
+            Extension(parts(&t.alice)),
+            Parameters(tools::jobs::ListJobsArgs {
+                status: None,
+                repo: None,
+                remote: None,
+                mine: false,
+                agent_type: None,
+                limit: None,
+            }),
+        )
+        .await));
+    unavailable(err(t.get_job(&t.alice, "platform-repo").await));
+    unavailable(err(f
+        .stats(
+            Extension(parts(&t.alice)),
+            Parameters(tools::jobs::RepoScopeArgs {
+                repo: None,
+                remote: None,
+            }),
+        )
+        .await));
+    unavailable(err(f
+        .complete_job(
+            Extension(parts(&t.alice)),
+            Parameters(tools::jobs::CompleteJobArgs {
+                job: t.jobs["platform-repo"].clone(),
+                result: None,
+                expected_attempts: None,
+            }),
+        )
+        .await));
+}

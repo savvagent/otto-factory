@@ -28,7 +28,9 @@ use rmcp::model::ErrorData;
 use rmcp::{tool, tool_router};
 use serde::Deserialize;
 
-use super::{maybe_repo_of, out, repo_of, scope};
+use super::{
+    ensure_job_visible, ensure_jobs_visible, maybe_repo_of, out, repo_of, scope, visible_job,
+};
 use crate::server::{Factory, McpResult};
 
 /// Turn caller-supplied job ids into the domain type.
@@ -687,6 +689,7 @@ impl Factory {
         let caller = self.caller(&parts)?;
         caller.require_scope(scope::JOBS_WRITE).mcp()?;
 
+        let team = self.team_scope(&caller).await?;
         let mut tx = self.tx(&caller).await?;
 
         // No key: reproduce today's behavior exactly, including charging as
@@ -695,7 +698,7 @@ impl Factory {
         // answer first, so nothing should run ahead of it.
         let Some(key) = args.idempotency_key else {
             self.charge(&mut tx, &caller, "add_job").await?;
-            let repo = repo_of(&mut tx, args.repo, args.remote).await?;
+            let repo = repo_of(&mut tx, &team, args.repo, args.remote).await?;
             let job = tx
                 .add_job(NewJob {
                     repo_id: repo.id,
@@ -718,7 +721,7 @@ impl Factory {
         // charging (a replay must never be billed, and there is no way to
         // un-charge after the fact — see Factory::charge's third exception),
         // which needs `repo.id` to build the payload to check.
-        let repo = repo_of(&mut tx, args.repo, args.remote).await?;
+        let repo = repo_of(&mut tx, &team, args.repo, args.remote).await?;
         let new_job = NewJob {
             repo_id: repo.id,
             title: args.title,
@@ -758,9 +761,10 @@ impl Factory {
         let caller = self.caller(&parts)?;
         caller.require_scope(scope::JOBS_READ).mcp()?;
 
+        let team = self.team_scope(&caller).await?;
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "get_job").await?;
-        let job = tx.get_job(&JobId::from(args.job)).await.mcp()?;
+        let job = visible_job(&mut tx, &team, &JobId::from(args.job)).await?;
         tx.commit().await.mcp()?;
 
         Ok(Json(out::JobOut { job }))
@@ -792,13 +796,15 @@ impl Factory {
             .transpose()
             .mcp()?;
 
+        let team = self.team_scope(&caller).await?;
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "list_jobs").await?;
-        let repo_id = maybe_repo_of(&mut tx, args.repo, args.remote).await?;
+        let repo_id = maybe_repo_of(&mut tx, &team, args.repo, args.remote).await?;
         let jobs = tx
             .list_jobs(&JobFilter {
                 status,
                 repo_id,
+                visible_teams: team.restriction(),
                 created_by: args.mine.then_some(caller.user_id),
                 agent_type: args.agent_type,
                 limit: args.limit,
@@ -826,8 +832,10 @@ impl Factory {
         let caller = self.caller(&parts)?;
         caller.require_scope(scope::JOBS_WRITE).mcp()?;
 
+        let team = self.team_scope(&caller).await?;
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "update_job").await?;
+        ensure_job_visible(&mut tx, &team, &JobId::from(args.job.clone())).await?;
         let job = tx
             .update_job(
                 &JobId::from(args.job),
@@ -857,8 +865,10 @@ impl Factory {
         caller.require_scope(scope::JOBS_WRITE).mcp()?;
 
         let id = JobId::from(args.job);
+        let team = self.team_scope(&caller).await?;
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "delete_job").await?;
+        ensure_job_visible(&mut tx, &team, &id).await?;
         tx.delete_job(&id).await.mcp()?;
         tx.commit().await.mcp()?;
 
@@ -891,8 +901,10 @@ impl Factory {
         let caller = self.caller(&parts)?;
         caller.require_scope(scope::JOBS_WRITE).mcp()?;
 
+        let team = self.team_scope(&caller).await?;
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "claim_jobs").await?;
+        ensure_jobs_visible(&mut tx, &team, &ids(args.jobs.clone())).await?;
         let jobs = tx
             .claim_jobs(
                 &ids(args.jobs),
@@ -933,8 +945,10 @@ impl Factory {
         let caller = self.caller(&parts)?;
         caller.require_scope(scope::JOBS_WRITE).mcp()?;
 
+        let team = self.team_scope(&caller).await?;
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "renew_claim").await?;
+        ensure_job_visible(&mut tx, &team, &JobId::from(args.job.clone())).await?;
         let job = tx
             .renew_claim(
                 &JobId::from(args.job),
@@ -968,8 +982,10 @@ impl Factory {
         let caller = self.caller(&parts)?;
         caller.require_scope(scope::JOBS_WRITE).mcp()?;
 
+        let team = self.team_scope(&caller).await?;
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "complete_job").await?;
+        ensure_job_visible(&mut tx, &team, &JobId::from(args.job.clone())).await?;
         let job = tx
             .complete_job(
                 &JobId::from(args.job),
@@ -1012,8 +1028,10 @@ impl Factory {
         let caller = self.caller(&parts)?;
         caller.require_scope(scope::JOBS_WRITE).mcp()?;
 
+        let team = self.team_scope(&caller).await?;
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "fail_job").await?;
+        ensure_job_visible(&mut tx, &team, &JobId::from(args.job.clone())).await?;
         let job = tx
             .fail_job(
                 &JobId::from(args.job),
@@ -1058,8 +1076,10 @@ impl Factory {
         let caller = self.caller(&parts)?;
         caller.require_scope(scope::JOBS_WRITE).mcp()?;
 
+        let team = self.team_scope(&caller).await?;
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "request_cancel").await?;
+        ensure_job_visible(&mut tx, &team, &JobId::from(args.job.clone())).await?;
         let id = JobId::from(args.job);
         let job = tx
             .request_cancel(&id, caller.user_id, args.reason.as_deref())
@@ -1134,8 +1154,10 @@ impl Factory {
         let caller = self.caller(&parts)?;
         caller.require_scope(scope::JOBS_WRITE).mcp()?;
 
+        let team = self.team_scope(&caller).await?;
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "cancel_job").await?;
+        ensure_job_visible(&mut tx, &team, &JobId::from(args.job.clone())).await?;
         let job = tx
             .cancel_job(
                 &JobId::from(args.job),
@@ -1186,8 +1208,10 @@ impl Factory {
         let caller = self.caller(&parts)?;
         caller.require_scope(scope::JOBS_WRITE).mcp()?;
 
+        let team = self.team_scope(&caller).await?;
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "activate_job").await?;
+        ensure_job_visible(&mut tx, &team, &JobId::from(args.job.clone())).await?;
         let job = tx.activate_job(&JobId::from(args.job)).await.mcp()?;
         tx.commit().await.mcp()?;
 
@@ -1208,8 +1232,10 @@ impl Factory {
         let caller = self.caller(&parts)?;
         caller.require_scope(scope::JOBS_WRITE).mcp()?;
 
+        let team = self.team_scope(&caller).await?;
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "repend_job").await?;
+        ensure_job_visible(&mut tx, &team, &JobId::from(args.job.clone())).await?;
         let job = tx.repend_job(&JobId::from(args.job)).await.mcp()?;
         tx.commit().await.mcp()?;
 
@@ -1232,8 +1258,20 @@ impl Factory {
         caller.require_scope(scope::JOBS_WRITE).mcp()?;
 
         let job = JobId::from(args.job);
+        let team = self.team_scope(&caller).await?;
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "set_dependencies").await?;
+        ensure_jobs_visible(
+            &mut tx,
+            &team,
+            &[
+                vec![job.clone()],
+                ids(args.add.clone()),
+                ids(args.remove.clone()),
+            ]
+            .concat(),
+        )
+        .await?;
         let deps = tx
             .set_dependencies(&job, &ids(args.add), &ids(args.remove))
             .await
@@ -1264,10 +1302,12 @@ impl Factory {
         let caller = self.caller(&parts)?;
         caller.require_scope(scope::JOBS_READ).mcp()?;
 
+        let team = self.team_scope(&caller).await?;
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "ready").await?;
-        let repo_id = maybe_repo_of(&mut tx, args.repo, args.remote).await?;
-        let jobs = tx.ready(repo_id, args.agent_type.as_deref()).await.mcp()?;
+        let repo_id = maybe_repo_of(&mut tx, &team, args.repo, args.remote).await?;
+        let mut jobs = tx.ready(repo_id, args.agent_type.as_deref()).await.mcp()?;
+        jobs.retain(|j| team.allows(j.team_id));
         tx.commit().await.mcp()?;
 
         Ok(Json(out::JobsOut { jobs }))
@@ -1286,10 +1326,12 @@ impl Factory {
         let caller = self.caller(&parts)?;
         caller.require_scope(scope::JOBS_READ).mcp()?;
 
+        let team = self.team_scope(&caller).await?;
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "blocked").await?;
-        let repo_id = maybe_repo_of(&mut tx, args.repo, args.remote).await?;
-        let jobs = tx.blocked(repo_id).await.mcp()?;
+        let repo_id = maybe_repo_of(&mut tx, &team, args.repo, args.remote).await?;
+        let mut jobs = tx.blocked(repo_id).await.mcp()?;
+        jobs.retain(|j| team.allows(j.team_id));
         tx.commit().await.mcp()?;
 
         Ok(Json(out::JobsOut { jobs }))
@@ -1309,10 +1351,14 @@ impl Factory {
         let caller = self.caller(&parts)?;
         caller.require_scope(scope::JOBS_READ).mcp()?;
 
+        let team = self.team_scope(&caller).await?;
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "stats").await?;
-        let repo_id = maybe_repo_of(&mut tx, args.repo, args.remote).await?;
-        let stats = tx.stats(repo_id).await.mcp()?;
+        let repo_id = maybe_repo_of(&mut tx, &team, args.repo, args.remote).await?;
+        let stats = match team.restriction() {
+            None => tx.stats(repo_id).await.mcp()?,
+            Some(teams) => tx.stats_for_teams(repo_id, &teams).await.mcp()?,
+        };
         tx.commit().await.mcp()?;
 
         Ok(Json(out::StatsOut { stats }))
@@ -1335,8 +1381,10 @@ impl Factory {
         let caller = self.caller(&parts)?;
         caller.require_scope(scope::TRACKERS).mcp()?;
 
+        let team = self.team_scope(&caller).await?;
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "link_ticket").await?;
+        ensure_job_visible(&mut tx, &team, &JobId::from(args.job.clone())).await?;
         let job = tx
             .link_ticket(&JobId::from(args.job), args.tracker, &args.ticket_ref)
             .await
@@ -1384,8 +1432,9 @@ impl Factory {
         // refused before this tool posts anything to GitHub or JIRA, rather
         // than only finding out afterwards via the eventual `charge` call
         // below (see `Factory::would_refuse`'s doc comment).
+        let team = self.team_scope(&caller).await?;
         let mut tx = self.tx(&caller).await?;
-        let job = tx.get_job(&JobId::from(args.job)).await.mcp()?;
+        let job = visible_job(&mut tx, &team, &JobId::from(args.job)).await?;
         self.would_refuse(&mut tx, "sync_ticket").await?;
         tx.commit().await.mcp()?;
 

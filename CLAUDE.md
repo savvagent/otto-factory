@@ -315,10 +315,15 @@ members, invites, teams, SSO, tokens, or usage. Those are the platform's, and
   (`?team=`) resolve the same way. When the platform deletes a team, its repos stay scoped to the
   dangling id (a tombstone nobody matches) rather than going org-wide — see
   `of_core::platform_events`.
-- **Team membership is not known here yet, and that fails closed too.** The platform's resource
-  API can say a team exists but not who is in it, so non-admins see org-wide repos only and
-  team-scoped repos are admin-only (`callers_teams` in `routes/repos.rs` is the one function to
-  change when the platform exposes "teams of this member").
+- **Team membership is the platform's, asked per caller, and it fails closed.** Owners and admins
+  see every repo and job. Anyone else sees org-wide rows (null `team_id`) plus those of the teams
+  `PlatformClient::member_teams` lists for them (`of_core::teams::TeamScope`, built by
+  `OrgCtx::team_scope` on the console and `Factory::team_scope` over MCP, **before** the
+  transaction opens). A platform that cannot answer is `503 platform_unavailable`, never "all
+  teams"; a team id the answer does not list (unknown, foreign, deleted) matches nothing. A row of
+  a team the caller is not on is `404` / `job_not_found` / `repo_unresolved`, and
+  `resolve_repo_visible` keeps its slug out of the "registered repos" list too. Every tool or route
+  that names a repo or a job resolves it through the scope, writes included.
 - **The platform's webhooks are idempotent and signature-first.** `/platform/webhooks` verifies
   `Otto-Signature` (HMAC over timestamp and raw body, replay-bounded) before parsing anything;
   a bad signature is `401` and does nothing. A handled event, a repeat (the event id is recorded in the same transaction as its effects, `platform_events`;
