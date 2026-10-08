@@ -1,11 +1,66 @@
 # Agent label validation design
 
-> **Status:** DRAFT — bound and validate the caller-chosen `agent` label on `claim_jobs` and
-> `acquire_lease` at write time, and render it quoted wherever it is interpolated into error
-> prose a peer agent reads. Closes savvagent/otto-factory#163.
+> **Status:** DRAFT — bound and validate the caller-chosen `agent` label on `claim_jobs`,
+> `acquire_lease`, and `send_message` at write time, render it quoted wherever it is
+> interpolated into error prose a peer agent reads, and withhold a non-conforming legacy label
+> from every other output. Closes savvagent/otto-factory#163. See the Addendum for what changed
+> after review.
 
 > **Follows from:** `docs/specs/2026-09-11-claim-generation-fencing-design.md` (shipped in
 > savvagent/otto-factory#161), whose round-2 security review flagged this and deferred it here.
+
+## Addendum: review round 1 (PR #208)
+
+The mandatory review trio changed four decisions below. Where the body of this spec disagrees
+with this section, this section wins.
+
+1. **`send_message` is in scope** (independent security review, Medium). The Out-list argument
+   below — "bounding the label beside a body closes nothing" — missed that the body is capped at
+   `MAX_BODY_LEN` while the label had **no cap at all**: an unbounded string stored in the shared
+   `messages` table and delivered to every recipient is a storage and response-size problem as
+   well as the same injection surface. `MessagesExt::send_message` and `find_replayed_message`
+   now run `agent_label::validate` before any SQL, and the stored label is the normalized one.
+   The idempotency fingerprint still hashes the label *as sent*, so a replay of the identical
+   call matches its own fingerprint and a message stored before this change still replays
+   (`a_keyed_send_message_with_a_padded_label_replays_cleanly`).
+2. **Legacy labels are withheld from structured output too** (security review, Medium). The
+   label also reaches peers as a JSON field (`claimedByLabel`, `holderLabel`, `senderLabel`) of
+   `get_job` / `list_jobs` / `ready` / `list_leases` / `read_messages` and the console API.
+   Rather than a migration (the per-org loop `CLAUDE.md` requires, for no benefit a read-side
+   filter cannot give), each field carries `#[serde(serialize_with =
+   "agent_label::serialize_stored")]`, which emits `agent_label::displayable(label)` — the trimmed
+   label if it passes today's rule, else `null`. `sync_ticket`'s manual tracker write-back uses
+   `displayable` the same way. A side benefit: tightening the rule later automatically withholds
+   labels the new rule refuses.
+3. **Quoting is explicit, not `{:?}`** (Rust review, Important). `Debug` for `str` is not a
+   stable format and escapes combining marks, so `cafe\u{301}` or a Hindi label would render as
+   `\u{...}` noise. `holder` now writes the quotes itself and escapes only `"` and `\`.
+4. **The deny-list is wider** (Rust and security reviews). It now also refuses every whitespace
+   character except the plain space (U+00A0, U+2000–U+200A, U+3000, …), the remaining format
+   characters (U+0600–U+0605, U+06DD, U+070F, U+0890–U+0891, U+08E2, U+FFF9–U+FFFB, U+110BD,
+   U+110CD, U+13430–U+1343F, U+1BCA0–U+1BCA3, U+1D173–U+1D17A), U+2800 (braille blank), and the
+   private-use areas (U+E000–U+F8FF, U+F0000–U+10FFFF). Unassigned code points are still allowed:
+   detecting them needs a Unicode version table this crate does not carry, and quoting is the
+   backstop. The refusal's "at character N" now says it counts after trimming.
+
+Also from review: `claim_jobs` makes a single `sync_jobs_after_transition` call, passing the label
+stored on the first claimed job, instead of a per-job loop. A test pins the "128" written in the
+three tool descriptions to `MAX_LEN`.
+
+**Considered, not done:**
+- A `maxLength` in the input schema. The limit applies *after* trimming, so a strict client
+  enforcing `maxLength: 128` would refuse a padded label the server accepts. The description
+  states the limit instead.
+- Rendering the label as inline code in the GitHub/JIRA claim comment (`of-trackers`'
+  `Claimed by {agent}.`), so that `@mention` and markdown in a label stop rendering. The comment
+  leaves the org, but it is posted by the org's own tracker app into the org's own tickets. It
+  already carries free text from `result`, `error`, and cancellation notes with the same
+  property, so it belongs with those, not here. See Risks.
+
+**Public interface accounting, revised:** the break now covers three tools (`send_message`
+too), plus one visible data change: a blank `agent` used to be stored and returned as `""` and
+now comes back as `null`. A legacy non-conforming label also now comes back as `null` in
+structured output.
 
 ## Premise corrections
 
@@ -55,11 +110,8 @@ server's own prose.
 
 **Out:**
 
-- **`send_message`'s `agent` (`messages.sender_label`).** It is never interpolated into error
-  prose: it is returned only as the structured `senderLabel` field of a message whose `body` —
-  up to `MAX_BODY_LEN` bytes of free text — was written by the same sender. Messages are
-  peer-authored content by design; bounding the label beside an unbounded-by-comparison body
-  closes nothing. Left unchanged and documented here rather than silently skipped.
+- ~~**`send_message`'s `agent` (`messages.sender_label`).**~~ Moved into scope by the
+  Addendum (item 1).
 - **Repo slugs and names in `Error::RepoUnresolved`'s "Registered repos: …" list.** Same
   pattern (peer-chosen text in error prose), but a different input (`register_repo`, gated by
   `repos:write`), with its own compatibility question (existing slugs are identifiers that
@@ -70,9 +122,9 @@ server's own prose.
   `ticket_ref`): these repeat what *this* caller just sent, so they cannot carry another
   member's text.
 - **Rewriting stored legacy labels.** No migration. A migration that rewrites tenant rows needs
-  the per-org loop `CLAUDE.md` describes, and the benefit is nil: render-time handling (§3)
-  already keeps a non-conforming legacy label out of error prose, and the label remains visible
-  as structured data in `get_job` / `list_leases` output, which is where it already was.
+  the per-org loop `CLAUDE.md` describes, and the benefit is nil: render-time handling (§3, and
+  the Addendum's item 2 for structured output) already withholds a non-conforming legacy label
+  everywhere it would leave the server.
 - **Validating against a list of known clients** — constraint 3 forbids it. The rule is purely
   about shape, never about which agent it names.
 - Any change to tracker sync beyond §4's one line (which makes the ticket comment carry the
@@ -254,5 +306,9 @@ wire level) needs no entry.
 - The deny-list may miss an exotic invisible code point. Its job is to stop the common tricks
   (newlines, bidi overrides, zero-width joiners, tag characters); the quoting in §3 is the
   backstop for anything it misses.
+- Labels that pass the rule can still contain `@name` or markdown, which the tracker renders in
+  the claim comment `of-trackers` posts. That is the same property as the `result`, `error`, and
+  cancellation-note text posted on other transitions, and should be handled for all of them
+  together if at all.
 - Repo slugs in `RepoUnresolved` remain unbounded peer-chosen text in error prose until the
   follow-up issue (savvagent/otto-factory#206) lands.

@@ -4883,9 +4883,49 @@ async fn an_invalid_agent_label_is_refused_and_not_billed(pool: PgPool) {
         .await);
     assert_eq!(code_of(&e), "invalid_agent_label");
 
+    let e = err(env
+        .factory
+        .send_message(
+            Extension(parts(&caller)),
+            Parameters(tools::coord::SendMessageArgs {
+                body: "hello".into(),
+                to: None,
+                kind: None,
+                repo: None,
+                remote: None,
+                job: None,
+                in_reply_to: None,
+                agent: Some("ci\u{202e}7".into()),
+                idempotency_key: None,
+            }),
+        )
+        .await);
+    assert_eq!(code_of(&e), "invalid_agent_label");
+
     assert_eq!(
         of_billing::outbox::pending(&env.db).await.unwrap(),
         before,
         "a refused call must leave no usage row behind"
     );
+}
+
+/// The label limit is written out as a literal in tool descriptions (an
+/// attribute string cannot name a constant), so this keeps them honest if
+/// `agent_label::MAX_LEN` ever moves.
+#[test]
+fn tools_that_take_an_agent_label_state_its_limit() {
+    let limit = format!(
+        "at most {} visible characters",
+        of_core::agent_label::MAX_LEN
+    );
+    for name in ["claim_jobs", "acquire_lease", "send_message"] {
+        let tool = tools::router()
+            .list_all()
+            .into_iter()
+            .find(|t| t.name == name)
+            .unwrap_or_else(|| panic!("{name} is missing"));
+        let description = tool.description.as_deref().unwrap_or_default();
+        assert!(description.contains(&limit), "{name}: {description}");
+        assert!(description.contains("invalid_agent_label"), "{name}");
+    }
 }

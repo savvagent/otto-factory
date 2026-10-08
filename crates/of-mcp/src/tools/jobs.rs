@@ -953,14 +953,10 @@ impl Factory {
         let out = Json(out::JobsOut { jobs: jobs.clone() });
         // The ticket comment names the label as stored — trimmed, and absent
         // when blank — never the raw argument, the same as `sync_ticket` does.
-        for job in &jobs {
-            self.sync_jobs_after_transition(
-                std::slice::from_ref(job),
-                JobTransition::Claimed,
-                job.claimed_by_label.as_deref(),
-            )
+        // One claim stores one label on every job it takes.
+        let label = jobs.first().and_then(|j| j.claimed_by_label.as_deref());
+        self.sync_jobs_after_transition(&jobs, JobTransition::Claimed, label)
             .await;
-        }
 
         Ok(out)
     }
@@ -1507,8 +1503,13 @@ impl Factory {
                 )))
                 .mcp();
             }
-            Status::InProgress => (JobTransition::Claimed, job.claimed_by_label.clone()),
-            Status::Active => (JobTransition::Claimed, job.claimed_by_label.clone()),
+            // A label stored before #163's policy is withheld here as it is
+            // from every other output, rather than posted to the ticket.
+            Status::InProgress | Status::Active => (
+                JobTransition::Claimed,
+                of_core::agent_label::displayable(job.claimed_by_label.as_deref())
+                    .map(str::to_string),
+            ),
             Status::Completed => (JobTransition::Completed, job.result.clone()),
             Status::Failed => (JobTransition::Failed, job.error.clone()),
             // No dedicated outbound "cancelled" signal exists for either tracker (no

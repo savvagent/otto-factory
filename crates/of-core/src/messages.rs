@@ -79,6 +79,7 @@ pub struct Message {
     pub org_id: OrgId,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub sender_user_id: UserId,
+    #[serde(serialize_with = "crate::agent_label::serialize_stored")]
     pub sender_label: Option<String>,
     pub sender_kind: SenderKind,
     pub recipient_user_id: Option<UserId>,
@@ -355,6 +356,9 @@ impl MessagesExt for Tx<'_> {
                 body.len()
             )));
         }
+        // The same refusal `send_message` gives, before any SQL, so a replay
+        // carrying a label the policy refuses is refused rather than resolved.
+        crate::agent_label::validate(new.sender_label.as_deref())?;
 
         let org = self.org();
         let existing: Option<(i64, Vec<u8>)> = sqlx::query_as(
@@ -400,6 +404,11 @@ impl MessagesExt for Tx<'_> {
         if let Some(key) = new.idempotency_key.as_deref() {
             crate::idempotency::validate(key)?;
         }
+        // Recipients read the label beside the body (#163). The normalized
+        // form is what is stored; the idempotency fingerprint below still
+        // hashes the label as sent, so a replay of the identical call matches
+        // its own earlier fingerprint whichever form it took.
+        let sender_label = crate::agent_label::validate(new.sender_label.as_deref())?;
 
         let org = self.org();
 
@@ -422,7 +431,7 @@ impl MessagesExt for Tx<'_> {
             ))
             .bind(org)
             .bind(sender)
-            .bind(new.sender_label.as_deref())
+            .bind(sender_label)
             .bind(new.sender_kind)
             .bind(new.recipient_user_id)
             .bind(new.team_id.map(|t| t.in_org(self.org())).transpose()?)
@@ -532,7 +541,7 @@ impl MessagesExt for Tx<'_> {
             ))
             .bind(org)
             .bind(sender)
-            .bind(new.sender_label.as_deref())
+            .bind(sender_label)
             .bind(new.sender_kind)
             .bind(new.recipient_user_id)
             .bind(new.team_id.map(|t| t.in_org(self.org())).transpose()?)

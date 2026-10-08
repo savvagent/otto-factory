@@ -44,6 +44,7 @@ pub struct Lease {
     pub repo_id: RepoId,
     pub resource: String,
     pub holder_user_id: UserId,
+    #[serde(serialize_with = "crate::agent_label::serialize_stored")]
     pub holder_label: Option<String>,
     pub job_id: Option<String>,
     pub acquired_at: chrono::DateTime<chrono::Utc>,

@@ -123,7 +123,11 @@ pub struct SendMessageArgs {
     /// The id of the message you are replying to.
     #[serde(default)]
     pub in_reply_to: Option<i64>,
-    /// How you want to be identified, for example "api-agent@ci-7".
+    /// How you want to be identified, for example "api-agent@ci-7". At most
+    /// 128 characters on one line, with no control, line-break, or invisible
+    /// formatting characters; anything else is refused with
+    /// invalid_agent_label rather than shortened. Blank is the same as
+    /// omitting it.
     #[serde(default)]
     pub agent: Option<String>,
     /// A caller-chosen key. Replaying send_message with the same key and the
@@ -381,7 +385,10 @@ impl Factory {
                        a job field — 'I have left the migration half-applied on this branch' is \
                        exactly the kind of thing that belongs here. Pass idempotencyKey if your \
                        connection can drop before you see the response, so a retry returns the \
-                       original message instead of posting a duplicate."
+                       original message instead of posting a duplicate. agent is a short label (one \
+                       line, at most 128 visible characters) shown to recipients as the sender; \
+                       a longer or multi-line one is refused with invalid_agent_label rather \
+                       than shortened."
     )]
     pub async fn send_message(
         &self,

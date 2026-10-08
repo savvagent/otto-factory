@@ -159,6 +159,7 @@ pub struct Job {
     pub error: Option<String>,
     pub created_by: Option<UserId>,
     pub claimed_by: Option<UserId>,
+    #[serde(serialize_with = "crate::agent_label::serialize_stored")]
     pub claimed_by_label: Option<String>,
     /// When the current claim lapses and the job becomes claimable again via
     /// `ready()`/`claim_jobs`, the way an expired `repo_leases` row frees its
