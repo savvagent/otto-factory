@@ -10,7 +10,11 @@ implements it exactly.
 
 ## Status — 2026-10-08
 
-⬜ Not started.
+🚧 Tasks 1–3 implemented on PR #208. Review round 1 added work beyond these tasks, recorded in the
+spec's Addendum: the policy now covers `send_message` too, a non-conforming legacy label is
+withheld from every serialized job, lease, and message (`agent_label::serialize_stored`) and from
+`sync_ticket`, `holder` quotes explicitly instead of with `{:?}`, the deny-list is wider, and a test
+pins the "128" in the tool descriptions to `MAX_LEN`.
 
 ## Global Constraints
 
