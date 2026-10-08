@@ -20,8 +20,9 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# Read-only by default; only the jobs below that name their own broader `permissions:` block
-# (release-please) get more. Nothing else in this workflow writes to the repo or needs to.
+# Read-only by default. Nothing in this workflow writes to the repo with GITHUB_TOKEN: the one job
+# that writes (release-please) does it with a GitHub App token minted inside the `release`
+# environment, and its own GITHUB_TOKEN has no permissions at all.
 permissions:
   contents: read
 
@@ -244,9 +245,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: [rust, web, docker-build]
     # Its own explicit guard, not just on.push.branches -- this job mints a release-app token
-    # with contents + pull-requests + issues write, more than deploy's own contents:read + one
-    # app-scoped Fly token, so it earns the same "don't lean on the trigger block" treatment
-    # deploy's if: gets below.
+    # with contents + pull-requests write, more than deploy's own contents:read + one app-scoped
+    # Fly token, so it earns the same "don't lean on the trigger block" treatment deploy's if:
+    # gets below.
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     timeout-minutes: 10
     # The writes (release PR, labels, tag, GitHub Release) go through the otto-factory release
@@ -254,9 +255,15 @@ jobs:
     # GITHUB_TOKEN open a pull request ("Allow GitHub Actions to create and approve pull
     # requests") is one switch with approving one, and it is off so a compromised workflow
     # token cannot approve a PR (savvagent/otto-factory#117). A side effect is that release PRs
-    # now run CI, which PRs opened by GITHUB_TOKEN never trigger.
-    permissions:
-      contents: read
+    # now run CI, which PRs opened by GITHUB_TOKEN never trigger -- and so would a tag or a
+    # Release it creates, so any future `on: release` / `on: push: tags` workflow fires on every
+    # release and needs a guard of its own.
+    #
+    # The `if:` above is text in a file any branch can edit, so it cannot keep the App's private
+    # key from a same-repo branch's own copy of this workflow. The `release` environment can: it
+    # admits only `master`, and the key is an environment secret, never a repository one.
+    environment: release
+    permissions: {}
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
@@ -268,7 +275,6 @@ jobs:
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
           permission-contents: write
           permission-pull-requests: write
-          permission-issues: write
       - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         id: release
         with:
