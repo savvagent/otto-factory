@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.1](https://github.com/savvagent/otto-factory/compare/v0.10.0...v0.10.1) (2026-10-08)
+
+
+### Bug Fixes
+
+* scope repo and job access to the caller's teams ([#200](https://github.com/savvagent/otto-factory/issues/200)) ([18587ea](https://github.com/savvagent/otto-factory/commit/18587ea68ef35a349df891969775eeba86676972))
+
 ## [0.10.0](https://github.com/savvagent/otto-factory/compare/v0.9.0...v0.10.0) (2026-10-08)
 
 
