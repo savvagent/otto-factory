@@ -50,9 +50,9 @@ primary_region = "iad"
   # (a public client; PKCE is what binds a code to its browser). Printed by
   # `otto-platform-server client register --name "otto-factory console"
   # --redirect-uri https://otto-factory.savvagent.com/auth/callback --first-party`
-  # (docs/deploy/fly.md). Uncomment and set once registered; until then
-  # `/auth/login` answers 503 console_login_disabled and everything else runs.
-  # OF_CONSOLE_CLIENT_ID = "otto_client_…"
+  # (docs/deploy/fly.md). Unset, `/auth/login` answers 503
+  # console_login_disabled and everything else runs.
+  OF_CONSOLE_CLIENT_ID = "otto_client_BY6fncRMJV2hDPnDv8n9R1LYE004vJJi4GJDvhJPuTQ"
   OF_STATIC_DIR = "/srv/console"
   OF_LOG_FORMAT = "json"
   RUST_LOG = "info,of_server=info,of_mcp=info,of_web=info"

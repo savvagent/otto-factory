@@ -72,7 +72,10 @@ otto-platform-server resource register https://otto-factory.savvagent.com/mcp \
   --name otto-factory \
   --scopes jobs:read,jobs:write,repos:read,repos:write,messages,trackers,org:admin \
   --default-scopes jobs:read,repos:read
+
+otto-platform-server resource rotate-secret https://otto-factory.savvagent.com/mcp
 #   -> prints the introspection secret ONCE: set it as OF_INTROSPECTION_SECRET
+#      (`register` issues no credential; `rotate-secret` is also how to replace it)
 
 otto-platform-server resource set-webhook https://otto-factory.savvagent.com/mcp \
   https://otto-factory.savvagent.com/platform/webhooks
