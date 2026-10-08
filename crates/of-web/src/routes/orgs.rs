@@ -367,9 +367,10 @@ pub async fn reset_member_passkeys(
     // other orgs this caller has no authority in. Being an admin *here* must
     // not be a way into an owner seat *there*, so the caller must hold at
     // least the same authority over the account in every org it belongs to
-    // (owner where the target is an owner, admin otherwise). Resetting your
-    // own account is always yours to do. The refusal does not name the other
-    // orgs, which are not this caller's to learn.
+    // (owner where the target is an owner, admin otherwise). An admin
+    // resetting their own account is exempt from this cross-org check (the
+    // admin requirement above still applies). The refusal does not name the
+    // other orgs, which are not this caller's to learn.
     if target != ctx.user.id {
         for membership in state.db.list_user_orgs(target).await? {
             if membership.org_id == ctx.org.id {

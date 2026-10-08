@@ -2556,6 +2556,30 @@ async fn a_reset_cannot_reach_an_account_that_holds_power_in_another_org(pool: P
         .expect(StatusCode::CREATED);
 }
 
+/// The other half of the cross-org rule: where the member is *not* an owner,
+/// being an admin there is enough.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn an_admin_in_every_org_can_reset_a_non_owner_member(pool: PgPool) {
+    let h = harness(pool).await;
+    let rob = onboard(&h, "rob@acme.test").await;
+    let acme = org_with_owner(&h, "acme", &rob).await;
+    let dave = onboard(&h, "dave@daveco.test").await;
+    let daveco = org_with_owner(&h, "daveco", &dave).await;
+    let carol = onboard(&h, "carol@acme.test").await;
+    add_member(&h, acme, carol.user, Role::Member).await;
+    add_member(&h, daveco, carol.user, Role::Member).await;
+    add_member(&h, daveco, rob.user, Role::Admin).await;
+
+    Call::post(format!(
+        "/api/orgs/acme/members/{}/reset-passkeys",
+        carol.user
+    ))
+    .with_session(&rob.session)
+    .send(&h.router)
+    .await
+    .expect(StatusCode::CREATED);
+}
+
 // --------------------------------------------------------------- trackers
 
 /// Tracker setup grants a repo the ability to move a customer's tickets, so
