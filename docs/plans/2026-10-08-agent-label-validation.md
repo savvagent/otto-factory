@@ -18,7 +18,10 @@ withheld from every serialized job, lease, and message (`agent_label::serialize_
 `sync_ticket`, `holder` quotes explicitly instead of with `{:?}`, the deny-list is wider, and a test
 pins the "128" in the tool descriptions to `MAX_LEN`. Later Copilot rounds made `validate` trim
 only the plain space, so forbidden edge characters are refused rather than stripped, and let a
-keyed message stored before the policy still replay (spec Addendum items 5 and 6).
+keyed message stored before the policy still replay (spec Addendum items 5 and 6). That replay
+exception applies only to an exact idempotency-key and fingerprint match on a row that already
+exists, and the replayed message's label is still withheld (`null`) by
+`agent_label::serialize_stored`. Every call that inserts is validated.
 
 ## Global Constraints
 
@@ -114,7 +117,8 @@ surface and proves the code reaches an MCP caller. Each depends on the one befor
   `code_of` helper).
 - [x] Update `ClaimJobsArgs::agent` and `AcquireLeaseArgs::agent` docs and both tool descriptions
   per spec §4 (`AcquireLeaseArgs::agent` has no "Free-form." to replace — append the sentence;
-  `SendMessageArgs::agent` is out of scope and stays unchanged).
+  `SendMessageArgs::agent` is out of scope and stays unchanged — **superseded** by spec
+  Addendum item 1: `send_message` is covered, and its `agent` doc states the rule).
 - [x] `claim_jobs` handler: pass the claimed jobs' stored `claimed_by_label` (not the raw
   `args.agent`) to `sync_jobs_after_transition`, per spec §4.
 - [x] File the out-of-scope follow-up issue for repo slugs/names in `RepoUnresolved`
