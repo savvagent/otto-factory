@@ -11,7 +11,7 @@
 use crate::error::{Error, Result};
 use crate::ids::{JobId, RepoId};
 use crate::repos::ReposExt;
-use crate::teams::VerifiedTeam;
+use crate::teams::{TeamScope, VerifiedTeam};
 use otto_tenant::ids::{OrgId, TeamId, UserId};
 use otto_tenant::Tx;
 use serde::{Deserialize, Serialize};
@@ -243,6 +243,20 @@ pub struct Stats {
     pub cancelled: i64,
     pub blocked: i64,
     pub total: i64,
+}
+
+/// SQL: job `j` is visible under the `uuid[]` bound as `$n` (NULL = everything).
+///
+/// A job is visible only if its own `team_id` is **and** its repo's is: a job
+/// with no team on a team-scoped repo belongs to that team's work, not to the
+/// org's. Every team-aware read of jobs goes through this one predicate.
+pub(crate) fn job_visible_sql(n: usize) -> String {
+    format!(
+        "(${n}::uuid[] IS NULL OR ((j.team_id IS NULL OR j.team_id = ANY(${n})) \
+           AND NOT EXISTS (SELECT 1 FROM repos vr WHERE vr.org_id = j.org_id \
+                           AND vr.id = j.repo_id AND vr.team_id IS NOT NULL \
+                           AND NOT vr.team_id = ANY(${n}))))"
+    )
 }
 
 const JOB_COLS: &str = "id, org_id, repo_id, team_id, title, description, status, ticket_ref, \
@@ -570,6 +584,29 @@ pub trait JobsExt {
         repo_id: Option<RepoId>,
         teams: &[TeamId],
     ) -> impl std::future::Future<Output = Result<Stats>> + Send;
+
+    /// [`Self::get_job`] for a caller with a [`TeamScope`]: a job whose own team
+    /// or whose repo's team is not visible is [`Error::JobNotFound`], exactly
+    /// like a job that does not exist.
+    fn get_job_visible(
+        &mut self,
+        id: &JobId,
+        scope: &TeamScope,
+    ) -> impl std::future::Future<Output = Result<Job>> + Send;
+
+    /// Of `ids`, those that name jobs `scope` may see. Unknown ids are dropped
+    /// too. For lists that carry job ids (dependencies) back to the caller.
+    fn visible_job_ids(
+        &mut self,
+        ids: &[JobId],
+        scope: &TeamScope,
+    ) -> impl std::future::Future<Output = Result<Vec<JobId>>> + Send;
+
+    /// Ids of repos hidden from `scope`, for filtering lists of jobs in memory.
+    fn hidden_repo_ids(
+        &mut self,
+        scope: &TeamScope,
+    ) -> impl std::future::Future<Output = Result<std::collections::HashSet<RepoId>>> + Send;
 }
 
 impl JobsExt for Tx<'_> {
@@ -1064,16 +1101,17 @@ impl JobsExt for Tx<'_> {
     async fn list_jobs(&mut self, f: &JobFilter) -> Result<Vec<Job>> {
         let org = self.org();
         let jobs = sqlx::query_as(&format!(
-            "SELECT {JOB_COLS} FROM jobs \
+            "SELECT {JOB_COLS} FROM jobs j \
              WHERE org_id = $1 \
                AND ($2::job_status IS NULL OR status = $2) \
                AND ($3::uuid IS NULL OR repo_id = $3) \
                AND ($4::uuid IS NULL OR team_id = $4) \
                AND ($5::uuid IS NULL OR created_by = $5) \
                AND ($6::text IS NULL OR agent_type = $6 OR agent_type IS NULL) \
-               AND ($8::uuid[] IS NULL OR team_id IS NULL OR team_id = ANY($8)) \
+               AND {} \
              ORDER BY created_at DESC \
-             LIMIT $7"
+             LIMIT $7",
+            job_visible_sql(8)
         ))
         .bind(org)
         .bind(f.status)
@@ -1729,7 +1767,7 @@ impl JobsExt for Tx<'_> {
     ) -> Result<Stats> {
         let org = self.org();
         let teams: Vec<uuid::Uuid> = teams.iter().map(|t| t.as_uuid()).collect();
-        let stats = sqlx::query_as(
+        let stats = sqlx::query_as(&format!(
             "SELECT \
                COUNT(*) FILTER (WHERE status = 'pending')     AS pending, \
                COUNT(*) FILTER (WHERE status = 'in-progress') AS in_progress, \
@@ -1745,14 +1783,66 @@ impl JobsExt for Tx<'_> {
                COUNT(*)                                       AS total \
              FROM jobs j WHERE j.org_id = $1 \
                AND ($2::uuid IS NULL OR j.repo_id = $2) \
-               AND (j.team_id IS NULL OR j.team_id = ANY($3))",
-        )
+               AND {}",
+            job_visible_sql(3)
+        ))
         .bind(org)
         .bind(repo_id)
         .bind(teams)
         .fetch_one(self.conn())
         .await?;
         Ok(stats)
+    }
+
+    async fn get_job_visible(&mut self, id: &JobId, scope: &TeamScope) -> Result<Job> {
+        let job = self.get_job(id).await?;
+        if scope.is_all() {
+            return Ok(job);
+        }
+        let hidden = self.hidden_repo_ids(scope).await?;
+        if scope.allows(job.team_id) && !hidden.contains(&job.repo_id) {
+            Ok(job)
+        } else {
+            Err(Error::JobNotFound(id.clone()))
+        }
+    }
+
+    async fn visible_job_ids(&mut self, ids: &[JobId], scope: &TeamScope) -> Result<Vec<JobId>> {
+        let org = self.org();
+        let wanted: Vec<String> = ids.iter().map(|i| i.0.clone()).collect();
+        let teams = scope
+            .restriction()
+            .map(|v| v.iter().map(|t| t.as_uuid()).collect::<Vec<uuid::Uuid>>());
+        let found: Vec<String> = sqlx::query_scalar(&format!(
+            "SELECT j.id FROM jobs j WHERE j.org_id = $1 AND j.id = ANY($2) AND {} ORDER BY j.id",
+            job_visible_sql(3)
+        ))
+        .bind(org)
+        .bind(&wanted)
+        .bind(teams)
+        .fetch_all(self.conn())
+        .await?;
+        Ok(found.into_iter().map(JobId).collect())
+    }
+
+    async fn hidden_repo_ids(
+        &mut self,
+        scope: &TeamScope,
+    ) -> Result<std::collections::HashSet<RepoId>> {
+        let Some(teams) = scope.restriction() else {
+            return Ok(Default::default());
+        };
+        let teams: Vec<uuid::Uuid> = teams.iter().map(|t| t.as_uuid()).collect();
+        let org = self.org();
+        let ids: Vec<RepoId> = sqlx::query_scalar(
+            "SELECT id FROM repos WHERE org_id = $1 \
+               AND team_id IS NOT NULL AND NOT team_id = ANY($2)",
+        )
+        .bind(org)
+        .bind(teams)
+        .fetch_all(self.conn())
+        .await?;
+        Ok(ids.into_iter().collect())
     }
 }
 

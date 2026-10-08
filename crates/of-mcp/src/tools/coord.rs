@@ -5,9 +5,9 @@
 //! cannot hold; `watch` lets an agent sit still until something happens
 //! instead of asking every few seconds.
 
+use of_core::jobs::JobsExt;
 use of_core::leases::LeasesExt;
 use of_core::messages::MessagesExt;
-use of_core::repos::ReposExt;
 use std::time::Duration;
 
 use of_core::ids::JobId;
@@ -19,7 +19,7 @@ use rmcp::model::ErrorData;
 use rmcp::{tool, tool_router};
 use serde::Deserialize;
 
-use super::{maybe_repo_of, out, repo_of, scope};
+use super::{ensure_job_visible, maybe_repo_of, out, repo_of, scope};
 use crate::server::{Factory, McpResult};
 
 /// Default long-poll duration, and the ceiling.
@@ -260,6 +260,9 @@ impl Factory {
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "acquire_lease").await?;
         let repo = repo_of(&mut tx, &team, args.repo, args.remote).await?;
+        if let Some(job) = &job {
+            ensure_job_visible(&mut tx, &team, job).await?;
+        }
         let lease = tx
             .acquire_lease(
                 repo.id,
@@ -291,8 +294,10 @@ impl Factory {
         caller.require_scope(scope::JOBS_WRITE).mcp()?;
 
         let id = lease_id(&args.lease)?;
+        let team = self.team_scope(&caller).await?;
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "renew_lease").await?;
+        ensure_lease_visible(&mut tx, &team, id).await?;
         let lease = tx
             .renew_lease(id, caller.user_id, args.ttl_seconds)
             .await
@@ -316,8 +321,10 @@ impl Factory {
         caller.require_scope(scope::JOBS_WRITE).mcp()?;
 
         let id = lease_id(&args.lease)?;
+        let team = self.team_scope(&caller).await?;
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "release_lease").await?;
+        ensure_lease_visible(&mut tx, &team, id).await?;
         tx.release_lease(id, caller.user_id).await.mcp()?;
         tx.commit().await.mcp()?;
 
@@ -344,16 +351,9 @@ impl Factory {
         let repo_id = maybe_repo_of(&mut tx, &team, args.repo, args.remote).await?;
         let mut leases = tx.list_leases(repo_id).await.mcp()?;
         if !team.is_all() {
-            // Leases hang off repos: keep those of repos the caller may see.
-            let visible: std::collections::HashSet<_> = tx
-                .list_repos(true, Some(1000))
-                .await
-                .mcp()?
-                .into_iter()
-                .filter(|r| team.allows(r.team_id))
-                .map(|r| r.id)
-                .collect();
-            leases.retain(|l| visible.contains(&l.repo_id));
+            // Leases hang off repos: drop those of repos the caller cannot see.
+            let hidden = tx.hidden_repo_ids(&team).await.mcp()?;
+            leases.retain(|l| !hidden.contains(&l.repo_id));
         }
         tx.commit().await.mcp()?;
 
@@ -392,6 +392,9 @@ impl Factory {
         let Some(key) = args.idempotency_key else {
             self.charge(&mut tx, &caller, "send_message").await?;
             let repo_id = maybe_repo_of(&mut tx, &team, args.repo, args.remote).await?;
+            if let Some(job) = &args.job {
+                ensure_job_visible(&mut tx, &team, &JobId::from(job.clone())).await?;
+            }
             let message = tx
                 .send_message(
                     caller.user_id,
@@ -421,6 +424,9 @@ impl Factory {
         // A key was supplied: replay-vs-new must be resolved before
         // charging, which needs `repo_id` to build the payload to check.
         let repo_id = maybe_repo_of(&mut tx, &team, args.repo, args.remote).await?;
+        if let Some(job) = &args.job {
+            ensure_job_visible(&mut tx, &team, &JobId::from(job.clone())).await?;
+        }
         let new_message = NewMessage {
             body: args.body,
             recipient_user_id: recipient,
@@ -465,7 +471,9 @@ impl Factory {
         let caller = self.caller(&parts)?;
         caller.require_scope(scope::MESSAGES).mcp()?;
 
+        let team = self.team_scope(&caller).await?;
         let q = InboxQuery {
+            visible_teams: team.restriction(),
             unread_only: args.unread_only,
             limit: args.limit.unwrap_or(50),
             newest_first: args.newest_first,
@@ -493,9 +501,13 @@ impl Factory {
         let caller = self.caller(&parts)?;
         caller.require_scope(scope::MESSAGES).mcp()?;
 
+        let team = self.team_scope(&caller).await?;
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "ack_messages").await?;
-        let cursor = tx.ack_messages(caller.user_id, args.up_to).await.mcp()?;
+        let cursor = tx
+            .ack_messages_for(caller.user_id, args.up_to, &team)
+            .await
+            .mcp()?;
         tx.commit().await.mcp()?;
 
         Ok(Json(out::CursorOut { cursor }))
@@ -514,9 +526,10 @@ impl Factory {
         let caller = self.caller(&parts)?;
         caller.require_scope(scope::MESSAGES).mcp()?;
 
+        let team = self.team_scope(&caller).await?;
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "unread_count").await?;
-        let unread = tx.unread_count(caller.user_id).await.mcp()?;
+        let unread = tx.unread_count_for(caller.user_id, &team).await.mcp()?;
         tx.commit().await.mcp()?;
 
         Ok(Json(out::UnreadOut { unread }))
@@ -586,6 +599,25 @@ impl Factory {
             },
         }))
     }
+}
+
+/// A lease of a repo the caller cannot see is `lease_not_held`, the same answer
+/// as for a lease that does not exist, so a lease id confirms nothing and cannot
+/// be acted on after leaving the team.
+async fn ensure_lease_visible(
+    tx: &mut otto_tenant::Tx<'_>,
+    team: &of_core::teams::TeamScope,
+    id: uuid::Uuid,
+) -> Result<(), ErrorData> {
+    if team.is_all() {
+        return Ok(());
+    }
+    if let Some(repo) = tx.lease_repo_id(id).await.mcp()? {
+        if tx.hidden_repo_ids(team).await.mcp()?.contains(&repo) {
+            return Err(of_core::Error::LeaseNotHeld(id.to_string())).mcp();
+        }
+    }
+    Ok(())
 }
 
 /// Parse a lease id, refusing anything that is not a UUID before it reaches a

@@ -7,6 +7,7 @@
 
 use crate::error::{Error, Result};
 use crate::ids::{JobId, RepoId};
+use crate::teams::TeamScope;
 use otto_tenant::ids::{OrgId, TeamId, UserId};
 use otto_tenant::Tx;
 use serde::{Deserialize, Serialize};
@@ -115,6 +116,9 @@ pub struct InboxQuery {
     /// Newest first, so a limit-capped read keeps the most recent messages
     /// rather than the oldest. Default false (oldest first, conversational order).
     pub newest_first: bool,
+    /// The reader's team visibility: when set, messages tied to a team, repo, or
+    /// job outside it are left out. `None` is unrestricted.
+    pub visible_teams: Option<Vec<TeamId>>,
 }
 
 impl Default for InboxQuery {
@@ -123,8 +127,30 @@ impl Default for InboxQuery {
             unread_only: true,
             limit: 50,
             newest_first: false,
+            visible_teams: None,
         }
     }
+}
+
+/// SQL: message `m` is visible under the `uuid[]` bound as `$n` (NULL = all).
+/// A message tied to a team, a repo, or a job the reader cannot see is not
+/// theirs to read, whoever it was addressed to.
+fn message_visible_sql(n: usize) -> String {
+    format!(
+        "(${n}::uuid[] IS NULL OR ((m.team_id IS NULL OR m.team_id = ANY(${n})) \
+           AND (m.repo_id IS NULL OR NOT EXISTS (SELECT 1 FROM repos vr \
+                 WHERE vr.org_id = m.org_id AND vr.id = m.repo_id \
+                   AND vr.team_id IS NOT NULL AND NOT vr.team_id = ANY(${n}))) \
+           AND (m.job_id IS NULL OR NOT EXISTS (SELECT 1 FROM jobs vj \
+                 JOIN repos vr ON vr.org_id = vj.org_id AND vr.id = vj.repo_id \
+                 WHERE vj.org_id = m.org_id AND vj.id = m.job_id \
+                   AND ((vj.team_id IS NOT NULL AND NOT vj.team_id = ANY(${n})) \
+                     OR (vr.team_id IS NOT NULL AND NOT vr.team_id = ANY(${n})))))))"
+    )
+}
+
+fn team_uuids(teams: Option<&Vec<TeamId>>) -> Option<Vec<uuid::Uuid>> {
+    teams.map(|v| v.iter().map(|t| t.as_uuid()).collect())
 }
 
 const MSG_COLS: &str = "id, org_id, created_at, sender_user_id, sender_label, sender_kind, \
@@ -205,6 +231,22 @@ pub trait MessagesExt {
     fn unread_count(
         &mut self,
         reader: UserId,
+    ) -> impl std::future::Future<Output = Result<i64>> + Send;
+
+    /// [`Self::ack_messages`], clamped to the newest message `scope` may see, so
+    /// the cursor that lands says nothing about hidden traffic.
+    fn ack_messages_for(
+        &mut self,
+        reader: UserId,
+        up_to: i64,
+        scope: &TeamScope,
+    ) -> impl std::future::Future<Output = Result<i64>> + Send;
+
+    /// [`Self::unread_count`], counting only messages `scope` may see.
+    fn unread_count_for(
+        &mut self,
+        reader: UserId,
+        scope: &TeamScope,
     ) -> impl std::future::Future<Output = Result<i64>> + Send;
 }
 
@@ -442,12 +484,15 @@ impl MessagesExt for Tx<'_> {
                      AND m.id > COALESCE( \
                        (SELECT last_read_id FROM message_cursors \
                         WHERE org_id = $1 AND user_id = $2), 0))) \
-             ORDER BY m.id {order} LIMIT $4"
+               AND {} \
+             ORDER BY m.id {order} LIMIT $4",
+            message_visible_sql(5)
         ))
         .bind(org)
         .bind(reader)
         .bind(q.unread_only)
         .bind(limit)
+        .bind(team_uuids(q.visible_teams.as_ref()))
         .fetch_all(self.conn())
         .await?;
 
@@ -455,12 +500,25 @@ impl MessagesExt for Tx<'_> {
     }
 
     async fn ack_messages(&mut self, reader: UserId, up_to: i64) -> Result<i64> {
+        self.ack_messages_for(reader, up_to, &TeamScope::All).await
+    }
+
+    async fn ack_messages_for(
+        &mut self,
+        reader: UserId,
+        up_to: i64,
+        scope: &TeamScope,
+    ) -> Result<i64> {
         let org = self.org();
-        let newest: i64 =
-            sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) FROM messages WHERE org_id = $1")
-                .bind(org)
-                .fetch_one(self.conn())
-                .await?;
+        let teams = team_uuids(scope.restriction().as_ref());
+        let newest: i64 = sqlx::query_scalar(&format!(
+            "SELECT COALESCE(MAX(m.id), 0) FROM messages m WHERE m.org_id = $1 AND {}",
+            message_visible_sql(2)
+        ))
+        .bind(org)
+        .bind(teams)
+        .fetch_one(self.conn())
+        .await?;
 
         let target = up_to.clamp(0, newest);
 
@@ -481,18 +539,26 @@ impl MessagesExt for Tx<'_> {
     }
 
     async fn unread_count(&mut self, reader: UserId) -> Result<i64> {
+        self.unread_count_for(reader, &TeamScope::All).await
+    }
+
+    async fn unread_count_for(&mut self, reader: UserId, scope: &TeamScope) -> Result<i64> {
         let org = self.org();
-        let n: i64 = sqlx::query_scalar(
+        let teams = team_uuids(scope.restriction().as_ref());
+        let n: i64 = sqlx::query_scalar(&format!(
             "SELECT COUNT(*) FROM messages m \
              WHERE m.org_id = $1 \
                AND (m.recipient_user_id IS NULL OR m.recipient_user_id = $2) \
                AND m.sender_user_id <> $2 \
                AND m.id > COALESCE( \
                  (SELECT last_read_id FROM message_cursors \
-                  WHERE org_id = $1 AND user_id = $2), 0)",
-        )
+                  WHERE org_id = $1 AND user_id = $2), 0) \
+               AND {}",
+            message_visible_sql(3)
+        ))
         .bind(org)
         .bind(reader)
+        .bind(teams)
         .fetch_one(self.conn())
         .await?;
         Ok(n)

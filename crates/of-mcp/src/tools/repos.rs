@@ -9,7 +9,7 @@ use rmcp::model::ErrorData;
 use rmcp::{tool, tool_router};
 use serde::Deserialize;
 
-use super::{out, repo_of, scope};
+use super::{out, redact_foreign_ids, repo_of, scope};
 use crate::server::{Factory, McpResult};
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -107,6 +107,7 @@ impl Factory {
         let caller = self.caller(&parts)?;
         caller.require_scope(scope::REPOS_WRITE).mcp()?;
 
+        let team = self.team_scope(&caller).await?;
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "register_repo").await?;
         let repo = tx
@@ -120,6 +121,7 @@ impl Factory {
                 ..Default::default()
             })
             .await
+            .map_err(|e| redact_foreign_ids(&team, e))
             .mcp()?;
         tx.commit().await.mcp()?;
 
@@ -215,6 +217,7 @@ impl Factory {
                 },
             )
             .await
+            .map_err(|e| redact_foreign_ids(&team, e))
             .mcp()?;
         tx.commit().await.mcp()?;
 

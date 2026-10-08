@@ -99,11 +99,55 @@ pub(crate) async fn visible_job(
     team: &TeamScope,
     id: &JobId,
 ) -> Result<Job, ErrorData> {
-    let job = tx.get_job(id).await.mcp()?;
-    if team.allows(job.team_id) {
-        Ok(job)
-    } else {
-        Err(of_core::Error::JobNotFound(id.clone())).mcp()
+    tx.get_job_visible(id, team).await.mcp()
+}
+
+/// Strip hidden jobs out of a list of jobs the caller was handed by a query that
+/// does not know about teams (`ready`, `blocked`): a job is visible only if its
+/// own team **and** its repo's team are.
+pub(crate) async fn retain_visible(
+    tx: &mut Tx<'_>,
+    team: &TeamScope,
+    jobs: &mut Vec<Job>,
+) -> Result<(), ErrorData> {
+    if team.is_all() {
+        return Ok(());
+    }
+    let hidden = tx.hidden_repo_ids(team).await.mcp()?;
+    jobs.retain(|j| team.allows(j.team_id) && !hidden.contains(&j.repo_id));
+    Ok(())
+}
+
+/// Keep the ids the caller may see. For job ids that ride along in an answer.
+pub(crate) async fn visible_ids(
+    tx: &mut Tx<'_>,
+    team: &TeamScope,
+    ids: Vec<JobId>,
+) -> Result<Vec<JobId>, ErrorData> {
+    if team.is_all() {
+        return Ok(ids);
+    }
+    tx.visible_job_ids(&ids, team).await.mcp()
+}
+
+/// Errors that name a job the caller never asked about (the other holder of a
+/// ticket, the far end of a dependency chain) must not name one they cannot
+/// see. Unrestricted callers get the error unchanged.
+pub(crate) fn redact_foreign_ids(team: &TeamScope, e: of_core::Error) -> of_core::Error {
+    if team.is_all() {
+        return e;
+    }
+    match e {
+        of_core::Error::TicketAlreadyLinked { .. } => of_core::Error::Invalid(
+            "that ticket_ref is already linked to another job in this repo".into(),
+        ),
+        of_core::Error::RemoteTaken(..) => of_core::Error::Invalid(
+            "that remote is already registered to another repo in this organization".into(),
+        ),
+        of_core::Error::DependencyCycle(..) => of_core::Error::Invalid(
+            "that change would make a job depend on itself, directly or through a chain".into(),
+        ),
+        other => other,
     }
 }
 

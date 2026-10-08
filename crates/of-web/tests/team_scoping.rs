@@ -317,3 +317,94 @@ async fn a_platform_outage_is_503_never_a_leak(pool: PgPool) {
         .await
         .expect(StatusCode::OK);
 }
+
+/// A job with no team of its own, in a repo scoped to a team afterwards, is that
+/// team's work: hidden from list, detail and counters; and a dependency on a
+/// hidden job is not listed back to someone who could not open it.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_teamless_job_in_a_team_repo_is_hidden_and_so_are_dependency_ids(pool: PgPool) {
+    use of_core::repos::{NewRepo, RepoPatch, ReposExt};
+    let w = world(pool).await;
+    let client = w.h.platform.client();
+    let team = {
+        let t = client
+            .team_by_slug(w.org.as_uuid(), "platform")
+            .await
+            .unwrap()
+            .unwrap();
+        of_core::teams::VerifiedTeam::verify(&client, w.org, t.id.into())
+            .await
+            .unwrap()
+    };
+
+    let (late_job, shared_job) = {
+        let mut tx = w.h.db.begin(w.org).await.unwrap();
+        let repo = tx
+            .register_repo(NewRepo {
+                slug: "late".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let late = tx
+            .add_job(of_core::jobs::NewJob {
+                repo_id: repo.id,
+                title: "job in late".into(),
+                created_by: Some(w.rob.user),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        tx.update_repo(
+            repo.id,
+            RepoPatch {
+                team_id: Some(Some(team)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let shared = tx
+            .list_jobs(&of_core::jobs::JobFilter::default())
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|j| j.title == "job in shared")
+            .unwrap();
+        // The shared job waits on the team's job.
+        tx.set_dependencies(&shared.id, std::slice::from_ref(&late.id), &[])
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        (late.id.to_string(), shared.id.to_string())
+    };
+
+    for who in [&w.bob, &w.carol] {
+        let r = get(&w, who, "/api/orgs/acme/jobs").await;
+        assert!(!titles(&r.body).contains(&"job in late".to_string()));
+        get(&w, who, &format!("/api/orgs/acme/jobs/{late_job}"))
+            .await
+            .expect(StatusCode::NOT_FOUND);
+        let r = get(&w, who, &format!("/api/orgs/acme/jobs/{shared_job}")).await;
+        r.expect(StatusCode::OK);
+        assert_eq!(
+            r.body["dependsOn"],
+            json!([]),
+            "a hidden dependency's id is not handed out"
+        );
+    }
+    // Counters agree with the list: rob 4, alice 3, carol 1.
+    let total = |r: common::Reply| r.body["total"].as_i64().unwrap();
+    assert_eq!(total(get(&w, &w.rob, "/api/orgs/acme/jobs/stats").await), 4);
+    assert_eq!(
+        total(get(&w, &w.alice, "/api/orgs/acme/jobs/stats").await),
+        3
+    );
+    assert_eq!(
+        total(get(&w, &w.carol, "/api/orgs/acme/jobs/stats").await),
+        1
+    );
+
+    let r = get(&w, &w.rob, &format!("/api/orgs/acme/jobs/{shared_job}")).await;
+    assert_eq!(r.body["dependsOn"], json!([late_job]));
+}

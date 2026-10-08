@@ -21,7 +21,6 @@
 use of_core::jobs::JobsExt;
 use of_core::repos::ReposExt;
 use of_core::scopes;
-use of_core::Error as CoreError;
 use std::str::FromStr;
 
 use axum::extract::{Json, Path, Query, State};
@@ -195,13 +194,16 @@ pub async fn get_job(
 
     let scope = ctx.team_scope(&state.platform).await?;
     let mut tx = ctx.begin(&state.db).await?;
-    let job = tx.get_job(&id).await?;
-    // A job of a team the caller is not on is not found, not forbidden: they
-    // should not learn it exists.
-    if !scope.allows(job.team_id) {
-        return Err(CoreError::JobNotFound(id).into());
-    }
+    // A job of a team the caller is not on (its own, or its repo's) is not
+    // found, not forbidden: they should not learn it exists.
+    let job = tx.get_job_visible(&id, &scope).await?;
+    // Nor are the ids of dependencies they could not open.
     let depends_on = tx.dependencies_of(&id).await?;
+    let depends_on = if scope.is_all() {
+        depends_on
+    } else {
+        tx.visible_job_ids(&depends_on, &scope).await?
+    };
     tx.commit().await?;
 
     Ok(Json(JobDetail { job, depends_on }))

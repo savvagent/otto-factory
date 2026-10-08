@@ -93,6 +93,12 @@ pub trait LeasesExt {
         holder: UserId,
     ) -> impl std::future::Future<Output = Result<()>> + Send;
 
+    /// The repo a lease (live or not) belongs to, if the lease exists.
+    fn lease_repo_id(
+        &mut self,
+        lease_id: uuid::Uuid,
+    ) -> impl std::future::Future<Output = Result<Option<RepoId>>> + Send;
+
     /// Live leases — "who is in this repo right now?".
     ///
     /// Filters expired rows in the query rather than relying on the reaper, so
@@ -225,6 +231,17 @@ impl LeasesExt for Tx<'_> {
             return Err(Error::LeaseNotHeld(lease_id.to_string()));
         }
         Ok(())
+    }
+
+    async fn lease_repo_id(&mut self, lease_id: uuid::Uuid) -> Result<Option<RepoId>> {
+        let org = self.org();
+        Ok(
+            sqlx::query_scalar("SELECT repo_id FROM repo_leases WHERE org_id = $1 AND id = $2")
+                .bind(org)
+                .bind(lease_id)
+                .fetch_optional(self.conn())
+                .await?,
+        )
     }
 
     async fn list_leases(&mut self, repo_id: Option<RepoId>) -> Result<Vec<Lease>> {

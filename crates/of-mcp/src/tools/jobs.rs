@@ -29,7 +29,8 @@ use rmcp::{tool, tool_router};
 use serde::Deserialize;
 
 use super::{
-    ensure_job_visible, ensure_jobs_visible, maybe_repo_of, out, repo_of, scope, visible_job,
+    ensure_job_visible, ensure_jobs_visible, maybe_repo_of, out, redact_foreign_ids, repo_of,
+    retain_visible, scope, visible_ids, visible_job,
 };
 use crate::server::{Factory, McpResult};
 
@@ -699,6 +700,7 @@ impl Factory {
         let Some(key) = args.idempotency_key else {
             self.charge(&mut tx, &caller, "add_job").await?;
             let repo = repo_of(&mut tx, &team, args.repo, args.remote).await?;
+            ensure_jobs_visible(&mut tx, &team, &ids(args.depends_on.clone())).await?;
             let job = tx
                 .add_job(NewJob {
                     repo_id: repo.id,
@@ -722,6 +724,7 @@ impl Factory {
         // un-charge after the fact — see Factory::charge's third exception),
         // which needs `repo.id` to build the payload to check.
         let repo = repo_of(&mut tx, &team, args.repo, args.remote).await?;
+        ensure_jobs_visible(&mut tx, &team, &ids(args.depends_on.clone())).await?;
         let new_job = NewJob {
             repo_id: repo.id,
             title: args.title,
@@ -1275,7 +1278,10 @@ impl Factory {
         let deps = tx
             .set_dependencies(&job, &ids(args.add), &ids(args.remove))
             .await
+            .map_err(|e| redact_foreign_ids(&team, e))
             .mcp()?;
+        // Dependencies the caller cannot see are not theirs to be told about.
+        let deps = visible_ids(&mut tx, &team, deps).await?;
         tx.commit().await.mcp()?;
 
         Ok(Json(out::DependenciesOut {
@@ -1307,7 +1313,7 @@ impl Factory {
         self.charge(&mut tx, &caller, "ready").await?;
         let repo_id = maybe_repo_of(&mut tx, &team, args.repo, args.remote).await?;
         let mut jobs = tx.ready(repo_id, args.agent_type.as_deref()).await.mcp()?;
-        jobs.retain(|j| team.allows(j.team_id));
+        retain_visible(&mut tx, &team, &mut jobs).await?;
         tx.commit().await.mcp()?;
 
         Ok(Json(out::JobsOut { jobs }))
@@ -1331,7 +1337,7 @@ impl Factory {
         self.charge(&mut tx, &caller, "blocked").await?;
         let repo_id = maybe_repo_of(&mut tx, &team, args.repo, args.remote).await?;
         let mut jobs = tx.blocked(repo_id).await.mcp()?;
-        jobs.retain(|j| team.allows(j.team_id));
+        retain_visible(&mut tx, &team, &mut jobs).await?;
         tx.commit().await.mcp()?;
 
         Ok(Json(out::JobsOut { jobs }))
@@ -1388,6 +1394,7 @@ impl Factory {
         let job = tx
             .link_ticket(&JobId::from(args.job), args.tracker, &args.ticket_ref)
             .await
+            .map_err(|e| redact_foreign_ids(&team, e))
             .mcp()?;
         tx.commit().await.mcp()?;
 

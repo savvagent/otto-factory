@@ -322,8 +322,12 @@ members, invites, teams, SSO, tokens, or usage. Those are the platform's, and
   transaction opens). A platform that cannot answer is `503 platform_unavailable`, never "all
   teams"; a team id the answer does not list (unknown, foreign, deleted) matches nothing. A row of
   a team the caller is not on is `404` / `job_not_found` / `repo_unresolved`, and
-  `resolve_repo_visible` keeps its slug out of the "registered repos" list too. Every tool or route
-  that names a repo or a job resolves it through the scope, writes included.
+  `resolve_repo_visible` keeps its slug out of the "registered repos" list too. A job is
+  visible only if its own team **and** its repo's team are (`job_visible_sql`, `get_job_visible`),
+  messages follow the same rule through their team, repo, and job, lease ids of hidden repos are
+  `lease_not_held`, and counts, dependency lists, and errors are computed or redacted for what the
+  caller may see. Every tool or route that names a repo, a job, or a lease resolves it through the
+  scope, writes included.
 - **The platform's webhooks are idempotent and signature-first.** `/platform/webhooks` verifies
   `Otto-Signature` (HMAC over timestamp and raw body, replay-bounded) before parsing anything;
   a bad signature is `401` and does nothing. A handled event, a repeat (the event id is recorded in the same transaction as its effects, `platform_events`;

@@ -3296,6 +3296,7 @@ async fn teams_world(pool: PgPool) -> Teams {
         let repo = tx
             .register_repo(NewRepo {
                 slug: slug.into(),
+                remotes: vec![format!("git@github.com:acme/{slug}.git")],
                 team_id,
                 ..Default::default()
             })
@@ -3700,4 +3701,403 @@ async fn a_platform_outage_refuses_team_scoped_reads_and_writes(pool: PgPool) {
             }),
         )
         .await));
+}
+
+// ---- adversarial pass: every other way to reach another team's data
+
+impl Teams {
+    async fn team_id(&self, slug: &str) -> uuid::Uuid {
+        self.env
+            .client
+            .team_by_slug(self.owner.org_id.as_uuid(), slug)
+            .await
+            .unwrap()
+            .unwrap()
+            .id
+    }
+
+    /// An org-wide repo with one job, then scoped to `platform` afterwards: the
+    /// job keeps a null team but lives in a team's repo.
+    async fn late_scoped_job(&self) -> String {
+        use of_core::jobs::{JobsExt, NewJob};
+        use of_core::repos::{RepoPatch, ReposExt};
+        use of_core::teams::VerifiedTeam;
+        let org = self.owner.org_id;
+        let team =
+            VerifiedTeam::verify(&self.env.client, org, self.team_id("platform").await.into())
+                .await
+                .unwrap();
+        let mut tx = self.env.db.begin(org).await.unwrap();
+        let repo = tx
+            .register_repo(of_core::repos::NewRepo {
+                slug: "late".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let job = tx
+            .add_job(NewJob {
+                repo_id: repo.id,
+                title: "job in late".into(),
+                created_by: Some(self.owner.user_id),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        tx.update_repo(
+            repo.id,
+            RepoPatch {
+                team_id: Some(Some(team)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        job.id.to_string()
+    }
+}
+
+/// A job with no team of its own, in a repo that belongs to a team, is that
+/// team's work: it is hidden everywhere a job is read.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_job_with_no_team_in_a_team_repo_is_hidden_too(pool: PgPool) {
+    let t = teams_world(pool).await;
+    let late = t.late_scoped_job().await;
+
+    for who in [&t.bob, &t.carol] {
+        assert!(!t.list_jobs(who).await.contains(&"job in late".to_string()));
+        assert!(!t.ready(who).await.contains(&"job in late".to_string()));
+        let e = err(t
+            .env
+            .factory
+            .get_job(
+                Extension(parts(who)),
+                Parameters(tools::jobs::JobArgs { job: late.clone() }),
+            )
+            .await);
+        assert_eq!(code_of(&e), "job_not_found");
+        let e = err(t
+            .env
+            .factory
+            .claim_jobs(
+                Extension(parts(who)),
+                Parameters(tools::jobs::ClaimJobsArgs {
+                    jobs: vec![late.clone()],
+                    agent: None,
+                    ttl: None,
+                }),
+            )
+            .await);
+        assert_eq!(code_of(&e), "job_not_found");
+    }
+    assert!(t
+        .list_jobs(&t.alice)
+        .await
+        .contains(&"job in late".to_string()));
+    assert!(t.ready(&t.owner).await.contains(&"job in late".to_string()));
+    // Counts agree with what is listed: owner 4, alice 3 (shared, platform, late),
+    // carol 1.
+    assert_eq!(t.stats_total(&t.owner).await, 4);
+    assert_eq!(t.stats_total(&t.alice).await, 3);
+    assert_eq!(t.stats_total(&t.carol).await, 1);
+}
+
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn dependencies_cannot_reach_or_reveal_a_hidden_job(pool: PgPool) {
+    let t = teams_world(pool).await;
+    let f = &t.env.factory;
+    let (hidden, shared) = (t.jobs["platform-repo"].clone(), t.jobs["shared"].clone());
+
+    // Depending on a hidden job, by set_dependencies or at queue time.
+    let set = |who: &Principal, add: Vec<String>| {
+        f.set_dependencies(
+            Extension(parts(who)),
+            Parameters(tools::jobs::SetDependenciesArgs {
+                job: shared.clone(),
+                add,
+                remove: vec![],
+            }),
+        )
+    };
+    assert_eq!(
+        code_of(&err(set(&t.carol, vec![hidden.clone()]).await)),
+        "job_not_found"
+    );
+    let e = err(f
+        .add_job(
+            Extension(parts(&t.carol)),
+            Parameters(tools::jobs::AddJobArgs {
+                title: "x".into(),
+                description: None,
+                repo: Some("shared".into()),
+                remote: None,
+                ticket_ref: None,
+                agent_type: None,
+                metadata: None,
+                depends_on: vec![hidden.clone()],
+                idempotency_key: None,
+            }),
+        )
+        .await);
+    assert_eq!(code_of(&e), "job_not_found");
+
+    // An owner makes the shared job wait on the hidden one. A member reading the
+    // dependency list is not told the hidden id; the owner is.
+    let deps = |v: &serde_json::Value| -> Vec<String> {
+        v["dependencies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d.as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(
+        deps(&ok(set(&t.owner, vec![hidden.clone()]).await)),
+        std::slice::from_ref(&hidden)
+    );
+    let other = t.env.add_job_to(&t.carol, "other", "shared").await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        deps(&ok(set(&t.carol, vec![other.clone()]).await)),
+        [other],
+        "the hidden dependency is not listed to a member who cannot see it"
+    );
+}
+
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn errors_do_not_name_what_the_caller_cannot_see(pool: PgPool) {
+    let t = teams_world(pool).await;
+    let f = &t.env.factory;
+
+    // Registering a remote that a hidden repo already owns.
+    let register = |who: &Principal| {
+        f.register_repo(
+            Extension(parts(who)),
+            Parameters(tools::repos::RegisterRepoArgs {
+                slug: "mine".into(),
+                name: None,
+                remotes: vec!["git@github.com:acme/platform-repo.git".into()],
+                default_branch: None,
+                default_agent_type: None,
+            }),
+        )
+    };
+    let e = err(register(&t.carol).await);
+    assert!(!e.message.contains("platform-repo"), "{}", e.message);
+    let e = err(register(&t.owner).await);
+    assert!(
+        e.message.contains("platform-repo"),
+        "admins still get the detail"
+    );
+
+    // A ticket already linked to a job the caller cannot see.
+    let hidden = t.jobs["platform-repo"].clone();
+    let link = |who: &Principal, job: &str| {
+        f.link_ticket(
+            Extension(parts(who)),
+            Parameters(tools::jobs::LinkTicketArgs {
+                job: job.into(),
+                tracker: of_core::jobs::Tracker::Github,
+                ticket_ref: "acme/api#1".into(),
+            }),
+        )
+    };
+    ok(link(&t.alice, &hidden).await);
+    let second = t.env.add_job_to(&t.alice, "second", "platform-repo").await;
+    let second = second["id"].as_str().unwrap();
+    // A non-admin is not told which job holds the ticket; an admin is.
+    let e = err(link(&t.alice, second).await);
+    assert!(!e.message.contains(&hidden), "{}", e.message);
+    let e = err(link(&t.owner, second).await);
+    assert_eq!(code_of(&e), "ticket_already_linked");
+    assert!(e.message.contains(&hidden));
+}
+
+impl Env {
+    async fn add_job_to(&self, caller: &Principal, title: &str, repo: &str) -> serde_json::Value {
+        ok(self
+            .factory
+            .add_job(
+                Extension(parts(caller)),
+                Parameters(tools::jobs::AddJobArgs {
+                    title: title.into(),
+                    description: None,
+                    repo: Some(repo.into()),
+                    remote: None,
+                    ticket_ref: None,
+                    agent_type: None,
+                    metadata: None,
+                    depends_on: vec![],
+                    idempotency_key: None,
+                }),
+            )
+            .await)["job"]
+            .clone()
+    }
+}
+
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn messages_about_a_hidden_repo_or_job_are_not_delivered(pool: PgPool) {
+    let t = teams_world(pool).await;
+    let f = &t.env.factory;
+    let send = |who: &Principal, body: &str, repo: Option<&str>, job: Option<&str>| {
+        f.send_message(
+            Extension(parts(who)),
+            Parameters(tools::coord::SendMessageArgs {
+                body: body.into(),
+                to: None,
+                kind: None,
+                repo: repo.map(Into::into),
+                remote: None,
+                job: job.map(Into::into),
+                in_reply_to: None,
+                agent: None,
+                idempotency_key: None,
+            }),
+        )
+    };
+    ok(send(&t.owner, "plain", None, None).await);
+    ok(send(&t.owner, "about repo", Some("platform-repo"), None).await);
+    ok(send(&t.owner, "about job", None, Some(&t.jobs["platform-repo"])).await);
+
+    // Naming a hidden job or repo when sending is refused outright.
+    let e = err(send(&t.carol, "x", None, Some(&t.jobs["platform-repo"])).await);
+    assert_eq!(code_of(&e), "job_not_found");
+    let e = err(send(&t.carol, "x", Some("platform-repo"), None).await);
+    assert_eq!(code_of(&e), "repo_unresolved");
+
+    let inbox = |who: &Principal| {
+        let p = parts(who);
+        async move {
+            let out = ok(f
+                .inbox(
+                    Extension(p),
+                    Parameters(tools::coord::InboxArgs {
+                        unread_only: true,
+                        limit: None,
+                        newest_first: false,
+                    }),
+                )
+                .await);
+            out["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| m["body"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        }
+    };
+    let unread = |who: &Principal| {
+        let p = parts(who);
+        async move {
+            ok(
+                f.unread_count(Extension(p), Parameters(tools::coord::NoArgs {}))
+                    .await,
+            )["unread"]
+                .as_i64()
+                .unwrap()
+        }
+    };
+    assert_eq!(inbox(&t.carol).await, ["plain"]);
+    assert_eq!(unread(&t.carol).await, 1);
+    assert_eq!(inbox(&t.alice).await, ["plain", "about repo", "about job"]);
+    assert_eq!(unread(&t.alice).await, 3);
+
+    // The cursor lands at the newest message carol can see, not the newest there is.
+    let landed = ok(f
+        .ack_messages(
+            Extension(parts(&t.carol)),
+            Parameters(tools::coord::AckMessagesArgs { up_to: 1_000_000 }),
+        )
+        .await)["cursor"]
+        .as_i64()
+        .unwrap();
+    let all = ok(f
+        .inbox(
+            Extension(parts(&t.alice)),
+            Parameters(tools::coord::InboxArgs {
+                unread_only: true,
+                limit: None,
+                newest_first: false,
+            }),
+        )
+        .await);
+    let ids: Vec<i64> = all["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(landed, ids[0], "clamped to the visible 'plain' message");
+}
+
+/// A lease id confirms nothing and does nothing for a repo the caller cannot see.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_lease_of_a_hidden_repo_cannot_be_renewed_or_released(pool: PgPool) {
+    use of_core::leases::LeasesExt;
+    use of_core::repos::ReposExt;
+    let t = teams_world(pool).await;
+    let f = &t.env.factory;
+
+    // bob holds a lease on a repo of a team he is not on (say he left it).
+    let lease = {
+        let mut tx = t.env.db.begin(t.owner.org_id).await.unwrap();
+        let repo = tx
+            .resolve_repo(&of_core::repos::RepoRef {
+                slug: Some("platform-repo".into()),
+                remote: None,
+            })
+            .await
+            .unwrap();
+        let l = tx
+            .acquire_lease(repo.id, "branch:x", t.bob.user_id, None, None, None)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        l.id.to_string()
+    };
+    let renew = |who: &Principal, id: &str| {
+        f.renew_lease(
+            Extension(parts(who)),
+            Parameters(tools::coord::RenewLeaseArgs {
+                lease: id.into(),
+                ttl_seconds: None,
+            }),
+        )
+    };
+    let release = |who: &Principal, id: &str| {
+        f.release_lease(
+            Extension(parts(who)),
+            Parameters(tools::coord::ReleaseLeaseArgs { lease: id.into() }),
+        )
+    };
+    let nonexistent = uuid::Uuid::new_v4().to_string();
+    let a = err(renew(&t.bob, &lease).await);
+    let b = err(renew(&t.bob, &nonexistent).await);
+    assert_eq!(code_of(&a), "lease_not_held");
+    assert_eq!(
+        code_of(&a),
+        code_of(&b),
+        "indistinguishable from a missing lease"
+    );
+    assert_eq!(
+        code_of(&err(release(&t.bob, &lease).await)),
+        "lease_not_held"
+    );
+
+    // It was not released behind the refusal.
+    let live = ok(f
+        .list_leases(
+            Extension(parts(&t.owner)),
+            Parameters(tools::coord::RepoScopeArgs::default()),
+        )
+        .await);
+    assert!(live["leases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|l| l["id"] == lease.as_str()));
 }
