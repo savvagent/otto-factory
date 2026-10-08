@@ -7,6 +7,7 @@
 
 use crate::error::{Error, Result};
 use crate::ids::{JobId, RepoId};
+use crate::teams::TeamScope;
 use otto_tenant::ids::{OrgId, TeamId, UserId};
 use otto_tenant::Tx;
 use serde::{Deserialize, Serialize};
@@ -107,6 +108,45 @@ pub struct NewMessage {
     pub idempotency_key: Option<String>,
 }
 
+/// Who a message being replied to was between. See [`MessagesExt::reply_parent`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReplyParent {
+    pub sender: UserId,
+    /// `None` for a broadcast.
+    pub recipient: Option<UserId>,
+}
+
+impl ReplyParent {
+    /// Who a reply from `replier` must be addressed to. A reply to a broadcast
+    /// goes wherever `requested` says. A reply to a private message stays
+    /// between the same two people: it goes to the other participant, and
+    /// `requested` may only name them, because a broadcast reply would show the
+    /// whole org that the private thread exists and quote its context.
+    pub fn reply_recipient(
+        &self,
+        replier: UserId,
+        requested: Option<UserId>,
+    ) -> Result<Option<UserId>> {
+        let Some(recipient) = self.recipient else {
+            return Ok(requested);
+        };
+        let other = if replier == self.sender {
+            recipient
+        } else {
+            self.sender
+        };
+        match requested {
+            None => Ok(Some(other)),
+            Some(r) if r == other => Ok(Some(other)),
+            Some(_) => Err(Error::Invalid(
+                "a reply to a private message stays between its two participants; omit \
+                 `to` to answer the other one, or omit in_reply_to to start a new thread"
+                    .into(),
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct InboxQuery {
     /// Only messages past my cursor that I did not send. Default true.
@@ -115,6 +155,9 @@ pub struct InboxQuery {
     /// Newest first, so a limit-capped read keeps the most recent messages
     /// rather than the oldest. Default false (oldest first, conversational order).
     pub newest_first: bool,
+    /// The reader's team visibility: when set, messages tied to a team, repo, or
+    /// job outside it are left out. `None` is unrestricted.
+    pub visible_teams: Option<Vec<TeamId>>,
 }
 
 impl Default for InboxQuery {
@@ -123,9 +166,46 @@ impl Default for InboxQuery {
             unread_only: true,
             limit: 50,
             newest_first: false,
+            visible_teams: None,
         }
     }
 }
+
+/// SQL: message `m` is visible under the `uuid[]` bound as `$n` (NULL = all).
+/// A message tied to a team, a repo, or a job the reader cannot see is not
+/// theirs to read, whoever it was addressed to. `scope_teams` is what it was
+/// tied to when sent, which outlives a deleted repo or job (see
+/// `0004_message_scope.sql`); the live checks catch a repo moved since.
+fn message_visible_sql(n: usize) -> String {
+    format!(
+        "(${n}::uuid[] IS NULL OR (m.scope_teams <@ ${n}::uuid[] \
+           AND (m.team_id IS NULL OR m.team_id = ANY(${n})) \
+           AND (m.repo_id IS NULL OR NOT EXISTS (SELECT 1 FROM repos vr \
+                 WHERE vr.org_id = m.org_id AND vr.id = m.repo_id \
+                   AND vr.team_id IS NOT NULL AND NOT vr.team_id = ANY(${n}))) \
+           AND (m.job_id IS NULL OR NOT EXISTS (SELECT 1 FROM jobs vj \
+                 JOIN repos vr ON vr.org_id = vj.org_id AND vr.id = vj.repo_id \
+                 WHERE vj.org_id = m.org_id AND vj.id = m.job_id \
+                   AND ((vj.team_id IS NOT NULL AND NOT vj.team_id = ANY(${n})) \
+                     OR (vr.team_id IS NOT NULL AND NOT vr.team_id = ANY(${n})))))))"
+    )
+}
+
+fn team_uuids(teams: Option<&Vec<TeamId>>) -> Option<Vec<uuid::Uuid>> {
+    teams.map(|v| v.iter().map(|t| t.as_uuid()).collect())
+}
+
+/// SQL: the `scope_teams` of a message being inserted, from the insert's own
+/// parameters — `$1` org, `$6` team, `$9` repo, `$10` job, `$11` the message it
+/// replies to. Every team it is bound to, and its thread's: a reply posted
+/// without a repo or job of its own is still part of a team's conversation.
+const SCOPE_TEAMS_SQL: &str = "ARRAY(SELECT DISTINCT t FROM unnest(ARRAY[$6::uuid, \
+       (SELECT r.team_id FROM repos r WHERE r.org_id = $1 AND r.id = $9), \
+       (SELECT j.team_id FROM jobs j WHERE j.org_id = $1 AND j.id = $10), \
+       (SELECT r.team_id FROM jobs j JOIN repos r ON r.org_id = j.org_id AND r.id = j.repo_id \
+         WHERE j.org_id = $1 AND j.id = $10)] \
+     || COALESCE((SELECT p.scope_teams FROM messages p WHERE p.org_id = $1 AND p.id = $11), \
+                 '{}'::uuid[])) AS t WHERE t IS NOT NULL)";
 
 const MSG_COLS: &str = "id, org_id, created_at, sender_user_id, sender_label, sender_kind, \
                         recipient_user_id, team_id, kind, body, repo_id, job_id, in_reply_to";
@@ -205,6 +285,49 @@ pub trait MessagesExt {
     fn unread_count(
         &mut self,
         reader: UserId,
+    ) -> impl std::future::Future<Output = Result<i64>> + Send;
+
+    /// [`Self::ack_messages`], clamped to the newest message `scope` may see, so
+    /// the cursor that lands says nothing about hidden traffic.
+    fn ack_messages_for(
+        &mut self,
+        reader: UserId,
+        up_to: i64,
+        scope: &TeamScope,
+    ) -> impl std::future::Future<Output = Result<i64>> + Send;
+
+    /// Whether `reader` could read message `id`: it exists, it is a broadcast
+    /// or to or from them, and `scope` covers every team it is tied to.
+    fn message_readable(
+        &mut self,
+        id: i64,
+        reader: UserId,
+        scope: &TeamScope,
+    ) -> impl std::future::Future<Output = Result<bool>> + Send;
+
+    /// The message an `in_reply_to` names, if `reader` could read it, with the
+    /// audience a reply to it must keep. A message that does not exist, a
+    /// private message between other people, and one tied to a team, repo, or
+    /// job outside `scope` are the same [`Error::Invalid`], so a reply cannot be
+    /// used to probe for hidden message ids.
+    ///
+    /// For a restricted `scope` the repos behind the parent (its own and its
+    /// job's) are held until the transaction ends, as any write's repo is: the
+    /// reply copies the parent's scope when it is inserted, and an admin moving
+    /// one of those repos in between would leave the reply readable by a team
+    /// that can no longer read the parent.
+    fn reply_parent(
+        &mut self,
+        parent: i64,
+        reader: UserId,
+        scope: &TeamScope,
+    ) -> impl std::future::Future<Output = Result<ReplyParent>> + Send;
+
+    /// [`Self::unread_count`], counting only messages `scope` may see.
+    fn unread_count_for(
+        &mut self,
+        reader: UserId,
+        scope: &TeamScope,
     ) -> impl std::future::Future<Output = Result<i64>> + Send;
 }
 
@@ -293,8 +416,8 @@ impl MessagesExt for Tx<'_> {
                 "INSERT INTO messages (org_id, sender_user_id, sender_label, sender_kind, \
                                        recipient_user_id, team_id, kind, body, repo_id, \
                                        job_id, in_reply_to, idempotency_key, \
-                                       idempotency_payload_hash) \
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) \
+                                       idempotency_payload_hash, scope_teams) \
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,{SCOPE_TEAMS_SQL}) \
                  RETURNING {MSG_COLS}"
             ))
             .bind(org)
@@ -403,8 +526,9 @@ impl MessagesExt for Tx<'_> {
             sqlx::query_as(&format!(
                 "INSERT INTO messages (org_id, sender_user_id, sender_label, sender_kind, \
                                        recipient_user_id, team_id, kind, body, repo_id, \
-                                       job_id, in_reply_to) \
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING {MSG_COLS}"
+                                       job_id, in_reply_to, scope_teams) \
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,{SCOPE_TEAMS_SQL}) \
+                 RETURNING {MSG_COLS}"
             ))
             .bind(org)
             .bind(sender)
@@ -442,12 +566,15 @@ impl MessagesExt for Tx<'_> {
                      AND m.id > COALESCE( \
                        (SELECT last_read_id FROM message_cursors \
                         WHERE org_id = $1 AND user_id = $2), 0))) \
-             ORDER BY m.id {order} LIMIT $4"
+               AND {} \
+             ORDER BY m.id {order} LIMIT $4",
+            message_visible_sql(5)
         ))
         .bind(org)
         .bind(reader)
         .bind(q.unread_only)
         .bind(limit)
+        .bind(team_uuids(q.visible_teams.as_ref()))
         .fetch_all(self.conn())
         .await?;
 
@@ -455,12 +582,32 @@ impl MessagesExt for Tx<'_> {
     }
 
     async fn ack_messages(&mut self, reader: UserId, up_to: i64) -> Result<i64> {
+        self.ack_messages_for(reader, up_to, &TeamScope::All).await
+    }
+
+    async fn ack_messages_for(
+        &mut self,
+        reader: UserId,
+        up_to: i64,
+        scope: &TeamScope,
+    ) -> Result<i64> {
         let org = self.org();
-        let newest: i64 =
-            sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) FROM messages WHERE org_id = $1")
-                .bind(org)
-                .fetch_one(self.conn())
-                .await?;
+        let teams = team_uuids(scope.restriction().as_ref());
+        // The newest message this reader could have read: a private message
+        // to someone else is not one, and landing the cursor on its id would
+        // tell the reader it exists.
+        let newest: i64 = sqlx::query_scalar(&format!(
+            "SELECT COALESCE(MAX(m.id), 0) FROM messages m WHERE m.org_id = $1 \
+               AND (m.recipient_user_id IS NULL OR m.recipient_user_id = $3 \
+                    OR m.sender_user_id = $3) \
+               AND {}",
+            message_visible_sql(2)
+        ))
+        .bind(org)
+        .bind(teams)
+        .bind(reader)
+        .fetch_one(self.conn())
+        .await?;
 
         let target = up_to.clamp(0, newest);
 
@@ -480,19 +627,96 @@ impl MessagesExt for Tx<'_> {
         Ok(landed)
     }
 
-    async fn unread_count(&mut self, reader: UserId) -> Result<i64> {
+    async fn message_readable(
+        &mut self,
+        id: i64,
+        reader: UserId,
+        scope: &TeamScope,
+    ) -> Result<bool> {
         let org = self.org();
-        let n: i64 = sqlx::query_scalar(
+        let teams = team_uuids(scope.restriction().as_ref());
+        Ok(sqlx::query_scalar(&format!(
+            "SELECT EXISTS (SELECT 1 FROM messages m WHERE m.org_id = $1 AND m.id = $2 \
+               AND (m.recipient_user_id IS NULL OR m.recipient_user_id = $3 \
+                    OR m.sender_user_id = $3) \
+               AND {})",
+            message_visible_sql(4)
+        ))
+        .bind(org)
+        .bind(id)
+        .bind(reader)
+        .bind(teams)
+        .fetch_one(self.conn())
+        .await?)
+    }
+
+    async fn reply_parent(
+        &mut self,
+        parent: i64,
+        reader: UserId,
+        scope: &TeamScope,
+    ) -> Result<ReplyParent> {
+        let org = self.org();
+        if !scope.is_all() {
+            // In id order, so two transactions holding the same pair cannot
+            // deadlock each other.
+            sqlx::query(
+                "SELECT r.id FROM repos r WHERE r.org_id = $1 AND r.id IN ( \
+                   SELECT m.repo_id FROM messages m WHERE m.org_id = $1 AND m.id = $2 \
+                   UNION \
+                   SELECT j.repo_id FROM messages m \
+                     JOIN jobs j ON j.org_id = m.org_id AND j.id = m.job_id \
+                   WHERE m.org_id = $1 AND m.id = $2) \
+                 ORDER BY r.id FOR SHARE OF r",
+            )
+            .bind(org)
+            .bind(parent)
+            .execute(self.conn())
+            .await?;
+        }
+        let found: Option<(UserId, Option<UserId>)> =
+            if self.message_readable(parent, reader, scope).await? {
+                sqlx::query_as(
+                    "SELECT sender_user_id, recipient_user_id FROM messages \
+                 WHERE org_id = $1 AND id = $2",
+                )
+                .bind(org)
+                .bind(parent)
+                .fetch_optional(self.conn())
+                .await?
+            } else {
+                None
+            };
+        let Some((sender, recipient)) = found else {
+            return Err(Error::Invalid(format!(
+                "in_reply_to {parent} is not a message you can read; pass the id of a \
+                 message from your inbox, or omit in_reply_to to start a new thread"
+            )));
+        };
+        Ok(ReplyParent { sender, recipient })
+    }
+
+    async fn unread_count(&mut self, reader: UserId) -> Result<i64> {
+        self.unread_count_for(reader, &TeamScope::All).await
+    }
+
+    async fn unread_count_for(&mut self, reader: UserId, scope: &TeamScope) -> Result<i64> {
+        let org = self.org();
+        let teams = team_uuids(scope.restriction().as_ref());
+        let n: i64 = sqlx::query_scalar(&format!(
             "SELECT COUNT(*) FROM messages m \
              WHERE m.org_id = $1 \
                AND (m.recipient_user_id IS NULL OR m.recipient_user_id = $2) \
                AND m.sender_user_id <> $2 \
                AND m.id > COALESCE( \
                  (SELECT last_read_id FROM message_cursors \
-                  WHERE org_id = $1 AND user_id = $2), 0)",
-        )
+                  WHERE org_id = $1 AND user_id = $2), 0) \
+               AND {}",
+            message_visible_sql(3)
+        ))
         .bind(org)
         .bind(reader)
+        .bind(teams)
         .fetch_one(self.conn())
         .await?;
         Ok(n)

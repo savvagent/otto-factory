@@ -122,6 +122,17 @@ pub enum Error {
     )]
     AccessRevoked,
 
+    /// One of the errors above, re-worded because its own message named a row
+    /// the caller cannot see (the job a ticket is already linked to, the repo a
+    /// remote belongs to, the far end of a dependency cycle). `code` is the
+    /// original error's, so an agent branching on [`Error::code`] takes the same
+    /// branch whether or not the detail was withheld.
+    #[error("{message}")]
+    Redacted {
+        code: &'static str,
+        message: &'static str,
+    },
+
     #[error(transparent)]
     Db(#[from] sqlx::Error),
 
@@ -158,6 +169,7 @@ impl Error {
             Error::RaceLost(_) => "race_lost",
             Error::IdempotencyKeyConflict { .. } => "idempotency_key_conflict",
             Error::AccessRevoked => "access_revoked",
+            Error::Redacted { code, .. } => code,
             Error::Db(_) => "internal_error",
             Error::Platform(_) => "platform_unavailable",
             Error::Tenant(e) => e.code(),

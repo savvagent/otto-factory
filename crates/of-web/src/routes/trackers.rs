@@ -17,7 +17,6 @@
 use axum::extract::{Json, Path, State};
 use axum::response::{IntoResponse, Response};
 use of_core::audit::action;
-use of_core::repos::ReposExt;
 use of_core::trackers::{
     delete_binding, delete_connection, get_connection, list_bindings_for_repo, list_connections,
     resolve_binding, upsert_binding, upsert_connection, Provider, TrackerBinding,
@@ -387,8 +386,9 @@ pub async fn list_repo_bindings(
     Path((_org, slug)): Path<(String, String)>,
 ) -> ApiResult<Json<Vec<TrackerBindingView>>> {
     ctx.require_scope(of_core::scopes::TRACKERS)?;
+    let scope = ctx.team_scope(&state.platform).await?;
     let mut tx = ctx.begin(&state.db).await?;
-    let repo = resolve_repo(&state, &mut tx, &ctx, slug).await?;
+    let repo = resolve_repo(&mut tx, &scope, slug).await?;
     let bindings = list_bindings_for_repo(&mut tx, repo.id).await?;
     tx.commit().await?;
 
@@ -415,8 +415,9 @@ pub async fn bind_repo(
         .unwrap_or(DEFAULT_TRIGGER_LABEL)
         .to_string();
 
+    let scope = ctx.team_scope(&state.platform).await?;
     let mut tx = ctx.begin(&state.db).await?;
-    let repo = resolve_repo(&state, &mut tx, &ctx, slug).await?;
+    let repo = resolve_repo(&mut tx, &scope, slug).await?;
 
     // The connection is looked up, never taken from the request. A binding
     // pointing at another provider's connection is not a shape any caller
@@ -460,8 +461,9 @@ pub async fn unbind_repo(
     ctx.require_scope(of_core::scopes::TRACKERS)?;
     let provider = provider_from_path(&provider)?;
 
+    let scope = ctx.team_scope(&state.platform).await?;
     let mut tx = ctx.begin(&state.db).await?;
-    let repo = resolve_repo(&state, &mut tx, &ctx, slug).await?;
+    let repo = resolve_repo(&mut tx, &scope, slug).await?;
     if let Some(binding) = resolve_binding(&mut tx, repo.id, provider).await? {
         delete_binding(&mut tx, binding.id).await?;
         tx.audit(
@@ -481,18 +483,11 @@ pub async fn unbind_repo(
 /// applies, so a team-scoped repo's tracker binding is not readable by members
 /// of other teams — the binding names the customer's JIRA project.
 async fn resolve_repo(
-    state: &AppState,
     tx: &mut otto_tenant::Tx<'_>,
-    ctx: &OrgCtx,
+    scope: &of_core::teams::TeamScope,
     slug: String,
 ) -> ApiResult<of_core::repos::Repo> {
-    let repo = tx
-        .resolve_repo(&of_core::repos::RepoRef {
-            slug: Some(slug),
-            remote: None,
-        })
-        .await?;
-    super::repos::require_visible(state, ctx, repo).await
+    super::repos::resolve_visible(tx, scope, slug).await
 }
 
 /// Refuse a binding that could never match an inbound event.

@@ -8,7 +8,9 @@
 
 mod common;
 
-use common::{add_member, harness, onboard, org_with_owner, Call, Harness};
+use common::{
+    add_member, harness, harness_uncached_members, onboard, org_with_owner, Call, Harness,
+};
 use http::StatusCode;
 use of_core::repos::{RepoRef, ReposExt};
 use of_testkit::MockPlatform;
@@ -144,7 +146,7 @@ async fn a_token_cannot_reach_another_orgs_console(pool: PgPool) {
 
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn a_member_removed_at_the_platform_is_locked_out(pool: PgPool) {
-    let h = harness(pool).await;
+    let h = harness_uncached_members(pool).await;
     let (org, user) = (Uuid::new_v4(), Uuid::new_v4());
     h.platform.add_org(org, "acme", "Acme");
     h.platform
@@ -380,9 +382,8 @@ async fn a_known_team_scopes_a_repo_and_can_be_released(pool: PgPool) {
     assert!(released.body["teamId"].is_null());
 }
 
-/// Team *membership* is not something the platform's resource API can report
-/// yet, so nobody is known to be in a team: a team-scoped repo is admin-only
-/// rather than visible to everyone. Fails closed.
+/// A member on no team sees org-wide repos only; a team-scoped repo is for its
+/// team and for admins. (The team-membership cases are in `team_scoping.rs`.)
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn a_team_scoped_repo_is_hidden_from_non_admins(pool: PgPool) {
     let h = harness(pool).await;
@@ -734,7 +735,7 @@ async fn the_platform_route_does_not_collide_with_the_tracker_route(pool: PgPool
 
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn the_audit_log_needs_an_admin_and_the_org_admin_scope(pool: PgPool) {
-    let h = harness(pool).await;
+    let h = harness_uncached_members(pool).await;
     let (org, admin) = (Uuid::new_v4(), Uuid::new_v4());
     h.platform.add_org(org, "acme", "Acme");
     h.platform

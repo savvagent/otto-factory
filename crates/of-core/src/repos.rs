@@ -6,7 +6,7 @@
 
 use crate::error::{Error, Result};
 use crate::ids::RepoId;
-use crate::teams::VerifiedTeam;
+use crate::teams::{TeamScope, VerifiedTeam};
 use otto_tenant::ids::{OrgId, TeamId, UserId};
 use otto_tenant::Tx;
 use serde::{Deserialize, Serialize};
@@ -213,6 +213,16 @@ pub fn normalize_remote(raw: &str) -> String {
 const REPO_COLS: &str = "id, org_id, slug, name, provider, default_branch, team_id, \
                          default_agent_type, tracker_binding, active, created_at, created_by";
 
+/// How [`ReposExt::hold_repo_visible`] locks the repo row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hold {
+    /// The transaction writes rows that hang off the repo (jobs, leases,
+    /// messages) but not the repo itself.
+    Shared,
+    /// The transaction goes on to update the repo row.
+    ForUpdate,
+}
+
 /// Extension methods on [`Tx`] for this module's domain (see the crate docs for why
 /// these are extension traits rather than inherent methods).
 pub trait ReposExt {
@@ -239,6 +249,15 @@ pub trait ReposExt {
         limit: Option<i64>,
     ) -> impl std::future::Future<Output = Result<Vec<Repo>>> + Send;
 
+    /// [`Self::list_repos`] restricted in SQL to what `scope` may see, so the
+    /// limit counts visible repos only.
+    fn list_repos_visible(
+        &mut self,
+        include_inactive: bool,
+        limit: Option<i64>,
+        scope: &TeamScope,
+    ) -> impl std::future::Future<Output = Result<Vec<Repo>>> + Send;
+
     fn get_repo_by_slug(
         &mut self,
         slug: &str,
@@ -261,6 +280,44 @@ pub trait ReposExt {
         &mut self,
         r: &RepoRef,
     ) -> impl std::future::Future<Output = Result<Repo>> + Send;
+
+    /// [`Self::resolve_repo`] for a caller with a [`TeamScope`]: a repo of a
+    /// team the caller is not on resolves exactly like a repo that does not
+    /// exist, and the "registered repos" list in the error names only the repos
+    /// the caller may see, so neither the answer nor the error reveals that a
+    /// hidden repo exists.
+    fn resolve_repo_visible(
+        &mut self,
+        r: &RepoRef,
+        scope: &TeamScope,
+    ) -> impl std::future::Future<Output = Result<Repo>> + Send;
+
+    /// [`Self::resolve_repo_visible`] for a write: the repo's row is also held
+    /// until the transaction ends, so its team cannot be reassigned between this
+    /// check and the write that follows it. See [`Self::hold_repo_visible`].
+    fn resolve_repo_visible_held(
+        &mut self,
+        r: &RepoRef,
+        scope: &TeamScope,
+        hold: Hold,
+    ) -> impl std::future::Future<Output = Result<Repo>> + Send;
+
+    /// Lock repo `id` against a concurrent team reassignment for the rest of the
+    /// transaction, and say whether `scope` may see it as it now stands (`false`
+    /// for a repo that does not exist).
+    ///
+    /// A visibility check that is a separate `SELECT` from the write it guards
+    /// is a race under `READ COMMITTED`: an admin can move the repo to another
+    /// team and commit between the two, and the write lands on a row the caller
+    /// can no longer see. The lock makes `update_repo`'s `UPDATE` wait for this
+    /// transaction, and one that committed first is the version this reads.
+    /// Unrestricted callers take no lock: nothing can hide a row from them.
+    fn hold_repo_visible(
+        &mut self,
+        id: RepoId,
+        scope: &TeamScope,
+        hold: Hold,
+    ) -> impl std::future::Future<Output = Result<bool>> + Send;
 
     /// Apply a partial update.
     ///
@@ -352,6 +409,31 @@ impl ReposExt for Tx<'_> {
         Ok(normalized)
     }
 
+    async fn list_repos_visible(
+        &mut self,
+        include_inactive: bool,
+        limit: Option<i64>,
+        scope: &TeamScope,
+    ) -> Result<Vec<Repo>> {
+        let org = self.org();
+        let teams = scope
+            .restriction()
+            .map(|v| v.iter().map(|t| t.as_uuid()).collect::<Vec<uuid::Uuid>>());
+        let repos = sqlx::query_as(&format!(
+            "SELECT {REPO_COLS} FROM repos \
+             WHERE org_id = $1 AND ($2 OR active) \
+               AND ($4::uuid[] IS NULL OR team_id IS NULL OR team_id = ANY($4)) \
+             ORDER BY slug LIMIT $3"
+        ))
+        .bind(org)
+        .bind(include_inactive)
+        .bind(limit.unwrap_or(200).clamp(1, 1000))
+        .bind(teams)
+        .fetch_all(self.conn())
+        .await?;
+        Ok(repos)
+    }
+
     async fn list_repos(
         &mut self,
         include_inactive: bool,
@@ -394,6 +476,74 @@ impl ReposExt for Tx<'_> {
         Ok(repo)
     }
 
+    async fn resolve_repo_visible(&mut self, r: &RepoRef, scope: &TeamScope) -> Result<Repo> {
+        let attempted = r
+            .slug
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| r.remote.clone())
+            .unwrap_or_else(|| "(nothing supplied)".into());
+        match self.resolve_repo(r).await {
+            Ok(repo) if scope.allows(repo.team_id) => Ok(repo),
+            Ok(_) => Err(self.unresolved(&attempted, scope).await?),
+            // The inner error names whatever it was given (an empty slug, say);
+            // report the wrapper's own name so a miss and a hidden repo read
+            // byte for byte the same.
+            Err(Error::RepoUnresolved { .. }) if !scope.is_all() => {
+                Err(self.unresolved(&attempted, scope).await?)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn resolve_repo_visible_held(
+        &mut self,
+        r: &RepoRef,
+        scope: &TeamScope,
+        hold: Hold,
+    ) -> Result<Repo> {
+        let repo = self.resolve_repo_visible(r, scope).await?;
+        if self.hold_repo_visible(repo.id, scope, hold).await? {
+            return Ok(repo);
+        }
+        // Moved out of the caller's sight while this waited for the lock.
+        let attempted = r
+            .slug
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| r.remote.clone())
+            .unwrap_or_else(|| "(nothing supplied)".into());
+        Err(self.unresolved(&attempted, scope).await?)
+    }
+
+    async fn hold_repo_visible(
+        &mut self,
+        id: RepoId,
+        scope: &TeamScope,
+        hold: Hold,
+    ) -> Result<bool> {
+        if scope.is_all() {
+            return Ok(true);
+        }
+        let org = self.org();
+        // `FOR SHARE` lets any number of restricted writers hold the same repo
+        // at once. A caller that is about to `UPDATE` the repo itself must take
+        // the stronger lock up front: two holders of `FOR SHARE` that both go on
+        // to update the row would deadlock each other.
+        let lock = match hold {
+            Hold::Shared => "FOR SHARE",
+            Hold::ForUpdate => "FOR NO KEY UPDATE",
+        };
+        let team: Option<Option<TeamId>> = sqlx::query_scalar(&format!(
+            "SELECT team_id FROM repos WHERE org_id = $1 AND id = $2 {lock}"
+        ))
+        .bind(org)
+        .bind(id)
+        .fetch_optional(self.conn())
+        .await?;
+        Ok(team.is_some_and(|t| scope.allows(t)))
+    }
+
     async fn resolve_repo(&mut self, r: &RepoRef) -> Result<Repo> {
         if let Some(slug) = r.slug.as_deref().filter(|s| !s.trim().is_empty()) {
             if let Some(repo) = self.get_repo_by_slug(slug).await? {
@@ -409,7 +559,7 @@ impl ReposExt for Tx<'_> {
             // commonest way to reach it and the one the caller can actually fix
             // from the answer, so answering "repo not found: apo" and stopping
             // there makes them go and look the name up somewhere else.
-            return Err(self.unresolved(slug).await?);
+            return Err(self.unresolved(slug, &TeamScope::All).await?);
         }
 
         if let Some(remote) = r.remote.as_deref().filter(|s| !s.trim().is_empty()) {
@@ -440,7 +590,7 @@ impl ReposExt for Tx<'_> {
             .or_else(|| r.remote.clone())
             .unwrap_or_else(|| "(nothing supplied)".into());
 
-        Err(self.unresolved(&attempted).await?)
+        Err(self.unresolved(&attempted, &TeamScope::All).await?)
     }
 
     async fn update_repo(&mut self, id: RepoId, patch: RepoPatch) -> Result<Repo> {
@@ -508,7 +658,7 @@ pub(crate) trait ReposInternal {
     /// itself a query: a database failure while composing an error message is a
     /// database failure, and reporting it as "no such repo" would send someone
     /// looking for a typo that is not there.
-    async fn unresolved(&mut self, attempted: &str) -> Result<Error>;
+    async fn unresolved(&mut self, attempted: &str, scope: &TeamScope) -> Result<Error>;
 }
 
 impl ReposInternal for Tx<'_> {
@@ -556,9 +706,9 @@ impl ReposInternal for Tx<'_> {
         Ok(())
     }
 
-    async fn unresolved(&mut self, attempted: &str) -> Result<Error> {
+    async fn unresolved(&mut self, attempted: &str, scope: &TeamScope) -> Result<Error> {
         let known = self
-            .list_repos(false, None)
+            .list_repos_visible(false, None, scope)
             .await?
             .into_iter()
             .map(|r| r.slug)

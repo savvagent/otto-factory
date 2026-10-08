@@ -11,7 +11,7 @@
 use crate::error::{Error, Result};
 use crate::ids::{JobId, RepoId};
 use crate::repos::ReposExt;
-use crate::teams::VerifiedTeam;
+use crate::teams::{TeamScope, VerifiedTeam};
 use otto_tenant::ids::{OrgId, TeamId, UserId};
 use otto_tenant::Tx;
 use serde::{Deserialize, Serialize};
@@ -218,6 +218,10 @@ pub struct JobFilter {
     pub status: Option<Status>,
     pub repo_id: Option<RepoId>,
     pub team_id: Option<TeamId>,
+    /// The caller's team visibility: when set, only org-wide jobs and jobs of
+    /// these teams. `None` is unrestricted (an administrator's). Distinct from
+    /// `team_id`, which is a filter the caller asked for.
+    pub visible_teams: Option<Vec<TeamId>>,
     /// Restrict to jobs this user created. Used by "what did I queue?" views.
     pub created_by: Option<UserId>,
     /// A routing hint, not access control: matches jobs with this exact
@@ -239,6 +243,20 @@ pub struct Stats {
     pub cancelled: i64,
     pub blocked: i64,
     pub total: i64,
+}
+
+/// SQL: job `j` is visible under the `uuid[]` bound as `$n` (NULL = everything).
+///
+/// A job is visible only if its own `team_id` is **and** its repo's is: a job
+/// with no team on a team-scoped repo belongs to that team's work, not to the
+/// org's. Every team-aware read of jobs goes through this one predicate.
+pub(crate) fn job_visible_sql(n: usize) -> String {
+    format!(
+        "(${n}::uuid[] IS NULL OR ((j.team_id IS NULL OR j.team_id = ANY(${n})) \
+           AND NOT EXISTS (SELECT 1 FROM repos vr WHERE vr.org_id = j.org_id \
+                           AND vr.id = j.repo_id AND vr.team_id IS NOT NULL \
+                           AND NOT vr.team_id = ANY(${n}))))"
+    )
 }
 
 const JOB_COLS: &str = "id, org_id, repo_id, team_id, title, description, status, ticket_ref, \
@@ -557,6 +575,62 @@ pub trait JobsExt {
         &mut self,
         repo_id: Option<RepoId>,
     ) -> impl std::future::Future<Output = Result<Stats>> + Send;
+
+    /// [`Self::stats`], counting only org-wide jobs and jobs of `teams`: what a
+    /// non-administrator may see. Always a full scan, because the org-wide
+    /// counters have no team dimension.
+    fn stats_for_teams(
+        &mut self,
+        repo_id: Option<RepoId>,
+        teams: &[TeamId],
+    ) -> impl std::future::Future<Output = Result<Stats>> + Send;
+
+    /// [`Self::get_job`] for a caller with a [`TeamScope`]: a job whose own team
+    /// or whose repo's team is not visible is [`Error::JobNotFound`], exactly
+    /// like a job that does not exist.
+    fn get_job_visible(
+        &mut self,
+        id: &JobId,
+        scope: &TeamScope,
+    ) -> impl std::future::Future<Output = Result<Job>> + Send;
+
+    /// [`Self::get_job_visible`] for a write: the job's repo is also held until
+    /// the transaction ends, so the repo's team cannot be reassigned between
+    /// this check and the write (see [`ReposExt::hold_repo_visible`]). A job's
+    /// own team and repo never change after it is created, so the repo is the
+    /// only thing to hold.
+    fn get_job_visible_held(
+        &mut self,
+        id: &JobId,
+        scope: &TeamScope,
+    ) -> impl std::future::Future<Output = Result<Job>> + Send;
+
+    /// Of `ids`, those that name jobs `scope` may see. Unknown ids are dropped
+    /// too. For lists that carry job ids (dependencies) back to the caller.
+    fn visible_job_ids(
+        &mut self,
+        ids: &[JobId],
+        scope: &TeamScope,
+    ) -> impl std::future::Future<Output = Result<Vec<JobId>>> + Send;
+
+    /// Whether some job `scope` cannot see depends on `id`. Deleting `id` would
+    /// change that job.
+    ///
+    /// For a restricted `scope` the answer holds until the transaction ends,
+    /// because it is what licenses the delete that follows: `id` is locked
+    /// `FOR UPDATE`, which a new dependency's foreign-key check must wait for,
+    /// and the dependents' repos are held against a team reassignment.
+    fn has_hidden_dependents(
+        &mut self,
+        id: &JobId,
+        scope: &TeamScope,
+    ) -> impl std::future::Future<Output = Result<bool>> + Send;
+
+    /// Ids of repos hidden from `scope`, for filtering lists of jobs in memory.
+    fn hidden_repo_ids(
+        &mut self,
+        scope: &TeamScope,
+    ) -> impl std::future::Future<Output = Result<std::collections::HashSet<RepoId>>> + Send;
 }
 
 impl JobsExt for Tx<'_> {
@@ -1051,15 +1125,17 @@ impl JobsExt for Tx<'_> {
     async fn list_jobs(&mut self, f: &JobFilter) -> Result<Vec<Job>> {
         let org = self.org();
         let jobs = sqlx::query_as(&format!(
-            "SELECT {JOB_COLS} FROM jobs \
+            "SELECT {JOB_COLS} FROM jobs j \
              WHERE org_id = $1 \
                AND ($2::job_status IS NULL OR status = $2) \
                AND ($3::uuid IS NULL OR repo_id = $3) \
                AND ($4::uuid IS NULL OR team_id = $4) \
                AND ($5::uuid IS NULL OR created_by = $5) \
                AND ($6::text IS NULL OR agent_type = $6 OR agent_type IS NULL) \
+               AND {} \
              ORDER BY created_at DESC \
-             LIMIT $7"
+             LIMIT $7",
+            job_visible_sql(8)
         ))
         .bind(org)
         .bind(f.status)
@@ -1068,6 +1144,11 @@ impl JobsExt for Tx<'_> {
         .bind(f.created_by)
         .bind(&f.agent_type)
         .bind(f.limit.unwrap_or(200).clamp(1, 1000))
+        .bind(
+            f.visible_teams
+                .as_ref()
+                .map(|v| v.iter().map(|t| t.as_uuid()).collect::<Vec<uuid::Uuid>>()),
+        )
         .fetch_all(self.conn())
         .await?;
         Ok(jobs)
@@ -1470,6 +1551,23 @@ impl JobsExt for Tx<'_> {
 
     async fn delete_job(&mut self, id: &JobId) -> Result<()> {
         let org = self.org();
+        // The delete nulls `job_id` on the job's messages, which is the link
+        // their visibility was read through. Fold the job's teams into each
+        // message's `scope_teams` first, so they stay scoped. Sending already
+        // records them; this is what makes it hold for a message the
+        // `0004_message_scope` backfill could not reach (it finds no rows when
+        // the migrating role is subject to row-level security).
+        sqlx::query(
+            "UPDATE messages m SET scope_teams = ARRAY( \
+               SELECT DISTINCT t FROM unnest(m.scope_teams || ARRAY[j.team_id, r.team_id]) AS t \
+               WHERE t IS NOT NULL) \
+             FROM jobs j JOIN repos r ON r.org_id = j.org_id AND r.id = j.repo_id \
+             WHERE m.org_id = $1 AND m.job_id = $2 AND j.org_id = $1 AND j.id = $2",
+        )
+        .bind(org)
+        .bind(id)
+        .execute(self.conn())
+        .await?;
         let deleted: Option<Status> =
             sqlx::query_scalar("DELETE FROM jobs WHERE org_id = $1 AND id = $2 RETURNING status")
                 .bind(org)
@@ -1701,6 +1799,146 @@ impl JobsExt for Tx<'_> {
         .fetch_one(self.conn())
         .await?;
         Ok(stats)
+    }
+
+    async fn stats_for_teams(
+        &mut self,
+        repo_id: Option<RepoId>,
+        teams: &[TeamId],
+    ) -> Result<Stats> {
+        let org = self.org();
+        let teams: Vec<uuid::Uuid> = teams.iter().map(|t| t.as_uuid()).collect();
+        let stats = sqlx::query_as(&format!(
+            "SELECT \
+               COUNT(*) FILTER (WHERE status = 'pending')     AS pending, \
+               COUNT(*) FILTER (WHERE status = 'in-progress') AS in_progress, \
+               COUNT(*) FILTER (WHERE status = 'active')      AS active, \
+               COUNT(*) FILTER (WHERE status = 'completed')   AS completed, \
+               COUNT(*) FILTER (WHERE status = 'failed')      AS failed, \
+               COUNT(*) FILTER (WHERE status = 'cancelled')   AS cancelled, \
+               COUNT(*) FILTER (WHERE status = 'pending' AND EXISTS ( \
+                 SELECT 1 FROM job_dependencies d \
+                 JOIN jobs dep ON dep.org_id = d.org_id AND dep.id = d.depends_on \
+                 WHERE d.org_id = j.org_id AND d.job_id = j.id \
+                   AND dep.status <> 'completed'))            AS blocked, \
+               COUNT(*)                                       AS total \
+             FROM jobs j WHERE j.org_id = $1 \
+               AND ($2::uuid IS NULL OR j.repo_id = $2) \
+               AND {}",
+            job_visible_sql(3)
+        ))
+        .bind(org)
+        .bind(repo_id)
+        .bind(teams)
+        .fetch_one(self.conn())
+        .await?;
+        Ok(stats)
+    }
+
+    async fn get_job_visible(&mut self, id: &JobId, scope: &TeamScope) -> Result<Job> {
+        let job = self.get_job(id).await?;
+        if scope.is_all() {
+            return Ok(job);
+        }
+        let hidden = self.hidden_repo_ids(scope).await?;
+        if scope.allows(job.team_id) && !hidden.contains(&job.repo_id) {
+            Ok(job)
+        } else {
+            Err(Error::JobNotFound(id.clone()))
+        }
+    }
+
+    async fn get_job_visible_held(&mut self, id: &JobId, scope: &TeamScope) -> Result<Job> {
+        let job = self.get_job(id).await?;
+        if scope.is_all() {
+            return Ok(job);
+        }
+        if scope.allows(job.team_id)
+            && self
+                .hold_repo_visible(job.repo_id, scope, crate::repos::Hold::Shared)
+                .await?
+        {
+            Ok(job)
+        } else {
+            Err(Error::JobNotFound(id.clone()))
+        }
+    }
+
+    async fn visible_job_ids(&mut self, ids: &[JobId], scope: &TeamScope) -> Result<Vec<JobId>> {
+        let org = self.org();
+        let wanted: Vec<String> = ids.iter().map(|i| i.0.clone()).collect();
+        let teams = scope
+            .restriction()
+            .map(|v| v.iter().map(|t| t.as_uuid()).collect::<Vec<uuid::Uuid>>());
+        let found: Vec<String> = sqlx::query_scalar(&format!(
+            "SELECT j.id FROM jobs j WHERE j.org_id = $1 AND j.id = ANY($2) AND {} ORDER BY j.id",
+            job_visible_sql(3)
+        ))
+        .bind(org)
+        .bind(&wanted)
+        .bind(teams)
+        .fetch_all(self.conn())
+        .await?;
+        Ok(found.into_iter().map(JobId).collect())
+    }
+
+    async fn has_hidden_dependents(&mut self, id: &JobId, scope: &TeamScope) -> Result<bool> {
+        if scope.is_all() {
+            return Ok(false);
+        }
+        let org = self.org();
+        sqlx::query("SELECT 1 FROM jobs WHERE org_id = $1 AND id = $2 FOR UPDATE")
+            .bind(org)
+            .bind(id)
+            .execute(self.conn())
+            .await?;
+        // In id order, so two transactions holding overlapping sets cannot
+        // deadlock each other.
+        sqlx::query(
+            "SELECT r.id FROM repos r WHERE r.org_id = $1 AND r.id IN ( \
+               SELECT j.repo_id FROM job_dependencies d \
+                 JOIN jobs j ON j.org_id = d.org_id AND j.id = d.job_id \
+               WHERE d.org_id = $1 AND d.depends_on = $2) \
+             ORDER BY r.id FOR SHARE OF r",
+        )
+        .bind(org)
+        .bind(id)
+        .execute(self.conn())
+        .await?;
+        let teams = scope
+            .restriction()
+            .map(|v| v.iter().map(|t| t.as_uuid()).collect::<Vec<uuid::Uuid>>());
+        Ok(sqlx::query_scalar(&format!(
+            "SELECT EXISTS (SELECT 1 FROM job_dependencies d \
+               JOIN jobs j ON j.org_id = d.org_id AND j.id = d.job_id \
+               WHERE d.org_id = $1 AND d.depends_on = $2 AND NOT {})",
+            job_visible_sql(3)
+        ))
+        .bind(org)
+        .bind(id)
+        .bind(teams)
+        .fetch_one(self.conn())
+        .await?)
+    }
+
+    async fn hidden_repo_ids(
+        &mut self,
+        scope: &TeamScope,
+    ) -> Result<std::collections::HashSet<RepoId>> {
+        let Some(teams) = scope.restriction() else {
+            return Ok(Default::default());
+        };
+        let teams: Vec<uuid::Uuid> = teams.iter().map(|t| t.as_uuid()).collect();
+        let org = self.org();
+        let ids: Vec<RepoId> = sqlx::query_scalar(
+            "SELECT id FROM repos WHERE org_id = $1 \
+               AND team_id IS NOT NULL AND NOT team_id = ANY($2)",
+        )
+        .bind(org)
+        .bind(teams)
+        .fetch_all(self.conn())
+        .await?;
+        Ok(ids.into_iter().collect())
     }
 }
 

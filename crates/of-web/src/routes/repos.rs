@@ -23,12 +23,12 @@ use of_core::leases::LeasesExt;
 use of_core::repos::ReposExt;
 use of_core::repos::{NewRepo, Provider, Repo, RepoPatch};
 use of_core::scopes;
-use of_core::teams::VerifiedTeam;
+use of_core::teams::{TeamScope, VerifiedTeam};
 use otto_tenant::audit::Entry;
 use otto_tenant::ids::TeamId;
 use serde::{Deserialize, Serialize};
 
-use crate::error::{ApiError, ApiResult};
+use crate::error::ApiResult;
 use crate::session::OrgCtx;
 use crate::state::AppState;
 
@@ -93,60 +93,30 @@ pub struct ListReposQuery {
     pub include_lease_status: bool,
 }
 
-/// The teams the caller belongs to.
-///
-/// **SEAM / gap, and it fails closed.** Team *membership* is the platform's, and
-/// the platform's resource-server API (`otto-resource`) can say whether a team
-/// exists in an org but not which teams a user is in. Until it can, nobody is
-/// known to be in any team, so a non-admin sees org-wide repos only and a
-/// team-scoped repo is visible to owners and admins. That is the safe direction:
-/// the alternative failure, guessing someone into a team, would show a team's
-/// repos, jobs, and leases to people outside it. When the platform grows a
-/// "teams of this member" lookup, this is the one function that changes.
-async fn callers_teams(_state: &AppState, _ctx: &OrgCtx) -> std::collections::HashSet<TeamId> {
-    std::collections::HashSet::new()
-}
+// Team visibility, per `docs/specs/2026-09-01-otto-factory-design.md`: a repo with
+// a `team_id` is visible only to that team's members and org admins; a null
+// `team_id` is org-wide. Membership is the platform's (`OrgCtx::team_scope`) and
+// fails closed. A repo whose team the platform has since deleted keeps its
+// dangling `team_id` (see `of_core::platform_events`), which matches nobody's
+// team list, so it is admin-only until reassigned.
 
-/// Filter repos down to what the caller is allowed to see.
-///
-/// Per `docs/specs/2026-09-01-otto-factory-design.md`: a repo with a
-/// `team_id` is visible only to that team's members and org admins; a null
-/// `team_id` is org-wide. `OrgCtx` only proves org membership, so without this
-/// every member — not just the assigned team — could read every team-scoped
-/// repo's leases and metadata through the console.
-///
-/// A repo whose team the platform has since deleted keeps its dangling
-/// `team_id` (see `of_core::platform_events`), which matches nobody's team list,
-/// so it is admin-only until reassigned.
-async fn visible_repos(state: &AppState, ctx: &OrgCtx, repos: Vec<Repo>) -> Vec<Repo> {
-    if ctx.role.can_administer() {
-        return repos;
-    }
-    let my_teams = callers_teams(state, ctx).await;
-    repos
-        .into_iter()
-        .filter(|r| r.team_id.is_none_or(|t| my_teams.contains(&t)))
-        .collect()
-}
-
-/// As [`visible_repos`], for a single already-resolved repo. A repo the
-/// caller may not see is reported as not found, not forbidden — the same
-/// "an org you are not in is 404" rule this file already applies to orgs
-/// extends to a team-scoped repo a non-member should not learn exists.
-pub(crate) async fn require_visible(state: &AppState, ctx: &OrgCtx, repo: Repo) -> ApiResult<Repo> {
-    if ctx.role.can_administer() {
-        return Ok(repo);
-    }
-    match repo.team_id {
-        None => Ok(repo),
-        Some(team) => {
-            if callers_teams(state, ctx).await.contains(&team) {
-                Ok(repo)
-            } else {
-                Err(ApiError::not_found("no repo with that slug in this org"))
-            }
-        }
-    }
+/// Resolve a repo slug as the caller may see it. A repo of a team the caller is
+/// not on is `404` exactly like one that does not exist, and the error's list of
+/// registered slugs omits it.
+pub(crate) async fn resolve_visible(
+    tx: &mut otto_tenant::Tx<'_>,
+    scope: &TeamScope,
+    slug: String,
+) -> ApiResult<Repo> {
+    Ok(tx
+        .resolve_repo_visible(
+            &of_core::repos::RepoRef {
+                slug: Some(slug),
+                remote: None,
+            },
+            scope,
+        )
+        .await?)
 }
 
 /// A repo plus, when `?includeLeaseStatus=true` asked for it, whether anyone
@@ -177,9 +147,11 @@ pub async fn list_repos(
     if q.include_lease_status {
         ctx.require_scope(scopes::JOBS_READ)?;
     }
+    let scope = ctx.team_scope(&state.platform).await?;
     let mut tx = ctx.begin(&state.db).await?;
-    let repos = tx.list_repos(q.include_inactive, None).await?;
-    let repos = visible_repos(&state, &ctx, repos).await;
+    let repos = tx
+        .list_repos_visible(q.include_inactive, None, &scope)
+        .await?;
 
     let active: Option<std::collections::HashSet<_>> = if q.include_lease_status {
         Some(
@@ -263,14 +235,9 @@ pub async fn get_repo(
     Path((_org, slug)): Path<(String, String)>,
 ) -> ApiResult<Json<Repo>> {
     ctx.require_scope(scopes::REPOS_READ)?;
+    let scope = ctx.team_scope(&state.platform).await?;
     let mut tx = ctx.begin(&state.db).await?;
-    let repo = tx
-        .resolve_repo(&of_core::repos::RepoRef {
-            slug: Some(slug),
-            remote: None,
-        })
-        .await?;
-    let repo = require_visible(&state, &ctx, repo).await?;
+    let repo = resolve_visible(&mut tx, &scope, slug).await?;
     tx.commit().await?;
     Ok(Json(repo))
 }
@@ -347,15 +314,11 @@ pub async fn list_leases(
     // The same scope MCP `list_leases` requires, so switching transports
     // cannot widen what a token may read.
     ctx.require_scope(scopes::JOBS_READ)?;
+    let scope = ctx.team_scope(&state.platform).await?;
     let mut tx = ctx.begin(&state.db).await?;
-    let repo = tx
-        .resolve_repo(&of_core::repos::RepoRef {
-            slug: Some(slug),
-            remote: None,
-        })
-        .await?;
-    let repo = require_visible(&state, &ctx, repo).await?;
-    let leases = tx.list_leases(Some(repo.id)).await?;
+    let repo = resolve_visible(&mut tx, &scope, slug).await?;
+    let mut leases = tx.list_leases(Some(repo.id)).await?;
+    of_core::leases::hide_unseen_jobs(&mut tx, &mut leases, &scope).await?;
     tx.commit().await?;
     Ok(Json(leases))
 }

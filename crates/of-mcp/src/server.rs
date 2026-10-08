@@ -32,6 +32,7 @@
 use std::sync::Arc;
 
 use of_billing::Meter;
+use of_core::teams::TeamScope;
 use of_core::watch::Watcher;
 use otto_resource::PlatformClient;
 use otto_tenant::{Db, Tx};
@@ -235,6 +236,30 @@ impl Factory {
     /// The principal for the HTTP request this tool call arrived on.
     pub fn caller(&self, parts: &http::request::Parts) -> Result<Principal, ErrorData> {
         crate::auth::principal_from(parts).ok_or_else(error::unauthenticated)
+    }
+
+    /// Which team-scoped repos and jobs the caller may see or touch: everything
+    /// for an owner or admin, otherwise org-wide rows plus those of the teams the
+    /// platform says they belong to. **Fails closed**: a platform that cannot
+    /// answer is `platform_unavailable`, never "all teams". Ask before opening
+    /// the transaction, so a slow platform holds no pooled connection.
+    pub async fn team_scope(&self, caller: &Principal) -> Result<TeamScope, ErrorData> {
+        // The role on the principal is as of the last introspection, cached for
+        // up to a minute: a demoted admin would keep full visibility. Ask the
+        // platform who this is now (its own, shorter cache), as the console does.
+        // A user it no longer knows as a member has left the org since the token
+        // was introspected: refused, not downgraded to a member of no teams. A
+        // platform that cannot answer is refused too.
+        let role = self
+            .platform
+            .member(caller.org_id.as_uuid(), caller.user_id.as_uuid())
+            .await
+            .map_err(|e| error::from_platform(&e))?
+            .ok_or_else(|| error::from_core(&of_core::Error::AccessRevoked))?
+            .role;
+        TeamScope::for_member(&self.platform, caller.org_id, caller.user_id, role)
+            .await
+            .map_err(|e| error::from_core(&e))
     }
 
     /// Open a transaction pinned to the caller's org, refused if the org was

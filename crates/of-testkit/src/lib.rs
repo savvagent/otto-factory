@@ -43,8 +43,9 @@ use axum::{Form, Json, Router};
 use base64::Engine;
 use chrono::{DateTime, NaiveDate, Utc};
 use otto_resource::{
-    ClientConfig, IntrospectionResponse, MemberInfo, OrgInfo, PlatformClient, RejectedEvent, Role,
-    TeamInfo, TokenKind, UsageBatch, UsageEvent, UsageReceipt, UsageStatus, UserInfo,
+    ClientConfig, IntrospectionResponse, MemberInfo, MemberTeams, OrgInfo, PlatformClient,
+    RejectedEvent, Role, TeamInfo, TokenKind, UsageBatch, UsageEvent, UsageReceipt, UsageStatus,
+    UserInfo,
 };
 use serde::Deserialize;
 use uuid::Uuid;
@@ -79,6 +80,8 @@ struct Data {
     members: HashMap<(Uuid, Uuid), (UserInfo, Role, u64)>,
     joins: u64,
     teams: HashMap<(Uuid, Uuid), TeamInfo>,
+    /// (org, user, team) memberships.
+    team_members: HashSet<(Uuid, Uuid, Uuid)>,
     usage: HashMap<Uuid, UsageStatus>,
     counted: Vec<UsageEvent>,
     seen: HashSet<Uuid>,
@@ -168,6 +171,10 @@ impl MockPlatform {
                 get(member_by_email),
             )
             .route("/internal/orgs/{org}/members/{user}", get(member))
+            .route(
+                "/internal/orgs/{org}/members/{user}/teams",
+                get(member_teams),
+            )
             .route(
                 "/internal/orgs/{org}/teams/by-slug/{slug}",
                 get(team_by_slug),
@@ -271,6 +278,26 @@ impl MockPlatform {
                 name: name.into(),
             },
         );
+    }
+
+    /// Put `user` on `team`. The platform lists a member's teams from its own
+    /// membership table, so the team and the member must both exist too.
+    pub fn add_team_member(&self, org: Uuid, user: Uuid, team: Uuid) {
+        self.inner
+            .data
+            .lock()
+            .unwrap()
+            .team_members
+            .insert((org, user, team));
+    }
+
+    pub fn remove_team_member(&self, org: Uuid, user: Uuid, team: Uuid) {
+        self.inner
+            .data
+            .lock()
+            .unwrap()
+            .team_members
+            .remove(&(org, user, team));
     }
 
     pub fn remove_team(&self, org: Uuid, team: Uuid) {
@@ -927,6 +954,31 @@ async fn member(
         Some(m) => Json(m).into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
     }
+}
+
+async fn member_teams(
+    State(inner): S,
+    headers: HeaderMap,
+    Path((org, user)): Path<(Uuid, Uuid)>,
+) -> Response {
+    if let Err(res) = caller(&inner, &headers) {
+        return res;
+    }
+    inner.lookup_calls.fetch_add(1, Ordering::SeqCst);
+    let d = inner.data.lock().unwrap();
+    if member_info(&d, org, user).is_none() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    // Ordered by name, as the platform answers; a deleted team is gone from the
+    // answer even though the membership row may linger in the mock.
+    let mut teams: Vec<TeamInfo> = d
+        .team_members
+        .iter()
+        .filter(|(o, u, _)| *o == org && *u == user)
+        .filter_map(|(o, _, t)| d.teams.get(&(*o, *t)).cloned())
+        .collect();
+    teams.sort_by(|a, b| a.name.cmp(&b.name));
+    Json(MemberTeams { teams }).into_response()
 }
 
 #[derive(Deserialize)]

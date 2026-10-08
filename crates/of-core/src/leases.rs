@@ -93,6 +93,12 @@ pub trait LeasesExt {
         holder: UserId,
     ) -> impl std::future::Future<Output = Result<()>> + Send;
 
+    /// The repo a lease (live or not) belongs to, if the lease exists.
+    fn lease_repo_id(
+        &mut self,
+        lease_id: uuid::Uuid,
+    ) -> impl std::future::Future<Output = Result<Option<RepoId>>> + Send;
+
     /// Live leases — "who is in this repo right now?".
     ///
     /// Filters expired rows in the query rather than relying on the reaper, so
@@ -227,6 +233,17 @@ impl LeasesExt for Tx<'_> {
         Ok(())
     }
 
+    async fn lease_repo_id(&mut self, lease_id: uuid::Uuid) -> Result<Option<RepoId>> {
+        let org = self.org();
+        Ok(
+            sqlx::query_scalar("SELECT repo_id FROM repo_leases WHERE org_id = $1 AND id = $2")
+                .bind(org)
+                .bind(lease_id)
+                .fetch_optional(self.conn())
+                .await?,
+        )
+    }
+
     async fn list_leases(&mut self, repo_id: Option<RepoId>) -> Result<Vec<Lease>> {
         let org = self.org();
         let leases = sqlx::query_as(&format!(
@@ -241,4 +258,36 @@ impl LeasesExt for Tx<'_> {
         .await?;
         Ok(leases)
     }
+}
+
+/// Blank the `job_id` of leases whose job `scope` cannot see: a lease on a
+/// visible repo can still name a job of a team the caller is not on.
+pub async fn hide_unseen_jobs(
+    tx: &mut Tx<'_>,
+    leases: &mut [Lease],
+    scope: &crate::teams::TeamScope,
+) -> Result<()> {
+    use crate::jobs::JobsExt;
+    if scope.is_all() {
+        return Ok(());
+    }
+    let named: Vec<JobId> = leases
+        .iter()
+        .filter_map(|l| l.job_id.clone().map(JobId))
+        .collect();
+    if named.is_empty() {
+        return Ok(());
+    }
+    let seen: std::collections::HashSet<String> = tx
+        .visible_job_ids(&named, scope)
+        .await?
+        .into_iter()
+        .map(|j| j.0)
+        .collect();
+    for l in leases {
+        if l.job_id.as_ref().is_some_and(|j| !seen.contains(j)) {
+            l.job_id = None;
+        }
+    }
+    Ok(())
 }

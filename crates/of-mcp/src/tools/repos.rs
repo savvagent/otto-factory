@@ -9,8 +9,9 @@ use rmcp::model::ErrorData;
 use rmcp::{tool, tool_router};
 use serde::Deserialize;
 
-use super::{out, repo_of, scope};
+use super::{out, redact_foreign_ids, repo_for_write, repo_of, scope};
 use crate::server::{Factory, McpResult};
+use of_core::repos::Hold;
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -107,6 +108,11 @@ impl Factory {
         let caller = self.caller(&parts)?;
         caller.require_scope(scope::REPOS_WRITE).mcp()?;
 
+        // Any caller with repos:write may register: a repo registered here
+        // takes no team, so it is org-wide and opens nothing new to anyone. The
+        // scope still matters for the refusals, which must not name a repo of a
+        // team the caller is not on (a remote that one already owns).
+        let team = self.team_scope(&caller).await?;
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "register_repo").await?;
         let repo = tx
@@ -120,6 +126,7 @@ impl Factory {
                 ..Default::default()
             })
             .await
+            .map_err(|e| redact_foreign_ids(&team, e))
             .mcp()?;
         tx.commit().await.mcp()?;
 
@@ -141,10 +148,11 @@ impl Factory {
         let caller = self.caller(&parts)?;
         caller.require_scope(scope::REPOS_READ).mcp()?;
 
+        let team = self.team_scope(&caller).await?;
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "list_repos").await?;
         let repos = tx
-            .list_repos(args.include_inactive, args.limit)
+            .list_repos_visible(args.include_inactive, args.limit, &team)
             .await
             .mcp()?;
         tx.commit().await.mcp()?;
@@ -167,9 +175,10 @@ impl Factory {
         let caller = self.caller(&parts)?;
         caller.require_scope(scope::REPOS_READ).mcp()?;
 
+        let team = self.team_scope(&caller).await?;
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "resolve_repo").await?;
-        let repo = repo_of(&mut tx, args.repo, args.remote).await?;
+        let repo = repo_of(&mut tx, &team, args.repo, args.remote).await?;
         tx.commit().await.mcp()?;
 
         Ok(Json(out::RepoOut { repo }))
@@ -191,9 +200,10 @@ impl Factory {
         let caller = self.caller(&parts)?;
         caller.require_scope(scope::REPOS_WRITE).mcp()?;
 
+        let team = self.team_scope(&caller).await?;
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "update_repo").await?;
-        let repo = repo_of(&mut tx, args.repo, args.remote).await?;
+        let repo = repo_for_write(&mut tx, &team, args.repo, args.remote, Hold::ForUpdate).await?;
         let updated = tx
             .update_repo(
                 repo.id,
@@ -207,6 +217,7 @@ impl Factory {
                 },
             )
             .await
+            .map_err(|e| redact_foreign_ids(&team, e))
             .mcp()?;
         tx.commit().await.mcp()?;
 
