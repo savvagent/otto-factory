@@ -30,7 +30,8 @@ use tower::ServiceExt;
 
 pub const RESOURCE: &str = of_testkit::RESOURCE_URI;
 pub const PUBLIC_URL: &str = "https://console.otto-factory.test";
-pub const PLATFORM_URL: &str = "https://otto.test";
+/// The console's OAuth client id at the (mock) platform.
+pub const CONSOLE_CLIENT: &str = "of_console_test";
 
 pub struct Harness {
     pub db: Db,
@@ -49,7 +50,10 @@ pub async fn harness_with(pool: PgPool, configure: impl FnOnce(&mut Config)) -> 
     let mut config = Config::new(
         PUBLIC_URL,
         RESOURCE,
-        PLATFORM_URL,
+        // The mock, not a made-up host: the console's login calls the platform's
+        // token endpoint server to server, and sends the browser to its
+        // authorize endpoint.
+        &platform.url,
         of_testkit::WEBHOOK_SECRET,
     );
     configure(&mut config);
@@ -61,6 +65,14 @@ pub async fn harness_with(pool: PgPool, configure: impl FnOnce(&mut Config)) -> 
         cipher: cipher(),
         platform,
     }
+}
+
+/// A harness whose deployment has console sign-in switched on.
+pub async fn harness_with_login(pool: PgPool) -> Harness {
+    harness_with(pool, |config| {
+        config.console_client_id = Some(CONSOLE_CLIENT.into());
+    })
+    .await
 }
 
 /// A harness whose deployment can actually take an admin through connecting a
@@ -96,6 +108,28 @@ pub struct Reply {
 }
 
 impl Reply {
+    /// The `Location` of a redirect.
+    pub fn location(&self) -> Option<&str> {
+        self.headers.get(http::header::LOCATION)?.to_str().ok()
+    }
+
+    /// The whole `Set-Cookie` header for `name`, attributes and all.
+    pub fn set_cookie(&self, name: &str) -> Option<String> {
+        self.headers
+            .get_all(http::header::SET_COOKIE)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .find(|v| v.starts_with(&format!("{name}=")))
+            .map(str::to_string)
+    }
+
+    /// The value a `Set-Cookie` for `name` sets; empty when it clears it.
+    pub fn cookie_value(&self, name: &str) -> Option<String> {
+        let header = self.set_cookie(name)?;
+        let (_, rest) = header.split_once('=')?;
+        Some(rest.split(';').next()?.to_string())
+    }
+
     pub fn error_code(&self) -> Option<&str> {
         self.body.get("error")?.get("code")?.as_str()
     }

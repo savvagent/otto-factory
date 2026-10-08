@@ -3,6 +3,8 @@
 use std::sync::Arc;
 
 use otto_resource::PlatformClient;
+
+use crate::oauth::PlatformOAuth;
 use otto_tenant::crypto::Cipher;
 use otto_tenant::Db;
 
@@ -64,6 +66,14 @@ pub struct Config {
     /// tracker console performs. Optional for the same reason.
     pub jira_client_id: Option<String>,
     pub jira_client_secret: Option<String>,
+
+    /// The console's own OAuth client id at the platform: a public first-party
+    /// client, registered by an operator
+    /// (`otto-platform-server client register … --first-party`). `None` turns
+    /// console login off — `/auth/login` answers `503 console_login_disabled`
+    /// — while the rest of the server runs as usual, so a deployment can be
+    /// brought up before the client is registered.
+    pub console_client_id: Option<String>,
 }
 
 impl std::fmt::Debug for Config {
@@ -72,6 +82,7 @@ impl std::fmt::Debug for Config {
             .field("public_url", &self.public_url)
             .field("resource_uri", &self.resource_uri)
             .field("platform_url", &self.platform_url)
+            .field("console_client_id", &self.console_client_id)
             .field(
                 "github_tracker_configured",
                 &self.github_tracker_configured(),
@@ -99,7 +110,14 @@ impl Config {
             github_app_client_secret: None,
             jira_client_id: None,
             jira_client_secret: None,
+            console_client_id: None,
         }
+    }
+
+    /// Where the platform sends a browser back with an authorization code. The
+    /// URI registered for the console client must be exactly this.
+    pub fn console_redirect_uri(&self) -> String {
+        self.url("/auth/callback")
     }
 
     /// Where both providers send a browser back after authorization.
@@ -197,6 +215,9 @@ pub struct AppState {
     /// The otto platform: introspects the bearer tokens console requests carry
     /// and answers identity questions (org slug, team by slug or id).
     pub platform: Arc<PlatformClient>,
+    /// The platform's token endpoints (code exchange, refresh, revoke), for the
+    /// console's own login. Server-to-server only: the platform serves no CORS.
+    pub oauth: Arc<PlatformOAuth>,
 }
 
 impl AppState {
@@ -204,6 +225,7 @@ impl AppState {
         Self {
             db,
             cipher: Arc::new(cipher),
+            oauth: Arc::new(PlatformOAuth::new(&config.platform_url)),
             config: Arc::new(config),
             platform,
         }

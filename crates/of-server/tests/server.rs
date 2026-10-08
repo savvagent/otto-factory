@@ -40,6 +40,7 @@ fn config(static_dir: &str) -> Config {
         github_app_client_secret: None,
         jira_client_id: None,
         jira_client_secret: None,
+        console_client_id: None,
         enforce_quotas: false,
         upgrade_url: format!("{PLATFORM}/settings/billing"),
         extra_allowed_hosts: vec![],
@@ -368,6 +369,9 @@ async fn the_console_fallback_stops_at_the_api(pool: PgPool) {
     for path in [
         "/api/no/such/thing",
         "/oauth/nope",
+        // The console's own sign-in routes are API-shaped too: a mistyped one is
+        // a JSON 404, never `index.html` served into a redirect.
+        "/auth/nope",
         "/.well-known/nope",
         "/platform/nope",
     ] {
@@ -382,11 +386,13 @@ async fn the_console_fallback_stops_at_the_api(pool: PgPool) {
 
     // A console path that merely shares a prefix with an API one is still the
     // console: `apiary` is a legal org slug.
-    let lookalike = get(app, "/apiary").await;
-    assert_eq!(lookalike.status(), http::StatusCode::OK);
-    assert!(body_text(lookalike)
-        .await
-        .contains("<title>console</title>"));
+    for path in ["/apiary", "/authors"] {
+        let lookalike = get(app.clone(), path).await;
+        assert_eq!(lookalike.status(), http::StatusCode::OK, "{path}");
+        assert!(body_text(lookalike)
+            .await
+            .contains("<title>console</title>"));
+    }
 
     watcher.shutdown().await;
 }

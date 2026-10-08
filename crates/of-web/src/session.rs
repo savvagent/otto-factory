@@ -1,28 +1,33 @@
 //! Who is calling the console API.
 //!
-//! # The seam
+//! # Two credentials, one identity
 //!
-//! The console used to sign people in itself: passkeys, a session cookie, a
-//! login page. All of that is the otto platform's now, and **console login is a
-//! separate, later change** (an OAuth authorization-code + PKCE flow against the
-//! platform that leaves this service holding its own session). Until then the
-//! console API needs *some* way to know who is asking, and the one the platform
-//! already provides is a bearer token.
-//!
-//! So this module accepts a platform-issued token on the console API:
+//! The console API accepts either of two credentials, and both end in the same
+//! call: the platform introspecting a platform-issued access token.
 //!
 //! ```text
-//!   Authorization: Bearer otto_at_…  (or otto_pat_…)
-//!       └─ PlatformClient::introspect ── active? which user, org, role, scopes?
-//!            └─ the `{org}` in the path must be the token's org
+//!   Authorization: Bearer otto_at_…  (or otto_pat_…)   scripts, CI, agents
+//!       └─ PlatformClient::introspect
+//!   Cookie: __Host-of_session=…                         the console in a browser
+//!       └─ the session row ── held token pair ── refreshed if expiring
+//!            └─ PlatformClient::introspect              (see `crate::console`)
+//!
+//!            └─ active? which user, org, role, scopes?
+//!                 └─ the `{org}` in the path must be the token's org
 //! ```
 //!
-//! That is the same credential, validated by the same call, as the MCP surface
-//! (`of_mcp::auth`), so the console API cannot be reached by anything an agent
-//! could not already reach it with. **Everything marked `SEAM` below is what the
-//! console-login change replaces**: it will resolve a session cookie to a held
-//! platform token and feed it through [`authenticate`] unchanged, and nothing
-//! downstream of [`OrgCtx`] needs to know the difference.
+//! [`authenticate`] is the one place a credential becomes an identity.
+//! **A bearer token, when present, decides the request**, valid or not: it is never
+//! "fixed" by falling back to a cookie, so a script's behaviour does not depend on
+//! what a browser left lying around. Only a request with no `Authorization`
+//! bearer looks at the cookie. Everything downstream of [`OrgCtx`] needs to know
+//! nothing about which it was, except one thing: a cookie session is bound to one
+//! org, and asking it for another is not "no such org" but a prompt to sign in to
+//! that one — see [`ApiError::org_session_mismatch`].
+//!
+//! The cookie is an ambient credential, so cookie-authenticated writes are
+//! guarded against cross-site requests ([`crate::csrf`]); a bearer is not ambient
+//! and is exempt.
 //!
 //! # What an extractor guarantees
 //!
@@ -33,7 +38,10 @@
 //!
 //! - **An org that is not the token's is `404`.** A token opens exactly one org,
 //!   fixed when it was issued. Answering `403` on a real slug and `404` on a fake
-//!   one turns any token into a directory of who uses the product.
+//!   one turns any token into a directory of who uses the product. (A *cookie*
+//!   session asking for another org is `401 org_session_mismatch` instead: the
+//!   person is signed in, just not to that org, and the console's answer is to sign
+//!   in again with an `org_hint`. It leaks nothing a login would not.)
 //! - **A platform outage is `503`, never `401`.** Same reasoning as the MCP
 //!   surface: `401` sends a client off to sign in again against the thing that is
 //!   down.
@@ -42,20 +50,29 @@
 
 use axum::extract::{FromRef, FromRequestParts};
 use http::request::Parts;
-use otto_resource::{Role, TokenClaims};
+use otto_resource::{MemberInfo, Role, TokenClaims};
 use otto_tenant::ids::{OrgId, UserId};
 
+use crate::console;
+use crate::cookies;
 use crate::error::ApiError;
 use crate::state::AppState;
 
-/// SEAM: the bearer token on the request, if any. The console-login change adds
-/// the session-cookie path beside this one.
+/// Which credential authenticated a request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    Bearer,
+    /// The console's session cookie.
+    Cookie,
+}
+
+/// The bearer token on the request, if any.
 pub fn bearer_token(parts: &Parts) -> Option<&str> {
-    let raw = parts
-        .headers
-        .get(http::header::AUTHORIZATION)?
-        .to_str()
-        .ok()?;
+    bearer_token_in(&parts.headers)
+}
+
+pub fn bearer_token_in(headers: &http::HeaderMap) -> Option<&str> {
+    let raw = headers.get(http::header::AUTHORIZATION)?.to_str().ok()?;
     let (scheme, token) = raw.split_once(' ')?;
     if !scheme.eq_ignore_ascii_case("bearer") {
         return None;
@@ -66,15 +83,35 @@ pub fn bearer_token(parts: &Parts) -> Option<&str> {
 
 /// Resolve the request's credential to the platform's claims about it.
 ///
-/// SEAM: the single place a credential becomes an identity. Everything else in
-/// the console API takes the result.
-pub async fn authenticate(state: &AppState, parts: &Parts) -> Result<TokenClaims, ApiError> {
-    let token = bearer_token(parts).ok_or_else(ApiError::unauthenticated)?;
+/// The single place a credential becomes an identity. Everything else in the
+/// console API takes the result.
+pub async fn authenticate(
+    state: &AppState,
+    parts: &Parts,
+) -> Result<(TokenClaims, Source), ApiError> {
+    if let Some(token) = bearer_token(parts) {
+        return introspect(state, token)
+            .await?
+            .map(|claims| (claims, Source::Bearer))
+            .ok_or_else(ApiError::unauthenticated);
+    }
+
+    let cookie = cookies::session_cookie(&parts.headers).ok_or_else(ApiError::unauthenticated)?;
+    let (token, org) = console::access_token(state, cookie).await?;
+    match introspect(state, &token).await? {
+        Some(claims) => Ok((claims, Source::Cookie)),
+        None => {
+            // The platform no longer honours the token it issued this session
+            // (revoked, or the member left). Nothing will revive it.
+            console::drop_session(state, org, cookie).await;
+            Err(ApiError::unauthenticated())
+        }
+    }
+}
+
+async fn introspect(state: &AppState, token: &str) -> Result<Option<TokenClaims>, ApiError> {
     match state.platform.introspect(token).await {
-        Ok(Some(claims)) => Ok(claims),
-        // The platform answered "no": one answer for unknown, expired, revoked,
-        // wrong audience, and a member who has since left.
-        Ok(None) => Err(ApiError::unauthenticated()),
+        Ok(claims) => Ok(claims),
         Err(e) => Err(ApiError::platform_unavailable(
             "introspect a console token",
             e,
@@ -142,6 +179,53 @@ pub fn role_name(role: Role) -> &'static str {
     }
 }
 
+/// Who is calling, as the platform sees them right now.
+#[derive(Debug, Clone)]
+pub struct Identity {
+    pub claims: TokenClaims,
+    /// The caller's user, the org their credential opens, and their role in it,
+    /// from a fresh lookup rather than the (up to 60 s old) introspection claims:
+    /// a demoted admin loses admin routes at once.
+    pub member: MemberInfo,
+    pub source: Source,
+}
+
+/// Authenticate, refuse tombstoned callers, and ask the platform who they are.
+///
+/// Everything an `{org}`-less route needs ([`Identity`]), and the first half of
+/// [`OrgCtx`].
+pub async fn identify(state: &AppState, parts: &Parts) -> Result<Identity, ApiError> {
+    let (claims, source) = authenticate(state, parts).await?;
+
+    // A deleted org or a just-removed member is refused now, though the
+    // platform's cached introspection may still vouch for the token.
+    match of_core::platform_events::revoked(&state.db, claims.org_id.into(), claims.user_id.into())
+        .await
+    {
+        Ok(false) => {}
+        Ok(true) => return Err(ApiError::unauthenticated()),
+        Err(e) => return Err(ApiError::unavailable("check revocation tombstones", e)),
+    }
+
+    let member = match state
+        .platform
+        .member(claims.org_id, claims.user_id)
+        .await
+        .map_err(|e| ApiError::platform_unavailable("look up the token's org", e))?
+    {
+        Some(member) if member.org.id == claims.org_id => member,
+        // The platform no longer sees this user in this org: the credential is
+        // dead, whatever the introspection cache still says.
+        _ => return Err(ApiError::unauthenticated()),
+    };
+
+    Ok(Identity {
+        claims,
+        member,
+        source,
+    })
+}
+
 impl<S> FromRequestParts<S> for OrgCtx
 where
     AppState: FromRef<S>,
@@ -158,46 +242,29 @@ where
             ApiError::internal("org path parameter", "route has no {org} segment")
         })?;
 
-        let claims = authenticate(&state, parts).await?;
-
-        // A deleted org or a just-removed member is refused now, though the
-        // platform's cached introspection may still vouch for the token.
-        match of_core::platform_events::revoked(
-            &state.db,
-            claims.org_id.into(),
-            claims.user_id.into(),
-        )
-        .await
-        {
-            Ok(false) => {}
-            Ok(true) => return Err(ApiError::unauthenticated()),
-            Err(e) => return Err(ApiError::unavailable("check revocation tombstones", e)),
-        }
-
-        // **An org that is not the token's is reported as not found, not as
-        // forbidden** — see the module docs.
-        let missing = || ApiError::not_found(format!("no org {wanted:?} that this token opens"));
+        let Identity {
+            claims,
+            member,
+            source,
+        } = identify(&state, parts).await?;
+        let (slug, role) = (member.org.slug, member.role);
 
         // The path may name the org by id or by slug. The platform is asked for
         // the slug rather than trusting anything the client sent.
-        let (slug, role) = match state
-            .platform
-            .member(claims.org_id, claims.user_id)
-            .await
-            .map_err(|e| ApiError::platform_unavailable("look up the token's org", e))?
-        {
-            // The role comes from this fresh lookup, not the (up to 60 s old)
-            // introspection claims: a demoted admin loses admin routes at once.
-            Some(member) if member.org.id == claims.org_id => (member.org.slug, member.role),
-            // The platform no longer sees this user in this org: the token is
-            // dead, whatever the introspection cache still says.
-            _ => return Err(ApiError::unauthenticated()),
-        };
         let by_id = wanted
             .parse::<uuid::Uuid>()
             .is_ok_and(|id| id == claims.org_id);
         if !(by_id || wanted.eq_ignore_ascii_case(&slug)) {
-            return Err(missing());
+            return Err(match source {
+                // **An org that is not the token's is reported as not found, not
+                // as forbidden** — see the module docs.
+                Source::Bearer => {
+                    ApiError::not_found(format!("no org {wanted:?} that this token opens"))
+                }
+                // A signed-in person asking for another of their orgs: say so,
+                // so the console can send them through login for that one.
+                Source::Cookie => ApiError::org_session_mismatch(),
+            });
         }
 
         Ok(OrgCtx {

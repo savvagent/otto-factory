@@ -9,6 +9,7 @@
 //! it lives in the otto platform.
 
 pub mod audit;
+pub mod auth;
 pub mod jobs;
 pub mod platform;
 pub mod repos;

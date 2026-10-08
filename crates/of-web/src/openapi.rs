@@ -67,7 +67,7 @@ pub fn document(endpoints: &[Endpoint]) -> Value {
         }
 
         if endpoint.auth != Auth::Public {
-            operation["security"] = json!([{ "platformBearer": [] }]);
+            operation["security"] = json!([{ "platformBearer": [] }, { "consoleSession": [] }]);
         }
         operation["x-otto-factory-auth"] = json!(endpoint.auth.as_str());
 
@@ -83,12 +83,14 @@ pub fn document(endpoints: &[Endpoint]) -> Value {
                 "The console's REST surface: repos, the queue, tracker connections, and \
                  this service's domain audit trail. Identity (sign-in, accounts, orgs, \
                  members, teams, SSO, tokens, usage) and the OAuth 2.1 authorization \
-                 server live in the otto platform, not here. Authentication is a bearer \
-                 token issued by the platform and introspected on every request; the \
-                 console's own sign-in (an OAuth authorization-code flow against the \
-                 platform) is a later change. The MCP surface uses the same tokens and \
-                 is described by its own metadata document, \
-                 `/.well-known/oauth-protected-resource`.",
+                 server live in the otto platform, not here. Authentication is a platform \
+                 access token, introspected on every request, presented either as a bearer \
+                 token or, for the console in a browser, held server-side behind a session \
+                 cookie obtained by signing in through the platform (`/auth/login`). A \
+                 bearer token, when sent, decides the request. Writes made with the \
+                 cookie must come from this site (`Origin`); bearer requests are exempt. \
+                 The MCP surface uses the same tokens and is described by its own \
+                 metadata document, `/.well-known/oauth-protected-resource`.",
         },
         "components": {
             "securitySchemes": {
@@ -99,6 +101,17 @@ pub fn document(endpoints: &[Endpoint]) -> Value {
                         "A token issued by the otto platform for this resource server \
                          (OAuth access token or personal access token). Its org is fixed \
                          when it is issued; the `{org}` path segment must name that org.",
+                },
+                "consoleSession": {
+                    "type": "apiKey",
+                    "in": "cookie",
+                    "name": "__Host-of_session",
+                    "description":
+                        "The console's session cookie, set by `/auth/callback` after a \
+                         sign-in through the otto platform. HttpOnly, Secure, SameSite=Lax. \
+                         It is bound to one org: asking for another answers `401` with \
+                         code `org_session_mismatch`, and the client signs in again with \
+                         `org=<slug>`. Writes must carry this site's `Origin`.",
                 },
             },
             "schemas": components(),
@@ -159,6 +172,8 @@ fn param_description(name: &str) -> &'static str {
 fn tag_for(path: &str) -> &'static str {
     if path.starts_with("/.well-known") {
         "discovery"
+    } else if path.starts_with("/auth") || path == "/api/session" {
+        "auth"
     } else if path.starts_with("/webhooks") {
         "trackers"
     } else if path.starts_with("/platform") {
@@ -558,6 +573,44 @@ fn queue_schemas() -> Value {
 /// Responses that are not entities.
 fn response_schemas() -> Value {
     json!({
+        "Session": {
+            "type": "object",
+            "description": "Who is signed in to the console, and in which org.",
+            "properties": {
+                "user": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "format": "uuid" },
+                        "email": { "type": ["string", "null"] },
+                        "name": { "type": ["string", "null"] },
+                    },
+                    "required": ["id"],
+                },
+                "org": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "format": "uuid" },
+                        "slug": { "type": "string" },
+                        "name": { "type": "string" },
+                        "plan": { "type": "string" },
+                    },
+                    "required": ["id", "slug", "name", "plan"],
+                },
+                "role": { "type": "string", "enum": ["owner", "admin", "member"] },
+                "scopes": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "What the platform granted this session.",
+                },
+                "platformUrl": {
+                    "type": "string",
+                    "description":
+                        "The otto platform's console, for members, teams, SSO, usage, \
+                         tokens, and the org list.",
+                },
+            },
+            "required": ["user", "org", "role", "scopes", "platformUrl"],
+        },
         "PlatformEventAck": {
             "type": "object",
             "description":
