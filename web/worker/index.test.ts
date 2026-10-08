@@ -28,6 +28,9 @@ describe('belongsToOrigin', () => {
       '/.well-known',
       '/.well-known/oauth-protected-resource',
       '/.well-known/oauth-authorization-server',
+      '/platform/webhooks',
+      '/webhooks/github',
+      '/webhooks/jira',
       '/healthz',
       '/readyz'
     ]) {
@@ -51,7 +54,9 @@ describe('belongsToOrigin', () => {
       '/oauthentication',
       '/readyzzz',
       '/healthzcheck',
-      '/.well-knownish'
+      '/.well-knownish',
+      '/platformer',
+      '/webhookstuff'
     ]) {
       expect(belongsToOrigin(path), path).toBe(false);
     }
@@ -61,7 +66,7 @@ describe('belongsToOrigin', () => {
     // The server does not list /healthz and /readyz in API_PREFIXES because it
     // mounts them as real routes ahead of its SPA fallback. The edge has no such
     // precedence, so it must name them or answer them with the console's HTML.
-    const serverPrefixes = ['/api', '/oauth', '/mcp', '/.well-known'];
+    const serverPrefixes = ['/api', '/oauth', '/mcp', '/.well-known', '/platform', '/webhooks'];
     const edgeOnly = ['/healthz', '/readyz'];
 
     for (const prefix of [...serverPrefixes, ...edgeOnly]) {

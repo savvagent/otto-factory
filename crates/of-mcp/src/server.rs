@@ -34,7 +34,6 @@ use std::sync::Arc;
 use of_billing::Meter;
 use of_core::watch::Watcher;
 use otto_resource::PlatformClient;
-use otto_tenant::ids::OrgId;
 use otto_tenant::{Db, Tx};
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::model::{ErrorData, Implementation, ServerCapabilities, ServerInfo};
@@ -226,9 +225,9 @@ impl Factory {
     /// runs the same enforcement/hard-stop/bucket check `charge` does,
     /// without recording usage, so `sync_ticket` can refuse before making
     /// that call.
-    pub async fn would_refuse(&self, org: OrgId, tool: &str) -> Result<(), ErrorData> {
+    pub async fn would_refuse(&self, tx: &mut Tx<'_>, tool: &str) -> Result<(), ErrorData> {
         self.meter
-            .would_refuse(org, tool)
+            .would_refuse(tx, tool)
             .await
             .map_err(|e| error::from_billing(&e))
     }

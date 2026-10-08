@@ -2,7 +2,8 @@
  * The console at the edge, and the one origin a browser is ever allowed to see.
  *
  * Cloudflare serves the built SPA from its own network and forwards everything
- * dynamic — `/api`, `/oauth`, `/.well-known`, `/mcp`, and the health probes — to
+ * dynamic — `/api`, `/oauth`, `/.well-known`, `/mcp`, the platform's and the
+ * trackers' webhooks, and the health probes — to
  * `of-server`. The browser talks to exactly one hostname, which is not a
  * performance decision: the console's session is an `HttpOnly`, `__Host-`
  * prefixed cookie, and `__Host-` means the browser refuses to store it unless it
@@ -30,7 +31,16 @@
  * with a `200`, which is the shape that keeps a health check green while the
  * database is gone.
  */
-const ORIGIN_PREFIXES = ['/api', '/oauth', '/mcp', '/.well-known', '/healthz', '/readyz'];
+const ORIGIN_PREFIXES = [
+  '/api',
+  '/oauth',
+  '/mcp',
+  '/.well-known',
+  '/platform',
+  '/webhooks',
+  '/healthz',
+  '/readyz'
+];
 
 /**
  * Prefix matching on segment boundaries, exactly as the server does it.

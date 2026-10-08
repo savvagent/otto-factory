@@ -51,10 +51,13 @@ impl Factory {
             .await
             .mcp()?;
 
+        // Every platform read comes before the meter, so a lookup that fails
+        // leaves no record of a call that was never served.
+        let usage = self.meter().report(caller.org_id).await.mcp()?;
+
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "whoami").await?;
         tx.commit().await.mcp()?;
-        let usage = self.meter().report(caller.org_id).await.mcp()?;
 
         let user = member.as_ref().map(|m| &m.user);
         let org = member.as_ref().map(|m| &m.org);
@@ -100,10 +103,13 @@ impl Factory {
     ) -> Result<Json<out::UsageOut>, ErrorData> {
         let caller = self.caller(&parts)?;
 
+        // Read first: a failed lookup must leave no record of a call that was
+        // never served.
+        let usage = self.meter().report(caller.org_id).await.mcp()?;
+
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "usage").await?;
         tx.commit().await.mcp()?;
-        let usage = self.meter().report(caller.org_id).await.mcp()?;
 
         Ok(Json(out::UsageOut { usage }))
     }

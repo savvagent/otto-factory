@@ -2780,6 +2780,79 @@ async fn sync_ticket_refuses_before_the_outbound_call_when_over_budget(pool: PgP
     assert_eq!(e.data.as_ref().unwrap()["retriable"], false);
 }
 
+/// The pre-check must judge the same total `charge` does: the platform's count
+/// *plus* this org's unshipped billable outbox rows. With the platform at 498 of
+/// 500 and two billable calls not yet shipped, the bucket is spent; a check that
+/// looked at the platform alone would let the tracker write through and leave
+/// the following `charge` to refuse a sync that had already happened. As in the
+/// test above, `tracker_sync_failed` here would mean the tracker was contacted.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn sync_ticket_counts_unshipped_usage_before_the_outbound_call(pool: PgPool) {
+    let (env, caller) = env_metered(pool, true).await;
+    let repo = env.register(&caller).await;
+    let repo_id: RepoId = repo["id"].as_str().unwrap().parse().unwrap();
+
+    let mut tx = env.db.begin(caller.org_id).await.unwrap();
+    let connection = upsert_connection(&mut tx, Provider::Github, "999999", None, None)
+        .await
+        .unwrap();
+    upsert_binding(
+        &mut tx,
+        repo_id,
+        Some(connection.id),
+        Provider::Github,
+        "acme/api",
+        "trackers",
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    let job = env.add_job(&caller, "two calls short of the limit").await;
+    let id = job["id"].as_str().unwrap().to_string();
+
+    // Ships everything so far: the platform's figure is now the whole story.
+    env.set_standing(caller.org_id, 498, 500).await;
+
+    // Two billable calls, recorded but deliberately left unshipped.
+    ok(env
+        .factory
+        .link_ticket(
+            Extension(parts(&caller)),
+            Parameters(tools::jobs::LinkTicketArgs {
+                job: id.clone(),
+                tracker: Tracker::Github,
+                ticket_ref: "acme/api#22".into(),
+            }),
+        )
+        .await);
+    ok(env
+        .factory
+        .claim_jobs(
+            Extension(parts(&caller)),
+            Parameters(tools::jobs::ClaimJobsArgs {
+                jobs: vec![id.clone()],
+                agent: Some("agent-one".into()),
+                ttl: None,
+            }),
+        )
+        .await);
+
+    let e = err(env
+        .factory
+        .sync_ticket(
+            Extension(parts(&caller)),
+            Parameters(tools::jobs::JobArgs { job: id }),
+        )
+        .await);
+    assert_eq!(
+        code_of(&e),
+        "quota_exceeded",
+        "unshipped usage must count before the tracker is contacted: {}",
+        e.message
+    );
+}
+
 /// A ticket_ref that isn't a valid GitHub issue reference ("owner/repo#N")
 /// will never succeed no matter how many times it's retried — it must not
 /// share the outbound-call path's retriable bucket, or an agent could poll

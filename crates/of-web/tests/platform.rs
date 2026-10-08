@@ -212,6 +212,59 @@ async fn roles_and_scopes_both_have_to_allow_a_write(pool: PgPool) {
         .expect(StatusCode::CREATED);
 }
 
+/// Lease activity is a `jobs:read` fact over MCP (`list_leases`), so the console
+/// must not hand it to a token carrying only `repos:read` — neither as the lease
+/// list itself nor as `hasActiveLease` on the repo list.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn reading_leases_needs_jobs_read_as_it_does_over_mcp(pool: PgPool) {
+    let h = harness(pool).await;
+    let (org, admin) = (Uuid::new_v4(), Uuid::new_v4());
+    h.platform.add_org(org, "acme", "Acme");
+    h.platform
+        .add_member(org, admin, "ada@acme.test", Role::Admin);
+    let full = h.platform.issue(org, admin, Role::Admin, ALL);
+    Call::post("/api/orgs/acme/repos")
+        .with_session(&full)
+        .json(serde_json::json!({ "slug": "api" }))
+        .send(&h.router)
+        .await
+        .expect(StatusCode::CREATED);
+
+    let repos_only = h.platform.issue(org, admin, Role::Admin, &["repos:read"]);
+    let reply = Call::get("/api/orgs/acme/repos/api/leases")
+        .with_session(&repos_only)
+        .send(&h.router)
+        .await;
+    reply.expect(StatusCode::FORBIDDEN);
+    assert!(reply.text.contains("jobs:read"), "{}", reply.text);
+    let reply = Call::get("/api/orgs/acme/repos?includeLeaseStatus=true")
+        .with_session(&repos_only)
+        .send(&h.router)
+        .await;
+    reply.expect(StatusCode::FORBIDDEN);
+    assert!(reply.text.contains("jobs:read"), "{}", reply.text);
+    // The plain listing is still a `repos:read` read.
+    Call::get("/api/orgs/acme/repos")
+        .with_session(&repos_only)
+        .send(&h.router)
+        .await
+        .expect(StatusCode::OK);
+
+    let both = h
+        .platform
+        .issue(org, admin, Role::Admin, &["repos:read", "jobs:read"]);
+    Call::get("/api/orgs/acme/repos/api/leases")
+        .with_session(&both)
+        .send(&h.router)
+        .await
+        .expect(StatusCode::OK);
+    Call::get("/api/orgs/acme/repos?includeLeaseStatus=true")
+        .with_session(&both)
+        .send(&h.router)
+        .await
+        .expect(StatusCode::OK);
+}
+
 // -------------------------------------------------------------------- teams
 
 async fn registered_slugs(h: &Harness, org: OrgId) -> Vec<String> {

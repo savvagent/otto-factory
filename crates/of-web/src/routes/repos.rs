@@ -172,6 +172,11 @@ pub async fn list_repos(
     axum::extract::Query(q): axum::extract::Query<ListReposQuery>,
 ) -> ApiResult<Json<Vec<RepoListItem>>> {
     ctx.require_scope(scopes::REPOS_READ)?;
+    // Lease activity is a `jobs:read` fact on the MCP surface (`list_leases`);
+    // asking for it here must not be a way around that.
+    if q.include_lease_status {
+        ctx.require_scope(scopes::JOBS_READ)?;
+    }
     let mut tx = state.db.begin(ctx.org.id).await?;
     let repos = tx.list_repos(q.include_inactive, None).await?;
     let repos = visible_repos(&state, &ctx, repos).await;
@@ -339,6 +344,9 @@ pub async fn list_leases(
     Path((_org, slug)): Path<(String, String)>,
 ) -> ApiResult<Json<Vec<Lease>>> {
     ctx.require_scope(scopes::REPOS_READ)?;
+    // The same scope MCP `list_leases` requires, so switching transports
+    // cannot widen what a token may read.
+    ctx.require_scope(scopes::JOBS_READ)?;
     let mut tx = state.db.begin(ctx.org.id).await?;
     let repo = tx
         .resolve_repo(&of_core::repos::RepoRef {

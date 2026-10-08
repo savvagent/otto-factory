@@ -139,13 +139,7 @@ impl Meter {
         let class = classify::classify(tool);
         if self.enforce && class.is_billable() {
             if let Some(status) = self.status_for(tx.org()).await {
-                // What the platform has not been told about yet.
-                let unshipped: i64 = sqlx::query_scalar(
-                    "SELECT count(*) FROM usage_outbox WHERE org_id = $1 AND billable",
-                )
-                .bind(tx.org())
-                .fetch_one(tx.conn())
-                .await?;
+                let unshipped = unshipped_billable(tx).await?;
                 self.refuse_if_spent(status, unshipped, tool)?;
             }
         }
@@ -178,15 +172,22 @@ impl Meter {
     /// to be told afterwards that it wasn't billed. Short-circuits when
     /// enforcement is off or the tool isn't billable, so it costs nothing in the
     /// default configuration.
-    pub async fn would_refuse(&self, org: OrgId, tool: &str) -> Result<()> {
+    ///
+    /// Takes the caller's `tx` so it counts unshipped usage exactly as `charge`
+    /// does. Judged against the platform's figure alone, an org whose bucket is
+    /// only spent once the outbox is added would pass here, have its tracker
+    /// write posted, and then be refused by the `charge` that follows — the
+    /// very outcome this check exists to prevent.
+    pub async fn would_refuse(&self, tx: &mut Tx<'_>, tool: &str) -> Result<()> {
         let class = classify::classify(tool);
         if !self.enforce || !class.is_billable() {
             return Ok(());
         }
-        match self.status_for(org).await {
-            // No transaction here, so unshipped usage is not added; the `charge`
-            // that follows does count it.
-            Some(status) => self.refuse_if_spent(status, 0, tool),
+        match self.status_for(tx.org()).await {
+            Some(status) => {
+                let unshipped = unshipped_billable(tx).await?;
+                self.refuse_if_spent(status, unshipped, tool)
+            }
             None => Ok(()),
         }
     }
@@ -263,6 +264,18 @@ impl Meter {
         let usage = self.platform.usage_status(org.as_uuid()).await?;
         Ok(Status::new(usage, self.enforce))
     }
+}
+
+/// Billable calls this org has recorded that the platform has not been told
+/// about yet.
+async fn unshipped_billable(tx: &mut Tx<'_>) -> Result<i64> {
+    let org = tx.org();
+    Ok(
+        sqlx::query_scalar("SELECT count(*) FROM usage_outbox WHERE org_id = $1 AND billable")
+            .bind(org)
+            .fetch_one(tx.conn())
+            .await?,
+    )
 }
 
 /// `free` -> `Free`.
