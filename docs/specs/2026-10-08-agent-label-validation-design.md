@@ -50,7 +50,8 @@ server's own prose.
 - `ensure_claim_held` and `acquire_lease`'s `LeaseHeld` branch render the holder through
   `agent_label::holder`.
 - New `Error::InvalidAgentLabel` variant, code `invalid_agent_label`, not retriable.
-- `claim_jobs` and `acquire_lease` tool descriptions and `agent` field docs in `of-mcp`.
+- `claim_jobs` and `acquire_lease` tool descriptions and `agent` field docs in `of-mcp`, and
+  `claim_jobs`'s tracker write-back using the stored label (§4).
 
 **Out:**
 
@@ -74,8 +75,8 @@ server's own prose.
   as structured data in `get_job` / `list_leases` output, which is where it already was.
 - **Validating against a list of known clients** — constraint 3 forbids it. The rule is purely
   about shape, never about which agent it names.
-- Any change to tracker sync. The ticket comment on claim already carries the label; it is now
-  bounded as a side effect, which is fine and needs no separate work.
+- Any change to tracker sync beyond §4's one line (which makes the ticket comment carry the
+  stored, normalized label rather than the raw argument).
 
 ## §1 — The policy
 
@@ -175,9 +176,14 @@ you — …`.
   (one line, at most 128 visible characters) shown to teammates; a longer or multi-line one is
   refused with invalid_agent_label rather than shortened."
 
-No handler code changes in `of-mcp`: the validation lives in `of-core`, where both write paths
-already go, and the refusal rolls back the transaction — including the `usage_outbox` row
-`Factory::charge` wrote — so a refused call is never billed.
+The validation lives in `of-core`, where both write paths already go, and the refusal rolls back
+the transaction — including the `usage_outbox` row `Factory::charge` wrote — so a refused call is
+never billed. One handler line changes: `claim_jobs` currently hands the *raw* `args.agent` to
+`sync_jobs_after_transition`, which posts `Claimed by {agent}.` to the linked GitHub/JIRA ticket.
+It passes the stored, normalized `claimed_by_label` of the claimed jobs instead (every job in one
+claim carries the same label), the way `sync_ticket` already does — otherwise a blank label
+(stored NULL) would still post `Claimed by    .` and a padded one would post untrimmed, on the one
+surface that leaves the org.
 
 ## Tenant isolation
 
@@ -218,9 +224,12 @@ wire level) needs no entry.
 - A `"` inside a valid label → accepted, rendered escaped as `\"` inside the quotes.
 - Legacy row with a 5,000-character or multi-line label → the error renders `user <uuid>`;
   `get_job` still returns the stored label as data.
-- `claim_jobs` with an invalid label and an empty job list → the empty-list `invalid_argument`
-  is reported first (validation runs after the existing argument checks, before SQL); either is
-  a refusal with nothing written.
+- Error ordering: the label is checked in `of-core`, so anything the handler or `of-core`
+  refuses first wins — an empty job list (`invalid_argument`), a job the caller cannot see
+  (`job_not_found`, from `ensure_jobs_visible`), an unresolvable repo (`repo_unresolved`, from
+  `repo_for_write`), or an empty / over-long lease `resource`. Every one of those is a refusal
+  with nothing written, so the order is immaterial to safety; a caller fixing the first error
+  may then meet `invalid_agent_label`.
 
 ## Assumptions
 
@@ -228,7 +237,11 @@ wire level) needs no entry.
   is chosen from the documented example and realistic composite labels, with 2× headroom.
 - **Trimming is not a "silent rewrite" in the sense CLAUDE.md forbids.** It never changes what a
   reader sees, and it already happens to lease `resource` and message `body`.
-- **Blank ≡ absent** for `claim_jobs` too, extending `acquire_lease`'s existing handler rule.
+- **Blank ≡ absent** for `agent`. This is a (harmless) behavior change for both tools, not an
+  extension of an existing rule: `acquire_lease`'s handler already folds a blank `resource` or
+  `branch` to absent, but a blank `agent` has until now been stored as `""` by both tools. It is
+  the same reasoning applied to the one remaining field, and a stored `""` rendered as
+  `claimed by ` was never useful to anyone.
 - **Breaking.** Refusing previously accepted input is a contract change even if no known client
   sends such input; erring on the side of the marker costs a minor-version bump.
 - **The user-id fallback for a non-conforming legacy label is acceptable** rather than a
