@@ -346,8 +346,8 @@ unaffected either way — the push that merges the release PR still runs `rust`/
 GitHub App installation token (contents + pull-requests write; labels need nothing more) rather
 than `GITHUB_TOKEN`, because the repo setting that let `GITHUB_TOKEN` open pull requests also let
 it approve them and is now off. The App's private key is a secret of the `release` environment,
-which admits only `master`. App-authored PRs do
-fire `pull_request`, so the release PR now runs CI, `pr-title` included.
+which admits only `master`. App-authored PRs do fire `pull_request`, so the release PR now runs
+CI, `pr-title` included.
 
 ## §3 MCP identity + OpenAPI version regression test
 
