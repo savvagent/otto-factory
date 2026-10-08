@@ -159,6 +159,7 @@ pub struct Job {
     pub error: Option<String>,
     pub created_by: Option<UserId>,
     pub claimed_by: Option<UserId>,
+    #[serde(serialize_with = "crate::agent_label::serialize_stored")]
     pub claimed_by_label: Option<String>,
     /// When the current claim lapses and the job becomes claimable again via
     /// `ready()`/`claim_jobs`, the way an expired `repo_leases` row frees its
@@ -1166,6 +1167,9 @@ impl JobsExt for Tx<'_> {
                 "claim_jobs needs at least one job id".into(),
             ));
         }
+        // Before any SQL: the label is quoted back to other members' agents in
+        // `ensure_claim_held`'s refusals, so it is bounded here (#163).
+        let label = crate::agent_label::validate(label)?;
         let ttl = clamp_claim_ttl(ttl_secs);
 
         let org = self.org();
@@ -2181,15 +2185,20 @@ impl JobsInternal for Tx<'_> {
             });
         }
 
-        // The `unwrap_or_else` arm is unreachable in practice: the only path
-        // to `InProgress`/`Active` is `claim_jobs`, which always sets
+        // Rendered for a *different* caller's error, so the stored label goes
+        // through `agent_label::holder`: quoted, and replaced by the user id
+        // when it would fail today's policy (a legacy row) — see #163.
+        //
+        // The `None` arm is unreachable in practice: the only path to
+        // `InProgress`/`Active` is `claim_jobs`, which always sets
         // `claimed_by`. It is worded as a data-inconsistency report rather
         // than a plausible-sounding "claimed by nobody" so that if this
         // invariant is ever broken by a future change, the resulting error
         // is legible as a bug report rather than a normal business state.
-        let holder = claimed_by_label
-            .or_else(|| claimed_by.map(|u| u.to_string()))
-            .unwrap_or_else(|| "no recorded holder (data inconsistency)".into());
+        let holder = match claimed_by {
+            Some(user) => crate::agent_label::holder(claimed_by_label.as_deref(), user),
+            None => "no recorded holder (data inconsistency)".into(),
+        };
 
         let is_holder = claimed_by == Some(caller);
 

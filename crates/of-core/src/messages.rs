@@ -79,6 +79,7 @@ pub struct Message {
     pub org_id: OrgId,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub sender_user_id: UserId,
+    #[serde(serialize_with = "crate::agent_label::serialize_stored")]
     pub sender_label: Option<String>,
     pub sender_kind: SenderKind,
     pub recipient_user_id: Option<UserId>,
@@ -355,7 +356,6 @@ impl MessagesExt for Tx<'_> {
                 body.len()
             )));
         }
-
         let org = self.org();
         let existing: Option<(i64, Vec<u8>)> = sqlx::query_as(
             "SELECT id, idempotency_payload_hash FROM messages \
@@ -366,9 +366,19 @@ impl MessagesExt for Tx<'_> {
         .fetch_optional(self.conn())
         .await?;
         let Some((id, stored_hash)) = existing else {
+            // Nothing to replay, so this call will insert: the agent label
+            // policy (#163) applies here, before the caller is metered, with
+            // the same refusal `send_message` itself gives.
+            crate::agent_label::validate(new.sender_label.as_deref())?;
             return Ok(None);
         };
 
+        // Deliberately not label-validated: a byte-for-byte retry of a call
+        // that committed before the policy existed must still get its original
+        // message back, not a refusal for a write that already happened. What
+        // it returns is safe to hand over — the label serializes through
+        // `agent_label::serialize_stored`, so a non-conforming one comes back
+        // as null.
         if stored_hash != message_idempotency_fingerprint(sender, new) {
             return Err(Error::IdempotencyKeyConflict {
                 key: key.to_string(),
@@ -400,6 +410,13 @@ impl MessagesExt for Tx<'_> {
         if let Some(key) = new.idempotency_key.as_deref() {
             crate::idempotency::validate(key)?;
         }
+        // Recipients read the label beside the body (#163). The normalized
+        // form is what is stored, but the idempotency fingerprint below still
+        // hashes the label exactly as sent — unchanged from before this
+        // policy, so keyed messages stored earlier still replay. A byte-for-
+        // byte retry therefore matches; a retry that changes only the label's
+        // padding is a different call and gets idempotency_key_conflict.
+        let sender_label = crate::agent_label::validate(new.sender_label.as_deref())?;
 
         let org = self.org();
 
@@ -422,7 +439,7 @@ impl MessagesExt for Tx<'_> {
             ))
             .bind(org)
             .bind(sender)
-            .bind(new.sender_label.as_deref())
+            .bind(sender_label)
             .bind(new.sender_kind)
             .bind(new.recipient_user_id)
             .bind(new.team_id.map(|t| t.in_org(self.org())).transpose()?)
@@ -532,7 +549,7 @@ impl MessagesExt for Tx<'_> {
             ))
             .bind(org)
             .bind(sender)
-            .bind(new.sender_label.as_deref())
+            .bind(sender_label)
             .bind(new.sender_kind)
             .bind(new.recipient_user_id)
             .bind(new.team_id.map(|t| t.in_org(self.org())).transpose()?)
