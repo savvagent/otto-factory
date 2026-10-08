@@ -11,7 +11,6 @@ import { describe, expect, it } from 'vitest';
 
 import { ApiError } from './api';
 import { messageFor } from './errors';
-import { WebauthnError } from './webauthn';
 
 const FALLBACK = 'fallback sentence';
 
@@ -45,32 +44,16 @@ describe('messageFor', () => {
     }
   });
 
-  it('translates a WebauthnError by its code', () => {
-    const cancelled = new WebauthnError('passkey_cancelled', 'English original');
-    expect(messageFor(cancelled, FALLBACK)).toBe(
-      'No passkey was used. Try again when you are ready.'
-    );
+  it('translates the codes the console sign-in introduces', () => {
+    for (const code of ['org_session_mismatch', 'console_login_disabled', 'platform_unavailable']) {
+      const rendered = messageFor(new ApiError(401, code, 'raw server text'), FALLBACK);
+      expect(rendered, code).not.toBe('raw server text');
+      expect(rendered.trim(), code).not.toBe('');
+    }
   });
 
   /**
-   * The one webauthn code carrying data. The `DOMException` name is not a word
-   * in anybody's language, so the sentence around it is translated and the name
-   * is placed into it.
-   */
-  it('places the DOMException name into the refusal sentence', () => {
-    const refused = new WebauthnError('passkey_refused', 'ignored', 'AbortError');
-    expect(messageFor(refused, FALLBACK)).toContain('AbortError');
-  });
-
-  it('survives a refusal with no detail', () => {
-    const refused = new WebauthnError('passkey_refused', 'ignored');
-    const rendered = messageFor(refused, FALLBACK);
-    expect(rendered.trim()).not.toBe('');
-    expect(rendered).not.toContain('undefined');
-  });
-
-  /**
-   * Anything that is neither of our error types had its message written for a
+   * Anything that is not an `ApiError` had its message written for a
    * developer. Callers pass a keyed sentence instead of leaking `String(e)`.
    */
   it('uses the caller fallback for an error that is neither of ours', () => {

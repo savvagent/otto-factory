@@ -21,6 +21,11 @@ describe('belongsToOrigin', () => {
       '/api/',
       '/api/orgs/acme',
       '/api/orgs/acme/jobs/job-1',
+      '/auth/login',
+      '/auth/callback',
+      '/auth/logout',
+      '/platform/webhooks',
+      '/webhooks/github',
       '/oauth',
       '/oauth/authorize',
       '/oauth/token',
@@ -41,10 +46,10 @@ describe('belongsToOrigin', () => {
   it('leaves the console its own routes, including the look-alikes', () => {
     for (const path of [
       '/',
-      '/login',
-      '/verify',
+      '/authors',
+      '/platformer',
+      '/webhooks-guide',
       '/o/acme/queue',
-      '/settings/billing',
       // `/apiary` is a legal org slug and `/mcp-guide` a legal page. A prefix
       // test that is not segment-aware sends both to the origin, which answers
       // a JSON 404 for a page the SPA was going to render.
@@ -66,7 +71,15 @@ describe('belongsToOrigin', () => {
     // The server does not list /healthz and /readyz in API_PREFIXES because it
     // mounts them as real routes ahead of its SPA fallback. The edge has no such
     // precedence, so it must name them or answer them with the console's HTML.
-    const serverPrefixes = ['/api', '/oauth', '/mcp', '/.well-known', '/platform', '/webhooks'];
+    const serverPrefixes = [
+      '/api',
+      '/auth',
+      '/oauth',
+      '/mcp',
+      '/.well-known',
+      '/platform',
+      '/webhooks'
+    ];
     const edgeOnly = ['/healthz', '/readyz'];
 
     for (const prefix of [...serverPrefixes, ...edgeOnly]) {

@@ -5,14 +5,7 @@
   import { LINK, around } from '$lib/labels';
   import { useOrg } from '$lib/org.svelte';
   import { relative, slugPreview } from '$lib/format';
-  import type {
-    Lease,
-    Repo,
-    RepoListItem,
-    Team,
-    TrackerBinding,
-    TrackerProvider
-  } from '$lib/types';
+  import type { Lease, Repo, RepoListItem, TrackerBinding, TrackerProvider } from '$lib/types';
   import Alert from '$lib/components/Alert.svelte';
   import Button from '$lib/components/Button.svelte';
   import Card from '$lib/components/Card.svelte';
@@ -42,7 +35,6 @@
   const org = useOrg();
 
   let repos = $state<RepoListItem[]>([]);
-  let teams = $state<Team[]>([]);
   let includeInactive = $state(false);
   let loading = $state(true);
   let error = $state<string | undefined>(undefined);
@@ -73,7 +65,6 @@
   let slug = $state('');
   let name = $state('');
   let remotes = $state('');
-  let teamId = $state('');
   let creating = $state(false);
   let formError = $state<string | undefined>(undefined);
 
@@ -95,10 +86,9 @@
 
     void (async () => {
       try {
-        const [r, t] = await Promise.all([api.repos(org_, withInactive, true), api.teams(org_)]);
+        const r = await api.repos(org_, withInactive, true);
         if (seq !== latest) return;
         repos = r;
-        teams = t;
       } catch (e) {
         if (seq !== latest) return;
         error = messageFor(e, m.repos_error_load());
@@ -221,14 +211,12 @@
       await api.registerRepo(org.slug, {
         slug: slugPreview(slug),
         name: name.trim() || null,
-        remotes: parsed,
-        teamId: teamId || null
+        remotes: parsed
       });
 
       slug = '';
       name = '';
       remotes = '';
-      teamId = '';
       showForm = false;
       repos = await api.repos(org.slug, includeInactive, true);
     } catch (e) {
@@ -247,8 +235,10 @@
     }
   }
 
+  // Teams are the platform's, and this console cannot list them, so a scoped repo
+  // says it is scoped rather than naming a team it cannot look up.
   const teamName = $derived((id: string | null) =>
-    id ? (teams.find((t) => t.id === id)?.slug ?? m.repos_team_unknown()) : m.repos_team_org_wide()
+    id ? m.repos_team_scoped() : m.repos_team_org_wide()
   );
 </script>
 
@@ -282,17 +272,6 @@
         <Field label={m.repos_field_remotes_label()} hint={m.repos_field_remotes_hint()}>
           <textarea class="of-input of-mono h-24" bind:value={remotes}></textarea>
         </Field>
-
-        {#if teams.length > 0}
-          <Field label={m.repos_field_team_label()} hint={m.repos_field_team_hint()}>
-            <select class="of-input" bind:value={teamId}>
-              <option value="">{m.repos_option_org_wide()}</option>
-              {#each teams as team (team.id)}
-                <option value={team.id}>{team.slug}</option>
-              {/each}
-            </select>
-          </Field>
-        {/if}
 
         {#if formError}<Alert>{formError}</Alert>{/if}
 

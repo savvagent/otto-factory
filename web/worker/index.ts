@@ -2,8 +2,9 @@
  * The console at the edge, and the one origin a browser is ever allowed to see.
  *
  * Cloudflare serves the built SPA from its own network and forwards everything
- * dynamic — `/api`, `/oauth`, `/.well-known`, `/mcp`, the platform's and the
- * trackers' webhooks, and the health probes — to
+ * dynamic — `/api`, `/auth` (console sign-in), `/oauth`, `/.well-known`, `/mcp`,
+ * `/platform` and `/webhooks` (the signed webhook receivers), and the health
+ * probes — to
  * `of-server`. The browser talks to exactly one hostname, which is not a
  * performance decision: the console's session is an `HttpOnly`, `__Host-`
  * prefixed cookie, and `__Host-` means the browser refuses to store it unless it
@@ -33,6 +34,7 @@
  */
 const ORIGIN_PREFIXES = [
   '/api',
+  '/auth',
   '/oauth',
   '/mcp',
   '/.well-known',
@@ -115,12 +117,13 @@ export default {
         method: request.method,
         headers,
         body: request.body,
-        // A proxy that follows redirects is not a proxy. `/oauth/authorize`
-        // answers `303` to a loopback address the *client* is listening on —
-        // following it here would fetch the callback from Cloudflare, burn the
-        // single-use authorization code, and leave the agent waiting forever.
-        // This was not theoretical: it is how the first scripted run of the
-        // task 12 conformance flow failed.
+        // A proxy that follows redirects is not a proxy. `/auth/login` answers
+        // `303` to the platform's authorize endpoint, and `/auth/callback`
+        // answers `303` into the console with the session cookie on it —
+        // following either here would swallow the `Set-Cookie` and fetch the
+        // destination from Cloudflare instead of the browser. (Back when this
+        // service was its own authorization server, `/oauth/authorize`'s `303`
+        // to a loopback address burned a single-use code the same way.)
         redirect: 'manual',
         // Nothing on these paths is cacheable and some of it is per-session.
         // A heuristically cached `GET /api/me` is one user's identity served to

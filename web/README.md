@@ -2,13 +2,13 @@
 
 SvelteKit 2 · Svelte 5 (runes) · Tailwind v4 · TypeScript, strict.
 
-Everything a human touches: signing up, enrolling an authenticator, members, teams, repos
-and their live leases, a read-only queue, the usage meter, and the page that tells any MCP
-client how to connect.
+What a human touches in the factory: repos and their live leases, a read-only queue,
+tracker connections, and the audit log. Sign-in, members, teams, SSO, usage, and tokens are
+the otto platform's; the console signs in through it and links to it.
 
 ```bash
 npm install
-npm run dev      # Vite on :5173, proxying /api /oauth /.well-known to OF_API_ORIGIN
+npm run dev      # Vite on :5173, proxying /api /auth /oauth /.well-known to OF_API_ORIGIN
 npm run check    # compile messages, check completeness, then svelte-check + tsc
 npm run lint     # prettier --check
 npm test         # vitest — the Worker's routing rule, locale resolution, the error map
@@ -33,18 +33,41 @@ pages that are behind a login and cannot be cached anyway. Building to static fi
 `of-server` serves beside `/api` keeps the cookie in exactly one place — the browser — and
 makes CORS a non-question, because there is no second origin.
 
-The same fact drives `vite.config.ts`. Dev proxies `/api`, `/oauth`, and `/.well-known`
-rather than pointing `fetch` at another port, because a cross-port request would not carry
-the session and no CORS header could rescue it.
+The same fact drives `vite.config.ts`. Dev proxies `/api`, `/auth`, `/oauth`, and
+`/.well-known` rather than pointing `fetch` at another port, because a cross-port request
+would not carry the session and no CORS header could rescue it. To sign in under `npm run
+dev`, run the server with `OF_PUBLIC_URL=http://localhost:5173` and have
+`http://localhost:5173/auth/callback` registered as a redirect URI for the console client at
+the platform.
+
+## How sign-in works
+
+The console does not sign anyone in. **Sign in** is a full navigation to `/auth/login`
+(never `goto`: it is a server route that redirects to another origin, so links to it carry
+`data-sveltekit-reload`), which sends the browser to the platform; the platform sends it
+back to `/auth/callback`, where `of-web` redeems the code, stores the platform's token pair
+server-side, and sets `__Host-of_session`. The browser holds only that opaque cookie.
+`GET /api/session` answers who is signed in, to which org, with what role.
+
+A session is signed in to **exactly one org** (the platform's token is bound to it). So
+`/o/{slug}` for any other org is a sign-in for that org (`/auth/login?org={slug}`), and an
+API `401 unauthenticated` / `org_session_mismatch` anywhere does the same (`$lib/api`,
+`$lib/login`). One attempt per org per minute: if the platform signs the visitor in to a
+different org anyway, they are not a member of the one asked for, and the page says "no such
+organization" rather than looping.
+
+Everything identity-shaped — members, teams, SSO, usage, tokens, the account, switching
+org — is a link into the platform's console (`$lib/platform`, from the `platformUrl` the
+session reports). The old identity pages and API calls are gone.
 
 ## What holds across the app
 
-**No credential is spent on a `GET`.** Invitation and claim links point
-at pages here — `/verify`, `/recover`, `/invite/{org}` — which render a button that
-`POST`s the token. Mail scanners and link-preview fetchers follow every URL in every
-message, and a single-use `GET` is burned before the human clicks it. `of-web`'s
-`every_single_use_redemption_is_a_post` and `redeemable_urls_are_pages_not_endpoints`
-assert the server's half of the same bargain.
+**No credential is spent on a `GET`.** The tracker callback page (`/trackers/callback`)
+receives a single-use authorization code in its URL and `POST`s it from script; a mail
+scanner or link-preview fetcher that follows the URL loads a page and burns nothing.
+`/auth/callback` is the exception that proves the rule: it is a `GET` that spends a code,
+but it is bound to the browser that started the flow by a sealed cookie and the PKCE
+verifier, so a fetcher holding only the URL gets `login_error=invalid_state`.
 
 **An org you are not in renders as "no such organization".** The API answers `404` for both
 a nonexistent org and one the caller is not in, precisely so the two cannot be told apart.
@@ -125,18 +148,18 @@ have no client-side JS to swap strings and share no keys with these catalogs.
 
 ## Which language, and how it is remembered
 
-Three tiers, each with one job:
+Two tiers now, each with one job:
 
-| Tier                        | Holds                                    | Authority                        |
-| --------------------------- | ---------------------------------------- | -------------------------------- |
-| `users.locale`              | the account's explicit choice, or `null` | **source of truth**              |
-| `localStorage['of.locale']` | a copy of it, for first paint            | cache only                       |
-| `navigator.languages`       | the browser's preference                 | fallback when nothing was chosen |
+| Tier                        | Holds                         | Authority                        |
+| --------------------------- | ----------------------------- | -------------------------------- |
+| `localStorage['of.locale']` | a choice made in this browser | wins when present                |
+| `navigator.languages`       | the browser's preference      | fallback when nothing was chosen |
 
-The choice lives on the account so it follows the person to their next device; the cache exists
-so every load after the first paints in the right language instead of flashing English until
-`/api/me` returns. `null` means **"never chose"** — it is not "chose English", and collapsing
-the two would pin every account that never opened the picker to the base locale.
+There used to be a third, the account's `users.locale` on the factory's own user row, which was
+the source of truth so a choice followed the person between devices. Accounts are the
+platform's now and its API reports no locale, so nothing in the console sets the language
+today beyond the browser's preference. `locale.ts` keeps `reconcile` and `applyLocale` for when
+the platform exposes one (or a picker returns); nothing calls them yet.
 
 A change of language **reloads the document**. Paraglide's `m.*()` are plain calls, not reactive
 reads, so Svelte has no dependency to invalidate when the locale changes underneath them.
@@ -156,22 +179,23 @@ language for it.
 | `src/lib/types.ts`          | The wire types, transcribed from `of-web`'s OpenAPI document.                            |
 | `src/lib/session.svelte.ts` | Who is signed in. A rune module, not a store.                                            |
 | `src/lib/org.svelte.ts`     | The org the current route is about, via context.                                         |
-| `src/lib/clients.ts`        | One recipe per coding agent, all the same shape.                                         |
+| `src/lib/login.ts`          | Starting sign-in, and the loop guard.                                                    |
+| `src/lib/platform.ts`       | Links into the platform's own console.                                                   |
 | `src/lib/poll.svelte.ts`    | Polling a page hands to an `$effect`. The overview and `/queue` use it; `/repos` should. |
 | `src/routes/`               | Public pages at the root; org pages under `/o/[org]`.                                    |
 | `worker/index.ts`           | The Cloudflare Worker: serves this bundle, proxies the API to `of-server`.               |
 | `wrangler.jsonc`            | That Worker's config. `worker/tsconfig.json` type-checks it separately.                  |
 
 Org pages live under `/o/[org]` rather than `/[org]` so that no org slug can ever collide
-with a page name. The routes the _server_ names — `/login`, `/verify`, `/recover`,
-`/invite/{org}`, `/settings/billing` — are fixed by what the server puts in an invitation link and in
-`of-billing`'s upgrade prompt, and must not be renamed here alone.
+with a page name. The paths the _server_ names — `/auth/login`, `/auth/callback`,
+`/auth/logout`, `/trackers/callback`, and a sign-in's default landing page `/o/{slug}` — are fixed
+by what the server redirects to, and must not be renamed here alone.
 
 ## Deploying to Cloudflare
 
 `npm run deploy` uploads `build/` and `worker/index.ts` as one Worker: Cloudflare serves the
-SPA from its own network and the Worker forwards `/api`, `/oauth`, `/.well-known`, `/mcp`,
-`/healthz` and `/readyz` to `of-server`.
+SPA from its own network and the Worker forwards `/api`, `/auth`, `/oauth`, `/.well-known`, `/mcp`,
+`/platform`, `/webhooks`, `/healthz` and `/readyz` to `of-server`.
 
 **It deploys `--env production`, and that is not a formality.** The default configuration
 names a _different_ Worker (`otto-factory-console-dev`) pointing at `http://127.0.0.1:8080`,

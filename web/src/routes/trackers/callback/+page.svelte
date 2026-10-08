@@ -77,7 +77,7 @@
     <h1 class="text-lg font-semibold">{m.trackercb_failed_heading()}</h1>
     <div class="mt-3"><Alert>{error}</Alert></div>
     <p class="mt-4 text-sm text-faint">
-      <a class="underline hover:text-ink" href="/orgs">{m.trackercb_back_link()}</a>
+      <a class="underline hover:text-ink" href="/">{m.trackercb_back_link()}</a>
     </p>
   {:else}
     <Loading what={m.trackercb_loading()} />
