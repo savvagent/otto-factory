@@ -31,6 +31,7 @@
 //! [`Db`]: otto_tenant::Db
 
 pub mod audit;
+pub mod console_sessions;
 pub mod error;
 pub mod idempotency;
 pub mod ids;
