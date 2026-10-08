@@ -96,7 +96,7 @@ server's own prose.
 - The refusal never echoes the offending label back.
 - A blank or whitespace-only `agent` is the same as omitting it; surrounding whitespace is
   trimmed before storage.
-- `AlreadyClaimed` and `LeaseHeld` render the holder as `agent "<label>"` (Rust `{:?}` quoting)
+- `AlreadyClaimed` and `LeaseHeld` render the holder as `agent "<label>"` (explicit quotes, with `"` and `\` escaped)
   when a label is stored, and as `user <uuid>` otherwise — including for a legacy row written
   before this change whose label would now fail validation.
 - Both tool descriptions (and the `agent` argument's schema description) state the rule.
@@ -204,9 +204,9 @@ point that says exactly which argument to fix.
 
 `of_core::agent_label::holder(label: Option<&str>, user: UserId) -> String`:
 
-- If `label` passes `validate` and is `Some(l)` → `format!("agent {l:?}")`, e.g.
-  `agent "api-agent@ci-7"`. `{:?}` adds the delimiting quotes and escapes any `"` or `\` inside,
-  so a label cannot close its own quotes.
+- If `label` passes `validate` and is `Some(l)` → `agent "<l>"`, e.g. `agent "api-agent@ci-7"`.
+  The function writes the delimiting quotes itself and escapes any `"` or `\` inside (Addendum
+  item 3), so a label cannot close its own quotes.
 - Otherwise (no label, or a legacy label that fails today's rule) → `format!("user {user}")`.
 
 This is a rendering choice, not a resolution fallback: the user id is the authoritative holder,
@@ -282,7 +282,7 @@ wire level) needs no entry.
   in rendered prose.
 - A `"` inside a valid label → accepted, rendered escaped as `\"` inside the quotes.
 - Legacy row with a 5,000-character or multi-line label → the error renders `user <uuid>`;
-  `get_job` still returns the stored label as data.
+  `get_job`, `list_leases`, and `read_messages` return it as `null` (Addendum item 2).
 - Error ordering: the label is checked in `of-core`, so anything the handler or `of-core`
   refuses first wins — an empty job list (`invalid_argument`), a job the caller cannot see
   (`job_not_found`, from `ensure_jobs_visible`), an unresolvable repo (`repo_unresolved`, from
