@@ -2,12 +2,10 @@
   import { page } from '$app/state';
   import type { Snippet } from 'svelte';
 
-  import { api, ApiError } from '$lib/api';
-  import { messageFor } from '$lib/errors';
   import { m } from '$lib/paraglide/messages';
+  import { signIn } from '$lib/login';
   import { OrgContext, provideOrg } from '$lib/org.svelte';
   import { session } from '$lib/session.svelte';
-  import Alert from '$lib/components/Alert.svelte';
   import Loading from '$lib/components/Loading.svelte';
 
   let { children }: { children: Snippet } = $props();
@@ -17,60 +15,53 @@
   const context = new OrgContext(() => page.params.org ?? '');
   provideOrg(context);
 
-  let loading = $state(true);
+  /** Signed in to this org (by slug or id), as opposed to some other one. */
+  const matches = $derived.by(() => {
+    const info = session.info;
+    if (!info) return false;
+    const wanted = slug.toLowerCase();
+    return wanted === info.org.slug.toLowerCase() || wanted === info.org.id.toLowerCase();
+  });
+
+  /** Signing in again for this org was just tried and changed nothing. */
   let missing = $state(false);
-  let error = $state<string | undefined>(undefined);
 
   /**
-   * Resolve the org named in the URL.
+   * Resolve the org named in the URL, from the session.
    *
-   * **A `404` is rendered as "no such organization", full stop.** The server
-   * answers `404` both for an org that does not exist and for one the caller is
-   * not in, precisely so the two cannot be told apart — a `403` on a real slug
-   * and a `404` on a fake one turns any signed-in account into a directory of
-   * who uses the product. A console that helpfully said "you don't have access
-   * to acme" would undo that from the client side.
+   * **A console session is signed in to exactly one org** — the platform's token
+   * is bound to it. So there is nothing to fetch: the org, the role, and the plan
+   * come from `GET /api/session`, and a URL naming any other org means the
+   * visitor has to sign in *for that org* (`/auth/login?org=…`, which the
+   * platform answers with that org if they belong to it). The server enforces the
+   * same thing from its side — an API call for another org is
+   * `401 org_session_mismatch`, and `$lib/api` sends the tab through the same
+   * sign-in.
+   *
+   * If sign-in comes straight back to the same mismatch, the visitor does not
+   * belong to that org, and the page says it does not exist. **It does not say
+   * "you don't have access"**: the server answers the same for an org that does
+   * not exist, precisely so the two cannot be told apart.
    */
   $effect(() => {
-    const wanted = slug;
-    if (!wanted || !session.signedIn) return;
-
-    loading = true;
-    missing = false;
-    error = undefined;
-
-    void (async () => {
-      try {
-        const joined = await api.org(wanted);
-        // Guard against an out-of-order response: a fast navigation between two
-        // orgs can land the first fetch after the second, and applying it would
-        // show the wrong org's name over the right org's data.
-        if (context.slug !== wanted) return;
-        context.org = joined.org;
-        context.role = joined.role;
-        session.lastOrg = joined.org.slug;
-      } catch (e) {
-        if (e instanceof ApiError && e.isNotFound) {
-          missing = true;
-        } else {
-          error = messageFor(e, m.orgnav_load_failed());
-        }
-      } finally {
-        loading = false;
-      }
-    })();
+    const info = session.info;
+    if (!info) return;
+    if (matches) {
+      context.org = info.org;
+      context.role = info.role;
+      missing = false;
+      return;
+    }
+    context.org = undefined;
+    context.role = undefined;
+    if (slug && !signIn(slug, page.url.pathname + page.url.search)) missing = true;
   });
 
   const nav = $derived([
     { href: `/o/${slug}`, label: m.orgnav_overview(), exact: true },
     { href: `/o/${slug}/queue`, label: m.orgnav_queue() },
     { href: `/o/${slug}/repos`, label: m.orgnav_repos() },
-    { href: `/o/${slug}/members`, label: m.orgnav_members() },
-    { href: `/o/${slug}/teams`, label: m.orgnav_teams() },
     ...(context.isAdmin ? [{ href: `/o/${slug}/trackers`, label: m.orgnav_trackers() }] : []),
-    ...(context.isAdmin ? [{ href: `/o/${slug}/sso`, label: m.orgnav_sso() }] : []),
-    { href: `/o/${slug}/connect`, label: m.orgnav_connect() },
-    { href: `/o/${slug}/usage`, label: m.orgnav_usage() },
     ...(context.isAdmin ? [{ href: `/o/${slug}/audit`, label: m.orgnav_audit() }] : [])
   ]);
 
@@ -91,8 +82,6 @@
     -->
     <p class="mt-2 text-sm text-faint">{m.orgnav_missing_body({ slug })}</p>
   </div>
-{:else if error}
-  <Alert>{error}</Alert>
 {:else}
   <div class="flex flex-col gap-6 sm:flex-row">
     <nav
@@ -117,7 +106,7 @@
     </nav>
 
     <div class="min-w-0 flex-1">
-      {#if loading && !context.org}
+      {#if !context.org}
         <Loading what={m.orgnav_loading({ org: slug })} />
       {:else}
         {@render children()}

@@ -92,6 +92,14 @@ pub struct Config {
     /// Atlassian OAuth client secret for JIRA tracker sync.
     pub jira_client_secret: Option<String>,
 
+    /// The console's OAuth client id at the platform, for console sign-in. A
+    /// public first-party client an operator registers
+    /// (`otto-platform-server client register --first-party`) with the redirect
+    /// URI `{public_url}/auth/callback`. Optional: while unset, `/auth/login`
+    /// answers `503 console_login_disabled` and everything else runs, so the
+    /// server can be deployed before the client exists.
+    pub console_client_id: Option<String>,
+
     /// Refuse billable calls once an org on a hard-stop plan is past its bucket,
     /// as the platform reports it (cached up to a minute, so overrun is bounded
     /// by that window and by what is still in the usage outbox).
@@ -121,6 +129,7 @@ impl std::fmt::Debug for Config {
             .field("public_url", &self.public_url)
             .field("resource_uri", &self.resource_uri)
             .field("platform_url", &self.platform_url)
+            .field("console_client_id", &self.console_client_id)
             .field("enforce_quotas", &self.enforce_quotas)
             .field("static_dir", &self.static_dir)
             .field("run_migrations", &self.run_migrations)
@@ -205,6 +214,7 @@ impl Config {
             github_app_client_secret: optional("OF_GITHUB_APP_CLIENT_SECRET"),
             jira_client_id: optional("OF_JIRA_CLIENT_ID"),
             jira_client_secret: optional("OF_JIRA_CLIENT_SECRET"),
+            console_client_id: optional("OF_CONSOLE_CLIENT_ID"),
 
             enforce_quotas: parse_var("OF_ENFORCE_QUOTAS", "0", parse_bool)?,
             upgrade_url: optional("OF_UPGRADE_URL")
@@ -320,6 +330,7 @@ impl Config {
             github_app_client_secret: None,
             jira_client_id: None,
             jira_client_secret: None,
+            console_client_id: None,
             enforce_quotas: false,
             upgrade_url: "https://otto.example.com/settings/billing".into(),
             extra_allowed_hosts: vec![],

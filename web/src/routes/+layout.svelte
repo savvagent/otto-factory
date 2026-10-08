@@ -7,8 +7,9 @@
   import { api } from '$lib/api';
   import { messageFor } from '$lib/errors';
   import { m } from '$lib/paraglide/messages';
-  import { reconcile, resolveAtBoot } from '$lib/locale';
-  import { isServerRoute, safeNext } from '$lib/next';
+  import { resolveAtBoot } from '$lib/locale';
+  import { orgOf, signIn } from '$lib/login';
+  import { platformLink, type PlatformPage } from '$lib/platform';
   import { session } from '$lib/session.svelte';
   import { APP_VERSION } from '$lib/version';
   import Alert from '$lib/components/Alert.svelte';
@@ -31,40 +32,22 @@
   /** A failure resolving the session that is *not* "signed out". */
   let fatal = $state<string | undefined>(undefined);
   let signingOut = $state(false);
+  /** Sign-in was just tried and the session still did not appear. */
+  let signInStuck = $state(false);
 
   /**
-   * Pages reachable without a session.
+   * Pages that skip the sign-in guard.
    *
-   * Just the two doors. `/signup` carries the whole account-creation flow now —
-   * address, recovery codes, and authenticator enrollment in one visit — because
-   * there is no email and so no second visit to come back from.
+   * `/docs/api` mirrors an `Auth::Public` server endpoint that has nothing to do
+   * with session state, so a visitor following the footer link lands on it
+   * whether or not they are signed in.
    *
-   * `/invite/…` is deliberately *not* here: redeeming an invitation requires a
-   * session whose address matches the one invited, so it sends the visitor to
-   * sign in first. That check is what keeps a code that goes astray from being
-   * a free seat.
-   */
-  const PUBLIC = ['/login', '/signup', '/claim'];
-
-  /**
-   * Pages that skip the routing guard entirely, in both directions — no
-   * redirect to `/login` when signed out, no redirect to `/` when signed in,
-   * and no wait on `session.ready` before rendering (see the main-content
-   * template below). `/docs/api` mirrors an `Auth::Public` server endpoint
-   * that has nothing to do with session state, so unlike `PUBLIC` above it is
-   * never redirected away from — a signed-in visitor following the footer
-   * link must land on the page, not bounce back to `/`.
-   *
-   * `/` is here for a different reason: it is the marketing front page, not
-   * a page with content of its own to gate. A signed-out visitor has to see
-   * it instead of bouncing to `/login` — the whole point of a front page is
-   * that someone who has never signed in can read it. A signed-in visitor is
-   * still moved along, but by `+page.svelte`'s own effect, which runs
-   * regardless of this list.
+   * `/` is the front page: a signed-out visitor has to be able to read it (and
+   * see a "Sign in" button, and a `login_error` if a sign-in just failed). A
+   * signed-in visitor is moved along by `+page.svelte`'s own effect.
    */
   const UNGATED = ['/docs/api', '/'];
 
-  const isPublic = $derived(PUBLIC.some((p) => page.url.pathname === p));
   const isUngated = $derived(UNGATED.some((p) => page.url.pathname === p));
 
   $effect(() => {
@@ -81,95 +64,55 @@
   }
 
   /**
-   * Apply the account's stored language whenever the session resolves.
-   *
-   * **An effect over `session.me`, not a line inside `resolve()`.** `resolve()`
-   * runs exactly once, on mount, and returns early forever after; every other
-   * path that establishes a session — signing in, signing up, redeeming a
-   * claim code or an invitation, and the settings page — calls
-   * `session.refresh()` directly and would never reach it. Reading
-   * `session.me` here makes this re-run for all of them.
-   *
-   * That is not a tidiness point: the case this whole mechanism exists for is
-   * **the first sign-in on a new device**, where the cache is empty and the
-   * browser's language differs from the account's. That is precisely the path
-   * `resolve()` cannot see, because the session became ready while the visitor
-   * was still signed out.
-   *
-   * `reconcile` no-ops unless the stored choice differs from what is rendering,
-   * so running it on every change is free — and it reloads at most once when
-   * they do differ, for the reason its own comment gives.
-   */
-  $effect(() => {
-    reconcile(session.me?.user.locale);
-  });
-
-  /**
-   * The routing guard, in one place.
+   * The sign-in guard, in one place.
    *
    * Written as an effect over `session.ready` and the current path rather than
    * as a check in each page: a page that forgets is a page that renders a
-   * skeleton to a signed-out visitor and then flashes it away, and the
-   * enrollment gate in particular has to hold everywhere at once — an account
-   * with no confirmed authenticator can reach the API, so leaving one route
-   * ungated would leave a usable console behind a half-finished login.
+   * skeleton to a signed-out visitor and then flashes it away.
+   *
+   * Sign-in is **a full navigation** to `/auth/login` — a server route that
+   * answers a redirect to the otto platform — and it brings the visitor back to
+   * this same URL afterwards.
+   *
+   * `signingOut` suppresses the guard for the moment between clearing the
+   * session and arriving at `/`. Without it the guard fires first, from whatever
+   * org page the button was pressed on, and sends someone who deliberately signed
+   * out straight back into sign-in.
    */
   $effect(() => {
-    // `signingOut` suppresses the guard for the moment between clearing the
-    // session and arriving at `/login`. Without it the guard fires first, from
-    // whatever org page the button was pressed on, and rewrites the destination
-    // to `/login?next=/o/acme` — so someone who deliberately signed out is told
-    // to "sign in to continue" and sent back where they left.
-    if (isUngated || !session.ready || fatal || signingOut) return;
-
-    if (!session.signedIn) {
-      if (!isPublic) {
-        const next = page.url.pathname + page.url.search;
-        void goto(`/login?next=${encodeURIComponent(next)}`, { replaceState: true });
-      }
-      return;
-    }
-
-    // No enrollment gate any more: a session only exists for an account that
-    // already registered a passkey, because the passkey is what creates the
-    // account.
-    //
-    // One exception, and it is not a half-signed-in state so much as a
-    // half-*introduced* one. Signup creates the account from the passkey and
-    // asks for an address on the step after, so between those two the account
-    // is signed in and sitting on `/signup` on purpose. Bouncing it to `/` the
-    // moment the session appears makes that second step unreachable — which is
-    // exactly what it did until a browser test caught it.
-    const needsProfile = session.me != null && session.me.user.email == null;
-    if (isPublic && !needsProfile) {
-      // Honour `next` rather than always landing on `/`. A language change
-      // detected at sign-in reloads this page, and the reload lands back here
-      // signed in — so without this, arriving with a stored locale that differs
-      // from the browser's silently costs the visitor their destination.
-      // `safeNext` is what makes an attacker-supplied `next` safe to follow;
-      // a server route needs a real navigation because the client router has
-      // no `/oauth/authorize` to render.
-      const next = safeNext(page.url.searchParams.get('next'));
-      if (next && isServerRoute(next)) location.assign(next);
-      else void goto(next ?? '/', { replaceState: true });
-    }
+    if (isUngated || !session.ready || fatal || signingOut || session.signedIn) return;
+    const { pathname, search } = page.url;
+    if (!signIn(orgOf(pathname), pathname + search)) signInStuck = true;
   });
 
   async function signOut() {
     signingOut = true;
     try {
       await api.logout();
+    } catch {
+      // Cleared locally regardless. The server treats an unknown cookie as
+      // already gone, so the only way to reach here with a live session is a
+      // network error — and leaving the console looking signed in after someone
+      // pressed "sign out" is the worse of the two wrong answers.
     } finally {
-      // Cleared even if the request failed. The server clears the cookie on
-      // success and treats an unknown one as already gone, so the only way to
-      // reach here with a live session is a network error — and leaving the
-      // console looking signed in after someone pressed "sign out" is the worse
-      // of the two wrong answers.
       session.clear();
-      await goto('/login', { replaceState: true });
+      await goto('/', { replaceState: true });
       signingOut = false;
     }
   }
+
+  /**
+   * What the platform's console manages, in the order a person looks for it.
+   * Identity is the platform's: this console links there rather than copying it.
+   */
+  const platformPages: { page: PlatformPage; label: () => string }[] = [
+    { page: 'members', label: () => m.nav_platform_members() },
+    { page: 'teams', label: () => m.nav_platform_teams() },
+    { page: 'sso', label: () => m.nav_platform_sso() },
+    { page: 'usage', label: () => m.nav_platform_usage() },
+    { page: 'account', label: () => m.nav_platform_account() },
+    { page: 'orgs', label: () => m.nav_platform_switch_org() }
+  ];
 </script>
 
 <div class="flex min-h-full flex-col">
@@ -179,32 +122,48 @@
         <Logo class="size-6 text-accent" />
       </a>
 
-      {#if session.signedIn}
-        <nav class="ml-2 hidden gap-1 text-sm sm:flex" aria-label={m.nav_organizations()}>
-          {#each session.orgs as membership (membership.orgId)}
-            <a
-              href="/o/{membership.orgSlug}"
-              class="rounded-md px-2.5 py-1 text-muted transition hover:bg-raised hover:text-ink"
-              class:bg-raised={page.url.pathname.startsWith(`/o/${membership.orgSlug}`)}
-              class:text-ink={page.url.pathname.startsWith(`/o/${membership.orgSlug}`)}
-            >
-              {membership.orgName}
-            </a>
-          {/each}
+      {#if session.info}
+        <nav class="ml-2 flex gap-1 text-sm" aria-label={m.nav_organizations()}>
           <a
-            href="/orgs/new"
-            class="rounded-md px-2.5 py-1 text-faint transition hover:bg-raised hover:text-ink"
-            title={m.nav_create_org()}
+            href="/o/{session.info.org.slug}"
+            class="rounded-md bg-raised px-2.5 py-1 text-ink transition"
           >
-            +
+            {session.info.org.name}
           </a>
         </nav>
+
+        <!--
+          Everything identity-shaped lives at the platform. A native <details>
+          rather than a hand-rolled menu: it is keyboard- and screen-reader-
+          operable for free, and needs no script to stay in sync.
+        -->
+        <details class="relative text-sm">
+          <summary
+            class="cursor-pointer list-none rounded-md px-2.5 py-1 text-muted transition hover:bg-raised hover:text-ink"
+          >
+            {m.nav_manage()}
+          </summary>
+          <ul
+            class="absolute left-0 z-10 mt-1 w-56 rounded-md border border-edge bg-surface p-1 shadow-lg"
+          >
+            {#each platformPages as item (item.page)}
+              <li>
+                <a
+                  href={platformLink(session.info.platformUrl, item.page, session.info.org.slug)}
+                  class="block rounded px-2.5 py-1.5 text-muted transition hover:bg-raised hover:text-ink"
+                >
+                  {item.label()}
+                </a>
+              </li>
+            {/each}
+          </ul>
+        </details>
       {/if}
 
       <div class="ml-auto flex items-center gap-3 text-sm">
-        {#if session.me}
+        {#if session.info}
           <span class="hidden text-faint sm:inline"
-            >{session.me.user.email ?? session.me.user.label}</span
+            >{session.info.user.email ?? session.info.user.name ?? ''}</span
           >
           <button
             class="rounded-md border border-edge px-2.5 py-1 text-muted transition hover:bg-raised hover:text-ink disabled:opacity-50"
@@ -215,7 +174,8 @@
           </button>
         {:else if session.ready}
           <a
-            href="/login"
+            href="/auth/login"
+            data-sveltekit-reload
             class="rounded-md border border-edge px-2.5 py-1 text-muted transition hover:bg-raised hover:text-ink"
           >
             {m.nav_sign_in()}
@@ -234,7 +194,12 @@
         <button class="ml-2 underline" onclick={() => location.reload()}>{m.nav_try_again()}</button
         >
       </Alert>
-    {:else if !session.ready}
+    {:else if signInStuck}
+      <Alert>
+        {m.nav_sign_in_stuck()}
+        <a class="ml-2 underline" href="/auth/login" data-sveltekit-reload>{m.nav_sign_in()}</a>
+      </Alert>
+    {:else if !session.ready || !session.signedIn}
       <Loading what={m.nav_checking_session()} />
     {:else}
       {@render children()}

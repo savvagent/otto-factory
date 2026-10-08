@@ -1,7 +1,9 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
+  import { page } from '$app/state';
   import { m } from '$lib/paraglide/messages';
   import { session } from '$lib/session.svelte';
+  import Alert from '$lib/components/Alert.svelte';
   import Button from '$lib/components/Button.svelte';
   import Loading from '$lib/components/Loading.svelte';
 
@@ -10,15 +12,30 @@
    *
    * A signed-out visitor reads it — per `+layout.svelte`'s `UNGATED` list, it
    * is the one page a stranger can reach without a session. A signed-in
-   * visitor is moved along: there is no useful org-less view once an account
-   * exists, because everything the console shows — the queue, repos,
-   * members, the meter — is scoped to one org. A brand new account with no
-   * memberships goes to create one rather than sitting on an empty shell.
+   * visitor is moved along: everything the console shows — the queue, repos,
+   * trackers — is scoped to the one org the session is signed in to.
+   *
+   * It is also where a failed sign-in lands (`/?login_error=<code>`, from
+   * `/auth/callback`). The code is one of a fixed set the server chooses; an
+   * unknown one falls back to the generic message rather than being shown.
    */
   $effect(() => {
-    if (!session.ready || !session.signedIn) return;
-    const home = session.homeOrg;
-    void goto(home ? `/o/${home}` : '/orgs/new', { replaceState: true });
+    if (!session.ready || !session.info) return;
+    void goto(`/o/${session.info.org.slug}`, { replaceState: true });
+  });
+
+  const LOGIN_ERRORS: Record<string, () => string> = {
+    access_denied: () => m.login_error_access_denied(),
+    invalid_state: () => m.login_error_invalid_state(),
+    platform_unavailable: () => m.login_error_platform_unavailable(),
+    failed: () => m.login_error_failed()
+  };
+
+  const loginError = $derived.by(() => {
+    const code = page.url.searchParams.get('login_error');
+    if (!code) return undefined;
+    const render = LOGIN_ERRORS[code] ?? LOGIN_ERRORS['failed'];
+    return render ? render() : undefined;
   });
 
   const devPoints = [m.landing_dev_1, m.landing_dev_2, m.landing_dev_3, m.landing_dev_4];
@@ -43,6 +60,10 @@
   <Loading what={m.home_finding_org()} />
 {:else}
   <div class="space-y-20 pt-6 pb-12">
+    {#if loginError}
+      <div class="mx-auto max-w-3xl"><Alert>{loginError}</Alert></div>
+    {/if}
+
     <section class="mx-auto max-w-3xl text-center">
       <p class="of-label text-accent">{m.landing_eyebrow()}</p>
       <h1 class="mt-3 text-4xl font-semibold tracking-tight text-ink sm:text-5xl">
@@ -52,7 +73,7 @@
         {m.landing_subhead()}
       </p>
       <div class="mt-8 flex flex-wrap items-center justify-center gap-3">
-        <a href="/login">
+        <a href="/auth/login" data-sveltekit-reload>
           <Button>{m.landing_cta_primary()}</Button>
         </a>
         <a
@@ -128,7 +149,7 @@
           </div>
           <h3 class="mt-3 text-sm font-semibold text-ink">{m.landing_how_2_title()}</h3>
           <p class="mt-1.5 text-sm text-muted">{m.landing_how_2_body()}</p>
-          <!-- A wire value, not prose — never translated, same as `src/lib/clients.ts`. -->
+          <!-- A wire value, not prose — never translated, same as the rest of this console's commands and paths. -->
           <code
             class="of-mono mt-3 block overflow-x-auto rounded-md border border-edge bg-canvas px-3 py-2 text-xs whitespace-pre"
             >claude mcp add --transport http factory https://mcp.your-domain.com/mcp</code
@@ -163,7 +184,7 @@
       <h2 class="text-2xl font-semibold text-ink">{m.landing_final_heading()}</h2>
       <p class="mt-2 text-sm text-muted">{m.landing_final_body()}</p>
       <div class="mt-6">
-        <a href="/login">
+        <a href="/auth/login" data-sveltekit-reload>
           <Button>{m.landing_cta_primary()}</Button>
         </a>
       </div>

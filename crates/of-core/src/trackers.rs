@@ -108,7 +108,7 @@ struct TrackerConnectionRow {
     updated_at: chrono::DateTime<chrono::Utc>,
 }
 
-fn encode_sealed(sealed: &Sealed) -> Result<String> {
+pub(crate) fn encode_sealed(sealed: &Sealed) -> Result<String> {
     if sealed.nonce.len() != NONCE_BYTES {
         return Err(otto_tenant::Error::Crypto("stored nonce has the wrong length".into()).into());
     }

@@ -23,7 +23,7 @@ use axum::extract::DefaultBodyLimit;
 use axum::routing::{delete, get, patch, post, put, MethodRouter};
 
 use crate::openapi;
-use crate::routes::{audit, jobs, platform, repos, trackers, webhooks};
+use crate::routes::{audit, auth, jobs, platform, repos, trackers, webhooks};
 use crate::state::AppState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,11 +54,16 @@ impl Verb {
 /// which is what makes [`crate::session::OrgCtx`] able to resolve one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Auth {
-    /// No bearer token. Discovery documents, and the machine endpoints whose
+    /// No credential needed. Discovery documents, the machine endpoints whose
     /// caller authenticates some other way (a tracker's or the platform's
-    /// webhook signature).
+    /// webhook signature), and the console's sign-in routes, which exist to
+    /// *produce* a credential.
     Public,
-    /// A platform-issued bearer token whose org is the one in the path.
+    /// A signed-in caller — a console session or a platform bearer token — in
+    /// whichever org that credential opens. No `{org}` in the path.
+    Session,
+    /// A console session or a platform-issued bearer token whose org is the one
+    /// in the path.
     OrgMember,
     /// As [`Auth::OrgMember`], and the token's holder is an `owner` or `admin`
     /// of that org.
@@ -69,6 +74,7 @@ impl Auth {
     pub fn as_str(self) -> &'static str {
         match self {
             Auth::Public => "public",
+            Auth::Session => "session",
             Auth::OrgMember => "org member",
             Auth::OrgAdmin => "org admin",
         }
@@ -269,6 +275,54 @@ pub fn catalog() -> Vec<Endpoint> {
                  id, so any 2xx means \"handled\", including a repeat. A handling \
                  failure answers 5xx so the platform retries. Bodies are capped at \
                  64 KiB.",
+            ),
+        // ------------------------------------------------------------ sign-in
+        Endpoint::get("/auth/login", auth::login)
+            .auth(Auth::Public)
+            .status(303)
+            .summary("Start console sign-in")
+            .describe(
+                "Redirects (303) to the otto platform's authorization endpoint with a \
+                 fresh PKCE challenge (S256) and `state`, remembering both, with where to \
+                 land afterwards, in a short-lived sealed `__Host-of_oauth` cookie. \
+                 `org=<slug>` is passed to the platform as `org_hint`, so a person who \
+                 belongs to several orgs is signed in to that one; `next=<path>` is where \
+                 to land afterwards, honoured only if it is a same-origin path. Answers \
+                 `503 console_login_disabled` when this deployment has no console client \
+                 id configured.",
+            ),
+        Endpoint::get("/auth/callback", auth::callback)
+            .auth(Auth::Public)
+            .status(303)
+            .summary("Finish console sign-in")
+            .describe(
+                "Where the platform sends the browser back. Checks `state` against the \
+                 `__Host-of_oauth` cookie, redeems the code at the platform's token \
+                 endpoint (server to server, with the PKCE verifier), stores the resulting \
+                 session, sets the `__Host-of_session` cookie, and redirects (303) to the \
+                 requested path or `/o/{org}`. Every failure redirects to \
+                 `/?login_error=<code>` (`access_denied`, `invalid_state`, \
+                 `platform_unavailable`, `failed`).",
+            ),
+        Endpoint::post("/auth/logout", auth::logout)
+            .auth(Auth::Public)
+            .status(204)
+            .summary("Sign out of the console")
+            .describe(
+                "Revokes the session's refresh token at the platform (best effort), \
+                 deletes the session, and clears the cookie. Idempotent. Like every \
+                 write made with the session cookie, it must come from this site: the \
+                 `Origin` must be this service's own origin.",
+            ),
+        Endpoint::get("/api/session", auth::get_session)
+            .auth(Auth::Session)
+            .returns("Session")
+            .summary("Who is signed in")
+            .describe(
+                "The caller, the one org their session or token is signed in to, their \
+                 role in it, the scopes granted, and where the platform's own console \
+                 lives (`platformUrl`) for everything identity-shaped. `401` when there \
+                 is no valid session.",
             ),
         // ----------------------------------------------------------- repos
         Endpoint::get("/api/orgs/{org}/repos", repos::list_repos)

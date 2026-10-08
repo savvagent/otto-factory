@@ -767,7 +767,9 @@ async fn the_audit_log_needs_an_admin_and_the_org_admin_scope(pool: PgPool) {
 }
 
 /// Identity is only ever the platform's answer: headers and query strings that
-/// claim an org or user are ignored.
+/// claim an org or user are ignored. A session cookie is a credential only if it
+/// opens a stored console session (`tests/console_login.rs`); a made-up one is
+/// not, and beside a bearer token it is not even consulted.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn nothing_but_the_token_decides_who_is_calling(pool: PgPool) {
     let h = harness(pool).await;
@@ -790,6 +792,19 @@ async fn nothing_but_the_token_decides_who_is_calling(pool: PgPool) {
     Call::get("/api/orgs/acme/repos")
         .header("x-org-id", acme.to_string())
         .header("x-user-id", rob.to_string())
+        .send(&h.router)
+        .await
+        .expect(StatusCode::UNAUTHORIZED);
+    // A session cookie that opens no stored session is no credential either,
+    // whatever it is named or what else the request claims.
+    Call::get("/api/orgs/acme/repos")
+        .header("x-org-id", acme.to_string())
+        .header("cookie", "__Host-of_session=anything")
+        .send(&h.router)
+        .await
+        .expect(StatusCode::UNAUTHORIZED);
+    Call::get("/api/orgs/acme/repos")
+        .header("cookie", format!("__Host-of_session={}", "A".repeat(43)))
         .send(&h.router)
         .await
         .expect(StatusCode::UNAUTHORIZED);

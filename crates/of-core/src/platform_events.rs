@@ -11,9 +11,9 @@
 //!
 //! | Event | Effect |
 //! |---|---|
-//! | `org.deleted` | Every row this database holds for the org is deleted: repos, jobs, leases, messages, tracker connections, counters, unshipped usage, and the org's domain audit trail. Only the dedupe marker survives. |
+//! | `org.deleted` | Every row this database holds for the org is deleted: repos, jobs, leases, messages, tracker connections, counters, unshipped usage, console sessions, and the org's domain audit trail. Only the dedupe marker survives. |
 //! | `team.deleted` | **Scope is kept, not widened.** Repos, jobs, and messages keep their `team_id`. See below. |
-//! | `member.removed` | The user's live leases are released, their in-progress or active job claims go back to `pending`, and their message read cursor is dropped. History they authored (jobs they created, messages they sent) is kept. |
+//! | `member.removed` | The user's live leases are released, their in-progress or active job claims go back to `pending`, and their message read cursor is dropped, and their console sessions in the org are deleted. History they authored (jobs they created, messages they sent) is kept. |
 //!
 //! # Why clean-up and requests take a lock
 //!
@@ -248,6 +248,7 @@ async fn org_deleted(db: &Db, event: &WebhookEvent, org: OrgId) -> Result<Outcom
         "repos",
         "org_counters",
         "usage_outbox",
+        "console_sessions",
     ] {
         let n = sqlx::query(&format!("DELETE FROM {table} WHERE org_id = $1"))
             .bind(org)
@@ -359,10 +360,15 @@ async fn member_removed(
         .await?
         .rows_affected();
 
+    // Their console logins go with them. The tombstone above already refuses the
+    // user's tokens; this removes the held token pair itself.
+    let sessions = crate::console_sessions::delete_for_user(&mut tx, user).await?;
+
     let detail = serde_json::json!({
         "leases_released": leases,
         "claims_released": claims,
         "cursors_dropped": cursors,
+        "sessions_dropped": sessions,
     });
     if first {
         tx.audit(

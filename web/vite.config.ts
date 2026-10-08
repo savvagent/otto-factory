@@ -5,7 +5,7 @@ import { defineConfig } from 'vite';
 
 /**
  * In production the console and the API are one origin: `of-server` serves the
- * built bundle beside `/api`, `/oauth`, and `/.well-known`.
+ * built bundle beside `/api`, `/auth`, and `/.well-known`.
  *
  * Development has to reproduce that, not merely approximate it. The session
  * cookie carries the `__Host-` prefix, which browsers refuse to store unless
@@ -14,6 +14,11 @@ import { defineConfig } from 'vite';
  * pointed `fetch` at `http://localhost:8080` would never send the session, and
  * CORS could not rescue it. Proxying instead keeps every request on the Vite
  * origin, where the cookie lives.
+ *
+ * Sign-in works through the same proxy: set the server's `OF_PUBLIC_URL` to
+ * `http://localhost:5173` so the platform sends the browser back to
+ * `/auth/callback` on this origin, and register that redirect URI for the
+ * console client at the platform.
  *
  * `secure: false` only tells the proxy not to verify an upstream TLS
  * certificate; it has nothing to do with the cookie's `Secure` attribute, which
@@ -57,6 +62,7 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/api': proxied,
+      '/auth': proxied,
       '/oauth': proxied,
       '/.well-known': proxied
     }

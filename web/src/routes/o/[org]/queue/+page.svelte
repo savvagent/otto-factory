@@ -11,7 +11,7 @@
   import { isClaimStranded } from '$lib/jobs';
   import { Poller } from '$lib/poll.svelte';
   import { fatalApiFailure } from '$lib/poll-fatal';
-  import type { Job, JobStatus, Repo, Team } from '$lib/types';
+  import type { Job, JobStatus, Repo } from '$lib/types';
   import Alert from '$lib/components/Alert.svelte';
   import Empty from '$lib/components/Empty.svelte';
   import Loading from '$lib/components/Loading.svelte';
@@ -56,17 +56,15 @@
   const mine = $derived(page.url.searchParams.get('mine') === 'true');
 
   let repos = $state<Repo[]>([]);
-  let teams = $state<Team[]>([]);
 
   $effect(() => {
     const slug = org.slug;
     if (!slug) return;
     void (async () => {
       try {
-        const [r, t] = await Promise.all([api.repos(slug), api.teams(slug)]);
+        const r = await api.repos(slug);
         if (org.slug !== slug) return;
         repos = r;
-        teams = t;
       } catch {
         // The pickers are a convenience. Losing them is not worth replacing the
         // queue itself with an error box — the filters still work by URL.
@@ -179,23 +177,17 @@
       </select>
     </label>
 
-    {#if teams.length > 0 || team}
-      <label class="block">
+    <!--
+      A team filter can only arrive in the URL (`?team=<slug>`): the platform owns
+      teams and this console cannot list them to offer a picker. The server still
+      resolves the slug, so a link that carries one keeps working, and this says
+      what is being filtered on.
+    -->
+    {#if team}
+      <div class="pb-2 text-sm text-muted">
         <span class="of-label">{m.queue_filter_team()}</span>
-        <select
-          class="of-input min-w-44"
-          value={team ?? ''}
-          onchange={(e) => setFilter('team', e.currentTarget.value)}
-        >
-          <option value="">{m.queue_filter_every_team()}</option>
-          {#if team && !teams.some((t) => t.slug === team)}
-            <option value={team}>{m.queue_team_missing({ team })}</option>
-          {/if}
-          {#each teams as option (option.id)}
-            <option value={option.slug}>{option.slug}</option>
-          {/each}
-        </select>
-      </label>
+        <code class="of-mono ml-1">{team}</code>
+      </div>
     {/if}
 
     <label class="flex items-center gap-2 pb-2 text-sm text-muted">

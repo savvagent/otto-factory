@@ -46,6 +46,13 @@ primary_region = "iad"
   # The OAuth authorization server, identity directory, and billing system of
   # record. Advertised to MCP clients as this resource's authorization server.
   OF_PLATFORM_URL = "https://otto.savvagent.com"
+  # The console's OAuth client at the platform, for console sign-in. NOT a secret
+  # (a public client; PKCE is what binds a code to its browser). Printed by
+  # `otto-platform-server client register --name "otto-factory console"
+  # --redirect-uri https://otto-factory.savvagent.com/auth/callback --first-party`
+  # (docs/deploy/fly.md). Uncomment and set once registered; until then
+  # `/auth/login` answers 503 console_login_disabled and everything else runs.
+  # OF_CONSOLE_CLIENT_ID = "otto_client_…"
   OF_STATIC_DIR = "/srv/console"
   OF_LOG_FORMAT = "json"
   RUST_LOG = "info,of_server=info,of_mcp=info,of_web=info"

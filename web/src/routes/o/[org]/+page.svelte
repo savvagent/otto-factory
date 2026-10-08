@@ -8,12 +8,11 @@
   import { roleLabel, statusLabel } from '$lib/labels';
   import { Poller } from '$lib/poll.svelte';
   import { fatalApiFailure } from '$lib/poll-fatal';
-  import type { Job, QueueStats, Repo, UsageStatus } from '$lib/types';
+  import type { Job, QueueStats, Repo } from '$lib/types';
   import Alert from '$lib/components/Alert.svelte';
   import Card from '$lib/components/Card.svelte';
   import Empty from '$lib/components/Empty.svelte';
   import Loading from '$lib/components/Loading.svelte';
-  import Meter from '$lib/components/Meter.svelte';
   import StatusPill from '$lib/components/StatusPill.svelte';
 
   /**
@@ -31,10 +30,10 @@
    * six rules that are each easy to omit, and they are written down once, in
    * `poll.svelte.ts`, next to why each one exists.
    *
-   * The four requests are one `Promise.all` and land as one value, so a tick
-   * repaints the whole page or none of it. Four pollers, or a staggered fetch
-   * to spread the load, would let the usage meter and the job list come from
-   * different ticks — a meter reading beside a job that has already finished.
+   * The three requests are one `Promise.all` and land as one value, so a tick
+   * repaints the whole page or none of it. Three pollers, or a staggered fetch
+   * to spread the load, would let the tiles and the job list come from different
+   * ticks — a count beside a job that has already finished.
    *
    * Nothing polled here is billable: `of-billing` meters MCP tool calls, and
    * these are console `GET`s.
@@ -46,7 +45,6 @@
     stats: QueueStats;
     recent: Job[];
     repos: Repo[];
-    usage: UsageStatus;
   }
 
   const overview = new Poller<Overview>();
@@ -58,13 +56,12 @@
     // the next org's starts — see the generation counter in `poll.svelte.ts`.
     return overview.start(
       async () => {
-        const [stats, recent, repos, usage] = await Promise.all([
+        const [stats, recent, repos] = await Promise.all([
           api.queueStats(slug),
           api.jobs(slug, { limit: 8 }),
-          api.repos(slug),
-          api.usage(slug)
+          api.repos(slug)
         ]);
-        return { stats, recent, repos, usage };
+        return { stats, recent, repos };
       },
       { fatal: fatalApiFailure }
     );
@@ -73,7 +70,6 @@
   const stats = $derived(overview.value?.stats);
   const recent = $derived(overview.value?.recent ?? []);
   const repos = $derived(overview.value?.repos ?? []);
-  const usage = $derived(overview.value?.usage);
   const error = $derived(
     overview.failed ? messageFor(overview.error, m.overview_load_failed()) : undefined
   );
@@ -212,20 +208,6 @@
       </Card>
 
       <div class="space-y-6">
-        <Card title={m.overview_period_title()} description={m.overview_period_description()}>
-          {#snippet actions()}
-            <a class="text-xs text-muted underline hover:text-ink" href="/o/{org.slug}/usage">
-              {m.overview_period_details()}
-            </a>
-          {/snippet}
-
-          {#if usage}
-            <Meter {usage} compact />
-          {:else}
-            <Loading what={m.overview_reading_meter()} />
-          {/if}
-        </Card>
-
         <Card title={m.overview_repos_title()} description={m.overview_repos_description()}>
           {#snippet actions()}
             <a class="text-xs text-muted underline hover:text-ink" href="/o/{org.slug}/repos">

@@ -6,17 +6,25 @@
 //! tracker webhooks (`/webhooks/{provider}`) and the otto platform's lifecycle
 //! webhooks (`/platform/webhooks`).
 //!
-//! Identity is not here. Accounts, sign-in, orgs, members, teams, SSO, tokens,
-//! and the usage meter live in the otto platform, which is also the OAuth
-//! authorization server for the MCP surface. This crate is a *resource server*:
-//! it asks the platform who a bearer token belongs to, and that is all it knows
-//! about identity.
+//! Identity is not here. Accounts, orgs, members, teams, SSO, tokens, and the
+//! usage meter live in the otto platform, which is also the OAuth authorization
+//! server for the MCP surface and for the console's own sign-in. This crate is a
+//! *resource server* and an OAuth *client*: it asks the platform who a token
+//! belongs to, and it holds the session a console login leaves behind. That is
+//! all it knows about identity.
 //!
 //! ```text
-//!   Browser/script ──► /api/orgs/{org}/…   platform bearer token ──► OrgCtx ──► of-core
+//!   Browser        ──► /auth/login, /auth/callback   OAuth code + PKCE against the platform
+//!   Browser        ──► /api/orgs/{org}/…   console session cookie ──┐
+//!   Script         ──► /api/orgs/{org}/…   platform bearer token ───┴► OrgCtx ──► of-core
 //!   Tracker        ──► /webhooks/{provider}  provider signature
 //!   Platform       ──► /platform/webhooks    Otto-Signature ──► platform_events
 //! ```
+//!
+//! The console signs in through the platform (`routes::auth`) and keeps its own
+//! session: a cookie that keys a stored platform token pair (`console`). Both
+//! credentials are resolved to the platform's claims by one function
+//! (`session::authenticate`).
 //!
 //! ## What holds across the whole crate
 //!
@@ -39,7 +47,11 @@
 //! they cannot drift apart.
 
 pub mod catalog;
+pub mod console;
+pub mod cookies;
+pub mod csrf;
 pub mod error;
+pub mod oauth;
 pub mod openapi;
 pub mod routes;
 pub mod session;
@@ -69,11 +81,15 @@ pub fn router(state: AppState) -> Router {
         }
     }
 
+    let origin = csrf::allowed_origin(&state.config);
+
     by_path
         .into_iter()
         .fold(Router::new(), |router, (path, methods)| {
             router.route(path, methods)
         })
+        // Cookie-authenticated writes must come from this origin; see `csrf`.
+        .layer(axum::middleware::from_fn_with_state(origin, csrf::check))
         .with_state(state)
 }
 

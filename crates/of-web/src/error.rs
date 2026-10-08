@@ -53,7 +53,18 @@ impl ApiError {
         Self::new(
             StatusCode::UNAUTHORIZED,
             "unauthenticated",
-            "sign in to continue: this needs a valid otto platform access token",
+            "sign in to continue: this needs a console session or a valid otto platform access token",
+        )
+    }
+
+    /// A signed-in console session asked for an org it is not signed in to. A
+    /// session is bound to one org (the token the platform issued it is), so the
+    /// answer is to sign in again for the other one, not "not found".
+    pub fn org_session_mismatch() -> Self {
+        Self::new(
+            StatusCode::UNAUTHORIZED,
+            "org_session_mismatch",
+            "this session is for a different organization; sign in again to switch",
         )
     }
 

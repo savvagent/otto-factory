@@ -18,12 +18,21 @@
 //! - **Usage dedupe.** `POST /internal/usage` counts an `event_id` once and
 //!   reports repeats as duplicates, so "ships exactly once" is checkable by
 //!   counting what [`MockPlatform::counted_usage`] holds.
+//! - **The console's OAuth flow.** `POST /oauth/token` redeems an authorization
+//!   code (single use, PKCE `S256` checked, `redirect_uri` and `client_id` must
+//!   match) or rotates a refresh token; `POST /oauth/revoke` revokes one. Like the
+//!   real platform, **a refresh token is consumed by use, and presenting a
+//!   consumed one revokes the whole family** (every refresh and access token
+//!   minted from the same login). [`MockPlatform::issue_code`] stands in for the
+//!   platform's `/oauth/authorize` once a person has signed in;
+//!   [`MockPlatform::refresh_calls`] counts rotations, which is how
+//!   "refreshes exactly once" is checked.
 //! - **Webhook signing.** [`MockPlatform::webhook`] produces a signed delivery
 //!   (header + raw body) for a given event.
 
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::extract::{Path, Query, State};
@@ -75,6 +84,35 @@ struct Data {
     seen: HashSet<Uuid>,
     /// Org ids whose usage the mock refuses, like a deleted org.
     unknown_orgs_for_usage: HashSet<Uuid>,
+    /// Authorization codes issued and not yet redeemed.
+    codes: HashMap<String, CodeRecord>,
+    /// Refresh tokens ever issued, consumed or not.
+    refresh_tokens: HashMap<String, RefreshRecord>,
+    /// Access tokens issued per login family, so revoking the family kills them.
+    family_access: HashMap<Uuid, Vec<String>>,
+    revoked_families: HashSet<Uuid>,
+    /// Refresh tokens a client revoked through `/oauth/revoke`.
+    revoked_refresh_tokens: Vec<String>,
+}
+
+struct CodeRecord {
+    client_id: String,
+    redirect_uri: String,
+    challenge: String,
+    org: Uuid,
+    user: Uuid,
+    scopes: Vec<String>,
+    resource: String,
+}
+
+struct RefreshRecord {
+    family: Uuid,
+    client_id: String,
+    org: Uuid,
+    user: Uuid,
+    scopes: Vec<String>,
+    resource: String,
+    consumed: bool,
 }
 
 struct Inner {
@@ -87,6 +125,13 @@ struct Inner {
     introspect_calls: AtomicUsize,
     usage_calls: AtomicUsize,
     lookup_calls: AtomicUsize,
+    code_exchanges: AtomicUsize,
+    refresh_calls: AtomicUsize,
+    /// Lifetime, in seconds, of access tokens minted by the token endpoint.
+    access_ttl_secs: AtomicI64,
+    /// How long the token endpoint sleeps before answering a refresh, so a test
+    /// can hold the window in which concurrent requests would double-refresh.
+    refresh_delay_ms: AtomicU64,
 }
 
 pub struct MockPlatform {
@@ -106,10 +151,16 @@ impl MockPlatform {
             introspect_calls: AtomicUsize::new(0),
             usage_calls: AtomicUsize::new(0),
             lookup_calls: AtomicUsize::new(0),
+            code_exchanges: AtomicUsize::new(0),
+            refresh_calls: AtomicUsize::new(0),
+            access_ttl_secs: AtomicI64::new(3600),
+            refresh_delay_ms: AtomicU64::new(0),
         });
 
         let app = Router::new()
             .route("/oauth/introspect", post(introspect))
+            .route("/oauth/token", post(token_endpoint))
+            .route("/oauth/revoke", post(revoke_endpoint))
             .route("/internal/usage", post(ingest_usage))
             .route("/internal/orgs/{org}/usage-status", get(usage_status))
             .route(
@@ -256,22 +307,8 @@ impl MockPlatform {
 
     // ---------------------------------------------------------------- tokens
 
-    /// Mint an OAuth token for the default resource server that opens `org` as
-    /// `user`. Also registers the membership (with `role`) and the org if the
-    /// mock has not seen them, so one call gives a working caller.
-    pub fn issue(&self, org: Uuid, user: Uuid, role: Role, scopes: &[&str]) -> String {
-        self.issue_for(RESOURCE_URI, org, user, role, scopes)
-    }
-
-    /// As [`Self::issue`], for an arbitrary resource server's audience.
-    pub fn issue_for(
-        &self,
-        resource: &str,
-        org: Uuid,
-        user: Uuid,
-        role: Role,
-        scopes: &[&str],
-    ) -> String {
+    /// Make sure the org, the membership (with `role`), and a usage record exist.
+    fn ensure_member(&self, org: Uuid, user: Uuid, role: Role) {
         {
             let mut d = self.inner.data.lock().unwrap();
             d.orgs.entry(org).or_insert_with(|| OrgInfo {
@@ -307,6 +344,25 @@ impl MockPlatform {
                 hard_stop: true,
             });
         }
+    }
+
+    /// Mint an OAuth token for the default resource server that opens `org` as
+    /// `user`. Also registers the membership (with `role`) and the org if the
+    /// mock has not seen them, so one call gives a working caller.
+    pub fn issue(&self, org: Uuid, user: Uuid, role: Role, scopes: &[&str]) -> String {
+        self.issue_for(RESOURCE_URI, org, user, role, scopes)
+    }
+
+    /// As [`Self::issue`], for an arbitrary resource server's audience.
+    pub fn issue_for(
+        &self,
+        resource: &str,
+        org: Uuid,
+        user: Uuid,
+        role: Role,
+        scopes: &[&str],
+    ) -> String {
+        self.ensure_member(org, user, role);
         let token = new_token();
         self.inner.data.lock().unwrap().tokens.insert(
             token.clone(),
@@ -344,6 +400,87 @@ impl MockPlatform {
             },
         );
         token
+    }
+
+    // --------------------------------------------------- console login (OAuth)
+
+    /// What the platform does at `/oauth/authorize` once a person has signed in
+    /// and been placed in `org`: mint a single-use authorization code bound to
+    /// the client, the redirect URI, and the PKCE `challenge` the client sent.
+    /// Registers the membership (with `role`) like [`Self::issue`] does.
+    #[allow(clippy::too_many_arguments)]
+    pub fn issue_code(
+        &self,
+        client_id: &str,
+        redirect_uri: &str,
+        challenge: &str,
+        org: Uuid,
+        user: Uuid,
+        role: Role,
+        scopes: &[&str],
+    ) -> String {
+        self.ensure_member(org, user, role);
+        let code = format!("code_{}", &new_token()[8..]);
+        self.inner.data.lock().unwrap().codes.insert(
+            code.clone(),
+            CodeRecord {
+                client_id: client_id.into(),
+                redirect_uri: redirect_uri.into(),
+                challenge: challenge.into(),
+                org,
+                user,
+                scopes: scopes.iter().map(|s| s.to_string()).collect(),
+                resource: RESOURCE_URI.into(),
+            },
+        );
+        code
+    }
+
+    /// Lifetime of access tokens from now on. A value under the console's
+    /// refresh skew (60 s) makes a token "about to expire" the moment it is issued.
+    pub fn set_access_ttl_secs(&self, secs: i64) {
+        self.inner.access_ttl_secs.store(secs, Ordering::SeqCst);
+    }
+
+    /// Delay every refresh by this long before answering.
+    pub fn set_refresh_delay_ms(&self, ms: u64) {
+        self.inner.refresh_delay_ms.store(ms, Ordering::SeqCst);
+    }
+
+    /// Successful and failed `grant_type=authorization_code` calls.
+    pub fn code_exchanges(&self) -> usize {
+        self.inner.code_exchanges.load(Ordering::SeqCst)
+    }
+
+    /// `grant_type=refresh_token` calls, whatever they answered.
+    pub fn refresh_calls(&self) -> usize {
+        self.inner.refresh_calls.load(Ordering::SeqCst)
+    }
+
+    /// Refresh tokens clients revoked through `/oauth/revoke`.
+    pub fn revoked_refresh_tokens(&self) -> Vec<String> {
+        self.inner
+            .data
+            .lock()
+            .unwrap()
+            .revoked_refresh_tokens
+            .clone()
+    }
+
+    /// Revoke every login at once, the way the platform would revoke a family
+    /// after an admin signs a user out: their refresh tokens answer
+    /// `invalid_grant` and their access tokens go inactive.
+    pub fn revoke_all_logins(&self) {
+        let mut d = self.inner.data.lock().unwrap();
+        let families: Vec<Uuid> = d.refresh_tokens.values().map(|r| r.family).collect();
+        for family in families {
+            revoke_family(&mut d, family);
+        }
+    }
+
+    /// Whether any login family has been revoked (by reuse or by `/oauth/revoke`).
+    pub fn any_family_revoked(&self) -> bool {
+        !self.inner.data.lock().unwrap().revoked_families.is_empty()
     }
 
     /// Revoke a token at the platform (its next introspection is inactive).
@@ -500,6 +637,192 @@ async fn introspect(
         _ => IntrospectionResponse::inactive(),
     };
     Json(body).into_response()
+}
+
+// ------------------------------------------------------------- oauth handlers
+
+#[derive(Deserialize)]
+struct TokenForm {
+    grant_type: Option<String>,
+    code: Option<String>,
+    redirect_uri: Option<String>,
+    code_verifier: Option<String>,
+    client_id: Option<String>,
+    resource: Option<String>,
+    refresh_token: Option<String>,
+}
+
+fn oauth_error(error: &str) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({ "error": error })),
+    )
+        .into_response()
+}
+
+fn s256(verifier: &str) -> String {
+    use sha2::{Digest, Sha256};
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
+}
+
+/// Mint a refresh token in `family` and an access token, and answer like the
+/// platform's token endpoint.
+#[allow(clippy::too_many_arguments)]
+fn mint_pair(
+    inner: &Inner,
+    d: &mut Data,
+    family: Uuid,
+    client_id: &str,
+    org: Uuid,
+    user: Uuid,
+    scopes: Vec<String>,
+    resource: String,
+) -> Response {
+    let ttl = inner.access_ttl_secs.load(Ordering::SeqCst);
+    let access = new_token();
+    d.tokens.insert(
+        access.clone(),
+        TokenRecord {
+            jti: Uuid::new_v4(),
+            org: Some(org),
+            user,
+            scopes: scopes.clone(),
+            resource: resource.clone(),
+            exp: (Utc::now() + chrono::Duration::seconds(ttl)).timestamp(),
+            kind: TokenKind::Oauth,
+        },
+    );
+    d.family_access
+        .entry(family)
+        .or_default()
+        .push(access.clone());
+
+    let refresh = new_token().replacen("otto_at_", "otto_rt_", 1);
+    d.refresh_tokens.insert(
+        refresh.clone(),
+        RefreshRecord {
+            family,
+            client_id: client_id.into(),
+            org,
+            user,
+            scopes: scopes.clone(),
+            resource,
+            consumed: false,
+        },
+    );
+    Json(serde_json::json!({
+        "access_token": access,
+        "token_type": "Bearer",
+        "expires_in": ttl,
+        "refresh_token": refresh,
+        "scope": scopes.join(" "),
+    }))
+    .into_response()
+}
+
+fn revoke_family(d: &mut Data, family: Uuid) {
+    d.revoked_families.insert(family);
+    for access in d.family_access.remove(&family).unwrap_or_default() {
+        d.tokens.remove(&access);
+    }
+}
+
+async fn token_endpoint(State(inner): S, Form(form): Form<TokenForm>) -> Response {
+    if inner.down.load(Ordering::SeqCst) {
+        return unavailable();
+    }
+    match form.grant_type.as_deref() {
+        Some("authorization_code") => {
+            inner.code_exchanges.fetch_add(1, Ordering::SeqCst);
+            let mut d = inner.data.lock().unwrap();
+            // Single use: removed whether or not the rest checks out.
+            let Some(code) = form.code.as_deref().and_then(|c| d.codes.remove(c)) else {
+                return oauth_error("invalid_grant");
+            };
+            let ok = form.client_id.as_deref() == Some(code.client_id.as_str())
+                && form.redirect_uri.as_deref() == Some(code.redirect_uri.as_str())
+                && form.resource.as_deref() == Some(code.resource.as_str())
+                && form.code_verifier.as_deref().map(s256).as_deref()
+                    == Some(code.challenge.as_str());
+            if !ok {
+                return oauth_error("invalid_grant");
+            }
+            let family = Uuid::new_v4();
+            mint_pair(
+                &inner,
+                &mut d,
+                family,
+                &code.client_id,
+                code.org,
+                code.user,
+                code.scopes,
+                code.resource,
+            )
+        }
+        Some("refresh_token") => {
+            inner.refresh_calls.fetch_add(1, Ordering::SeqCst);
+            let delay = inner.refresh_delay_ms.load(Ordering::SeqCst);
+            if delay > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+            }
+            let mut d = inner.data.lock().unwrap();
+            let Some(token) = form.refresh_token.as_deref() else {
+                return oauth_error("invalid_request");
+            };
+            let Some(record) = d.refresh_tokens.get(token) else {
+                return oauth_error("invalid_grant");
+            };
+            let family = record.family;
+            if d.revoked_families.contains(&family) {
+                return oauth_error("invalid_grant");
+            }
+            if record.client_id.as_str() != form.client_id.as_deref().unwrap_or_default() {
+                return oauth_error("invalid_grant");
+            }
+            if record.consumed {
+                // Reuse of a spent token: the whole login is compromised.
+                revoke_family(&mut d, family);
+                return oauth_error("invalid_grant");
+            }
+            let (client_id, org, user, scopes, resource) = (
+                record.client_id.clone(),
+                record.org,
+                record.user,
+                record.scopes.clone(),
+                record.resource.clone(),
+            );
+            // A member who left cannot refresh.
+            if !d.members.contains_key(&(org, user)) {
+                revoke_family(&mut d, family);
+                return oauth_error("invalid_grant");
+            }
+            d.refresh_tokens.get_mut(token).unwrap().consumed = true;
+            mint_pair(
+                &inner, &mut d, family, &client_id, org, user, scopes, resource,
+            )
+        }
+        _ => oauth_error("unsupported_grant_type"),
+    }
+}
+
+#[derive(Deserialize)]
+struct RevokeForm {
+    token: Option<String>,
+}
+
+/// Always `200`, like the platform (RFC 7009).
+async fn revoke_endpoint(State(inner): S, Form(form): Form<RevokeForm>) -> Response {
+    if inner.down.load(Ordering::SeqCst) {
+        return unavailable();
+    }
+    if let Some(token) = form.token {
+        let mut d = inner.data.lock().unwrap();
+        if let Some(family) = d.refresh_tokens.get(&token).map(|r| r.family) {
+            d.revoked_refresh_tokens.push(token);
+            revoke_family(&mut d, family);
+        }
+    }
+    StatusCode::OK.into_response()
 }
 
 async fn ingest_usage(

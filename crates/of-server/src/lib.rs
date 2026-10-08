@@ -5,7 +5,8 @@
 //!
 //! ```text
 //!   /healthz /readyz          health      no database on the liveness path
-//!   /api/…                    of-web      the console API: platform bearer tokens
+//!   /api/…                    of-web      the console API: session cookie or platform bearer token
+//!   /auth/…                   of-web      console sign-in (OAuth code + PKCE against the platform)
 //!   /webhooks/…               of-web      tracker deliveries, provider-signed
 //!   /platform/webhooks        of-web      the platform's lifecycle events, signed
 //!   /.well-known/…            of-mcp      discovery, open by necessity
@@ -15,8 +16,9 @@
 //!
 //! otto-factory is a resource server of the otto platform, which is the OAuth
 //! authorization server and the system of record for identity and billing. There
-//! is no `/oauth/*`, login, or account surface here; both HTTP surfaces validate
-//! the platform's tokens by introspection.
+//! is no `/oauth/*` or account surface here; the console signs in *through* the
+//! platform (`/auth/*`, an OAuth client), and both HTTP surfaces validate the
+//! platform's tokens by introspection.
 //!
 //! Assembly is a library function rather than something buried in `main` so a
 //! test can build the whole router. Axum panics on a route registered twice, and
@@ -51,9 +53,13 @@ pub use config::{Config, LogFormat};
 /// and `200 text/html` is the shape that makes an agent retry forever against a
 /// route that will never exist. `/oauth` is listed although nothing is served
 /// there any more: an old client that still tries it should get a JSON `404`
-/// naming where authorization lives now, not a console page.
-const API_PREFIXES: [&str; 6] = [
+/// naming where authorization lives now, not a console page. `/auth` is the
+/// console's own sign-in (`/auth/login`, `/auth/callback`, `/auth/logout`); a
+/// mistyped path under it is likewise a JSON `404`, never `index.html` served
+/// to a browser that is in the middle of a redirect.
+const API_PREFIXES: [&str; 7] = [
     "/api",
+    "/auth",
     "/oauth",
     "/mcp",
     "/.well-known",
@@ -144,6 +150,7 @@ fn web_config(config: &Config) -> of_web::Config {
     web.github_app_client_secret = config.github_app_client_secret.clone();
     web.jira_client_id = config.jira_client_id.clone();
     web.jira_client_secret = config.jira_client_secret.clone();
+    web.console_client_id = config.console_client_id.clone();
     web
 }
 
@@ -225,9 +232,16 @@ mod tests {
         config.github_app_client_secret = Some("gh-secret".into());
         config.jira_client_id = Some("jira-client".into());
         config.jira_client_secret = Some("jira-secret".into());
+        config.console_client_id = Some("console-client".into());
         config.enforce_quotas = true;
 
         let web = web_config(&config);
+
+        assert_eq!(web.console_client_id.as_deref(), Some("console-client"));
+        assert_eq!(
+            web.console_redirect_uri(),
+            "https://factory.example.com/auth/callback"
+        );
 
         assert_eq!(
             web.github_app_webhook_secret.as_deref(),
@@ -269,12 +283,15 @@ mod tests {
         assert!(is_api_path("/.well-known/oauth-protected-resource"));
         assert!(is_api_path("/platform/webhooks"));
         assert!(is_api_path("/webhooks/github"));
+        assert!(is_api_path("/auth/callback"));
+        assert!(is_api_path("/auth"));
 
         // An org slug or a page name that merely starts with the same letters
         // belongs to the console. `/apiary` is a legal org route and must not
         // answer a JSON 404 that the SPA never gets to render.
         assert!(!is_api_path("/apiary"));
         assert!(!is_api_path("/mcp-guide"));
+        assert!(!is_api_path("/authors"));
         assert!(!is_api_path("/o/acme/queue"));
         assert!(!is_api_path("/"));
     }
