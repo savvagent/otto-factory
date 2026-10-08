@@ -129,6 +129,9 @@ impl LeasesExt for Tx<'_> {
                 resource.len()
             )));
         }
+        // Before any SQL, so a refused label writes nothing — not even the
+        // reap below. `LeaseHeld` quotes it to other members' agents (#163).
+        let label = crate::agent_label::validate(label)?;
         let ttl = ttl_secs.unwrap_or(DEFAULT_TTL_SECS).clamp(60, MAX_TTL_SECS);
         let org = self.org();
 
@@ -163,10 +166,10 @@ impl LeasesExt for Tx<'_> {
             }
             return Err(Error::LeaseHeld {
                 resource: resource.to_string(),
-                holder: live
-                    .holder_label
-                    .clone()
-                    .unwrap_or_else(|| live.holder_user_id.to_string()),
+                holder: crate::agent_label::holder(
+                    live.holder_label.as_deref(),
+                    live.holder_user_id,
+                ),
                 expires_at: live.expires_at,
             });
         }
