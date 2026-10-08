@@ -1576,21 +1576,19 @@ impl Factory {
                 // making a caller's retry re-post to the tracker a second
                 // time for a sync that already went through.
                 let mut tx = self.tx(&caller).await?;
-                let job = if let Some(remote_revision) = outcome {
+                if let Some(remote_revision) = outcome {
                     tx.set_remote_revision(&job.id, &remote_revision)
                         .await
                         .mcp()?;
-                    let job = tx.get_job(&job.id).await.mcp()?;
-                    tx.commit().await.mcp()?;
-                    job
-                } else {
-                    tx.commit().await.mcp()?;
-                    job
-                };
+                }
+                // Re-read under the caller's scope, as of now: see the note at
+                // the end of this function.
+                let job = tx.get_job_visible(&job.id, &team).await;
+                tx.commit().await.mcp()?;
                 let mut charge_tx = self.tx(&caller).await?;
                 self.charge(&mut charge_tx, &caller, "sync_ticket").await?;
                 charge_tx.commit().await.mcp()?;
-                job
+                job.mcp()?
             }
             Tracker::Jira => {
                 // Same reasoning as the GitHub arm's pre-parse above: an
@@ -1621,14 +1619,12 @@ impl Factory {
                 // charging is attempted, so a quota refusal never erases
                 // loop-safety state for a tracker call that already happened.
                 let mut tx = self.tx(&caller).await?;
-                let job = if let Some(remote_revision) = outcome.remote_revision.as_deref() {
+                if let Some(remote_revision) = outcome.remote_revision.as_deref() {
                     tx.set_remote_revision(&job.id, remote_revision)
                         .await
                         .mcp()?;
-                    tx.get_job(&job.id).await.mcp()?
-                } else {
-                    job
-                };
+                }
+                let job = tx.get_job_visible(&job.id, &team).await;
                 if let Some(rotated) = outcome.rotated_credentials.as_ref() {
                     let webhook_secret = connection
                         .encrypted_webhook_secret
@@ -1650,10 +1646,16 @@ impl Factory {
                 let mut charge_tx = self.tx(&caller).await?;
                 self.charge(&mut charge_tx, &caller, "sync_ticket").await?;
                 charge_tx.commit().await.mcp()?;
-                job
+                job.mcp()?
             }
         };
 
+        // Authorization is decided once, when the call starts, as for any
+        // request already in flight: the tracker round trip cannot be held
+        // inside a transaction, and once it has happened its write-back is
+        // loop-safety state that must land whoever may see the job now. What
+        // is decided again is what the caller gets back. A job whose repo moved
+        // out of their teams mid-call is `job_not_found`, not returned.
         Ok(Json(out::JobOut { job }))
     }
 }

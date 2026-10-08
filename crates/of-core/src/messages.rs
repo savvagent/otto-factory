@@ -108,6 +108,45 @@ pub struct NewMessage {
     pub idempotency_key: Option<String>,
 }
 
+/// Who a message being replied to was between. See [`MessagesExt::reply_parent`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReplyParent {
+    pub sender: UserId,
+    /// `None` for a broadcast.
+    pub recipient: Option<UserId>,
+}
+
+impl ReplyParent {
+    /// Who a reply from `replier` must be addressed to. A reply to a broadcast
+    /// goes wherever `requested` says. A reply to a private message stays
+    /// between the same two people: it goes to the other participant, and
+    /// `requested` may only name them, because a broadcast reply would show the
+    /// whole org that the private thread exists and quote its context.
+    pub fn reply_recipient(
+        &self,
+        replier: UserId,
+        requested: Option<UserId>,
+    ) -> Result<Option<UserId>> {
+        let Some(recipient) = self.recipient else {
+            return Ok(requested);
+        };
+        let other = if replier == self.sender {
+            recipient
+        } else {
+            self.sender
+        };
+        match requested {
+            None => Ok(Some(other)),
+            Some(r) if r == other => Ok(Some(other)),
+            Some(_) => Err(Error::Invalid(
+                "a reply to a private message stays between its two participants; omit \
+                 `to` to answer the other one, or omit in_reply_to to start a new thread"
+                    .into(),
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct InboxQuery {
     /// Only messages past my cursor that I did not send. Default true.
@@ -266,16 +305,23 @@ pub trait MessagesExt {
         scope: &TeamScope,
     ) -> impl std::future::Future<Output = Result<bool>> + Send;
 
-    /// Refuse an `in_reply_to` that names a message `reader` could not read:
-    /// one that does not exist, a private message between other people, or one
-    /// tied to a team, repo, or job outside `scope`. All three are the same
-    /// error, so a reply cannot be used to probe for hidden message ids.
-    fn ensure_reply_parent_visible(
+    /// The message an `in_reply_to` names, if `reader` could read it, with the
+    /// audience a reply to it must keep. A message that does not exist, a
+    /// private message between other people, and one tied to a team, repo, or
+    /// job outside `scope` are the same [`Error::Invalid`], so a reply cannot be
+    /// used to probe for hidden message ids.
+    ///
+    /// For a restricted `scope` the repos behind the parent (its own and its
+    /// job's) are held until the transaction ends, as any write's repo is: the
+    /// reply copies the parent's scope when it is inserted, and an admin moving
+    /// one of those repos in between would leave the reply readable by a team
+    /// that can no longer read the parent.
+    fn reply_parent(
         &mut self,
         parent: i64,
         reader: UserId,
         scope: &TeamScope,
-    ) -> impl std::future::Future<Output = Result<()>> + Send;
+    ) -> impl std::future::Future<Output = Result<ReplyParent>> + Send;
 
     /// [`Self::unread_count`], counting only messages `scope` may see.
     fn unread_count_for(
@@ -604,20 +650,50 @@ impl MessagesExt for Tx<'_> {
         .await?)
     }
 
-    async fn ensure_reply_parent_visible(
+    async fn reply_parent(
         &mut self,
         parent: i64,
         reader: UserId,
         scope: &TeamScope,
-    ) -> Result<()> {
-        if self.message_readable(parent, reader, scope).await? {
-            Ok(())
-        } else {
-            Err(Error::Invalid(format!(
+    ) -> Result<ReplyParent> {
+        let org = self.org();
+        if !scope.is_all() {
+            // In id order, so two transactions holding the same pair cannot
+            // deadlock each other.
+            sqlx::query(
+                "SELECT r.id FROM repos r WHERE r.org_id = $1 AND r.id IN ( \
+                   SELECT m.repo_id FROM messages m WHERE m.org_id = $1 AND m.id = $2 \
+                   UNION \
+                   SELECT j.repo_id FROM messages m \
+                     JOIN jobs j ON j.org_id = m.org_id AND j.id = m.job_id \
+                   WHERE m.org_id = $1 AND m.id = $2) \
+                 ORDER BY r.id FOR SHARE OF r",
+            )
+            .bind(org)
+            .bind(parent)
+            .execute(self.conn())
+            .await?;
+        }
+        let found: Option<(UserId, Option<UserId>)> =
+            if self.message_readable(parent, reader, scope).await? {
+                sqlx::query_as(
+                    "SELECT sender_user_id, recipient_user_id FROM messages \
+                 WHERE org_id = $1 AND id = $2",
+                )
+                .bind(org)
+                .bind(parent)
+                .fetch_optional(self.conn())
+                .await?
+            } else {
+                None
+            };
+        let Some((sender, recipient)) = found else {
+            return Err(Error::Invalid(format!(
                 "in_reply_to {parent} is not a message you can read; pass the id of a \
                  message from your inbox, or omit in_reply_to to start a new thread"
-            )))
-        }
+            )));
+        };
+        Ok(ReplyParent { sender, recipient })
     }
 
     async fn unread_count(&mut self, reader: UserId) -> Result<i64> {

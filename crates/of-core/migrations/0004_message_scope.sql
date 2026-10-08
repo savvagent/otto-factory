@@ -23,11 +23,18 @@ ALTER TABLE messages
   FOREIGN KEY (org_id, job_id) REFERENCES jobs (org_id, id) ON DELETE SET NULL (job_id);
 
 -- Backfill existing rows from what is still linked. Per org, with both the
--- explicit predicate and `app.org_id` (see CLAUDE.md). Where the migrating role
--- is subject to row-level security, the org loop itself finds no rows and this
--- does nothing. That is not a hole: the live checks still apply, and
--- `delete_job` folds a job's teams into its messages' `scope_teams` before it
--- unlinks them, so this backfill is never what keeps a message scoped.
+-- explicit predicate and `app.org_id` (see CLAUDE.md).
+--
+-- Finding the orgs is the one read that cannot be pinned to an org. Where the
+-- migrating role is subject to row-level security (FORCE binds the owner),
+-- `messages_tenant_isolation` hides every row from an unpinned read, so the
+-- loop would find nothing and silently skip the backfill. This read-only policy
+-- lets an unpinned read see the rows for the length of this migration, the
+-- same branch `audit_events_retention_read` gives the retention sweep. It is
+-- created and dropped inside this migration's own transaction, so no other
+-- session ever sees it, and it grants no write.
+CREATE POLICY messages_backfill_0004 ON messages FOR SELECT USING (current_org() IS NULL);
+
 DO $$
 DECLARE
   o uuid;
@@ -60,3 +67,5 @@ BEGIN
   END LOOP;
   PERFORM set_config('app.org_id', '', true);
 END $$;
+
+DROP POLICY messages_backfill_0004 ON messages;

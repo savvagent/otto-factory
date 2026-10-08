@@ -1169,3 +1169,119 @@ async fn audit_rows_cannot_be_erased_from_a_request(pool: PgPool) {
 // explicit org_id/id predicate every statement in idp.rs/domains.rs/orgs.rs
 // carries. Matches resolve_connection_org's existing test comment convention
 // in tests/trackers.rs.
+
+/// The team-scoped helpers added for team visibility, each handed another org's
+/// ids directly. Org B's repo carries a team, and org A's restricted scope names
+/// that same team id, so a match on team alone would cross the org line: only
+/// the explicit `org_id` predicate (or RLS) stands in the way.
+#[sqlx::test]
+async fn team_scoped_helpers_do_not_cross_orgs(pool: PgPool) {
+    use of_core::messages::ReplyParent;
+    use of_core::repos::Hold;
+    use of_core::teams::TeamScope;
+    use otto_tenant::ids::TeamId;
+
+    let db = db(pool);
+    let a = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+    let b = tenant(&db, "globex", "git@github.com:globex/api.git").await;
+    let team = TeamId::from(uuid::Uuid::new_v4());
+
+    // Org B: a team-scoped repo with a job, a dependent, a lease, and a message.
+    let mut tx = db.begin(b.org).await.unwrap();
+    sqlx::query("UPDATE repos SET team_id = $2 WHERE org_id = $1 AND id = $3")
+        .bind(b.org)
+        .bind(team)
+        .bind(b.repo)
+        .execute(tx.conn())
+        .await
+        .unwrap();
+    let b_job = tx.add_job(job(&b, "globex work")).await.unwrap();
+    tx.add_job(of_core::jobs::NewJob {
+        depends_on: vec![b_job.id.clone()],
+        ..job(&b, "globex follow-up")
+    })
+    .await
+    .unwrap();
+    let b_lease = tx
+        .acquire_lease(b.repo, "main", b.user, None, None, None)
+        .await
+        .unwrap();
+    let b_msg = tx
+        .send_message(
+            b.user,
+            NewMessage {
+                body: "globex plan".into(),
+                repo_id: Some(b.repo),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let restricted = TeamScope::Teams([team].into_iter().collect());
+    for scope in [TeamScope::All, restricted] {
+        let mut tx = db.begin(a.org).await.unwrap();
+
+        assert!(matches!(
+            tx.get_job_visible(&b_job.id, &scope).await,
+            Err(of_core::Error::JobNotFound(_))
+        ));
+        assert!(matches!(
+            tx.get_job_visible_held(&b_job.id, &scope).await,
+            Err(of_core::Error::JobNotFound(_))
+        ));
+        assert!(tx
+            .visible_job_ids(std::slice::from_ref(&b_job.id), &scope)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(!tx.has_hidden_dependents(&b_job.id, &scope).await.unwrap());
+        assert!(!tx.hidden_repo_ids(&scope).await.unwrap().contains(&b.repo));
+
+        let repos = tx.list_repos_visible(true, None, &scope).await.unwrap();
+        assert_eq!(
+            repos.iter().map(|r| r.id).collect::<Vec<_>>(),
+            [a.repo],
+            "org A listed org B's repo"
+        );
+        let b_remote = RepoRef {
+            remote: Some("git@github.com:globex/api.git".into()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            tx.resolve_repo_visible(&b_remote, &scope).await,
+            Err(of_core::Error::RepoUnresolved { .. })
+        ));
+        assert!(matches!(
+            tx.resolve_repo_visible_held(&b_remote, &scope, Hold::Shared)
+                .await,
+            Err(of_core::Error::RepoUnresolved { .. })
+        ));
+        if !scope.is_all() {
+            assert!(!tx
+                .hold_repo_visible(b.repo, &scope, Hold::Shared)
+                .await
+                .unwrap());
+        }
+
+        assert_eq!(tx.lease_repo_id(b_lease.id).await.unwrap(), None);
+
+        assert!(!tx.message_readable(b_msg.id, a.user, &scope).await.unwrap());
+        let parent: Result<ReplyParent, _> = tx.reply_parent(b_msg.id, a.user, &scope).await;
+        assert!(matches!(parent, Err(of_core::Error::Invalid(_))));
+        assert_eq!(tx.unread_count_for(a.user, &scope).await.unwrap(), 0);
+        assert_eq!(
+            tx.ack_messages_for(a.user, i64::MAX, &scope).await.unwrap(),
+            0,
+            "the cursor landed on org B's message"
+        );
+        assert_eq!(
+            tx.stats_for_teams(None, &[team]).await.unwrap().total,
+            0,
+            "org A counted org B's jobs"
+        );
+
+        tx.commit().await.unwrap();
+    }
+}

@@ -403,11 +403,8 @@ impl Factory {
             if let Some(job) = &args.job {
                 ensure_job_visible(&mut tx, &team, &JobId::from(job.clone())).await?;
             }
-            if let Some(parent) = args.in_reply_to {
-                tx.ensure_reply_parent_visible(parent, caller.user_id, &team)
-                    .await
-                    .mcp()?;
-            }
+            let recipient =
+                reply_recipient(&mut tx, &team, &caller, args.in_reply_to, recipient).await?;
             let message = tx
                 .send_message(
                     caller.user_id,
@@ -440,11 +437,8 @@ impl Factory {
         if let Some(job) = &args.job {
             ensure_job_visible(&mut tx, &team, &JobId::from(job.clone())).await?;
         }
-        if let Some(parent) = args.in_reply_to {
-            tx.ensure_reply_parent_visible(parent, caller.user_id, &team)
-                .await
-                .mcp()?;
-        }
+        let recipient =
+            reply_recipient(&mut tx, &team, &caller, args.in_reply_to, recipient).await?;
         let new_message = NewMessage {
             body: args.body,
             recipient_user_id: recipient,
@@ -655,6 +649,26 @@ async fn ensure_lease_visible(
         }
     }
     Ok(())
+}
+
+/// Who a message goes to, given the message it replies to (if any): the
+/// parent must be one the caller can read, and a reply to a private message
+/// stays private (`ReplyParent::reply_recipient`). The parent's repos stay held
+/// until the transaction ends; see `MessagesExt::reply_parent`.
+async fn reply_recipient(
+    tx: &mut otto_tenant::Tx<'_>,
+    team: &of_core::teams::TeamScope,
+    caller: &crate::auth::Principal,
+    in_reply_to: Option<i64>,
+    requested: Option<otto_tenant::ids::UserId>,
+) -> Result<Option<otto_tenant::ids::UserId>, ErrorData> {
+    let Some(parent) = in_reply_to else {
+        return Ok(requested);
+    };
+    tx.reply_parent(parent, caller.user_id, team)
+        .await
+        .and_then(|p| p.reply_recipient(caller.user_id, requested))
+        .mcp()
 }
 
 /// Blank a returned lease's `job_id` if the caller cannot see that job, as

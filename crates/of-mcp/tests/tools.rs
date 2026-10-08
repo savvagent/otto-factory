@@ -4699,3 +4699,135 @@ async fn a_write_cannot_land_after_its_repo_moves_out_of_sight(pool: PgPool) {
     assert_eq!(code_of(&e), "repo_unresolved");
     assert_eq!(t.list_jobs(&t.owner).await.len(), 3, "nothing was added");
 }
+
+/// A reply to a private message stays between its two participants: without
+/// `to` it answers the other one, and it cannot be widened to anyone else.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_reply_to_a_private_message_stays_private(pool: PgPool) {
+    let t = teams_world(pool).await;
+    let private = ok(t
+        .send(
+            &t.owner,
+            "just for alice",
+            None,
+            None,
+            None,
+            Some("alice@acme.test"),
+        )
+        .await)["message"]["id"]
+        .as_i64()
+        .unwrap();
+
+    let reply = ok(t
+        .send(&t.alice, "back to you", None, None, Some(private), None)
+        .await);
+    assert_eq!(
+        reply["message"]["recipientUserId"],
+        serde_json::json!(t.owner.user_id)
+    );
+    assert_eq!(t.inbox(&t.carol).await, Vec::<String>::new());
+    assert_eq!(t.inbox(&t.owner).await, ["back to you"]);
+
+    let e = err(t
+        .send(
+            &t.alice,
+            "x",
+            None,
+            None,
+            Some(private),
+            Some("carol@acme.test"),
+        )
+        .await);
+    assert_eq!(code_of(&e), "invalid_argument");
+}
+
+/// The reply copies its parent's scope when it is inserted, so the parent's repo
+/// is held from the check to the insert: a move that commits first is seen.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_reply_cannot_land_after_its_parents_repo_moves_out_of_sight(pool: PgPool) {
+    let t = teams_world(pool).await;
+    let parent = ok(t
+        .send(
+            &t.alice,
+            "platform thread",
+            Some("platform-repo"),
+            None,
+            None,
+            None,
+        )
+        .await)["message"]["id"]
+        .as_i64()
+        .unwrap();
+    let admin = t
+        .move_repo_uncommitted("platform-repo", Some(t.growth_team))
+        .await;
+
+    let reply = t.send(&t.alice, "reply", None, None, Some(parent), None);
+    tokio::pin!(reply);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), &mut reply)
+            .await
+            .is_err(),
+        "the reply waits on the reassignment"
+    );
+    admin.commit().await.unwrap();
+
+    let e = err(reply.await);
+    assert_eq!(code_of(&e), "invalid_argument");
+}
+
+/// `delete_job`'s "nothing hidden depends on this" holds until the delete: a
+/// dependent's repo moving out of the caller's teams is waited for and seen.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_delete_cannot_land_after_a_dependent_moves_out_of_sight(pool: PgPool) {
+    let t = teams_world(pool).await;
+    let target = t.jobs["platform-repo"].clone();
+    let dependent = ok(t
+        .env
+        .factory
+        .add_job(
+            Extension(parts(&t.alice)),
+            Parameters(tools::jobs::AddJobArgs {
+                title: "waits".into(),
+                description: None,
+                repo: Some("shared".into()),
+                remote: None,
+                ticket_ref: None,
+                agent_type: None,
+                metadata: None,
+                depends_on: vec![target.clone()],
+                idempotency_key: None,
+            }),
+        )
+        .await)["job"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let admin = t.move_repo_uncommitted("shared", Some(t.growth_team)).await;
+
+    let delete = t.env.factory.delete_job(
+        Extension(parts(&t.alice)),
+        Parameters(tools::jobs::JobArgs {
+            job: target.clone(),
+        }),
+    );
+    tokio::pin!(delete);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), &mut delete)
+            .await
+            .is_err(),
+        "the delete waits on the reassignment"
+    );
+    admin.commit().await.unwrap();
+
+    let e = err(delete.await);
+    assert_eq!(code_of(&e), "invalid_argument");
+    ok(t.env
+        .factory
+        .get_job(
+            Extension(parts(&t.owner)),
+            Parameters(tools::jobs::JobArgs { job: dependent }),
+        )
+        .await);
+    ok(t.get_job(&t.owner, "platform-repo").await);
+}

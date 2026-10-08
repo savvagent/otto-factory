@@ -53,7 +53,7 @@ sessions, plans, or usage totals, and no foreign key to any of them. Every `org_
 |---|---|---|
 | `DATABASE_URL` | Postgres URL for `otto_factory` | `fly postgres attach` |
 | `OF_ENCRYPTION_KEY` | 32 bytes base64; seals tracker credentials at rest | `openssl rand -base64 32`. Fed unchanged to `otto_tenant::crypto::Cipher`. |
-| `OF_INTROSPECTION_SECRET` | `otto_rs_…`; authenticates every call this service makes to the platform | Printed once by `resource register` / `resource rotate-secret` |
+| `OF_INTROSPECTION_SECRET` | `otto_rs_…`; authenticates every call this service makes to the platform | Printed once by `resource rotate-secret` (`resource register` issues none) |
 | `OF_PLATFORM_WEBHOOK_SECRET` | `otto_whsec_…`; verifies the platform's lifecycle webhooks | Printed once by `resource set-webhook` |
 
 Non-secret settings (`OF_PUBLIC_URL`, `OF_RESOURCE_URI`, `OF_PLATFORM_URL`,
@@ -63,7 +63,7 @@ Non-secret settings (`OF_PUBLIC_URL`, `OF_RESOURCE_URI`, `OF_PLATFORM_URL`,
 
 The platform's authorization server validates every authorize, token, refresh, and PAT
 request against a registered resource, and authenticates this service's calls with the
-credential issued at registration. Registration is an **operator step on the platform**
+credential `resource rotate-secret` issues for it. Registration is an **operator step on the platform**
 (it replaces the startup upsert the factory used to do against its own database):
 
 ```bash

@@ -615,6 +615,11 @@ pub trait JobsExt {
 
     /// Whether some job `scope` cannot see depends on `id`. Deleting `id` would
     /// change that job.
+    ///
+    /// For a restricted `scope` the answer holds until the transaction ends,
+    /// because it is what licenses the delete that follows: `id` is locked
+    /// `FOR UPDATE`, which a new dependency's foreign-key check must wait for,
+    /// and the dependents' repos are held against a team reassignment.
     fn has_hidden_dependents(
         &mut self,
         id: &JobId,
@@ -1882,6 +1887,24 @@ impl JobsExt for Tx<'_> {
             return Ok(false);
         }
         let org = self.org();
+        sqlx::query("SELECT 1 FROM jobs WHERE org_id = $1 AND id = $2 FOR UPDATE")
+            .bind(org)
+            .bind(id)
+            .execute(self.conn())
+            .await?;
+        // In id order, so two transactions holding overlapping sets cannot
+        // deadlock each other.
+        sqlx::query(
+            "SELECT r.id FROM repos r WHERE r.org_id = $1 AND r.id IN ( \
+               SELECT j.repo_id FROM job_dependencies d \
+                 JOIN jobs j ON j.org_id = d.org_id AND j.id = d.job_id \
+               WHERE d.org_id = $1 AND d.depends_on = $2) \
+             ORDER BY r.id FOR SHARE OF r",
+        )
+        .bind(org)
+        .bind(id)
+        .execute(self.conn())
+        .await?;
         let teams = scope
             .restriction()
             .map(|v| v.iter().map(|t| t.as_uuid()).collect::<Vec<uuid::Uuid>>());
