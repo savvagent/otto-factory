@@ -247,14 +247,16 @@ impl Factory {
         // The role on the principal is as of the last introspection, cached for
         // up to a minute: a demoted admin would keep full visibility. Ask the
         // platform who this is now (its own, shorter cache), as the console does.
-        // A user it no longer knows as a member gets the member role and so an
-        // empty team set; a platform that cannot answer is refused.
+        // A user it no longer knows as a member has left the org since the token
+        // was introspected: refused, not downgraded to a member of no teams. A
+        // platform that cannot answer is refused too.
         let role = self
             .platform
             .member(caller.org_id.as_uuid(), caller.user_id.as_uuid())
             .await
             .map_err(|e| error::from_platform(&e))?
-            .map_or(otto_resource::Role::Member, |m| m.role);
+            .ok_or_else(|| error::from_core(&of_core::Error::AccessRevoked))?
+            .role;
         TeamScope::for_member(&self.platform, caller.org_id, caller.user_id, role)
             .await
             .map_err(|e| error::from_core(&e))

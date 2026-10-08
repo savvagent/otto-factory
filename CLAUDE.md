@@ -324,9 +324,14 @@ members, invites, teams, SSO, tokens, or usage. Those are the platform's, and
   a team the caller is not on is `404` / `job_not_found` / `repo_unresolved`, and
   `resolve_repo_visible` keeps its slug out of the "registered repos" list too. A job is
   visible only if its own team **and** its repo's team are (`job_visible_sql`, `get_job_visible`),
-  messages follow the same rule through their team, repo, and job, lease ids of hidden repos are
-  `lease_not_held`, and counts, dependency lists, and errors are computed or redacted for what the
-  caller may see. Every tool or route that names a repo, a job, or a lease resolves it through the
+  messages follow the same rule through their team, repo, and job **and** through `scope_teams`,
+  the teams they were bound to when sent (thread included), which outlives a deleted job;
+  lease ids of hidden repos are `lease_not_held`, and counts, dependency lists, returned leases, and
+  errors are computed or redacted for what the caller may see — a redacted error keeps its
+  original `code()` (`Error::Redacted`). A write checks visibility with the repo row **held**
+  (`hold_repo_visible`, `get_job_visible_held`, `repo_for_write`), so an admin's team reassignment
+  cannot commit between the check and the write. A user the platform no longer lists as a member
+  is `access_revoked`, never a member of no teams. Every tool or route that names a repo, a job, or a lease resolves it through the
   scope, writes included. Accepted, not closed: `watch` wakes on any activity in the org (a timing
   signal, it carries no data), and the per-org sequential job ids (`job-N`) reveal how many jobs
   exist. The MCP scope is built from a fresh `member` lookup (10s cache), not the introspected role

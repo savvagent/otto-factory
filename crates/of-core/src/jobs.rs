@@ -594,6 +594,17 @@ pub trait JobsExt {
         scope: &TeamScope,
     ) -> impl std::future::Future<Output = Result<Job>> + Send;
 
+    /// [`Self::get_job_visible`] for a write: the job's repo is also held until
+    /// the transaction ends, so the repo's team cannot be reassigned between
+    /// this check and the write (see [`ReposExt::hold_repo_visible`]). A job's
+    /// own team and repo never change after it is created, so the repo is the
+    /// only thing to hold.
+    fn get_job_visible_held(
+        &mut self,
+        id: &JobId,
+        scope: &TeamScope,
+    ) -> impl std::future::Future<Output = Result<Job>> + Send;
+
     /// Of `ids`, those that name jobs `scope` may see. Unknown ids are dropped
     /// too. For lists that carry job ids (dependencies) back to the caller.
     fn visible_job_ids(
@@ -1809,6 +1820,22 @@ impl JobsExt for Tx<'_> {
         }
         let hidden = self.hidden_repo_ids(scope).await?;
         if scope.allows(job.team_id) && !hidden.contains(&job.repo_id) {
+            Ok(job)
+        } else {
+            Err(Error::JobNotFound(id.clone()))
+        }
+    }
+
+    async fn get_job_visible_held(&mut self, id: &JobId, scope: &TeamScope) -> Result<Job> {
+        let job = self.get_job(id).await?;
+        if scope.is_all() {
+            return Ok(job);
+        }
+        if scope.allows(job.team_id)
+            && self
+                .hold_repo_visible(job.repo_id, scope, crate::repos::Hold::Shared)
+                .await?
+        {
             Ok(job)
         } else {
             Err(Error::JobNotFound(id.clone()))

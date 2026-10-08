@@ -179,6 +179,11 @@ impl From<CoreError> for ApiError {
 
             WrongStatus { .. } | DependencyCycle(..) | Invalid(_) => StatusCode::BAD_REQUEST,
 
+            // The withheld error's own status: a cycle is a bad request, the
+            // rest are conflicts with a row the caller cannot see.
+            Redacted { code, .. } if *code == "dependency_cycle" => StatusCode::BAD_REQUEST,
+            Redacted { .. } => StatusCode::CONFLICT,
+
             // Retriable, not the caller's fault — the same distinction
             // retriable() already draws at the MCP layer. 503, not 500: this
             // is specifically a "try again" condition, and its message

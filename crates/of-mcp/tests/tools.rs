@@ -138,6 +138,9 @@ async fn env_metered(pool: PgPool, enforce: bool) -> (Env, Principal) {
     // a minute-old answer.
     let mut cfg = ClientConfig::new(&platform.url, RESOURCE, of_testkit::SECRET);
     cfg.usage_status_ttl = Duration::from_millis(1);
+    // Membership read fresh, so a test that moves someone between teams sees
+    // the move on the next call rather than ten seconds later.
+    cfg.member_ttl = Duration::ZERO;
     let client = platform.client_with(cfg);
 
     let env = Env {
@@ -3245,6 +3248,8 @@ struct Teams {
     bob: Principal,
     carol: Principal,
     jobs: std::collections::HashMap<&'static str, String>,
+    platform_team: uuid::Uuid,
+    growth_team: uuid::Uuid,
 }
 
 async fn teams_world(pool: PgPool) -> Teams {
@@ -3325,6 +3330,8 @@ async fn teams_world(pool: PgPool) -> Teams {
         bob,
         carol,
         jobs,
+        platform_team,
+        growth_team,
     }
 }
 
@@ -4118,9 +4125,21 @@ async fn a_stale_admin_role_on_the_token_does_not_widen_the_view(pool: PgPool) {
     assert_eq!(t.repos(&demoted).await, ["shared"]);
     assert_eq!(t.list_jobs(&demoted).await, ["job in shared"]);
 
-    // Removed: the platform does not know the user at all.
+    // Removed: the platform does not know the user at all. Refused outright,
+    // not read as a member of no teams (who would still see org-wide repos).
     let gone = principal(UserId::new(), org, all_scopes());
-    assert_eq!(t.repos(&gone).await, ["shared"]);
+    let e = err(t
+        .env
+        .factory
+        .list_repos(
+            Extension(parts(&gone)),
+            Parameters(tools::repos::ListReposArgs {
+                include_inactive: false,
+                limit: None,
+            }),
+        )
+        .await);
+    assert_eq!(code_of(&e), "access_revoked");
 
     // And an outage is refused, never read as the token's role.
     t.env.platform.set_down(true);
@@ -4289,7 +4308,8 @@ async fn only_admins_register_repos_over_mcp_and_conflicts_are_generic(pool: PgP
             }),
         )
         .await);
-    assert!(e.message.contains("unavailable"), "{}", e.message);
+    // The code an agent branches on is kept; only the detail is withheld.
+    assert_eq!(code_of(&e), "remote_taken");
     assert!(!e.message.contains("growth-repo"), "{}", e.message);
 }
 
@@ -4310,4 +4330,341 @@ async fn list_repos_limit_counts_visible_repos(pool: PgPool) {
         .await);
     assert_eq!(out["repos"][0]["slug"], "shared");
     assert_eq!(out["repos"].as_array().unwrap().len(), 1);
+}
+
+impl Teams {
+    /// What an administrator moving a repo between teams does, through the
+    /// domain layer: `None` makes it org-wide.
+    async fn move_repo(&self, slug: &str, team: Option<uuid::Uuid>) {
+        let tx = self.move_repo_uncommitted(slug, team).await;
+        tx.commit().await.unwrap();
+    }
+
+    /// [`Self::move_repo`], with the transaction left open: the row lock its
+    /// `UPDATE` took is still held.
+    async fn move_repo_uncommitted(
+        &self,
+        slug: &str,
+        team: Option<uuid::Uuid>,
+    ) -> otto_tenant::Tx<'static> {
+        use of_core::repos::{RepoPatch, RepoRef, ReposExt};
+        use of_core::teams::VerifiedTeam;
+        let org = self.owner.org_id;
+        let team = match team {
+            Some(t) => Some(
+                VerifiedTeam::verify(&self.env.client, org, t.into())
+                    .await
+                    .unwrap(),
+            ),
+            None => None,
+        };
+        let mut tx = self.env.db.begin(org).await.unwrap();
+        let repo = tx
+            .resolve_repo(&RepoRef {
+                slug: Some(slug.into()),
+                remote: None,
+            })
+            .await
+            .unwrap();
+        tx.update_repo(
+            repo.id,
+            RepoPatch {
+                team_id: Some(team),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        tx
+    }
+
+    async fn send(
+        &self,
+        who: &Principal,
+        body: &str,
+        repo: Option<&str>,
+        job: Option<&str>,
+        in_reply_to: Option<i64>,
+        to: Option<&str>,
+    ) -> Result<Json<tools::out::MessageOut>, ErrorData> {
+        self.env
+            .factory
+            .send_message(
+                Extension(parts(who)),
+                Parameters(tools::coord::SendMessageArgs {
+                    body: body.into(),
+                    to: to.map(Into::into),
+                    kind: None,
+                    repo: repo.map(Into::into),
+                    remote: None,
+                    job: job.map(Into::into),
+                    in_reply_to,
+                    agent: None,
+                    idempotency_key: None,
+                }),
+            )
+            .await
+    }
+
+    async fn inbox(&self, who: &Principal) -> Vec<String> {
+        let out = ok(self
+            .env
+            .factory
+            .inbox(
+                Extension(parts(who)),
+                Parameters(tools::coord::InboxArgs {
+                    unread_only: false,
+                    limit: None,
+                    newest_first: false,
+                }),
+            )
+            .await);
+        out["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["body"].as_str().unwrap().to_string())
+            .collect()
+    }
+}
+
+/// Deleting a job used to fail outright once anyone had messaged about it (the
+/// composite foreign key nulled `org_id` too). Now it succeeds, and the message
+/// keeps the team scope it was sent under instead of turning org-wide.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_deleted_jobs_messages_keep_their_team_scope(pool: PgPool) {
+    let t = teams_world(pool).await;
+    let job = t.jobs["platform-repo"].clone();
+    ok(
+        t.send(&t.alice, "about the job", None, Some(&job), None, None)
+            .await,
+    );
+    assert_eq!(t.inbox(&t.carol).await, Vec::<String>::new());
+
+    ok(t.env
+        .factory
+        .delete_job(
+            Extension(parts(&t.owner)),
+            Parameters(tools::jobs::JobArgs { job }),
+        )
+        .await);
+
+    assert_eq!(t.inbox(&t.carol).await, Vec::<String>::new());
+    assert_eq!(t.inbox(&t.bob).await, Vec::<String>::new());
+    assert_eq!(t.inbox(&t.owner).await, ["about the job"]);
+}
+
+/// A reply carries its thread's scope, and a reply cannot name a message the
+/// sender could not read: a hidden one and a missing one are the same refusal.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_reply_is_scoped_to_its_thread_and_cannot_probe_hidden_ids(pool: PgPool) {
+    let t = teams_world(pool).await;
+    let parent = ok(t
+        .send(
+            &t.alice,
+            "platform thread",
+            Some("platform-repo"),
+            None,
+            None,
+            None,
+        )
+        .await)["message"]["id"]
+        .as_i64()
+        .unwrap();
+
+    // Carol cannot see the thread: replying to it reads exactly like replying
+    // to an id that does not exist.
+    let hidden = err(t.send(&t.carol, "x", None, None, Some(parent), None).await);
+    let missing = err(t
+        .send(&t.carol, "x", None, None, Some(parent + 1_000), None)
+        .await);
+    assert_eq!(code_of(&hidden), "invalid_argument");
+    assert_eq!(code_of(&hidden), code_of(&missing));
+    assert_eq!(
+        hidden.message.replace(&parent.to_string(), "N"),
+        missing.message.replace(&(parent + 1_000).to_string(), "N")
+    );
+
+    // Neither can a private message between other people be replied to.
+    let private = ok(t
+        .send(
+            &t.owner,
+            "just for alice",
+            None,
+            None,
+            None,
+            Some("alice@acme.test"),
+        )
+        .await)["message"]["id"]
+        .as_i64()
+        .unwrap();
+    let e = err(t.send(&t.carol, "x", None, None, Some(private), None).await);
+    assert_eq!(code_of(&e), "invalid_argument");
+
+    // Alice replies without naming the repo again; the reply stays in the
+    // platform team's thread rather than going org-wide.
+    ok(t.send(&t.alice, "reply", None, None, Some(parent), None)
+        .await);
+    assert_eq!(t.inbox(&t.carol).await, Vec::<String>::new());
+    assert_eq!(t.inbox(&t.bob).await, Vec::<String>::new());
+    assert_eq!(
+        t.inbox(&t.alice).await,
+        ["platform thread", "just for alice", "reply"]
+    );
+}
+
+/// `ack_messages` lands on the newest message the reader could have read: not a
+/// private message to someone else, whose id would tell them it exists.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn ack_does_not_land_on_someone_elses_private_message(pool: PgPool) {
+    let t = teams_world(pool).await;
+    let public = ok(t.send(&t.owner, "everyone", None, None, None, None).await)["message"]["id"]
+        .as_i64()
+        .unwrap();
+    ok(t.send(
+        &t.owner,
+        "just for alice",
+        None,
+        None,
+        None,
+        Some("alice@acme.test"),
+    )
+    .await);
+    let landed = ok(t
+        .env
+        .factory
+        .ack_messages(
+            Extension(parts(&t.carol)),
+            Parameters(tools::coord::AckMessagesArgs { up_to: 1_000_000 }),
+        )
+        .await)["cursor"]
+        .as_i64()
+        .unwrap();
+    assert_eq!(landed, public);
+}
+
+/// `acquire_lease` on a resource the caller already holds, and `renew_lease`,
+/// return the lease — and must blank a job id the caller has lost sight of, as
+/// `list_leases` does.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_returned_lease_does_not_name_a_job_the_caller_cannot_see(pool: PgPool) {
+    let t = teams_world(pool).await;
+    let f = &t.env.factory;
+    let job = t.jobs["platform-repo"].clone();
+    let acquire = |job: Option<String>| {
+        f.acquire_lease(
+            Extension(parts(&t.alice)),
+            Parameters(tools::coord::AcquireLeaseArgs {
+                resource: Some("deploy-slot".into()),
+                branch: None,
+                repo: Some("shared".into()),
+                remote: None,
+                agent: None,
+                job,
+                ttl_seconds: None,
+            }),
+        )
+    };
+    let lease = ok(acquire(Some(job.clone())).await)["lease"].clone();
+    assert_eq!(lease["jobId"], serde_json::json!(job));
+
+    // The job's repo moves to a team alice is not on; `shared` stays visible.
+    t.move_repo("platform-repo", Some(t.growth_team)).await;
+
+    let again = ok(acquire(None).await)["lease"].clone();
+    assert_eq!(again["id"], lease["id"], "the existing lease was renewed");
+    assert_eq!(again["jobId"], serde_json::Value::Null);
+
+    let renewed = ok(f
+        .renew_lease(
+            Extension(parts(&t.alice)),
+            Parameters(tools::coord::RenewLeaseArgs {
+                lease: lease["id"].as_str().unwrap().into(),
+                ttl_seconds: None,
+            }),
+        )
+        .await)["lease"]
+        .clone();
+    assert_eq!(renewed["jobId"], serde_json::Value::Null);
+}
+
+/// An idempotent `add_job` replay must not hand back a job the caller can no
+/// longer see. The key's fingerprint covers what the caller sent, not the team
+/// the job inherited, so the repo can be visible while the job is not.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn an_add_job_replay_does_not_return_a_hidden_job(pool: PgPool) {
+    let t = teams_world(pool).await;
+    let add = || {
+        t.env.factory.add_job(
+            Extension(parts(&t.alice)),
+            Parameters(tools::jobs::AddJobArgs {
+                title: "keyed".into(),
+                description: None,
+                repo: Some("platform-repo".into()),
+                remote: None,
+                ticket_ref: None,
+                agent_type: None,
+                metadata: None,
+                depends_on: vec![],
+                idempotency_key: Some("k-1".into()),
+            }),
+        )
+    };
+    let job = ok(add().await)["job"].clone();
+    assert_eq!(job["teamId"], serde_json::json!(t.platform_team));
+
+    // The repo goes org-wide and alice leaves the platform team: she still sees
+    // the repo, but not the job, which kept the team it inherited.
+    t.move_repo("platform-repo", None).await;
+    t.env.platform.remove_team_member(
+        t.owner.org_id.as_uuid(),
+        t.alice.user_id.as_uuid(),
+        t.platform_team,
+    );
+
+    let e = err(add().await);
+    assert_eq!(code_of(&e), "idempotency_key_conflict");
+    assert!(
+        !e.message.contains(job["id"].as_str().unwrap()),
+        "{}",
+        e.message
+    );
+}
+
+/// The visibility check and the write it guards are one decision: an admin
+/// moving the repo out of the caller's teams either commits first, and the
+/// write sees the new team and is refused, or waits for the write to finish.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_write_cannot_land_after_its_repo_moves_out_of_sight(pool: PgPool) {
+    let t = teams_world(pool).await;
+    let admin = t
+        .move_repo_uncommitted("platform-repo", Some(t.growth_team))
+        .await;
+
+    let write = t.env.factory.add_job(
+        Extension(parts(&t.alice)),
+        Parameters(tools::jobs::AddJobArgs {
+            title: "racing".into(),
+            description: None,
+            repo: Some("platform-repo".into()),
+            remote: None,
+            ticket_ref: None,
+            agent_type: None,
+            metadata: None,
+            depends_on: vec![],
+            idempotency_key: None,
+        }),
+    );
+    tokio::pin!(write);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), &mut write)
+            .await
+            .is_err(),
+        "the write waits on the reassignment instead of acting on the old team"
+    );
+    admin.commit().await.unwrap();
+
+    let e = err(write.await);
+    assert_eq!(code_of(&e), "repo_unresolved");
+    assert_eq!(t.list_jobs(&t.owner).await.len(), 3, "nothing was added");
 }

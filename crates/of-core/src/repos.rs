@@ -213,6 +213,16 @@ pub fn normalize_remote(raw: &str) -> String {
 const REPO_COLS: &str = "id, org_id, slug, name, provider, default_branch, team_id, \
                          default_agent_type, tracker_binding, active, created_at, created_by";
 
+/// How [`ReposExt::hold_repo_visible`] locks the repo row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hold {
+    /// The transaction writes rows that hang off the repo (jobs, leases,
+    /// messages) but not the repo itself.
+    Shared,
+    /// The transaction goes on to update the repo row.
+    ForUpdate,
+}
+
 /// Extension methods on [`Tx`] for this module's domain (see the crate docs for why
 /// these are extension traits rather than inherent methods).
 pub trait ReposExt {
@@ -281,6 +291,33 @@ pub trait ReposExt {
         r: &RepoRef,
         scope: &TeamScope,
     ) -> impl std::future::Future<Output = Result<Repo>> + Send;
+
+    /// [`Self::resolve_repo_visible`] for a write: the repo's row is also held
+    /// until the transaction ends, so its team cannot be reassigned between this
+    /// check and the write that follows it. See [`Self::hold_repo_visible`].
+    fn resolve_repo_visible_held(
+        &mut self,
+        r: &RepoRef,
+        scope: &TeamScope,
+        hold: Hold,
+    ) -> impl std::future::Future<Output = Result<Repo>> + Send;
+
+    /// Lock repo `id` against a concurrent team reassignment for the rest of the
+    /// transaction, and say whether `scope` may see it as it now stands (`false`
+    /// for a repo that does not exist).
+    ///
+    /// A visibility check that is a separate `SELECT` from the write it guards
+    /// is a race under `READ COMMITTED`: an admin can move the repo to another
+    /// team and commit between the two, and the write lands on a row the caller
+    /// can no longer see. The lock makes `update_repo`'s `UPDATE` wait for this
+    /// transaction, and one that committed first is the version this reads.
+    /// Unrestricted callers take no lock: nothing can hide a row from them.
+    fn hold_repo_visible(
+        &mut self,
+        id: RepoId,
+        scope: &TeamScope,
+        hold: Hold,
+    ) -> impl std::future::Future<Output = Result<bool>> + Send;
 
     /// Apply a partial update.
     ///
@@ -457,6 +494,54 @@ impl ReposExt for Tx<'_> {
             }
             Err(e) => Err(e),
         }
+    }
+
+    async fn resolve_repo_visible_held(
+        &mut self,
+        r: &RepoRef,
+        scope: &TeamScope,
+        hold: Hold,
+    ) -> Result<Repo> {
+        let repo = self.resolve_repo_visible(r, scope).await?;
+        if self.hold_repo_visible(repo.id, scope, hold).await? {
+            return Ok(repo);
+        }
+        // Moved out of the caller's sight while this waited for the lock.
+        let attempted = r
+            .slug
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| r.remote.clone())
+            .unwrap_or_else(|| "(nothing supplied)".into());
+        Err(self.unresolved(&attempted, scope).await?)
+    }
+
+    async fn hold_repo_visible(
+        &mut self,
+        id: RepoId,
+        scope: &TeamScope,
+        hold: Hold,
+    ) -> Result<bool> {
+        if scope.is_all() {
+            return Ok(true);
+        }
+        let org = self.org();
+        // `FOR SHARE` lets any number of restricted writers hold the same repo
+        // at once. A caller that is about to `UPDATE` the repo itself must take
+        // the stronger lock up front: two holders of `FOR SHARE` that both go on
+        // to update the row would deadlock each other.
+        let lock = match hold {
+            Hold::Shared => "FOR SHARE",
+            Hold::ForUpdate => "FOR NO KEY UPDATE",
+        };
+        let team: Option<Option<TeamId>> = sqlx::query_scalar(&format!(
+            "SELECT team_id FROM repos WHERE org_id = $1 AND id = $2 {lock}"
+        ))
+        .bind(org)
+        .bind(id)
+        .fetch_optional(self.conn())
+        .await?;
+        Ok(team.is_some_and(|t| scope.allows(t)))
     }
 
     async fn resolve_repo(&mut self, r: &RepoRef) -> Result<Repo> {

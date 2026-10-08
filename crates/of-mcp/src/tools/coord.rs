@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use of_core::ids::JobId;
 use of_core::messages::{InboxQuery, MessageKind, NewMessage, SenderKind};
+use of_core::repos::{Hold, ReposExt};
 use of_core::watch::Outcome;
 use rmcp::handler::server::tool::Extension;
 use rmcp::handler::server::wrapper::{Json, Parameters};
@@ -19,7 +20,7 @@ use rmcp::model::ErrorData;
 use rmcp::{tool, tool_router};
 use serde::Deserialize;
 
-use super::{ensure_job_visible, maybe_repo_of, out, repo_of, scope};
+use super::{ensure_job_visible, maybe_repo_for_write, maybe_repo_of, out, repo_for_write, scope};
 use crate::server::{Factory, McpResult};
 
 /// Default long-poll duration, and the ceiling.
@@ -259,11 +260,11 @@ impl Factory {
         let team = self.team_scope(&caller).await?;
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "acquire_lease").await?;
-        let repo = repo_of(&mut tx, &team, args.repo, args.remote).await?;
+        let repo = repo_for_write(&mut tx, &team, args.repo, args.remote, Hold::Shared).await?;
         if let Some(job) = &job {
             ensure_job_visible(&mut tx, &team, job).await?;
         }
-        let lease = tx
+        let mut lease = tx
             .acquire_lease(
                 repo.id,
                 &resource,
@@ -274,6 +275,9 @@ impl Factory {
             )
             .await
             .mcp()?;
+        // Acquiring a resource this caller already holds renews the existing
+        // lease, which can name a job they have since lost sight of.
+        hide_unseen_job(&mut tx, &team, &mut lease).await?;
         tx.commit().await.mcp()?;
 
         Ok(Json(out::LeaseOut { lease }))
@@ -298,10 +302,11 @@ impl Factory {
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "renew_lease").await?;
         ensure_lease_visible(&mut tx, &team, id).await?;
-        let lease = tx
+        let mut lease = tx
             .renew_lease(id, caller.user_id, args.ttl_seconds)
             .await
             .mcp()?;
+        hide_unseen_job(&mut tx, &team, &mut lease).await?;
         tx.commit().await.mcp()?;
 
         Ok(Json(out::LeaseOut { lease }))
@@ -394,9 +399,14 @@ impl Factory {
         // identical comment (tools::jobs) and Factory::charge's doc comment.
         let Some(key) = args.idempotency_key else {
             self.charge(&mut tx, &caller, "send_message").await?;
-            let repo_id = maybe_repo_of(&mut tx, &team, args.repo, args.remote).await?;
+            let repo_id = maybe_repo_for_write(&mut tx, &team, args.repo, args.remote).await?;
             if let Some(job) = &args.job {
                 ensure_job_visible(&mut tx, &team, &JobId::from(job.clone())).await?;
+            }
+            if let Some(parent) = args.in_reply_to {
+                tx.ensure_reply_parent_visible(parent, caller.user_id, &team)
+                    .await
+                    .mcp()?;
             }
             let message = tx
                 .send_message(
@@ -426,9 +436,14 @@ impl Factory {
 
         // A key was supplied: replay-vs-new must be resolved before
         // charging, which needs `repo_id` to build the payload to check.
-        let repo_id = maybe_repo_of(&mut tx, &team, args.repo, args.remote).await?;
+        let repo_id = maybe_repo_for_write(&mut tx, &team, args.repo, args.remote).await?;
         if let Some(job) = &args.job {
             ensure_job_visible(&mut tx, &team, &JobId::from(job.clone())).await?;
+        }
+        if let Some(parent) = args.in_reply_to {
+            tx.ensure_reply_parent_visible(parent, caller.user_id, &team)
+                .await
+                .mcp()?;
         }
         let new_message = NewMessage {
             body: args.body,
@@ -448,6 +463,23 @@ impl Factory {
             .await
             .mcp()?
         {
+            // The original is the caller's own, but what it is tied to may have
+            // moved out of their teams since: not theirs to read back now.
+            if !tx
+                .message_readable(existing.id, caller.user_id, &team)
+                .await
+                .mcp()?
+            {
+                // Not `*_not_found`, which would invite a retry with the same
+                // key: the original exists, so the key is spent.
+                return Err(of_core::Error::Redacted {
+                    code: "idempotency_key_conflict",
+                    message: "that idempotency key already sent a message you can no longer \
+                              see (what it was tied to has moved to a team you are not on); \
+                              use a new key",
+                })
+                .mcp();
+            }
             self.record_replay(&mut tx, &caller, "send_message").await?;
             tx.commit().await.mcp()?;
             return Ok(Json(out::MessageOut { message: existing }));
@@ -616,11 +648,25 @@ async fn ensure_lease_visible(
         return Ok(());
     }
     if let Some(repo) = tx.lease_repo_id(id).await.mcp()? {
-        if tx.hidden_repo_ids(team).await.mcp()?.contains(&repo) {
+        // Held, like any write's repo: the renew or release that follows must
+        // not land after the repo has moved out of the caller's teams.
+        if !tx.hold_repo_visible(repo, team, Hold::Shared).await.mcp()? {
             return Err(of_core::Error::LeaseNotHeld(id.to_string())).mcp();
         }
     }
     Ok(())
+}
+
+/// Blank a returned lease's `job_id` if the caller cannot see that job, as
+/// `list_leases` does for every lease it returns.
+async fn hide_unseen_job(
+    tx: &mut otto_tenant::Tx<'_>,
+    team: &of_core::teams::TeamScope,
+    lease: &mut of_core::leases::Lease,
+) -> Result<(), ErrorData> {
+    of_core::leases::hide_unseen_jobs(tx, std::slice::from_mut(lease), team)
+        .await
+        .mcp()
 }
 
 /// Parse a lease id, refusing anything that is not a UUID before it reaches a

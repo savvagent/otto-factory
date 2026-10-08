@@ -105,8 +105,10 @@ impl TeamScope {
     ///
     /// Administrators are [`TeamScope::All`] without a platform call. Anyone
     /// else costs one `member_teams` lookup (cached by the client for
-    /// `MEMBER_TTL`). A user the platform no longer knows as a member gets the
-    /// empty team set: org-wide rows only.
+    /// `MEMBER_TTL`). A user the platform no longer knows as a member of `org`
+    /// is [`Error::AccessRevoked`], not a member of no teams: the token can
+    /// outlive the membership by an introspection cache window, and "no teams"
+    /// would still open every org-wide row to someone who has left.
     ///
     /// ```no_run
     /// # async fn demo(platform: &otto_resource::PlatformClient, org: otto_tenant::OrgId,
@@ -126,10 +128,12 @@ impl TeamScope {
         if role.can_administer() {
             return Ok(Self::All);
         }
+        // `Some([])` is a member on no team; `None` is someone the platform
+        // does not know in this org at all.
         let teams = platform
             .member_teams(org.as_uuid(), user.as_uuid())
             .await?
-            .unwrap_or_default();
+            .ok_or(Error::AccessRevoked)?;
         Ok(Self::Teams(
             teams
                 .into_iter()

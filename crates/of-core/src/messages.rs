@@ -134,10 +134,13 @@ impl Default for InboxQuery {
 
 /// SQL: message `m` is visible under the `uuid[]` bound as `$n` (NULL = all).
 /// A message tied to a team, a repo, or a job the reader cannot see is not
-/// theirs to read, whoever it was addressed to.
+/// theirs to read, whoever it was addressed to. `scope_teams` is what it was
+/// tied to when sent, which outlives a deleted repo or job (see
+/// `0004_message_scope.sql`); the live checks catch a repo moved since.
 fn message_visible_sql(n: usize) -> String {
     format!(
-        "(${n}::uuid[] IS NULL OR ((m.team_id IS NULL OR m.team_id = ANY(${n})) \
+        "(${n}::uuid[] IS NULL OR (m.scope_teams <@ ${n}::uuid[] \
+           AND (m.team_id IS NULL OR m.team_id = ANY(${n})) \
            AND (m.repo_id IS NULL OR NOT EXISTS (SELECT 1 FROM repos vr \
                  WHERE vr.org_id = m.org_id AND vr.id = m.repo_id \
                    AND vr.team_id IS NOT NULL AND NOT vr.team_id = ANY(${n}))) \
@@ -152,6 +155,18 @@ fn message_visible_sql(n: usize) -> String {
 fn team_uuids(teams: Option<&Vec<TeamId>>) -> Option<Vec<uuid::Uuid>> {
     teams.map(|v| v.iter().map(|t| t.as_uuid()).collect())
 }
+
+/// SQL: the `scope_teams` of a message being inserted, from the insert's own
+/// parameters — `$1` org, `$6` team, `$9` repo, `$10` job, `$11` the message it
+/// replies to. Every team it is bound to, and its thread's: a reply posted
+/// without a repo or job of its own is still part of a team's conversation.
+const SCOPE_TEAMS_SQL: &str = "ARRAY(SELECT DISTINCT t FROM unnest(ARRAY[$6::uuid, \
+       (SELECT r.team_id FROM repos r WHERE r.org_id = $1 AND r.id = $9), \
+       (SELECT j.team_id FROM jobs j WHERE j.org_id = $1 AND j.id = $10), \
+       (SELECT r.team_id FROM jobs j JOIN repos r ON r.org_id = j.org_id AND r.id = j.repo_id \
+         WHERE j.org_id = $1 AND j.id = $10)] \
+     || COALESCE((SELECT p.scope_teams FROM messages p WHERE p.org_id = $1 AND p.id = $11), \
+                 '{}'::uuid[])) AS t WHERE t IS NOT NULL)";
 
 const MSG_COLS: &str = "id, org_id, created_at, sender_user_id, sender_label, sender_kind, \
                         recipient_user_id, team_id, kind, body, repo_id, job_id, in_reply_to";
@@ -241,6 +256,26 @@ pub trait MessagesExt {
         up_to: i64,
         scope: &TeamScope,
     ) -> impl std::future::Future<Output = Result<i64>> + Send;
+
+    /// Whether `reader` could read message `id`: it exists, it is a broadcast
+    /// or to or from them, and `scope` covers every team it is tied to.
+    fn message_readable(
+        &mut self,
+        id: i64,
+        reader: UserId,
+        scope: &TeamScope,
+    ) -> impl std::future::Future<Output = Result<bool>> + Send;
+
+    /// Refuse an `in_reply_to` that names a message `reader` could not read:
+    /// one that does not exist, a private message between other people, or one
+    /// tied to a team, repo, or job outside `scope`. All three are the same
+    /// error, so a reply cannot be used to probe for hidden message ids.
+    fn ensure_reply_parent_visible(
+        &mut self,
+        parent: i64,
+        reader: UserId,
+        scope: &TeamScope,
+    ) -> impl std::future::Future<Output = Result<()>> + Send;
 
     /// [`Self::unread_count`], counting only messages `scope` may see.
     fn unread_count_for(
@@ -335,8 +370,8 @@ impl MessagesExt for Tx<'_> {
                 "INSERT INTO messages (org_id, sender_user_id, sender_label, sender_kind, \
                                        recipient_user_id, team_id, kind, body, repo_id, \
                                        job_id, in_reply_to, idempotency_key, \
-                                       idempotency_payload_hash) \
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) \
+                                       idempotency_payload_hash, scope_teams) \
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,{SCOPE_TEAMS_SQL}) \
                  RETURNING {MSG_COLS}"
             ))
             .bind(org)
@@ -445,8 +480,9 @@ impl MessagesExt for Tx<'_> {
             sqlx::query_as(&format!(
                 "INSERT INTO messages (org_id, sender_user_id, sender_label, sender_kind, \
                                        recipient_user_id, team_id, kind, body, repo_id, \
-                                       job_id, in_reply_to) \
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING {MSG_COLS}"
+                                       job_id, in_reply_to, scope_teams) \
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,{SCOPE_TEAMS_SQL}) \
+                 RETURNING {MSG_COLS}"
             ))
             .bind(org)
             .bind(sender)
@@ -511,12 +547,19 @@ impl MessagesExt for Tx<'_> {
     ) -> Result<i64> {
         let org = self.org();
         let teams = team_uuids(scope.restriction().as_ref());
+        // The newest message this reader could have read: a private message
+        // to someone else is not one, and landing the cursor on its id would
+        // tell the reader it exists.
         let newest: i64 = sqlx::query_scalar(&format!(
-            "SELECT COALESCE(MAX(m.id), 0) FROM messages m WHERE m.org_id = $1 AND {}",
+            "SELECT COALESCE(MAX(m.id), 0) FROM messages m WHERE m.org_id = $1 \
+               AND (m.recipient_user_id IS NULL OR m.recipient_user_id = $3 \
+                    OR m.sender_user_id = $3) \
+               AND {}",
             message_visible_sql(2)
         ))
         .bind(org)
         .bind(teams)
+        .bind(reader)
         .fetch_one(self.conn())
         .await?;
 
@@ -536,6 +579,45 @@ impl MessagesExt for Tx<'_> {
         .await?;
 
         Ok(landed)
+    }
+
+    async fn message_readable(
+        &mut self,
+        id: i64,
+        reader: UserId,
+        scope: &TeamScope,
+    ) -> Result<bool> {
+        let org = self.org();
+        let teams = team_uuids(scope.restriction().as_ref());
+        Ok(sqlx::query_scalar(&format!(
+            "SELECT EXISTS (SELECT 1 FROM messages m WHERE m.org_id = $1 AND m.id = $2 \
+               AND (m.recipient_user_id IS NULL OR m.recipient_user_id = $3 \
+                    OR m.sender_user_id = $3) \
+               AND {})",
+            message_visible_sql(4)
+        ))
+        .bind(org)
+        .bind(id)
+        .bind(reader)
+        .bind(teams)
+        .fetch_one(self.conn())
+        .await?)
+    }
+
+    async fn ensure_reply_parent_visible(
+        &mut self,
+        parent: i64,
+        reader: UserId,
+        scope: &TeamScope,
+    ) -> Result<()> {
+        if self.message_readable(parent, reader, scope).await? {
+            Ok(())
+        } else {
+            Err(Error::Invalid(format!(
+                "in_reply_to {parent} is not a message you can read; pass the id of a \
+                 message from your inbox, or omit in_reply_to to start a new thread"
+            )))
+        }
     }
 
     async fn unread_count(&mut self, reader: UserId) -> Result<i64> {

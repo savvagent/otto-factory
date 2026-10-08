@@ -29,10 +29,11 @@ use rmcp::{tool, tool_router};
 use serde::Deserialize;
 
 use super::{
-    ensure_job_visible, ensure_jobs_visible, maybe_repo_of, out, redact_foreign_ids, repo_of,
-    retain_visible, scope, visible_ids, visible_job,
+    ensure_job_visible, ensure_jobs_visible, maybe_repo_of, out, redact_foreign_ids,
+    repo_for_write, retain_visible, scope, visible_ids, visible_job,
 };
 use crate::server::{Factory, McpResult};
+use of_core::repos::Hold;
 
 /// Turn caller-supplied job ids into the domain type.
 fn ids(raw: Vec<String>) -> Vec<JobId> {
@@ -699,7 +700,7 @@ impl Factory {
         // answer first, so nothing should run ahead of it.
         let Some(key) = args.idempotency_key else {
             self.charge(&mut tx, &caller, "add_job").await?;
-            let repo = repo_of(&mut tx, &team, args.repo, args.remote).await?;
+            let repo = repo_for_write(&mut tx, &team, args.repo, args.remote, Hold::Shared).await?;
             ensure_jobs_visible(&mut tx, &team, &ids(args.depends_on.clone())).await?;
             let job = tx
                 .add_job(NewJob {
@@ -723,7 +724,7 @@ impl Factory {
         // charging (a replay must never be billed, and there is no way to
         // un-charge after the fact — see Factory::charge's third exception),
         // which needs `repo.id` to build the payload to check.
-        let repo = repo_of(&mut tx, &team, args.repo, args.remote).await?;
+        let repo = repo_for_write(&mut tx, &team, args.repo, args.remote, Hold::Shared).await?;
         ensure_jobs_visible(&mut tx, &team, &ids(args.depends_on.clone())).await?;
         let new_job = NewJob {
             repo_id: repo.id,
@@ -739,6 +740,23 @@ impl Factory {
         };
 
         if let Some(existing) = tx.find_replayed_job(&new_job).await.mcp()? {
+            // The fingerprint covers what the caller sent, not the team the job
+            // inherited from its repo then. If the repo has been reassigned
+            // since, the repo can be visible while the original job is not.
+            // Not `job_not_found`, which would invite a retry with the same
+            // key: the original exists, so the key is spent.
+            if let Err(e) = tx.get_job_visible(&existing.id, &team).await {
+                if !matches!(e, of_core::Error::JobNotFound(_)) {
+                    return Err(e).mcp();
+                }
+                return Err(of_core::Error::Redacted {
+                    code: "idempotency_key_conflict",
+                    message: "that idempotency key already created a job you can no longer see \
+                              (its repo has moved to a team you are not on); use a new key for \
+                              a new job",
+                })
+                .mcp();
+            }
             self.record_replay(&mut tx, &caller, "add_job").await?;
             tx.commit().await.mcp()?;
             return Ok(Json(out::JobOut { job: existing }));

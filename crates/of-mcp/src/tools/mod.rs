@@ -21,7 +21,7 @@
 use of_core::ids::{JobId, RepoId};
 use of_core::jobs::{Job, JobsExt};
 use of_core::repos::ReposExt;
-use of_core::repos::{Repo, RepoRef};
+use of_core::repos::{Hold, Repo, RepoRef};
 use of_core::teams::TeamScope;
 use otto_tenant::Tx;
 use rmcp::handler::server::tool::ToolRouter;
@@ -68,6 +68,41 @@ pub(crate) async fn repo_of(
     tx.resolve_repo_visible(&RepoRef { slug, remote }, team)
         .await
         .mcp()
+}
+
+/// [`repo_of`] for a tool that writes to the repo or to rows hanging off it:
+/// the repo stays held until the transaction ends, so it cannot be moved out of
+/// the caller's teams between this check and the write (see
+/// `ReposExt::hold_repo_visible`).
+pub(crate) async fn repo_for_write(
+    tx: &mut Tx<'_>,
+    team: &TeamScope,
+    slug: Option<String>,
+    remote: Option<String>,
+    hold: Hold,
+) -> Result<Repo, ErrorData> {
+    tx.resolve_repo_visible_held(&RepoRef { slug, remote }, team, hold)
+        .await
+        .mcp()
+}
+
+/// [`maybe_repo_of`] for a write; see [`repo_for_write`].
+pub(crate) async fn maybe_repo_for_write(
+    tx: &mut Tx<'_>,
+    team: &TeamScope,
+    slug: Option<String>,
+    remote: Option<String>,
+) -> Result<Option<RepoId>, ErrorData> {
+    let named = slug.as_deref().is_some_and(|s| !s.trim().is_empty())
+        || remote.as_deref().is_some_and(|s| !s.trim().is_empty());
+    if !named {
+        return Ok(None);
+    }
+    Ok(Some(
+        repo_for_write(tx, team, slug, remote, Hold::Shared)
+            .await?
+            .id,
+    ))
 }
 
 /// Resolve a repo only if the caller named one.
@@ -130,30 +165,39 @@ pub(crate) async fn visible_ids(
     tx.visible_job_ids(&ids, team).await.mcp()
 }
 
-/// Errors that name a job the caller never asked about (the other holder of a
-/// ticket, the far end of a dependency chain) must not name one they cannot
-/// see. Unrestricted callers get the error unchanged.
+/// Errors that name a row the caller never asked about (the job a ticket is
+/// already linked to, the repo a remote belongs to, the far end of a dependency
+/// chain) must not name one they cannot see. The message is withheld and the
+/// code kept, so an agent branching on the code is unaffected. Unrestricted
+/// callers get the error unchanged.
 pub(crate) fn redact_foreign_ids(team: &TeamScope, e: of_core::Error) -> of_core::Error {
     if team.is_all() {
         return e;
     }
-    match e {
-        of_core::Error::TicketAlreadyLinked { .. } => of_core::Error::Invalid(
-            "that ticket_ref is already linked to another job in this repo".into(),
-        ),
-        of_core::Error::RemoteTaken(..) | of_core::Error::RepoSlugTaken(..) => {
-            of_core::Error::Invalid("that slug or remote is unavailable".into())
+    let message = match &e {
+        of_core::Error::TicketAlreadyLinked { .. } => {
+            "that ticket_ref is already linked to another job in this repo; use a different \
+             ticket_ref, or ask an administrator which job holds it"
         }
-        of_core::Error::DependencyCycle(..) => of_core::Error::Invalid(
-            "that change would make a job depend on itself, directly or through a chain".into(),
-        ),
-        other => other,
+        of_core::Error::RemoteTaken(..) => {
+            "that remote is already registered to another repo; ask an administrator which"
+        }
+        of_core::Error::DependencyCycle(..) => {
+            "that change would make a job depend on itself, directly or through a chain; \
+             drop the dependency that closes the loop"
+        }
+        _ => return e,
+    };
+    of_core::Error::Redacted {
+        code: e.code(),
+        message,
     }
 }
 
 /// Refuse unless every job named is one the caller may see, so a write cannot
-/// reach into a team the caller is not on. Unrestricted callers cost nothing
-/// extra; a job that does not exist is left to the write itself to report.
+/// reach into a team the caller is not on. Each job's repo stays held until the
+/// transaction ends, so an admin cannot move it out of the caller's teams
+/// between this check and the write. Unrestricted callers cost nothing extra.
 pub(crate) async fn ensure_jobs_visible(
     tx: &mut Tx<'_>,
     team: &TeamScope,
@@ -163,7 +207,7 @@ pub(crate) async fn ensure_jobs_visible(
         return Ok(());
     }
     for id in ids {
-        visible_job(tx, team, id).await?;
+        tx.get_job_visible_held(id, team).await.mcp()?;
     }
     Ok(())
 }
