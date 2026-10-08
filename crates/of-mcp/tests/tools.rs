@@ -4101,3 +4101,213 @@ async fn a_lease_of_a_hidden_repo_cannot_be_renewed_or_released(pool: PgPool) {
         .iter()
         .any(|l| l["id"] == lease.as_str()));
 }
+
+// ---- review follow-ups
+
+/// The role on the token is up to a minute stale; the scope comes from a fresh
+/// member lookup. A token that still says `owner` for someone the platform now
+/// calls a member, or no longer knows at all, gets a member's view.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_stale_admin_role_on_the_token_does_not_widen_the_view(pool: PgPool) {
+    let t = teams_world(pool).await;
+    let org = t.owner.org_id;
+
+    // Demoted: the token says owner, the platform says member.
+    let demoted = t.env.teammate(org, "dan@acme.test").await;
+    assert_eq!(demoted.role, Role::Owner);
+    assert_eq!(t.repos(&demoted).await, ["shared"]);
+    assert_eq!(t.list_jobs(&demoted).await, ["job in shared"]);
+
+    // Removed: the platform does not know the user at all.
+    let gone = principal(UserId::new(), org, all_scopes());
+    assert_eq!(t.repos(&gone).await, ["shared"]);
+
+    // And an outage is refused, never read as the token's role.
+    t.env.platform.set_down(true);
+    let e = err(t
+        .env
+        .factory
+        .list_repos(
+            Extension(parts(
+                &UserId::new().pipe(|u| principal(u, org, all_scopes())),
+            )),
+            Parameters(tools::repos::ListReposArgs {
+                include_inactive: false,
+                limit: None,
+            }),
+        )
+        .await);
+    assert_eq!(code_of(&e), "platform_unavailable");
+}
+
+trait Pipe: Sized {
+    fn pipe<R>(self, f: impl FnOnce(Self) -> R) -> R {
+        f(self)
+    }
+}
+impl<T> Pipe for T {}
+
+/// With an empty slug and a remote, a hidden repo and a missing one read the same.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn an_empty_slug_with_a_remote_does_not_distinguish_hidden_from_missing(pool: PgPool) {
+    let t = teams_world(pool).await;
+    let resolve = |remote: &str| {
+        t.env.factory.resolve_repo(
+            Extension(parts(&t.bob)),
+            Parameters(tools::repos::RepoRefArgs {
+                repo: Some(String::new()),
+                remote: Some(remote.into()),
+            }),
+        )
+    };
+    let hidden = "git@github.com:acme/platform-repo.git";
+    let missing = "git@github.com:acme/zzz-missing.git";
+    let a = err(resolve(hidden).await).message.replace(hidden, "<R>");
+    let b = err(resolve(missing).await).message.replace(missing, "<R>");
+    assert_eq!(a, b);
+    assert!(
+        a.contains("from <R>."),
+        "names the remote it was given: {a}"
+    );
+}
+
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_lease_does_not_name_a_job_the_caller_cannot_see(pool: PgPool) {
+    use of_core::leases::LeasesExt;
+    use of_core::repos::ReposExt;
+    let t = teams_world(pool).await;
+    let hidden = t.jobs["platform-repo"].clone();
+    {
+        let mut tx = t.env.db.begin(t.owner.org_id).await.unwrap();
+        let repo = tx
+            .resolve_repo(&of_core::repos::RepoRef {
+                slug: Some("shared".into()),
+                remote: None,
+            })
+            .await
+            .unwrap();
+        tx.acquire_lease(
+            repo.id,
+            "branch:job",
+            t.owner.user_id,
+            None,
+            Some(&hidden.clone().into()),
+            None,
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+    }
+    let job_ids = |who: &Principal| {
+        let p = parts(who);
+        let f = &t.env.factory;
+        async move {
+            ok(f.list_leases(
+                Extension(p),
+                Parameters(tools::coord::RepoScopeArgs::default()),
+            )
+            .await)["leases"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|l| l["resource"] == "branch:job")
+                .map(|l| l["jobId"].clone())
+                .collect::<Vec<_>>()
+        }
+    };
+    assert_eq!(job_ids(&t.owner).await, [serde_json::json!(hidden)]);
+    assert_eq!(job_ids(&t.alice).await, [serde_json::json!(hidden)]);
+    assert_eq!(job_ids(&t.carol).await, [serde_json::Value::Null]);
+}
+
+/// Deleting a job cascades to its dependents' edges, so a caller may not delete
+/// a job that work they cannot see is waiting on.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn deleting_a_job_a_hidden_job_depends_on_is_refused(pool: PgPool) {
+    let t = teams_world(pool).await;
+    let f = &t.env.factory;
+    let (shared, hidden) = (t.jobs["shared"].clone(), t.jobs["platform-repo"].clone());
+    // The hidden job waits on the shared one.
+    ok(f.set_dependencies(
+        Extension(parts(&t.owner)),
+        Parameters(tools::jobs::SetDependenciesArgs {
+            job: hidden.clone(),
+            add: vec![shared.clone()],
+            remove: vec![],
+        }),
+    )
+    .await);
+    let delete = |who: &Principal| {
+        f.delete_job(
+            Extension(parts(who)),
+            Parameters(tools::jobs::JobArgs {
+                job: shared.clone(),
+            }),
+        )
+    };
+    let e = err(delete(&t.carol).await);
+    assert!(!e.message.contains(&hidden), "{}", e.message);
+    // Still there, still depended on.
+    ok(t.get_job(&t.carol, "shared").await);
+    // Someone who can see the dependent, or an admin, may.
+    ok(delete(&t.owner).await);
+}
+
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn only_admins_register_repos_over_mcp_and_conflicts_are_generic(pool: PgPool) {
+    let t = teams_world(pool).await;
+    let f = &t.env.factory;
+    let register = |who: &Principal, slug: &str, remote: &str| {
+        f.register_repo(
+            Extension(parts(who)),
+            Parameters(tools::repos::RegisterRepoArgs {
+                slug: slug.into(),
+                name: None,
+                remotes: vec![remote.into()],
+                default_branch: None,
+                default_agent_type: None,
+            }),
+        )
+    };
+    let e = err(register(&t.alice, "mine", "git@github.com:acme/mine.git").await);
+    assert_eq!(code_of(&e), "forbidden");
+    ok(register(&t.owner, "mine", "git@github.com:acme/mine.git").await);
+
+    // Attaching a remote a hidden repo owns is the same generic refusal as a
+    // slug conflict would be.
+    let e = err(f
+        .update_repo(
+            Extension(parts(&t.alice)),
+            Parameters(tools::repos::UpdateRepoArgs {
+                repo: Some("platform-repo".into()),
+                remote: None,
+                name: None,
+                default_branch: None,
+                default_agent_type: None,
+                active: None,
+                add_remotes: vec!["git@github.com:acme/growth-repo.git".into()],
+            }),
+        )
+        .await);
+    assert!(e.message.contains("unavailable"), "{}", e.message);
+    assert!(!e.message.contains("growth-repo"), "{}", e.message);
+}
+
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn list_repos_limit_counts_visible_repos(pool: PgPool) {
+    let t = teams_world(pool).await;
+    // `growth-repo` and `platform-repo` sort before `shared`; carol sees neither.
+    let out = ok(t
+        .env
+        .factory
+        .list_repos(
+            Extension(parts(&t.carol)),
+            Parameters(tools::repos::ListReposArgs {
+                include_inactive: false,
+                limit: Some(1),
+            }),
+        )
+        .await);
+    assert_eq!(out["repos"][0]["slug"], "shared");
+    assert_eq!(out["repos"].as_array().unwrap().len(), 1);
+}

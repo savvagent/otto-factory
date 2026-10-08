@@ -408,3 +408,49 @@ async fn a_teamless_job_in_a_team_repo_is_hidden_and_so_are_dependency_ids(pool:
     let r = get(&w, &w.rob, &format!("/api/orgs/acme/jobs/{shared_job}")).await;
     assert_eq!(r.body["dependsOn"], json!([late_job]));
 }
+
+/// A lease on a visible repo does not name a job the caller cannot see.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_lease_does_not_name_a_hidden_job(pool: PgPool) {
+    let w = world(pool).await;
+    let all = get(&w, &w.rob, "/api/orgs/acme/jobs").await;
+    let hidden = all
+        .body
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|j| j["title"] == "job in platform-repo")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    {
+        let shared = get(&w, &w.rob, "/api/orgs/acme/repos/shared").await;
+        let repo = shared.body["id"].as_str().unwrap().parse().unwrap();
+        let mut tx = w.h.db.begin(w.org).await.unwrap();
+        tx.acquire_lease(
+            repo,
+            "branch:job",
+            w.rob.user,
+            None,
+            Some(&hidden.clone().into()),
+            None,
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+    }
+    let job_of = |r: &common::Reply| {
+        r.body
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|l| l["resource"] == "branch:job")
+            .unwrap()["jobId"]
+            .clone()
+    };
+    let uri = "/api/orgs/acme/repos/shared/leases";
+    assert_eq!(job_of(&get(&w, &w.rob, uri).await), json!(hidden));
+    assert_eq!(job_of(&get(&w, &w.alice, uri).await), json!(hidden));
+    assert_eq!(job_of(&get(&w, &w.carol, uri).await), Value::Null);
+}

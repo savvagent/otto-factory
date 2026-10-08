@@ -107,7 +107,15 @@ impl Factory {
         let caller = self.caller(&parts)?;
         caller.require_scope(scope::REPOS_WRITE).mcp()?;
 
+        // The console registers repos for administrators only; so does this.
         let team = self.team_scope(&caller).await?;
+        if !team.is_all() {
+            return Err(rmcp::model::ErrorData::new(
+                rmcp::model::ErrorCode::INVALID_REQUEST,
+                "registering a repository needs an owner or admin of this organization",
+                Some(serde_json::json!({ "code": "forbidden", "retriable": false })),
+            ));
+        }
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "register_repo").await?;
         let repo = tx
@@ -146,15 +154,10 @@ impl Factory {
         let team = self.team_scope(&caller).await?;
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "list_repos").await?;
-        // The limit applies to what the caller may see, so the cut is made after
-        // the team filter rather than in SQL.
-        let limit = args.limit.unwrap_or(200).clamp(1, 1000);
-        let mut repos = tx
-            .list_repos(args.include_inactive, Some(1000))
+        let repos = tx
+            .list_repos_visible(args.include_inactive, args.limit, &team)
             .await
             .mcp()?;
-        repos.retain(|r| team.allows(r.team_id));
-        repos.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
         tx.commit().await.mcp()?;
 
         Ok(Json(out::ReposOut { repos }))

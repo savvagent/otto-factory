@@ -354,6 +354,9 @@ impl Factory {
             // Leases hang off repos: drop those of repos the caller cannot see.
             let hidden = tx.hidden_repo_ids(&team).await.mcp()?;
             leases.retain(|l| !hidden.contains(&l.repo_id));
+            of_core::leases::hide_unseen_jobs(&mut tx, &mut leases, &team)
+                .await
+                .mcp()?;
         }
         tx.commit().await.mcp()?;
 

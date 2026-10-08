@@ -141,9 +141,9 @@ pub(crate) fn redact_foreign_ids(team: &TeamScope, e: of_core::Error) -> of_core
         of_core::Error::TicketAlreadyLinked { .. } => of_core::Error::Invalid(
             "that ticket_ref is already linked to another job in this repo".into(),
         ),
-        of_core::Error::RemoteTaken(..) => of_core::Error::Invalid(
-            "that remote is already registered to another repo in this organization".into(),
-        ),
+        of_core::Error::RemoteTaken(..) | of_core::Error::RepoSlugTaken(..) => {
+            of_core::Error::Invalid("that slug or remote is unavailable".into())
+        }
         of_core::Error::DependencyCycle(..) => of_core::Error::Invalid(
             "that change would make a job depend on itself, directly or through a chain".into(),
         ),

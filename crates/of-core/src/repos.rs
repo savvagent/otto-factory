@@ -239,6 +239,15 @@ pub trait ReposExt {
         limit: Option<i64>,
     ) -> impl std::future::Future<Output = Result<Vec<Repo>>> + Send;
 
+    /// [`Self::list_repos`] restricted in SQL to what `scope` may see, so the
+    /// limit counts visible repos only.
+    fn list_repos_visible(
+        &mut self,
+        include_inactive: bool,
+        limit: Option<i64>,
+        scope: &TeamScope,
+    ) -> impl std::future::Future<Output = Result<Vec<Repo>>> + Send;
+
     fn get_repo_by_slug(
         &mut self,
         slug: &str,
@@ -363,6 +372,31 @@ impl ReposExt for Tx<'_> {
         Ok(normalized)
     }
 
+    async fn list_repos_visible(
+        &mut self,
+        include_inactive: bool,
+        limit: Option<i64>,
+        scope: &TeamScope,
+    ) -> Result<Vec<Repo>> {
+        let org = self.org();
+        let teams = scope
+            .restriction()
+            .map(|v| v.iter().map(|t| t.as_uuid()).collect::<Vec<uuid::Uuid>>());
+        let repos = sqlx::query_as(&format!(
+            "SELECT {REPO_COLS} FROM repos \
+             WHERE org_id = $1 AND ($2 OR active) \
+               AND ($4::uuid[] IS NULL OR team_id IS NULL OR team_id = ANY($4)) \
+             ORDER BY slug LIMIT $3"
+        ))
+        .bind(org)
+        .bind(include_inactive)
+        .bind(limit.unwrap_or(200).clamp(1, 1000))
+        .bind(teams)
+        .fetch_all(self.conn())
+        .await?;
+        Ok(repos)
+    }
+
     async fn list_repos(
         &mut self,
         include_inactive: bool,
@@ -415,7 +449,10 @@ impl ReposExt for Tx<'_> {
         match self.resolve_repo(r).await {
             Ok(repo) if scope.allows(repo.team_id) => Ok(repo),
             Ok(_) => Err(self.unresolved(&attempted, scope).await?),
-            Err(Error::RepoUnresolved { attempted, .. }) if !scope.is_all() => {
+            // The inner error names whatever it was given (an empty slug, say);
+            // report the wrapper's own name so a miss and a hidden repo read
+            // byte for byte the same.
+            Err(Error::RepoUnresolved { .. }) if !scope.is_all() => {
                 Err(self.unresolved(&attempted, scope).await?)
             }
             Err(e) => Err(e),
@@ -586,10 +623,9 @@ impl ReposInternal for Tx<'_> {
 
     async fn unresolved(&mut self, attempted: &str, scope: &TeamScope) -> Result<Error> {
         let known = self
-            .list_repos(false, None)
+            .list_repos_visible(false, None, scope)
             .await?
             .into_iter()
-            .filter(|r| scope.allows(r.team_id))
             .map(|r| r.slug)
             .collect::<Vec<_>>();
 

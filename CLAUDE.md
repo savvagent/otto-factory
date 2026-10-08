@@ -327,7 +327,10 @@ members, invites, teams, SSO, tokens, or usage. Those are the platform's, and
   messages follow the same rule through their team, repo, and job, lease ids of hidden repos are
   `lease_not_held`, and counts, dependency lists, and errors are computed or redacted for what the
   caller may see. Every tool or route that names a repo, a job, or a lease resolves it through the
-  scope, writes included.
+  scope, writes included. Accepted, not closed: `watch` wakes on any activity in the org (a timing
+  signal, it carries no data), and the per-org sequential job ids (`job-N`) reveal how many jobs
+  exist. The MCP scope is built from a fresh `member` lookup (10s cache), not the introspected role
+  (60s), so a demotion applies within seconds.
 - **The platform's webhooks are idempotent and signature-first.** `/platform/webhooks` verifies
   `Otto-Signature` (HMAC over timestamp and raw body, replay-bounded) before parsing anything;
   a bad signature is `401` and does nothing. A handled event, a repeat (the event id is recorded in the same transaction as its effects, `platform_events`;

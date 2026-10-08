@@ -602,6 +602,14 @@ pub trait JobsExt {
         scope: &TeamScope,
     ) -> impl std::future::Future<Output = Result<Vec<JobId>>> + Send;
 
+    /// Whether some job `scope` cannot see depends on `id`. Deleting `id` would
+    /// change that job.
+    fn has_hidden_dependents(
+        &mut self,
+        id: &JobId,
+        scope: &TeamScope,
+    ) -> impl std::future::Future<Output = Result<bool>> + Send;
+
     /// Ids of repos hidden from `scope`, for filtering lists of jobs in memory.
     fn hidden_repo_ids(
         &mut self,
@@ -1823,6 +1831,27 @@ impl JobsExt for Tx<'_> {
         .fetch_all(self.conn())
         .await?;
         Ok(found.into_iter().map(JobId).collect())
+    }
+
+    async fn has_hidden_dependents(&mut self, id: &JobId, scope: &TeamScope) -> Result<bool> {
+        if scope.is_all() {
+            return Ok(false);
+        }
+        let org = self.org();
+        let teams = scope
+            .restriction()
+            .map(|v| v.iter().map(|t| t.as_uuid()).collect::<Vec<uuid::Uuid>>());
+        Ok(sqlx::query_scalar(&format!(
+            "SELECT EXISTS (SELECT 1 FROM job_dependencies d \
+               JOIN jobs j ON j.org_id = d.org_id AND j.id = d.job_id \
+               WHERE d.org_id = $1 AND d.depends_on = $2 AND NOT {})",
+            job_visible_sql(3)
+        ))
+        .bind(org)
+        .bind(id)
+        .bind(teams)
+        .fetch_one(self.conn())
+        .await?)
     }
 
     async fn hidden_repo_ids(

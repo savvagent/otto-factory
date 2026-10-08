@@ -872,6 +872,14 @@ impl Factory {
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "delete_job").await?;
         ensure_job_visible(&mut tx, &team, &id).await?;
+        // Deleting cascades to whatever depends on this job. If that includes
+        // work the caller cannot see, it is not theirs to change.
+        if tx.has_hidden_dependents(&id, &team).await.mcp()? {
+            return Err(of_core::Error::Invalid(
+                "this job cannot be deleted by you; ask an organization admin".into(),
+            ))
+            .mcp();
+        }
         tx.delete_job(&id).await.mcp()?;
         tx.commit().await.mcp()?;
 
