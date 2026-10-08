@@ -524,7 +524,11 @@ pub fn catalog() -> Vec<Endpoint> {
             "The only assisted account recovery there is. Clears every passkey, ends \
              every session, and returns a one-time code the admin hands over — the \
              code is what stops the account being claimable by whoever reaches \
-             registration first. Only an owner may reset an owner.",
+             registration first. Only an owner may reset an owner. Because the \
+             account is not org-scoped, the caller must also hold at least the same \
+             authority over the member in every other org the member belongs to \
+             (owner where the member is an owner, admin otherwise); otherwise the \
+             reset is refused with 403.",
         ),
         Endpoint::delete("/api/orgs/{org}/members/{user}", orgs::remove_member)
             .auth(Auth::OrgAdmin)
