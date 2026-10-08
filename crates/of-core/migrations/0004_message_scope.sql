@@ -23,8 +23,11 @@ ALTER TABLE messages
   FOREIGN KEY (org_id, job_id) REFERENCES jobs (org_id, id) ON DELETE SET NULL (job_id);
 
 -- Backfill existing rows from what is still linked. Per org, with both the
--- explicit predicate and `app.org_id`, so it is correct whether or not the
--- migrating role bypasses row-level security (see CLAUDE.md).
+-- explicit predicate and `app.org_id` (see CLAUDE.md). Where the migrating role
+-- is subject to row-level security, the org loop itself finds no rows and this
+-- does nothing. That is not a hole: the live checks still apply, and
+-- `delete_job` folds a job's teams into its messages' `scope_teams` before it
+-- unlinks them, so this backfill is never what keeps a message scoped.
 DO $$
 DECLARE
   o uuid;

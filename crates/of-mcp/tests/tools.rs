@@ -4454,6 +4454,37 @@ async fn a_deleted_jobs_messages_keep_their_team_scope(pool: PgPool) {
     assert_eq!(t.inbox(&t.owner).await, ["about the job"]);
 }
 
+/// A message with no recorded scope (what `0004`'s backfill leaves when the
+/// migrating role is subject to row-level security and sees no rows) is still
+/// scoped once its job is deleted: deletion records the job's teams first.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn deleting_a_job_scopes_messages_the_backfill_missed(pool: PgPool) {
+    let t = teams_world(pool).await;
+    let job = t.jobs["growth-repo"].clone();
+    ok(t.send(&t.bob, "legacy", None, Some(&job), None, None).await);
+    {
+        let mut tx = t.env.db.begin(t.owner.org_id).await.unwrap();
+        sqlx::query("UPDATE messages SET scope_teams = '{}' WHERE org_id = $1")
+            .bind(t.owner.org_id)
+            .execute(tx.conn())
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    }
+
+    ok(t.env
+        .factory
+        .delete_job(
+            Extension(parts(&t.owner)),
+            Parameters(tools::jobs::JobArgs { job }),
+        )
+        .await);
+
+    assert_eq!(t.inbox(&t.carol).await, Vec::<String>::new());
+    assert_eq!(t.inbox(&t.alice).await, Vec::<String>::new());
+    assert_eq!(t.inbox(&t.bob).await, ["legacy"]);
+}
+
 /// A reply carries its thread's scope, and a reply cannot name a message the
 /// sender could not read: a hidden one and a missing one are the same refusal.
 #[sqlx::test(migrations = "../of-core/migrations")]

@@ -1546,6 +1546,23 @@ impl JobsExt for Tx<'_> {
 
     async fn delete_job(&mut self, id: &JobId) -> Result<()> {
         let org = self.org();
+        // The delete nulls `job_id` on the job's messages, which is the link
+        // their visibility was read through. Fold the job's teams into each
+        // message's `scope_teams` first, so they stay scoped. Sending already
+        // records them; this is what makes it hold for a message the
+        // `0004_message_scope` backfill could not reach (it finds no rows when
+        // the migrating role is subject to row-level security).
+        sqlx::query(
+            "UPDATE messages m SET scope_teams = ARRAY( \
+               SELECT DISTINCT t FROM unnest(m.scope_teams || ARRAY[j.team_id, r.team_id]) AS t \
+               WHERE t IS NOT NULL) \
+             FROM jobs j JOIN repos r ON r.org_id = j.org_id AND r.id = j.repo_id \
+             WHERE m.org_id = $1 AND m.job_id = $2 AND j.org_id = $1 AND j.id = $2",
+        )
+        .bind(org)
+        .bind(id)
+        .execute(self.conn())
+        .await?;
         let deleted: Option<Status> =
             sqlx::query_scalar("DELETE FROM jobs WHERE org_id = $1 AND id = $2 RETURNING status")
                 .bind(org)
