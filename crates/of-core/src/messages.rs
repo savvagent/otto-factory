@@ -356,10 +356,6 @@ impl MessagesExt for Tx<'_> {
                 body.len()
             )));
         }
-        // The same refusal `send_message` gives, before any SQL, so a replay
-        // carrying a label the policy refuses is refused rather than resolved.
-        crate::agent_label::validate(new.sender_label.as_deref())?;
-
         let org = self.org();
         let existing: Option<(i64, Vec<u8>)> = sqlx::query_as(
             "SELECT id, idempotency_payload_hash FROM messages \
@@ -370,9 +366,19 @@ impl MessagesExt for Tx<'_> {
         .fetch_optional(self.conn())
         .await?;
         let Some((id, stored_hash)) = existing else {
+            // Nothing to replay, so this call will insert: the agent label
+            // policy (#163) applies here, before the caller is metered, with
+            // the same refusal `send_message` itself gives.
+            crate::agent_label::validate(new.sender_label.as_deref())?;
             return Ok(None);
         };
 
+        // Deliberately not label-validated: a byte-for-byte retry of a call
+        // that committed before the policy existed must still get its original
+        // message back, not a refusal for a write that already happened. What
+        // it returns is safe to hand over — the label serializes through
+        // `agent_label::serialize_stored`, so a non-conforming one comes back
+        // as null.
         if stored_hash != message_idempotency_fingerprint(sender, new) {
             return Err(Error::IdempotencyKeyConflict {
                 key: key.to_string(),

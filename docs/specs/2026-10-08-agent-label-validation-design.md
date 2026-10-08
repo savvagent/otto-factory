@@ -50,6 +50,18 @@ with this section, this section wins.
    and a label made only of plain spaces is the only blank that means "no label". U+FFFC (object
    replacement) joins the deny-list in the same round.
 
+6. **A pre-policy keyed message still replays** (Copilot review, second pass). Item 1 first
+   validated the label in `find_replayed_message` *before* the lookup, so a byte-for-byte retry
+   of a keyed `send_message` that committed before this change, with a label the policy now
+   refuses, got `invalid_agent_label` instead of its original message, which broke the
+   idempotency promise for a write that had already happened. `find_replayed_message` now
+   validates only when there is nothing to replay (the call is about to insert). An exact
+   fingerprint match returns the stored message, whose label serializes as `null` (item 2).
+   `a_pre_policy_keyed_message_with_a_now_invalid_label_still_replays` plants such a row, with
+   its fingerprint computed by the public `idempotency::fingerprint`. That also pins the
+   fingerprint's shape. The Egyptian hieroglyph format-control range is extended to U+13455 in
+   the same round.
+
 Also from review: `claim_jobs` makes a single `sync_jobs_after_transition` call, passing the label
 stored on the first claimed job, instead of a per-job loop. A test pins the "128" written in the
 three tool descriptions to `MAX_LEN`.
