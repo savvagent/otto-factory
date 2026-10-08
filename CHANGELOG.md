@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.10.0](https://github.com/savvagent/otto-factory/compare/v0.9.0...v0.10.0) (2026-10-08)
+
+
+### ⚠ BREAKING CHANGES
+
+* console signs in through otto-platform (OAuth code + PKCE) ([#199](https://github.com/savvagent/otto-factory/issues/199))
+* become an otto-platform resource server ([#197](https://github.com/savvagent/otto-factory/issues/197))
+
+### Features
+
+* become an otto-platform resource server ([#197](https://github.com/savvagent/otto-factory/issues/197)) ([2562c67](https://github.com/savvagent/otto-factory/commit/2562c6791028ebcc84095d07b1940101d712de54))
+* console signs in through otto-platform (OAuth code + PKCE) ([#199](https://github.com/savvagent/otto-factory/issues/199)) ([73c7fbf](https://github.com/savvagent/otto-factory/commit/73c7fbf753a5de01ff7305f2522cc18b2f7b60b2))
+
+
+### Bug Fixes
+
+* **of-web:** tighten authorization for member passkey resets ([#196](https://github.com/savvagent/otto-factory/issues/196)) ([394f4f8](https://github.com/savvagent/otto-factory/commit/394f4f85d1d73d5ac8d6b60b59bdb8c1de411d94))
+
 ## [0.9.0](https://github.com/savvagent/otto-factory/compare/v0.8.0...v0.9.0) (2026-10-07)
 
 
