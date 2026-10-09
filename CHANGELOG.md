@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.12.0](https://github.com/savvagent/otto-factory/compare/v0.11.0...v0.12.0) (2026-10-09)
+
+
+### Features
+
+* **web:** add a back-to-otto link to the console header ([#213](https://github.com/savvagent/otto-factory/issues/213)) ([2968164](https://github.com/savvagent/otto-factory/commit/29681641d48db67c141974c42dbbf0c7d3215ca5))
+
+
+### Bug Fixes
+
+* **web:** test the back link's address logic and apply review follow-ups ([#220](https://github.com/savvagent/otto-factory/issues/220)) ([4ecdd2e](https://github.com/savvagent/otto-factory/commit/4ecdd2e935538d2b616072823dfe139d3bfbd8dc))
+* **web:** use one lease term in Spanish and one gender in Hindi ([#218](https://github.com/savvagent/otto-factory/issues/218)) ([b7156c8](https://github.com/savvagent/otto-factory/commit/b7156c84efb9582f5f448c866da9fe61683952e2))
+
 ## [0.11.0](https://github.com/savvagent/otto-factory/compare/v0.10.1...v0.11.0) (2026-10-09)
 
 
