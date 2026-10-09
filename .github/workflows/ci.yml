@@ -301,6 +301,14 @@ jobs:
       github.ref == 'refs/heads/master' &&
       needs.release-please.outputs.release_created == 'true'
     timeout-minutes: 10
+    # The `if:` above guards this job, not the token: it is text in a file any same-repo branch
+    # can edit, and that branch's own copy of this workflow would read a repository secret. The
+    # `production` environment admits only `master`, and FLY_API_TOKEN is its secret, so a
+    # branch run is refused the token however its workflow is written (#215) -- the same shape
+    # as release-please's `release` environment above.
+    environment:
+      name: production
+      url: https://otto-factory.savvagent.com
     permissions:
       contents: read
     steps:
