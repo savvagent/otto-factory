@@ -53,10 +53,15 @@ states, because the header renders outside the main-content gate.
 
 Visible text: `← otto` is too terse for a screen reader, so the link's visible text is
 "Back to otto" (`nav_back_to_platform`), with the arrow as an `aria-hidden` glyph. "otto" is a
-product name and stays verbatim in every locale. A `title` repeats the destination host so a
-hover shows where it goes. Styling matches the existing header controls (`rounded-md`,
-`text-muted`, `hover:bg-raised`), plus an explicit `focus-visible` outline. Same tab, no
+product name and stays verbatim in every locale. It is the only new catalog key. The link's
+`title` is the destination's bare host (not a translated sentence), so a hover shows where it
+goes. Styling matches the existing header controls (`rounded-md`, `text-muted`,
+`hover:bg-raised`); the focus ring is the global `:focus-visible` rule in `app.css`. Same tab, no
 `target="_blank"`: going back is navigation, not a side trip.
+
+Below the `sm` breakpoint the full label overflows a signed-in header at 375px, so the visible
+text shrinks to "otto" (the product name, identical in every locale) while
+`aria-label="Back to otto"` (translated) keeps the accessible name the same at every width.
 
 ## §2 Where the address comes from
 
@@ -86,8 +91,9 @@ already carries the address, so the extra request is not made.
 `web/src/lib/platform.test.ts`: `platformHome` accepts http(s), strips trailing slashes, refuses
 `javascript:`, relative, empty, and undefined; `discoverPlatformUrl` returns the first
 authorization server, and `undefined` for non-2xx, bad JSON, a missing/empty array, a non-http
-URL, and a thrown fetch. Visual check of the header signed in and signed out against
-`npm run dev`.
+URL, and a thrown fetch. Visual check of the header against `npm run dev` with Playwright,
+stubbing `/api/session` and `/.well-known/oauth-protected-resource` (signed in; signed out;
+session `500` with discovery up; both down, so no link; 375px width; keyboard focus).
 
 ## Assumptions
 

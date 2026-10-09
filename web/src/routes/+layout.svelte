@@ -9,7 +9,12 @@
   import { m } from '$lib/paraglide/messages';
   import { resolveAtBoot } from '$lib/locale';
   import { orgOf, signIn } from '$lib/login';
-  import { platformLink, type PlatformPage } from '$lib/platform';
+  import {
+    discoverPlatformUrl,
+    platformHome,
+    platformLink,
+    type PlatformPage
+  } from '$lib/platform';
   import { session } from '$lib/session.svelte';
   import { APP_VERSION } from '$lib/version';
   import Alert from '$lib/components/Alert.svelte';
@@ -102,6 +107,27 @@
   }
 
   /**
+   * Where "Back to otto" goes: the platform's console.
+   *
+   * A signed-in session already says where the platform is. A visitor without
+   * one — signed out, or whose session lookup failed — asks the open discovery
+   * document instead, once. Both come from the server at runtime; neither found
+   * means no link, never a guessed address.
+   */
+  let discovered = $state<string | undefined>(undefined);
+  /** Plain, not `$state`: a failed discovery must not re-run the effect. */
+  let discoveryStarted = false;
+
+  $effect(() => {
+    if (!session.ready || session.signedIn || discoveryStarted) return;
+    discoveryStarted = true;
+    void discoverPlatformUrl().then((url) => (discovered = url));
+  });
+
+  const platformHomeUrl = $derived(platformHome(session.platformUrl) ?? discovered);
+  const platformHost = $derived(platformHomeUrl ? new URL(platformHomeUrl).host : undefined);
+
+  /**
    * What the platform's console manages, in the order a person looks for it.
    * Identity is the platform's: this console links there rather than copying it.
    */
@@ -161,6 +187,25 @@
       {/if}
 
       <div class="ml-auto flex items-center gap-3 text-sm">
+        {#if platformHomeUrl}
+          <!--
+            The way back to where this person signed in. Same tab: returning is
+            navigation, not a side trip. The host is in `title` so a hover says
+            exactly where it goes; the arrow is decoration. On a phone the
+            visible text shrinks to the product name so the header does not
+            overflow; `aria-label` keeps the full name at every width.
+          -->
+          <a
+            href={platformHomeUrl}
+            aria-label={m.nav_back_to_platform()}
+            title={platformHost}
+            class="inline-flex items-center gap-1 rounded-md px-2.5 py-1 whitespace-nowrap text-muted transition hover:bg-raised hover:text-ink"
+          >
+            <span aria-hidden="true">←</span>
+            <span class="hidden sm:inline">{m.nav_back_to_platform()}</span>
+            <span class="sm:hidden">otto</span>
+          </a>
+        {/if}
         {#if session.info}
           <span class="hidden text-faint sm:inline"
             >{session.info.user.email ?? session.info.user.name ?? ''}</span

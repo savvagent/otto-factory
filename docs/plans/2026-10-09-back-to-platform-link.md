@@ -8,7 +8,7 @@ implements it exactly.
 
 ## Status — 2026-10-09
 
-⬜ Task 1 not started.
+✅ Task 1 implemented (pending review and merge).
 
 ## Global constraints
 
@@ -25,25 +25,25 @@ implements it exactly.
 | **Modify.** `web/src/lib/platform.ts` | `platformHome`, `discoverPlatformUrl` |
 | **Modify.** `web/src/lib/platform.test.ts` | their unit tests |
 | **Modify.** `web/src/routes/+layout.svelte` | the header link and the discovery effect |
-| **Modify.** `web/messages/{en,es,de,fr,it,hi}.json` | `nav_back_to_platform`, `nav_back_to_platform_title` |
+| **Modify.** `web/messages/{en,es,de,fr,it,hi}.json` | `nav_back_to_platform` |
 
-## Task 1 — Back-to-platform link ⬜
+## Task 1 — Back-to-platform link ✅
 
 **Files:** as above. **Interfaces:** produces `platformHome(url?: string): string | undefined`
 and `discoverPlatformUrl(fetcher?: typeof fetch): Promise<string | undefined>`.
 
-- [ ] Write failing tests in `platform.test.ts` for `platformHome` (http/https accepted, trailing
+- [x] Write failing tests in `platform.test.ts` for `platformHome` (http/https accepted, trailing
       slash stripped, path kept; `javascript:`, relative, empty, undefined refused) and
       `discoverPlatformUrl` (first `authorization_servers` entry; `undefined` on non-2xx, bad
       JSON, missing/empty array, non-http URL, thrown fetch).
-- [ ] `cd web && npx vitest run src/lib/platform.test.ts` — expect failures (missing exports).
-- [ ] Implement both in `platform.ts`. Re-run — expect pass.
-- [ ] Add the catalog keys to all six locales.
-- [ ] In `+layout.svelte`: `discovered = $state<string | undefined>()`; an `$effect` that, once
+- [x] `cd web && npx vitest run src/lib/platform.test.ts` — expect failures (missing exports).
+- [x] Implement both in `platform.ts`. Re-run — expect pass.
+- [x] Add the catalog keys to all six locales.
+- [x] In `+layout.svelte`: `discovered = $state<string | undefined>()`; an `$effect` that, once
       `session.ready && !session.signedIn` (or `fatal`), calls `discoverPlatformUrl()` once;
       `home = $derived(platformHome(session.platformUrl) ?? discovered)`; render the link first
       in the right-hand group when `home` is set.
-- [ ] Out-of-band: console bundle — `npm run check && npm run lint && npm test && npm run build`;
+- [x] Out-of-band: console bundle — `npm run check && npm run lint && npm test && npm run build`;
       confirm no platform host appears in `web/build` (`grep -r savvagent web/build` is empty).
-- [ ] Visual check signed out against `npm run dev` (Playwright screenshot).
-- [ ] Format (`npm run format`) and commit: `web: add a back-to-otto link to the console header`.
+- [x] Visual check signed out against `npm run dev` (Playwright screenshot).
+- [x] Format (`npm run format`) and commit: `web: add a back-to-otto link to the console header`.

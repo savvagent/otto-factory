@@ -275,6 +275,7 @@
   "nav_platform_usage": "Utilizzo e fatturazione",
   "nav_platform_account": "Impostazioni dell’account",
   "nav_platform_switch_org": "Cambia organizzazione",
+  "nav_back_to_platform": "Torna a otto",
   "nav_sign_in_stuck": "L’accesso non è stato completato. Se continua a succedere, controlla che il browser accetti i cookie di questo sito.",
   "login_error_access_denied": "L’accesso è stato annullato, oppure questo account non può usare la console.",
   "login_error_invalid_state": "Questo link di accesso è scaduto o non è stato avviato in questo browser. Accedi di nuovo.",
