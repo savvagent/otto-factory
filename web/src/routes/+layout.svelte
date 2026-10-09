@@ -115,16 +115,30 @@
    * means no link, never a guessed address.
    */
   let discovered = $state<string | undefined>(undefined);
-  /** Plain, not `$state`: a failed discovery must not re-run the effect. */
+  /** Plain, not `$state`: a once-only latch the effect does not need to track. */
   let discoveryStarted = false;
 
+  /**
+   * The session's platform address, scheme-checked. Every link into the
+   * platform is built from this, so the Manage menu gets the same defence in
+   * depth as the back link.
+   */
+  const platformBase = $derived(platformHome(session.platformUrl));
+
   $effect(() => {
-    if (!session.ready || session.signedIn || discoveryStarted) return;
+    if (platformBase) {
+      // Remember it, so signing out does not blank the link while nothing has
+      // changed about where the platform is — and nothing need be fetched.
+      discovered = platformBase;
+      discoveryStarted = true;
+      return;
+    }
+    if (!session.ready || discoveryStarted) return;
     discoveryStarted = true;
     void discoverPlatformUrl().then((url) => (discovered = url));
   });
 
-  const platformHomeUrl = $derived(platformHome(session.platformUrl) ?? discovered);
+  const platformHomeUrl = $derived(platformBase ?? discovered);
   const platformHost = $derived(platformHomeUrl ? new URL(platformHomeUrl).host : undefined);
 
   /**
@@ -163,27 +177,29 @@
           rather than a hand-rolled menu: it is keyboard- and screen-reader-
           operable for free, and needs no script to stay in sync.
         -->
-        <details class="relative text-sm">
-          <summary
-            class="cursor-pointer list-none rounded-md px-2.5 py-1 text-muted transition hover:bg-raised hover:text-ink"
-          >
-            {m.nav_manage()}
-          </summary>
-          <ul
-            class="absolute left-0 z-10 mt-1 w-56 rounded-md border border-edge bg-surface p-1 shadow-lg"
-          >
-            {#each platformPages as item (item.page)}
-              <li>
-                <a
-                  href={platformLink(session.info.platformUrl, item.page, session.info.org.slug)}
-                  class="block rounded px-2.5 py-1.5 text-muted transition hover:bg-raised hover:text-ink"
-                >
-                  {item.label()}
-                </a>
-              </li>
-            {/each}
-          </ul>
-        </details>
+        {#if platformBase}
+          <details class="relative text-sm">
+            <summary
+              class="cursor-pointer list-none rounded-md px-2.5 py-1 text-muted transition hover:bg-raised hover:text-ink"
+            >
+              {m.nav_manage()}
+            </summary>
+            <ul
+              class="absolute left-0 z-10 mt-1 w-56 rounded-md border border-edge bg-surface p-1 shadow-lg"
+            >
+              {#each platformPages as item (item.page)}
+                <li>
+                  <a
+                    href={platformLink(platformBase, item.page, session.info.org.slug)}
+                    class="block rounded px-2.5 py-1.5 text-muted transition hover:bg-raised hover:text-ink"
+                  >
+                    {item.label()}
+                  </a>
+                </li>
+              {/each}
+            </ul>
+          </details>
+        {/if}
       {/if}
 
       <div class="ml-auto flex items-center gap-3 text-sm">
@@ -193,7 +209,9 @@
             navigation, not a side trip. The host is in `title` so a hover says
             exactly where it goes; the arrow is decoration. On a phone the
             visible text shrinks to the product name so the header does not
-            overflow; `aria-label` keeps the full name at every width.
+            overflow; `aria-label` keeps the full name at every width. That
+            short form is a literal on purpose, not a catalog entry: "otto" is a
+            product name and stays verbatim in every locale.
           -->
           <a
             href={platformHomeUrl}

@@ -32,8 +32,14 @@ describe('platformHome', () => {
     expect(platformHome('http://localhost:8080/')).toBe('http://localhost:8080');
   });
 
-  it('keeps a path prefix', () => {
+  it('keeps a path prefix and drops any query or fragment', () => {
     expect(platformHome('https://x.example/otto/')).toBe('https://x.example/otto');
+    expect(platformHome('https://x.example/otto?next=/#top')).toBe('https://x.example/otto');
+  });
+
+  it('refuses a URL carrying credentials', () => {
+    expect(platformHome('https://user:pass@otto.example')).toBeUndefined();
+    expect(platformHome('https://user@otto.example')).toBeUndefined();
   });
 
   it('refuses anything that is not an absolute http(s) URL', () => {

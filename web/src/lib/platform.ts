@@ -48,7 +48,11 @@ export function platformHome(url: string | undefined): string | undefined {
     return undefined;
   }
   if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return undefined;
-  return parsed.href.replace(/\/+$/, '');
+  // Credentials in the configured URL would be printed into every visitor's
+  // DOM, signed out included; refuse rather than strip, so the misconfiguration
+  // shows up as a missing link instead of a working one that hides it.
+  if (parsed.username || parsed.password) return undefined;
+  return (parsed.origin + parsed.pathname).replace(/\/+$/, '');
 }
 
 /**

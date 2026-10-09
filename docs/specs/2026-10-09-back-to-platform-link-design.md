@@ -4,6 +4,30 @@
 > otto platform's console, built from addresses the server reports at runtime. Closes
 > savvagent/otto-factory#212.
 
+## Addendum: review round 1 (PR #213)
+
+Where the body below disagrees with this section, this section wins.
+
+1. **Every platform link is scheme-checked** (security review, Low). The Manage menu built hrefs
+   from the raw `platformUrl`. The layout now derives one `platformBase =
+   platformHome(session.platformUrl)` and builds both the back link and the Manage menu from it.
+   The menu is hidden when the base is `undefined`.
+2. **`platformHome` refuses a URL that carries credentials, and returns origin plus path only**
+   (security review, Low; code review). That way `user:pass@` can never reach every visitor's
+   DOM, and a query or fragment is dropped instead of being slash-trimmed.
+3. **Discovery runs whenever the session gives no usable address, not only when signed out**
+   (Rust review). A known session address is also remembered in `discovered`, so signing out
+   does not blank the link and needs no fetch (architect and code review).
+4. **The coupling is pinned by a test** (architect review, Important).
+   `the_console_and_the_discovery_document_name_the_same_platform` in
+   `crates/of-server/src/lib.rs` asserts that `of-mcp`'s `platform_url` (which feeds
+   `authorization_servers`) and `of-web`'s `platform_url` (which feeds `/api/session`) are the
+   same value. A follow-up could move the address into a documented unauthenticated answer if
+   the platform ever separates its authorization server from its console.
+5. **"Every page" is narrower in practice.** On a gated page, a signed-out visitor is
+   redirected to sign-in at once. So the signed-out link is really seen on `/`, `/docs/api`,
+   and the error states (`fatal`, "sign-in stuck").
+
 ## Brief
 
 > "otto-factory needs to provide a way in the UI to make it back to otto.savvagent.com"
