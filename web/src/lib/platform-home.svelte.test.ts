@@ -4,7 +4,13 @@ import { PlatformHome } from './platform-home.svelte';
 
 const PLATFORM = 'https://otto.example';
 
-/** A discovery the test resolves by hand, to order it against the session. */
+/**
+ * A discovery the test resolves by hand, to order it against the session.
+ *
+ * `answer` relies on `PlatformHome` having attached its `.then` before the test
+ * awaits the same promise: callbacks run in attachment order, so by the time
+ * `await promise` returns, the class's handler has already run.
+ */
 function pendingDiscovery() {
   let resolve!: (url: string | undefined) => void;
   const promise = new Promise<string | undefined>((r) => (resolve = r));
@@ -83,6 +89,17 @@ describe('PlatformHome', () => {
     home.observe(undefined, true);
     home.observe(PLATFORM, true);
     await pending.answer('https://elsewhere.example');
+    home.observe(undefined, true);
+    expect(home.url(undefined)).toBe(PLATFORM);
+  });
+
+  it('lets a session address replace one discovery found earlier', async () => {
+    const pending = pendingDiscovery();
+    const home = new PlatformHome(pending.discover);
+    home.observe(undefined, true);
+    await pending.answer('https://elsewhere.example');
+    home.observe(PLATFORM, true);
+    expect(home.url(PLATFORM)).toBe(PLATFORM);
     home.observe(undefined, true);
     expect(home.url(undefined)).toBe(PLATFORM);
   });
