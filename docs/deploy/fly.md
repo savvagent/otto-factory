@@ -303,9 +303,17 @@ split.
 Deploys are automatic: the `deploy` job in `.github/workflows/ci.yml` runs
 `flyctl deploy --remote-only -a otto-factory-mcp` when the release-please-maintained
 "chore: release X.Y.Z" PR is merged to `master` — i.e., when release-please has just cut a
-release — authenticated via the `FLY_API_TOKEN` repository secret (an app-scoped Fly deploy
-token, minted with `fly tokens create deploy -a otto-factory-mcp` and never valid for any
-other app on the `savvagent` org). A failed `flyctl deploy` leaves the previously-running
+release — authenticated via `FLY_API_TOKEN`, a secret of the GitHub `production` environment
+(an app-scoped Fly deploy token, minted with `fly tokens create deploy -a otto-factory-mcp` and
+never valid for any other app on the `savvagent` org). The environment admits only `master`, so
+no other branch's run can read the token, whatever its copy of the workflow says; never store it
+as a repository secret. That protection reaches exactly as far as the `master` ruleset does: code
+that lands on `master` runs with the token, so whoever can merge a change to
+`.github/workflows/` can use it (CODEOWNERS for that path is #126). To rotate: mint a new token
+with an expiry (`fly tokens create deploy -a otto-factory-mcp --expiry 8760h`), `gh secret set
+FLY_API_TOKEN --env production -R savvagent/otto-factory`, then revoke the old one (`fly tokens
+list -a otto-factory-mcp` / `fly tokens revoke <id>`) — revoking is the step that makes a
+rotation mean anything, not an optional tidy-up. A failed `flyctl deploy` leaves the previously-running
 machine serving traffic, since Fly's own rolling-deploy health check (`/readyz`) never cuts
 traffic to a machine that hasn't passed it.
 
