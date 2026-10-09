@@ -37,6 +37,12 @@ describe('platformHome', () => {
     expect(platformHome('https://x.example/otto?next=/#top')).toBe('https://x.example/otto');
   });
 
+  it('normalises what URL parsing normalises', () => {
+    expect(platformHome('http://[::1]:8080/')).toBe('http://[::1]:8080');
+    expect(platformHome('  https://otto.example/  ')).toBe('https://otto.example');
+    expect(platformHome('HTTPS://OTTO.EXAMPLE/')).toBe('https://otto.example');
+  });
+
   it('refuses a URL carrying credentials', () => {
     expect(platformHome('https://user:pass@otto.example')).toBeUndefined();
     expect(platformHome('https://user@otto.example')).toBeUndefined();

@@ -16,7 +16,7 @@ Where the body below disagrees with this section, this section wins.
    (security review, Low; code review). That way `user:pass@` can never reach every visitor's
    DOM, and a query or fragment is dropped instead of being slash-trimmed.
 3. **Discovery runs whenever the session gives no usable address, not only when signed out**
-   (Rust review). A known session address is also remembered in `discovered`, so signing out
+   (Rust review). A known session address is also remembered (`PlatformHome`'s last-known address), so signing out
    does not blank the link and needs no fetch (architect and code review).
 4. **The coupling is pinned by a test** (architect review, Important).
    `the_console_and_the_discovery_document_name_the_same_platform` in
@@ -101,8 +101,10 @@ non-2xx, bad JSON, missing field — returns `undefined`. Silence is right here,
 the link is a convenience, and its absence is exactly the specified fallback.
 
 The layout derives `home = platformHome(session.platformUrl) ?? discovered`. Discovery runs
-once, only when the session has resolved and is not signed in (or failed): a signed-in session
-already carries the address, so the extra request is not made.
+once, whenever the session has resolved without a usable address — signed out, failed, or an
+address `platformHome` refused (addendum item 3): a signed-in session already carries the
+address, so the extra request is not made. That decision lives in `PlatformHome`
+(`web/src/lib/platform-home.svelte.ts`), where it is unit-tested.
 
 ## Error handling & edge cases
 

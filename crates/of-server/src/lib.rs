@@ -280,6 +280,12 @@ mod tests {
     /// discovery document's `authorization_servers` (`of-mcp`'s `platform_url`,
     /// handed to `ResourceServer` in `of_mcp::router`) when not. A signed-out
     /// visitor is sent somewhere else the day those two stop being one value.
+    ///
+    /// This checks the two configs agree; it cannot see what either crate then
+    /// serves. `discovery_is_open_and_points_at_the_platform` (`tests/server.rs`)
+    /// reads the served document's `authorization_servers[0]` back against the
+    /// configured address, and `of-web`'s `console_login.rs` does the same for
+    /// `/api/session`'s `platformUrl`.
     #[test]
     fn the_console_and_the_discovery_document_name_the_same_platform() {
         let config = Config::for_test();

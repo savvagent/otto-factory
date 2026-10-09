@@ -9,12 +9,8 @@
   import { m } from '$lib/paraglide/messages';
   import { resolveAtBoot } from '$lib/locale';
   import { orgOf, signIn } from '$lib/login';
-  import {
-    discoverPlatformUrl,
-    platformHome,
-    platformLink,
-    type PlatformPage
-  } from '$lib/platform';
+  import { platformHome, platformLink, type PlatformPage } from '$lib/platform';
+  import { PlatformHome } from '$lib/platform-home.svelte';
   import { session } from '$lib/session.svelte';
   import { APP_VERSION } from '$lib/version';
   import Alert from '$lib/components/Alert.svelte';
@@ -114,9 +110,7 @@
    * document instead, once. Both come from the server at runtime; neither found
    * means no link, never a guessed address.
    */
-  let discovered = $state<string | undefined>(undefined);
-  /** Plain, not `$state`: a once-only latch the effect does not need to track. */
-  let discoveryStarted = false;
+  const home = new PlatformHome();
 
   /**
    * The session's platform address, scheme-checked. Every link into the
@@ -126,19 +120,10 @@
   const platformBase = $derived(platformHome(session.platformUrl));
 
   $effect(() => {
-    if (platformBase) {
-      // Remember it, so signing out does not blank the link while nothing has
-      // changed about where the platform is — and nothing need be fetched.
-      discovered = platformBase;
-      discoveryStarted = true;
-      return;
-    }
-    if (!session.ready || discoveryStarted) return;
-    discoveryStarted = true;
-    void discoverPlatformUrl().then((url) => (discovered = url));
+    home.observe(platformBase, session.ready);
   });
 
-  const platformHomeUrl = $derived(platformBase ?? discovered);
+  const platformHomeUrl = $derived(home.url(platformBase));
   const platformHost = $derived(platformHomeUrl ? new URL(platformHomeUrl).host : undefined);
 
   /**
@@ -164,9 +149,15 @@
 
       {#if session.info}
         <nav class="ml-2 flex gap-1 text-sm" aria-label={m.nav_organizations()}>
+          <!--
+            Truncated, with the full name in `title`: an org's name is the
+            customer's to choose, and a long one would otherwise push the
+            header past a phone's width.
+          -->
           <a
             href="/o/{session.info.org.slug}"
-            class="rounded-md bg-raised px-2.5 py-1 text-ink transition"
+            title={session.info.org.name}
+            class="block max-w-[10rem] truncate rounded-md bg-raised px-2.5 py-1 text-ink transition sm:max-w-xs"
           >
             {session.info.org.name}
           </a>
