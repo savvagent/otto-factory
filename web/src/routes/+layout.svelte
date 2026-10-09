@@ -119,7 +119,9 @@
    */
   const platformBase = $derived(platformHome(session.platformUrl));
 
-  $effect(() => home.observe(platformBase, session.ready));
+  $effect(() => {
+    home.observe(platformBase, session.ready);
+  });
 
   const platformHomeUrl = $derived(home.url(platformBase));
   const platformHost = $derived(platformHomeUrl ? new URL(platformHomeUrl).host : undefined);

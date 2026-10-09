@@ -145,8 +145,10 @@ async fn discovery_is_open_and_points_at_the_platform(pool: PgPool) {
     let doc = body_json(resource).await;
     assert_eq!(doc["resource"], RESOURCE);
     // The console's signed-out "Back to otto" link is built from exactly this
-    // value; `the_console_and_the_discovery_document_name_the_same_platform`
-    // pins the signed-in side (`/api/session`) to the same configured address.
+    // value. The signed-in side reads `/api/session`'s `platformUrl`:
+    // `the_console_and_the_discovery_document_name_the_same_platform` pins the
+    // config that feeds it, and `of-web`'s `console_login.rs` checks the served
+    // value against the platform.
     assert_eq!(doc["authorization_servers"][0], PLATFORM);
 
     // Not an authorization server any more, and says so as JSON.

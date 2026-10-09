@@ -16,7 +16,7 @@ Where the body below disagrees with this section, this section wins.
    (security review, Low; code review). That way `user:pass@` can never reach every visitor's
    DOM, and a query or fragment is dropped instead of being slash-trimmed.
 3. **Discovery runs whenever the session gives no usable address, not only when signed out**
-   (Rust review). A known session address is also remembered in `discovered`, so signing out
+   (Rust review). A known session address is also remembered (`PlatformHome`'s last-known address), so signing out
    does not blank the link and needs no fetch (architect and code review).
 4. **The coupling is pinned by a test** (architect review, Important).
    `the_console_and_the_discovery_document_name_the_same_platform` in

@@ -63,7 +63,7 @@ describe('PlatformHome', () => {
     expect(home.url(undefined)).toBeUndefined();
   });
 
-  it('lets the session address win over discovery, in either order', async () => {
+  it('lets the session address win over a late discovery failure', async () => {
     const pending = pendingDiscovery();
     const home = new PlatformHome(pending.discover);
     home.observe(undefined, true);
@@ -75,5 +75,15 @@ describe('PlatformHome', () => {
     home.observe(undefined, true);
     expect(home.url(undefined)).toBe(PLATFORM);
     expect(pending.discover).toHaveBeenCalledTimes(1);
+  });
+
+  it('lets the session address win over a late, different discovery answer', async () => {
+    const pending = pendingDiscovery();
+    const home = new PlatformHome(pending.discover);
+    home.observe(undefined, true);
+    home.observe(PLATFORM, true);
+    await pending.answer('https://elsewhere.example');
+    home.observe(undefined, true);
+    expect(home.url(undefined)).toBe(PLATFORM);
   });
 });
