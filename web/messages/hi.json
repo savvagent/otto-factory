@@ -243,7 +243,7 @@
   "repos_leases_note": "लीज़ सलाहकारी हैं। सर्वर git push नहीं देख सकता, इसलिए लीज़ टकराव को दिखाता है — रोकता नहीं।",
   "repos_leases_heading": "यहाँ कौन है",
   "repos_leases_info_label": "लीज़ के बारे में",
-  "repos_leases_info_detail": "लीज़ वह है जिसके ज़रिए list_leases और acquire_lease MCP टूल समन्वय करते हैं, और यदि कभी नवीनीकृत न हों तो अपने आप समाप्त हो जाती हैं।",
+  "repos_leases_info_detail": "लीज़ वह है जिसके ज़रिए list_leases और acquire_lease MCP टूल समन्वय करते हैं, और यदि कभी नवीनीकृत न हों तो अपने आप समाप्त हो जाते हैं।",
   "repos_trackers_heading": "इशू ट्रैकर",
   "repos_bindings_loading": "ट्रैकर बंधन पढ़े जा रहे हैं",
   "repos_bindings_failed": "इस रिपॉज़िटरी के ट्रैकर बंधन नहीं पढ़े जा सके।",
