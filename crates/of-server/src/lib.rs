@@ -275,6 +275,25 @@ mod tests {
         assert_eq!(mcp.encryption_key.as_deref(), Some("k"));
     }
 
+    /// The console's "Back to otto" link reads the platform's address from
+    /// `/api/session` (`of-web`'s `platform_url`) when signed in, and from the
+    /// discovery document's `authorization_servers` (`of-mcp`'s `platform_url`,
+    /// handed to `ResourceServer` in `of_mcp::router`) when not. A signed-out
+    /// visitor is sent somewhere else the day those two stop being one value.
+    #[test]
+    fn the_console_and_the_discovery_document_name_the_same_platform() {
+        let config = Config::for_test();
+        let platform = platform_client(&config).expect("platform client");
+        let mcp = mcp_config(platform, &config);
+        let web = web_config(&config);
+
+        assert_eq!(mcp.platform_url, config.platform_url);
+        assert_eq!(
+            mcp.platform_url.trim_end_matches('/'),
+            web.platform_url.trim_end_matches('/')
+        );
+    }
+
     #[test]
     fn api_prefixes_do_not_match_by_string_prefix_alone() {
         assert!(is_api_path("/api"));

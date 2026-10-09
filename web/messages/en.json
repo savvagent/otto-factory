@@ -273,6 +273,7 @@
   "nav_platform_usage": "Usage and billing",
   "nav_platform_account": "Account settings",
   "nav_platform_switch_org": "Switch organization",
+  "nav_back_to_platform": "Back to otto",
   "nav_sign_in_stuck": "Signing in did not complete. If this keeps happening, check that your browser accepts cookies for this site.",
   "login_error_access_denied": "Sign-in was cancelled, or this account is not allowed to use the console.",
   "login_error_invalid_state": "That sign-in link has expired or was not started in this browser. Please sign in again.",

@@ -273,6 +273,7 @@
   "nav_platform_usage": "Nutzung und Abrechnung",
   "nav_platform_account": "Kontoeinstellungen",
   "nav_platform_switch_org": "Organisation wechseln",
+  "nav_back_to_platform": "Zurück zu otto",
   "nav_sign_in_stuck": "Die Anmeldung wurde nicht abgeschlossen. Wenn das wiederholt passiert, prüfe, ob dein Browser Cookies für diese Seite akzeptiert.",
   "login_error_access_denied": "Die Anmeldung wurde abgebrochen, oder dieses Konto darf die Konsole nicht verwenden.",
   "login_error_invalid_state": "Dieser Anmeldelink ist abgelaufen oder wurde nicht in diesem Browser gestartet. Bitte melde dich erneut an.",
