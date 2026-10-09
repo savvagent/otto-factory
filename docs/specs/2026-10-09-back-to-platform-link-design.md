@@ -101,8 +101,10 @@ non-2xx, bad JSON, missing field — returns `undefined`. Silence is right here,
 the link is a convenience, and its absence is exactly the specified fallback.
 
 The layout derives `home = platformHome(session.platformUrl) ?? discovered`. Discovery runs
-once, only when the session has resolved and is not signed in (or failed): a signed-in session
-already carries the address, so the extra request is not made.
+once, whenever the session has resolved without a usable address — signed out, failed, or an
+address `platformHome` refused (addendum item 3): a signed-in session already carries the
+address, so the extra request is not made. That decision lives in `PlatformHome`
+(`web/src/lib/platform-home.svelte.ts`), where it is unit-tested.
 
 ## Error handling & edge cases
 
