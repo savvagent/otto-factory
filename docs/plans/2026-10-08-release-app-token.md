@@ -6,7 +6,7 @@ is now off, so a compromised workflow token cannot approve a PR — but the same
 release-please open its release PR with `GITHUB_TOKEN`. Give release-please its own credential,
 and keep that credential away from every branch but `master`.
 
-## Status — 2026-10-08
+## Status — 2026-10-09
 
 Task 1 ✅, exercised live. After the key was corrected, run 37860359372 updated release PR #207
 as the app (and CI ran on a release PR for the first time); merging #207 then cut `v0.11.0`,

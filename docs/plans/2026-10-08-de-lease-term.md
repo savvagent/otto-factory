@@ -2,8 +2,8 @@
 
 Goal: savvagent/otto-factory#183, shipped in #204. The German catalog translated "lease" as
 *Sperre* ("lock") — in copy whose point is that a lease is advisory, not a lock. This plan is
-recorded after the fact: #204 skipped it so as not to touch `docs/plans/` while #203 was editing
-it in parallel.
+recorded after the fact: #204 skipped it so as not to touch `docs/plans/` while #205 (for #203)
+was editing it in parallel.
 
 ## Status — 2026-10-08
 
