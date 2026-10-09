@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.11.0](https://github.com/savvagent/otto-factory/compare/v0.10.1...v0.11.0) (2026-10-09)
+
+
+### ⚠ BREAKING CHANGES
+
+* **of-core:** `claim_jobs`, `acquire_lease` and `send_message` refuse an `agent` label that is longer than 128 characters or contains control, line-break, non-space whitespace, invisible formatting or private-use characters (`invalid_agent_label`). A blank `agent` is now stored and returned as null instead of "". A stored label that fails this rule comes back as null in jobs, leases and messages. `AlreadyClaimed` and `LeaseHeld` now show the holder as `agent "<label>"` or `user <uuid>`.
+
+### Bug Fixes
+
+* **of-core:** bound and quote the agent label on claims, leases, and messages ([#208](https://github.com/savvagent/otto-factory/issues/208)) ([6a8c770](https://github.com/savvagent/otto-factory/commit/6a8c77065f7138d1e127d0090c903af1415a8b94)), closes [#163](https://github.com/savvagent/otto-factory/issues/163)
+* **web:** use Lease instead of Sperre for lease in the German catalog ([#204](https://github.com/savvagent/otto-factory/issues/204)) ([4005409](https://github.com/savvagent/otto-factory/commit/40054094fd3b0089816607bf3237fb9ab8e78a19)), closes [#183](https://github.com/savvagent/otto-factory/issues/183)
+
 ## [0.10.1](https://github.com/savvagent/otto-factory/compare/v0.10.0...v0.10.1) (2026-10-08)
 
 
