@@ -14,7 +14,10 @@
  * `docs/specs/2026-09-01-otto-factory-design.md` refuses on purpose.
  *
  * This Worker therefore proxies rather than redirects, and it is the reason the
- * split-origin option in the issue was never really an option.
+ * split-origin option in the issue was never really an option. The one
+ * exception is a rename's deprecation window: on a legacy host the console's
+ * pages are redirected to the canonical one (see `legacyRedirect`), because a
+ * session cookie bound to the old host is a session the new one cannot use.
  */
 
 /**
@@ -60,11 +63,90 @@ export interface Env {
   ASSETS: Fetcher;
   /** Where `of-server` actually listens, e.g. `https://otto-factory-mcp.fly.dev`. */
   OF_ORIGIN: string;
+  /**
+   * Deprecated public hostnames, comma separated — the same value as the
+   * origin's `OF_LEGACY_HOSTS`. Unset outside a rename's deprecation window,
+   * and then nothing is redirected.
+   */
+  OF_LEGACY_HOSTS?: string;
+  /**
+   * The canonical public origin a legacy host's browser traffic is sent to —
+   * the same value as the origin's `OF_PUBLIC_URL`. Read only when
+   * `OF_LEGACY_HOSTS` is set.
+   */
+  OF_PUBLIC_URL?: string;
+}
+
+/**
+ * Where a request on a legacy host is redirected, or `null` to serve it here.
+ *
+ * Only a browser's routes move: the console's pages, and `/auth/login`, so
+ * sign-in starts on — and its `__Host-` session cookie lands on — the canonical
+ * host. Everything else under an origin prefix keeps working where it is until
+ * the sunset, because a machine sent it: an agent on `/mcp` and `/.well-known`
+ * that would not follow a redirect with its bearer token, a tracker or the
+ * platform delivering a webhook that would not follow one at all, and the rest
+ * of `/auth` (`/auth/callback` must complete on the host that set the PKCE
+ * cookie). The origin stamps those responses with the deprecation notice.
+ *
+ * `308` rather than `301`: it keeps the method and is never turned into a `GET`.
+ */
+export function legacyRedirect(url: URL, legacyHosts: string[], canonical: string): string | null {
+  if (!legacyHosts.includes(url.hostname.toLowerCase())) {
+    return null;
+  }
+  if (belongsToOrigin(url.pathname) && url.pathname !== '/auth/login') {
+    return null;
+  }
+  return `${canonical}${url.pathname}${url.search}`;
+}
+
+function legacyHosts(env: Env): string[] {
+  return (env.OF_LEGACY_HOSTS ?? '')
+    .split(',')
+    .map((host) => host.trim().toLowerCase())
+    .filter((host) => host.length > 0);
+}
+
+/** `OF_PUBLIC_URL` as a bare origin, or `null` when it is not an http(s) URL. */
+function canonicalOrigin(env: Env): string | null {
+  try {
+    const url = new URL(env.OF_PUBLIC_URL ?? '');
+    return url.protocol === 'https:' || url.protocol === 'http:' ? url.origin : null;
+  } catch {
+    return null;
+  }
+}
+
+function misconfigured(description: string): Response {
+  return new Response(JSON.stringify({ error: 'misconfigured', error_description: description }), {
+    status: 500,
+    headers: { 'content-type': 'application/json' }
+  });
 }
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+
+    const legacy = legacyHosts(env);
+    if (legacy.length > 0) {
+      const canonical = canonicalOrigin(env);
+      if (!canonical) {
+        // Loud for the same reason as a missing OF_ORIGIN below: a legacy host
+        // with nowhere to send its browsers is a deployment fault, and guessing
+        // a destination would be worse than saying so.
+        return misconfigured(
+          'this Worker has OF_LEGACY_HOSTS but no usable OF_PUBLIC_URL, so it does not ' +
+            'know the canonical host to send a legacy host’s console to. Set OF_PUBLIC_URL ' +
+            'to the same https:// origin as of-server’s.'
+        );
+      }
+      const location = legacyRedirect(url, legacy, canonical);
+      if (location) {
+        return new Response(null, { status: 308, headers: { location } });
+      }
+    }
 
     if (!belongsToOrigin(url.pathname)) {
       // `not_found_handling: "single-page-application"` turns an unknown path
@@ -77,14 +159,9 @@ export default {
       // Loud, and in the one place it can be seen. Without this the failure is
       // a URL constructor throwing inside a proxy hop, which reaches the caller
       // as a bare 500 with nothing naming the cause.
-      return new Response(
-        JSON.stringify({
-          error: 'misconfigured',
-          error_description:
-            'this Worker has no OF_ORIGIN, so it does not know where of-server is. ' +
-            'Deploy with --env production, or pass --var OF_ORIGIN:https://…'
-        }),
-        { status: 500, headers: { 'content-type': 'application/json' } }
+      return misconfigured(
+        'this Worker has no OF_ORIGIN, so it does not know where of-server is. ' +
+          'Deploy with --env production, or pass --var OF_ORIGIN:https://…'
       );
     }
 
@@ -111,6 +188,16 @@ export default {
     } else {
       headers.delete('cf-connecting-ip');
     }
+
+    // The public host the caller used. The subrequest's `Host` is the origin's
+    // own name (a Worker cannot choose it), so this is the only way the origin
+    // can tell the canonical host from a legacy one and attach the deprecation
+    // notice. It is *set*, from the URL Cloudflare routed on, never passed
+    // through: a caller's own `X-Forwarded-Host` would otherwise decide which
+    // host the origin believes it was reached on. (The origin only lets that
+    // choose among hosts its operator configured, never the token audience, so
+    // a forged value is harmless there too — but it should not be possible.)
+    headers.set('x-forwarded-host', url.host);
 
     return fetch(
       new Request(target, {

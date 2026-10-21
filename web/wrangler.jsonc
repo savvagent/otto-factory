@@ -56,6 +56,11 @@
   "env": {
     "production": {
       "name": "otto-factory-console",
+      // The rename cutover (docs/deploy/fly.md, step 8) adds OF_PUBLIC_URL and
+      // OF_LEGACY_HOSTS here, with the same values as of-server's, so the old
+      // host's console pages and /auth/login 308 to the new host. They are
+      // absent until then on purpose: set early, they would redirect browsers
+      // to a host that is not serving yet.
       "vars": {
         "OF_ORIGIN": "https://otto-factory-mcp.fly.dev"
       }
