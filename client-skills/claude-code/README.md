@@ -193,7 +193,7 @@ steps succeeded or failed (see Known Gaps' note on why unconditional silence was
    personal access token) — this template assumes that connection exists; it does not
    configure one. See the root `docs/clients/matrix.md` and the console's connect page.
    The connection is added with
-   `claude mcp add --transport http otto-tower https://otto-tower.savvagent.com/mcp`, which
+   `claude mcp add --transport http otto-tower https://otto-factory.savvagent.com/mcp`, which
    exposes the tools as `mcp__otto-tower__*`.
    **The connection must carry at least the `repos:read` scope (for `resolve_repo`) and
    the `jobs:write` scope (for `add_job`, `claim_jobs`, and `complete_job`).** A

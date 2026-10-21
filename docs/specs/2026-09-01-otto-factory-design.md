@@ -18,7 +18,7 @@ complete jobs; to see what every other agent on the team is working on and where
 keep GitHub Issues / JIRA in sync with that work.
 
 ```
-claude mcp add --transport http otto-tower https://otto-tower.savvagent.com/mcp
+claude mcp add --transport http otto-tower https://otto-factory.savvagent.com/mcp
 ```
 
 That is the entire client-side install.

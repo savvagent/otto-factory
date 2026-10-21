@@ -16,7 +16,7 @@ otto-tower is a **resource server** of the otto platform (savvagent/otto-factory
 Two Fly apps, two databases on one Postgres instance, one direction of dependency:
 
 ```
-  otto-platform   (https://otto.savvagent.com)        otto-factory-mcp  (https://otto-tower.savvagent.com)
+  otto-platform   (https://otto.savvagent.com)        otto-factory-mcp  (https://otto-factory.savvagent.com)
   OAuth AS, login, passkeys, orgs, teams, billing     POST /mcp       bearer tokens, introspected at the platform
   db: otto_platform  ◄────────── same instance ─────► db: otto_factory  repos, jobs, leases, messages, trackers
         ▲   POST /oauth/introspect, /internal/*  ◄────────────────  per request (cached 60 s)
@@ -67,7 +67,7 @@ Non-secret settings (`OF_PUBLIC_URL`, `OF_RESOURCE_URI`, `OF_PLATFORM_URL`,
 
 ## Registering with the platform
 
-This is the first-time setup for a new deployment, written for the otto-tower URI. Production
+This is the setup as it stands on the live host. For a new deployment use the otto-tower URI. Production
 was registered under the old URI before the rename; it is moved by *The rename cutover* below
 (`resource rename-service`, `resource rename`), not re-registered.
 
@@ -78,17 +78,17 @@ credential `resource rotate-secret` issues for it. Registration is an **operator
 
 ```bash
 # On the platform (a machine with otto-platform-server and its OTTO_* environment):
-otto-platform-server resource register https://otto-tower.savvagent.com/mcp \
+otto-platform-server resource register https://otto-factory.savvagent.com/mcp \
   --name otto-tower \
   --scopes jobs:read,jobs:write,repos:read,repos:write,messages,trackers,org:admin \
   --default-scopes jobs:read,repos:read
 
-otto-platform-server resource rotate-secret https://otto-tower.savvagent.com/mcp
+otto-platform-server resource rotate-secret https://otto-factory.savvagent.com/mcp
 #   -> prints the introspection secret ONCE: set it as OF_INTROSPECTION_SECRET
 #      (`register` issues no credential; `rotate-secret` is also how to replace it)
 
-otto-platform-server resource set-webhook https://otto-tower.savvagent.com/mcp \
-  https://otto-tower.savvagent.com/platform/webhooks
+otto-platform-server resource set-webhook https://otto-factory.savvagent.com/mcp \
+  https://otto-factory.savvagent.com/platform/webhooks
 #   -> prints the webhook signing secret ONCE: set it as OF_PLATFORM_WEBHOOK_SECRET
 ```
 
@@ -117,7 +117,7 @@ is an operator step on the platform:
 # Run on the platform's machine (it needs the platform's OTTO_* environment):
 fly ssh console -a otto-platform -C \
   'otto-platform-server client register --name "otto-tower console" \
-     --redirect-uri https://otto-tower.savvagent.com/auth/callback --first-party'
+     --redirect-uri https://otto-factory.savvagent.com/auth/callback --first-party'
 #   -> prints the client_id: set it as OF_CONSOLE_CLIENT_ID
 ```
 
@@ -458,7 +458,7 @@ Order matters; the platform goes first.
    credential against the platform, and binds a port. Look for
    `the otto platform accepted this service's credential`.
 7. **Verify**: `GET /.well-known/oauth-protected-resource` names the platform in
-   `authorization_servers`; an MCP client pointed at `https://otto-tower.savvagent.com/mcp`
+   `authorization_servers`; an MCP client pointed at `https://otto-factory.savvagent.com/mcp`
    is sent to the platform to sign in, and `whoami` answers with the platform's records.
    `usage_outbox` drains (`SELECT count(*) FROM usage_outbox` goes to 0).
 8. **Webhooks**: delete a throwaway team at the platform and check `audit_events` for a
@@ -471,7 +471,7 @@ Order matters; the platform goes first.
     `OF_CONSOLE_CLIENT_ID` (see *Registering the console's sign-in client* above), then
     redeploy. The console is not usable until this is done: `/auth/login` answers
     `503 console_login_disabled` and the UI shows its sign-in failing. Verify by opening
-    `https://otto-tower.savvagent.com/` in a browser: **Sign in** goes to the platform,
+    `https://otto-factory.savvagent.com/` in a browser: **Sign in** goes to the platform,
     comes back to `/o/<your org>`, and the header shows your name and a **Manage** menu
     linking into the platform's console. Agents (`/mcp`) never depended on this step.
 
@@ -521,18 +521,19 @@ console links there. See the platform-split checklist for first-time setup and *
 
 ## The hostname
 
-The hostname below is the otto-tower one. Production serves it only after *The rename cutover*;
-`otto-factory.savvagent.com` is the deprecated legacy host (`OF_LEGACY_HOSTS`) until the sunset.
+The hostname below is production's live one. *The rename cutover* moves the product to
+`otto-tower.savvagent.com` and turns this one into the deprecated legacy host (`OF_LEGACY_HOSTS`)
+until the sunset; the URL-flip step (8a) then updates this section.
 
-The public hostname is **`otto-tower.savvagent.com`**, and the app answers on
+The public hostname is **`otto-factory.savvagent.com`**, and the app answers on
 `otto-factory-mcp.fly.dev` without advertising it. DNS is at Namecheap:
 
 ```
-A     otto-tower.savvagent.com  →  66.241.124.65             (Fly shared IPv4)
-AAAA  otto-tower.savvagent.com  →  2a09:8280:1::186:67e:0     (this app's dedicated IPv6)
+A     otto-factory.savvagent.com  →  66.241.124.65             (Fly shared IPv4)
+AAAA  otto-factory.savvagent.com  →  2a09:8280:1::186:67e:0     (this app's dedicated IPv6)
 ```
 
-`fly certs add otto-tower.savvagent.com -a otto-factory-mcp` issues and renews the
+`fly certs add otto-factory.savvagent.com -a otto-factory-mcp` issues and renews the
 certificate; nothing else in DNS is needed, because the dedicated IPv6 is what Fly
 validates ownership against.
 
@@ -543,7 +544,7 @@ does not invalidate anyone's credentials (it does require re-registering the res
 platform under the new URI, and re-authorizing clients).
 
 A later move behind a Cloudflare Worker keeps this same hostname: a Worker custom
-domain serves `otto-tower.savvagent.com` directly and proxies to the Fly app, so
+domain serves `otto-factory.savvagent.com` directly and proxies to the Fly app, so
 `OF_ORIGIN` becomes `otto-factory-mcp.fly.dev` and `OF_PUBLIC_URL` does not
 change. See `cloudflare.md`, whose `OF_ALLOWED_HOSTS` trap is exactly about that
 split.
