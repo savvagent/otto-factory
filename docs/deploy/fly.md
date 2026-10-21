@@ -237,7 +237,7 @@ working then.
 
 The platform release carries the guarded service rename (`resource rename-service`), the
 time-boxed URI alias (`resource rename`, `drop-alias`) and OAuth alias resolution. Nothing below
-works without it. Check `otto-platform-server resource describe $OLD` runs on the deployed binary.
+works without it. Check `otto-platform-server resource show $OLD` runs on the deployed binary (it is read-only; `resource describe` is not, since it replaces the consent-screen scope descriptions).
 
 ### 2. Release and deploy otto-factory (this repo)
 
@@ -287,15 +287,20 @@ ROLLBACK;
 (`event_name` is `otto_factory__<meter>`: the meter key with `-` turned into `_` and `/` into `__`.
 A meter containing `__` uses the escaped form instead, `otto_hfactory___<meter with _ as _u>`; see
 `otto-platform/crates/otto-billing/src/stripe/event_name.rs`.)
-Also run, on the platform's machine:
+Also run, on the platform's machine. Both commands are read-only: `show` prints the service, its
+declared meters, its aliases and the rename blocker counts, and `--dry-run` runs the real guard in a
+transaction that is always rolled back. Do **not** use `resource describe` here: it replaces the
+consent-screen scope descriptions.
 
 ```bash
-otto-platform-server resource describe $OLD      # service slug is otto-factory
-otto-platform-server resource list               # $NEW is not registered or aliased yet
+otto-platform-server resource show $OLD                                  # service slug is otto-factory; blockers all 0
+otto-platform-server resource rename-service $OLD otto-tower --dry-run   # reports it would rename, changes nothing
+otto-platform-server resource list                                       # $NEW is not registered or aliased yet
 ```
 
-**Verify:** all five counts are 0; `describe` shows the slug `otto-factory`; `list` has no entry for `$NEW`.
-**Stop if:** any count is non-zero (usage or Stripe data already exists under the old slug and
+**Verify:** all five counts are 0; `show` gives the slug `otto-factory` and zero blockers; the dry run
+says it would rename; `list` has no entry for `$NEW`.
+**Stop if:** any count is non-zero or the dry run refuses (usage or Stripe data already exists under the old slug and
 `rename-service` will refuse by design: resolve that at the platform first), or `$NEW` already appears.
 
 ### 4. Rename the billing service, immediately
@@ -370,6 +375,10 @@ otto-platform-server resource list      # confirm: $NEW canonical, $OLD alias un
 authorization codes from `$OLD` to `$NEW`. From here the running app (still configured with
 `OF_RESOURCE_URI=$OLD`) authenticates to the platform as the alias and keeps working with no
 configuration change.
+
+Run it at low traffic: it briefly holds the old and new URIs' usage-ledger locks, so ingest for this
+service (only) waits, and a batch caught mid-rename gets a retriable 503. A `busy` refusal changed
+nothing; run it again.
 
 **Verify:** `resource list` shows `$NEW` canonical and `$OLD` as a live alias with the sunset; the old
 host's `GET /readyz` and an MCP call still work.
@@ -514,6 +523,8 @@ otto-platform-server resource drop-alias https://otto-factory.savvagent.com/mcp
 ```
 
 The alias row is kept as a tombstone, so the old URI can never be registered to a different server.
+The drop also revokes any token or code still bound to the old URI string (the command prints the
+counts); clients still pointed at the old URL must re-add the server.
 Then clear `OF_LEGACY_HOSTS` and `OF_LEGACY_SUNSET` from `fly.toml`, redeploy, and remove the old
 hostname's DNS records (at the current DNS provider) and certificate
 (`fly certs remove otto-factory.savvagent.com -a otto-factory-mcp`). Only if the deployment is
