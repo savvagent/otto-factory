@@ -177,11 +177,51 @@ pub async fn receive(
         tx = of_core::platform_events::begin_live(&state.db, org_id, None)
             .await
             .map_err(ApiError::from)?;
-        let connection = get_connection(&mut tx, provider)
+        let fresh = get_connection(&mut tx, provider)
             .await
-            .map_err(ApiError::from)?
-            .ok_or_else(webhook_not_found)?;
-        apply(&mut tx, provider, &connection, &parsed, Some(&warmed)).await?;
+            .map_err(ApiError::from)?;
+        let Some(fresh) = fresh else {
+            tracing::warn!(
+                provider = %provider,
+                org_id = %org_id,
+                "connection disappeared between webhook passes; dropping the event"
+            );
+            return Err(webhook_not_found());
+        };
+        // The connection verified in pass 1 is the only one this request was
+        // authenticated against. If it was replaced or re-keyed in the gap,
+        // the verification no longer stands, so the event is dropped.
+        let still_verified = fresh.id == connection.id
+            && match provider {
+                Provider::Github => true,
+                Provider::Jira => fresh
+                    .encrypted_webhook_secret
+                    .as_deref()
+                    .is_some_and(|secret| {
+                        verify_and_parse(
+                            provider,
+                            &headers,
+                            query.as_deref(),
+                            raw_body,
+                            Verification::Jira {
+                                cipher: &state.cipher,
+                                encoded_secret: secret,
+                            },
+                        )
+                        .is_ok()
+                    }),
+            };
+        if !still_verified {
+            tracing::warn!(
+                provider = %provider,
+                org_id = %org_id,
+                verified_connection_id = %connection.id,
+                current_connection_id = %fresh.id,
+                "connection changed between webhook passes; dropping the event"
+            );
+            return Ok(Json(json!({ "ok": true })));
+        }
+        apply(&mut tx, provider, &fresh, &parsed, Some(&warmed)).await?;
     }
 
     tx.commit().await.map_err(ApiError::from)?;

@@ -154,6 +154,8 @@ struct Inner {
     lookup_calls: AtomicUsize,
     /// `GET /internal/orgs/{org}/usage-status` alone (also in `lookup_calls`).
     status_calls: AtomicUsize,
+    /// Milliseconds `usage-status` waits before answering (after counting).
+    status_delay_ms: AtomicU64,
     code_exchanges: AtomicUsize,
     refresh_calls: AtomicUsize,
     /// Lifetime, in seconds, of access tokens minted by the token endpoint.
@@ -198,6 +200,7 @@ impl MockPlatform {
             usage_calls: AtomicUsize::new(0),
             lookup_calls: AtomicUsize::new(0),
             status_calls: AtomicUsize::new(0),
+            status_delay_ms: AtomicU64::new(0),
             code_exchanges: AtomicUsize::new(0),
             refresh_calls: AtomicUsize::new(0),
             access_ttl_secs: AtomicI64::new(3600),
@@ -608,6 +611,13 @@ impl MockPlatform {
     /// that fail closed.
     pub fn set_status_down(&self, down: bool) {
         self.inner.status_down.store(down, Ordering::SeqCst);
+    }
+
+    /// Make `GET /internal/orgs/{org}/usage-status` wait `ms` before it
+    /// answers, so a test can change state while a lookup is in flight.
+    /// [`Self::status_calls`] already counts the call while it waits.
+    pub fn set_status_delay_ms(&self, ms: u64) {
+        self.inner.status_delay_ms.store(ms, Ordering::SeqCst);
     }
 
     /// Fail the next `n` usage POSTs with `503`, then recover.
@@ -1071,6 +1081,10 @@ async fn usage_status(State(inner): S, headers: HeaderMap, Path(org): Path<Uuid>
     }
     inner.lookup_calls.fetch_add(1, Ordering::SeqCst);
     inner.status_calls.fetch_add(1, Ordering::SeqCst);
+    let delay = inner.status_delay_ms.load(Ordering::SeqCst);
+    if delay > 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+    }
     if inner.status_down.load(Ordering::SeqCst) {
         return unavailable();
     }

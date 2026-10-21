@@ -9,7 +9,7 @@ use hmac::{Hmac, Mac};
 use http::{Request, StatusCode};
 use of_core::jobs::Tracker;
 use of_core::repos::NewRepo;
-use of_core::trackers::{upsert_binding, upsert_connection, Provider};
+use of_core::trackers::{delete_connection, upsert_binding, upsert_connection, Provider};
 
 use otto_tenant::ids::{OrgId, UserId};
 use sha2::Sha256;
@@ -481,6 +481,68 @@ async fn an_unverified_request_makes_no_status_lookup(pool: PgPool) {
     assert_eq!(missing.status(), StatusCode::NOT_FOUND);
     assert_eq!(forged_github.status(), StatusCode::NOT_FOUND);
     assert_eq!(h.platform.status_calls(), 0);
+}
+
+/// The connection a request was verified against is the one it is applied
+/// under. If it is replaced while the standing is being looked up, the
+/// verification no longer stands: the event is dropped, not applied.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_connection_replaced_during_the_standing_lookup_drops_the_event(pool: PgPool) {
+    let h = harness(pool.clone()).await;
+    let org = OrgId::new();
+    bind_github_repo(&h, org, INSTALLATION, "acme/api").await;
+    let job = open_issue(&h, org, INSTALLATION, "acme/api", 17).await;
+    claim(&h, org, &job, UserId::new()).await;
+    h.platform.set_status_delay_ms(800);
+
+    let closed = github_issue(
+        INSTALLATION,
+        "acme/api",
+        17,
+        "closed",
+        Some("completed"),
+        "2026-09-04T09:00:00Z",
+    );
+    let request = post_github_issue(&h, &closed);
+    let replace = async {
+        // Wait for pass 1 to reach the lookup, then swap the connection (a
+        // new row, so a new id) and point the repo binding at it.
+        while h.platform.status_calls() == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let mut tx = h.db.begin(org).await.unwrap();
+        let repo = tx.get_repo_by_slug("api").await.unwrap().expect("repo");
+        delete_connection(&mut tx, Provider::Github).await.unwrap();
+        let connection = upsert_connection(
+            &mut tx,
+            Provider::Github,
+            &INSTALLATION.to_string(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        upsert_binding(
+            &mut tx,
+            repo.id,
+            Some(connection.id),
+            Provider::Github,
+            "acme/api",
+            "trackers",
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+    };
+    let (response, ()) = tokio::join!(request, replace);
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        job_for(&h, org, "acme/api", 17).await.status,
+        of_core::jobs::Status::InProgress,
+        "the close must not be applied under a connection it was not verified against"
+    );
+    assert_eq!(completion_rows(&pool).await, vec![]);
 }
 
 /// Billing follows claim history, not the status at the close: a job an
