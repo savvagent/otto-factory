@@ -39,12 +39,27 @@ service's production slug is already set (`service=otto-factory`).
 
 - **`complete_job` is not the only way a job is completed.** An inbound tracker webhook that
   closes a linked ticket moves the job to Completed through `close_from_ticket`
-  (`of-web/src/routes/webhooks.rs:~248`, `of-core/src/jobs.rs:1458`). Metering only the MCP tool
-  would let an agent close the ticket instead and never be billed. Both paths meter: the webhook
-  handler writes the same `otto-factory/jobs_completed` row in its transaction when the close moves
-  a job to Completed (a close of an already-terminal job fails `WrongStatus` and rolls back, so
-  this is exactly once too). An inbound close is never refused (a webhook can't be meaningfully
-  turned away; the platform's block applies to the agent's `complete_job`).
+  (`of-web/src/routes/webhooks.rs`, `of-core/src/jobs.rs`). Metering only the MCP tool would let
+  an agent close the ticket instead and never be billed. Both paths record the completion through
+  one entry point, `of_billing::record_job_completed` (see "The meter row"), in the transaction
+  that completes the job; a redelivery or a close of an already-terminal job is dropped or fails
+  `WrongStatus` and rolls back, so each completion is recorded exactly once. An inbound close is
+  never refused (the tracker already closed the ticket), but it is **billed only when** the job
+  was ever claimed (`attempts > 0` on the row `close_from_ticket` returns), the close means done,
+  **and** the org is not blocked:
+  - A job never claimed is not billable work, whoever closed its ticket (on a public repo, an
+    outsider can close an issue). Its close is recorded as an unbilled completion.
+  - Claim history, not the status at the close. `attempts` is incremented by every claim and
+    never reset: `repend_job` and an expired claim both keep it. Deciding on the status at the
+    close would let an agent repend a worked job (or let its claim lapse) back to `pending` and
+    close the ticket to complete it unbilled.
+  - The hard stop holds on this path too. The webhook warms the platform status before opening
+    its transaction (failing open on a lookup failure, exactly like `complete_job`); when
+    `billable_blocked()`, the close is applied but recorded unbilled. Otherwise an agent refused
+    at `budget_exceeded` could close the issue (say, with a "Fixes #N" merge) and be billed
+    anyway. For a `payment_required` org this makes tracker closes free.
+  - The ticket-state to job-status mapping is unchanged (any GitHub close other than
+    `not_planned` completes the job); only billing depends on claim history.
 
 ## Assumptions
 
@@ -121,9 +136,17 @@ test `work_is_billable_and_looking_is_not` to assert everything is free.
 - **`of_billing::METER_JOBS_COMPLETED = "otto-factory/jobs_completed"`**, plus its declaration
   (display name "Jobs completed", unit "job").
 - **Recording.** Every tool already writes a usage row inside its own transaction via
-  `Factory::charge` before the work. `complete_job` calls a metered variant that writes its row
-  with `meter = METER_JOBS_COMPLETED`, `quantity = 1`, `billable = true`; every other row is
-  `billable = false`, no meter. Because the row is in the tool's transaction, a completion that
+  `Factory::charge` before the work. A completed job is recorded only through
+  `of_billing::record_job_completed(tx, user, source, billed)` (`of-billing/src/completion.rs`),
+  which owns what a completion writes: exactly one row per completion; when `billed`,
+  `meter = METER_JOBS_COMPLETED`, `quantity = 1`, `billable = true`; when not, an unmetered
+  `billable = false` row. `source` is a `CompletionSource` whose tool names are constants
+  (`complete_job`, `inbound_ticket_close`). `complete_job` reaches it through
+  `Meter::charge_completion` (refused instead when blocked, see Enforcement); the webhook calls
+  it directly. Nothing else writes a completion row, so `org_counters.jobs_completed_total`
+  always equals the number of completion rows (a parity test in `of-web/tests/webhooks_http.rs`
+  pins it). `Metered`'s fields are private: a row can carry only a meter its constructors make.
+  Every other row is `billable = false`, no meter. Because the row is in the tool's transaction, a completion that
   fails (`WrongStatus` on an already-completed job, `AlreadyClaimed`, a stale `expected_attempts`)
   rolls it back: exactly once on success, none on a retry or duplicate. Shipping is already
   idempotent per `event_id`.
@@ -133,20 +156,33 @@ test `work_is_billable_and_looking_is_not` to assert everything is free.
 
 ### Public-interface classification (dev skill Non-Negotiable Rule 6)
 
-All changes are **additive**, so no `!`/`BREAKING CHANGE` marker and no major release:
+This change is **deliberately breaking**. The squash commit carries a `BREAKING CHANGE:` footer
+(pre-1.0 with `bump-minor-pre-major`, so release-please cuts a minor release).
 
-- `whoami` / `usage` result (`of_billing::Status`): new fields added; every existing field is kept,
-  marked deprecated in its doc comment and JSON schema description.
-- MCP error codes: `budget_exceeded` and `payment_required` are added. `quota_exceeded` is no longer
-  produced: v0.10.0 always serves `hard_stop: false`, so it already could not fire against the
-  current platform; a client that branches on it simply never takes that branch, exactly as today.
-  Its variant is removed from the code.
-- `OF_ENFORCE_QUOTAS`: still accepted (a warning says it has no effect), so no deployment's config
-  becomes invalid.
+**Breaking:**
+
+- **`OF_ENFORCE_QUOTAS` flips meaning.** It used to switch enforcement on (default off); it is now
+  retired and enforcement is always on. A deployment that set it to `0` to keep enforcement off
+  now enforces the platform's block. The variable is still accepted (a warning says it has no
+  effect), so no deployment's config fails to load.
+- **`complete_job` gains a refusal mode.** It is refused with `budget_exceeded` or
+  `payment_required` (`retriable: false`) when the platform reports the org's billable work
+  blocked; in production it was never refused before. `quota_exceeded` is no longer produced
+  (v0.10.0 always serves `hard_stop: false`, so it could not fire against the current platform)
+  and its variant is removed.
+- **`enforced` in `whoami`/`usage` changes meaning.** It reported whether `OF_ENFORCE_QUOTAS` was
+  on; it is now always `true` (the platform's block is always enforced). Kept, marked deprecated.
+
+**Additive:**
+
+- `whoami` / `usage` result (`of_billing::Status`): new fields `meters`, `budget` (including
+  `reason`, so `spend_unavailable` is visible) and `blockedReason`; every existing field is kept,
+  the legacy bucket ones marked deprecated in their doc comments and JSON schema descriptions.
+- MCP error codes `budget_exceeded` and `payment_required` are added.
 - Usage events gain `meter`/`quantity` (the platform's optional fields); the migration is additive.
 
-`docs/clients/matrix.md` needs no change: no client-visible behaviour a client depends on changes
-shape.
+`docs/clients/matrix.md` needs no change: it records client conformance (OAuth, connection, tool
+calls), not error codes or result fields.
 
 ### Declaration at startup
 
@@ -172,14 +208,20 @@ minute with the number of rows waiting.
 - **When the lookup happens.** `Factory::tx` (`of-mcp/src/server.rs:267-271`) stops calling
   `meter.warm(org)` for every tool. `complete_job` calls `meter.warm(org)` itself, before
   `self.tx(...)`, so the platform round trip happens with no transaction and no pooled connection
-  held, and free tools never wait on the platform. Inside the transaction, the metered charge reads
-  the warmed cache. CLAUDE.md Metering rule 4 and the `meter.rs` module doc are reworded to match.
+  held, and free tools never wait on the platform. The tracker webhook does the same before its
+  transaction, to decide whether a close is billed. `warm` returns a `Warmed`, which only it can
+  construct, and the charge inside the transaction judges that value and makes no lookup: a
+  charge cannot be handed a bare `None` that means "allow" by accident (a failed lookup still
+  yields a `Warmed` that allows). CLAUDE.md Metering rule 4 and the `meter.rs` module doc are
+  reworded to match.
 - `BillingError::Blocked` maps `code()` to the platform's reason (`budget_exceeded` or
   `payment_required`; any other value, or `billable_blocked()` true with no `blocked_reason` →
   `budget_exceeded`), `retriable() = false`. The message
   says what happened, that free tools keep working, and that an owner raises the budget or adds a
   card in the otto console at `OF_UPGRADE_URL` when set, else `OF_PLATFORM_URL` (the console home;
-  the old default `{platform}/settings/billing` no longer exists on the v0.10.0 console).
+  the old default `{platform}/settings/billing` no longer exists on the v0.10.0 console). That
+  default is defined once, `of_billing::default_fix_url`, and used by both `of-server`'s config
+  and `of-mcp`'s.
   No per-org link: the charge path knows only the org id, and resolving the slug would put a
   platform call inside the transaction.
 - `of-mcp/src/error.rs` `from_billing`: the new variant maps like `QuotaExceeded` did (envelope
@@ -196,7 +238,8 @@ minute with the number of rows waiting.
 
 `of_billing::Status` (`meter.rs:292`) gains (camelCase, JSON schema) `meters: [{meter,
 displayName, unit, quantity}]` (this service's), `budget: {monthlyBudgetCents, spendCents,
-percentUsed, thresholdsReached, hardStop, blocked} | null` and `blockedReason: string | null`. The legacy fields (`includedOps`, `billableUsed`, `remaining`, `totalCalls`, `warning`,
+percentUsed, thresholdsReached, hardStop, blocked, reason} | null` (`reason` is the platform's
+`BudgetStatus.reason`: `budget_exceeded`, or `spend_unavailable` when spend is unknown) and `blockedReason: string | null`. The legacy fields (`includedOps`, `billableUsed`, `remaining`, `totalCalls`, `warning`,
 `hardStop`, `enforced`) stay, filled from the platform's legacy values as today, and are marked
 deprecated (`enforced` now reports `true`: the platform's blocked reason is always enforced). Tool descriptions (`org.rs:92-97`) and the server instructions (`server.rs:82-84`)
 say: coordination calls are free; a completed job is billed per the org's otto-factory meter;
@@ -220,7 +263,8 @@ new fields.
   narrowed further: only `complete_job` can be refused, and only on the platform's explicit
   `blocked_reason`.
 - **Append-only migrations**: one new file, `0005`.
-- **No SQL outside `of-core`**: the outbox SQL already lives in `of-billing`, as today; the new
+- **No SQL outside `of-core`**: the outbox SQL already lives in `of-billing`, as today (the
+  documented exception to Invariant 3, now written down in CLAUDE.md and the dev skill); the new
   migration is in `of-core/migrations`.
 - **Tenant isolation**: no new table; RLS on `usage_outbox` unchanged.
 - **Config never falls back quietly**: a retired variable is warned about, not silently ignored.
@@ -228,8 +272,13 @@ new fields.
 ## Migration
 
 `0005_usage_meter.sql`, additive only (two nullable columns and two CHECKs on two tables; both
-tables are small queues). Compatible both ways during rollout: the old release ignores the
-columns; the new release writes them only for `complete_job`.
+tables are small queues). The schema is compatible both ways (the old release's inserts leave the
+columns null), but **a metered row can lose its meter unit** while the previous release's shipper
+runs against the new schema: that shipper's claim `RETURNING` does not read `meter`/`quantity`,
+so it ships a metered row as a plain call and deletes it. That happens in a rolling-deploy
+overlap (production runs one machine, so the overlap is brief) or after a rollback. Prices are
+not set, so the cost today is zero. `docs/deploy/fly.md` says to drain or check
+`usage_outbox WHERE meter IS NOT NULL` before rolling back.
 
 ## Out-of-band
 
@@ -246,6 +295,10 @@ columns; the new release writes them only for `complete_job`.
 - **Platform down during declaration:** the shipper waits and retries; rows accumulate safely.
 - **Declaration refused:** logged at error, retried slowly; operator fixes the slug.
 - **Platform down during a `complete_job` lookup:** allowed (fail open) and still metered.
+- **Platform down during a webhook's lookup:** the close is billed as if not blocked (fail open).
+- **Inbound close of a never-claimed job:** completed, recorded unbilled.
+- **Inbound close of a job claimed, then repended or left to expire:** billed (it was worked).
+- **Inbound close for a blocked org:** applied, recorded unbilled.
 - **Duplicate/retried completion:** fails in `ensure_claim_held`; transaction rolls back; no row.
 - **Usage shipped before declaration** cannot happen: the shipper only starts after declaring.
 - **Old rows in the outbox at upgrade:** unmetered tool rows ship as before (free).
@@ -264,6 +317,13 @@ gates (`npm run check`, `lint`, `test`, `build`) for the fixture change.
   writes none; every other tool writes an unmetered free row; `budget_exceeded` and
   `payment_required` map to MCP errors with `retriable: false`; `whoami`/`usage` show the meter
   and budget; existing quota tests replaced.
+- `of-web/tests/webhooks_http.rs`: a claimed job closed as done writes one billed row and a
+  redelivery nothing more; a never-claimed job's close writes one unbilled row; a job claimed
+  then repended to pending and closed writes one billed row; a blocked org's close
+  (tripped budget) is applied and unbilled; `not_planned` writes no completion; a parity guard
+  over a mixed scenario (complete_job, claimed close, never-claimed close, `not_planned`, a blocked
+  org's refused `complete_job` and its close) asserts `jobs_completed_total` equals the number of
+  completion rows.
 - `of-server`: the shipper declares before shipping (MockPlatform records the declaration first);
   a refused declaration doesn't block startup; the retired flag warns.
 - Migration: fresh cluster applies cleanly; the CHECKs hold.
