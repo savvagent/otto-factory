@@ -19,10 +19,10 @@ pub enum BillingError {
         "{what}, so this job was not marked completed. The job and your claim on it are \
          unchanged: keep the claim alive with renew_claim while an owner fixes billing and \
          then call complete_job again, or hand the job back to the queue with repend_job. \
-         Every other otto-factory tool is free and keeps working: you can still queue, \
+         Every other otto-tower tool is free and keeps working: you can still queue, \
          claim, and inspect jobs. To complete jobs again, an owner of this organization \
          needs to {fix} in the otto console at {fix_url}. Changes made in the otto console \
-         can take up to a minute to reach otto-factory.",
+         can take up to a minute to reach otto-tower.",
         what = blocked_what(reason.as_deref()),
         fix = blocked_fix(reason.as_deref()),
     )]
@@ -87,7 +87,7 @@ fn blocked_what(reason: Option<&str>) -> &'static str {
             "this organization has no payment method in good standing and has used \
              past what its plan includes this month"
         }
-        _ => "this organization has reached its otto-factory budget for this month",
+        _ => "this organization has reached its otto-tower budget for this month",
     }
 }
 

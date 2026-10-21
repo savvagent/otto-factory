@@ -290,16 +290,16 @@ async fn a_handler_without_a_principal_blames_the_server(pool: PgPool) {
 
 /// `get_info` is answered from `ServerInfo::default()` if nobody sets
 /// `server_info` explicitly, and that default is `rmcp`'s own crate name and
-/// version — expanded in `rmcp`'s build context, not otto-factory's. Every
-/// client that completes `initialize` should see otto-factory identify
+/// version — expanded in `rmcp`'s build context, not otto-tower's. Every
+/// client that completes `initialize` should see otto-tower identify
 /// itself, not the library it is built on.
 #[sqlx::test(migrations = "../of-core/migrations")]
-async fn get_info_reports_otto_factorys_own_name_and_version(pool: PgPool) {
+async fn get_info_reports_otto_towers_own_name_and_version(pool: PgPool) {
     let (env, _caller) = env(pool).await;
 
     let info = env.factory.get_info();
 
-    assert_eq!(info.server_info.name, "otto-factory");
+    assert_eq!(info.server_info.name, "otto-tower");
     assert_eq!(info.server_info.version, env!("CARGO_PKG_VERSION"));
 }
 
@@ -2257,11 +2257,7 @@ async fn a_completed_job_writes_one_metered_row(pool: PgPool) {
 
     assert_eq!(
         outbox_rows(&env, "complete_job").await,
-        vec![(
-            true,
-            Some("otto-factory/jobs_completed".to_string()),
-            Some(1)
-        )]
+        vec![(true, Some("otto-tower/jobs_completed".to_string()), Some(1))]
     );
 }
 
@@ -2504,7 +2500,7 @@ async fn whoami_and_usage_report_the_completed_jobs_meter(pool: PgPool) {
         assert_eq!(
             status["meters"],
             serde_json::json!([{
-                "meter": "otto-factory/jobs_completed",
+                "meter": "otto-tower/jobs_completed",
                 "displayName": "Jobs completed",
                 "unit": "job",
                 "quantity": 1
@@ -2539,7 +2535,7 @@ async fn a_declared_meter_with_no_usage_reports_quantity_zero(pool: PgPool) {
         assert_eq!(
             status["meters"],
             serde_json::json!([{
-                "meter": "otto-factory/jobs_completed",
+                "meter": "otto-tower/jobs_completed",
                 "displayName": "Jobs completed",
                 "unit": "job",
                 "quantity": 0
@@ -2744,11 +2740,7 @@ async fn a_status_outage_lets_a_completion_through_and_still_meters_it(pool: PgP
 
     assert_eq!(
         outbox_rows(&env, "complete_job").await,
-        vec![(
-            true,
-            Some("otto-factory/jobs_completed".to_string()),
-            Some(1)
-        )]
+        vec![(true, Some("otto-tower/jobs_completed".to_string()), Some(1))]
     );
 }
 

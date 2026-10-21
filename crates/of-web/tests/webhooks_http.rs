@@ -373,7 +373,7 @@ fn billed_close() -> CompletionRow {
     CompletionRow {
         tool: "inbound_ticket_close".into(),
         billable: true,
-        meter: Some("otto-factory/jobs_completed".into()),
+        meter: Some("otto-tower/jobs_completed".into()),
         quantity: Some(1),
         user_id: None,
     }
@@ -741,7 +741,7 @@ async fn every_completion_writes_exactly_one_completion_row(pool: PgPool) {
     );
     assert!(
         rows.iter()
-            .all(|r| r.billable == (r.meter.as_deref() == Some("otto-factory/jobs_completed"))),
+            .all(|r| r.billable == (r.meter.as_deref() == Some("otto-tower/jobs_completed"))),
         "a row is billed exactly when it carries the meter: {rows:?}"
     );
 }

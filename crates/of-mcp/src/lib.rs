@@ -141,7 +141,7 @@ impl Config {
 ///   validated by the platform.
 ///
 /// The transport runs **stateless** (`stateful_mode: false`, `json_response:
-/// true`). otto-factory never pushes to a client — `watch` is a long poll the
+/// true`). otto-tower never pushes to a client — `watch` is a long poll the
 /// agent initiates — so a server-held session would buy nothing and cost the
 /// one thing a hosted multi-replica deployment cannot easily give it: every
 /// request from one client landing on the replica that holds its session.

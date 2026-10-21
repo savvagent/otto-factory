@@ -1,6 +1,6 @@
 //! `of-web` — the console API.
 //!
-//! Everything a human's browser asks of otto-factory *about its own domain*:
+//! Everything a human's browser asks of otto-tower *about its own domain*:
 //! repos, the queue, tracker connections, and this service's audit trail. Plus
 //! two machine endpoints, both authenticated by signature rather than by token:
 //! tracker webhooks (`/webhooks/{provider}`) and the otto platform's lifecycle

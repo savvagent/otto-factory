@@ -77,7 +77,7 @@ pub fn document(endpoints: &[Endpoint]) -> Value {
     json!({
         "openapi": "3.1.0",
         "info": {
-            "title": "otto-factory console API",
+            "title": "otto-tower console API",
             "version": env!("CARGO_PKG_VERSION"),
             "description":
                 "The console's REST surface: repos, the queue, tracker connections, and \
@@ -488,7 +488,7 @@ fn queue_schemas() -> Value {
             "type": "object",
             "description":
                 "One unit of coordinated work, always anchored to a repo. `metadata` \
-                 is opaque — otto-factory never reads it; it is where a customer's own \
+                 is opaque — otto-tower never reads it; it is where a customer's own \
                  skill keeps whatever its methodology needs.",
             "properties": {
                 "id": { "type": "string", "examples": ["job-42"] },

@@ -312,7 +312,7 @@ fn plan_name(plan: &str) -> String {
 pub struct Status {
     pub plan: String,
     /// This month's quantity for each meter this server bills on, such as
-    /// `otto-factory/jobs_completed`. A meter with no usage yet shows zero.
+    /// `otto-tower/jobs_completed`. A meter with no usage yet shows zero.
     pub meters: Vec<MeterStatus>,
     /// The monthly budget the org set for this service and where its spend
     /// stands, or null when it has set none.
