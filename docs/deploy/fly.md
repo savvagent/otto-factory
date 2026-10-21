@@ -276,10 +276,13 @@ SELECT
   (SELECT count(*) FROM org_meter_period_usage WHERE meter LIKE 'otto-factory/%')       AS org_meter_period_usage,
   (SELECT count(*) FROM stripe_meters          WHERE meter LIKE 'otto-factory/%')       AS stripe_meters,
   (SELECT count(*) FROM stripe_prices          WHERE meter LIKE 'otto-factory/%')       AS stripe_prices,
-  (SELECT count(*) FROM stripe_meter_outbox    WHERE event_name LIKE 'otto\_factory\_\_%') AS stripe_meter_outbox;
+  (SELECT count(*) FROM stripe_meter_outbox    WHERE event_name LIKE 'otto\_factory\_\_%'
+                                                OR event_name LIKE 'otto\_hfactory\_\_\_%') AS stripe_meter_outbox;
 ```
 
-(`event_name` is `otto_factory__<meter>`, the meter key with `-` turned into `_` and `/` into `__`.)
+(`event_name` is `otto_factory__<meter>`: the meter key with `-` turned into `_` and `/` into `__`.
+A meter containing `__` uses the escaped form instead, `otto_hfactory___<meter with _ as _u>`; see
+`otto-platform/crates/otto-billing/src/stripe/event_name.rs`.)
 Also run, on the platform's machine:
 
 ```bash
@@ -297,7 +300,9 @@ otto-platform-server resource list               # $NEW is not registered or ali
 otto-platform-server resource rename-service $OLD otto-tower
 ```
 
-Do this straight after step 3 and before anything else. The shipper's next retry declares
+Do this straight after step 3 and before anything else, and only while usage shipping is paused
+(it is, from step 2 until this step: the new binary's meter declaration is refused until the
+slug changes). A batch the platform accepted mid-rename could otherwise land under the old slug. The shipper's next retry declares
 `otto-tower/jobs_completed`, logs `declared usage meters`, and drains the queued rows (oldest
 first). Watch the backlog and the logs (`fly logs -a otto-factory-mcp`):
 
@@ -305,7 +310,8 @@ first). Watch the backlog and the logs (`fly logs -a otto-factory-mcp`):
 SELECT count(*), min(occurred_at), max(attempts), max(last_error) FROM usage_outbox;
 ```
 
-**Verify:** the command succeeded; `declared usage meters` appears in the log; the count falls to 0.
+**Verify:** the command succeeded; `declared usage meters` appears in the log; the count falls to 0;
+re-running the step 3 query on the platform database still gives five zeros.
 **Stop if:** `rename-service` errors (do not continue; the platform changed nothing, so the old name
 stays in force: find out why and retry), or the backlog does not drain / `last_error` stays
 non-empty after a few minutes.
