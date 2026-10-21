@@ -1,4 +1,4 @@
-# otto-factory
+# otto-tower
 
 A hosted, multi-tenant **MCP server for coordinating agentic coding work** across
 enterprises and teams.
@@ -12,7 +12,7 @@ every other agent on the team is working on and where; and to keep GitHub Issues
 sync with that work.
 
 ```bash
-claude mcp add --transport http factory https://mcp.<domain>/mcp
+claude mcp add --transport http otto-tower https://otto-tower.savvagent.com/mcp
 ```
 
 That is the entire client-side install.
@@ -28,7 +28,7 @@ org-owned entity, not a config string. Jobs belong to repos, agents announce whi
 they are in and which resource within it they hold (a branch, a staging slot, a migration
 lock), and the primitives that stop two agents colliding are repo-scoped.
 
-**It is a substrate, not a workflow.** otto-factory deliberately does less than its
+**It is a substrate, not a workflow.** otto-tower deliberately does less than its
 ancestor. It provides coordination primitives and ships no opinion about how work should be
 specified, planned, reviewed, or measured. Customers encode their own methodology in their
 own skills, commands, plugins, and subagents. When a capability could live either in the
@@ -44,9 +44,9 @@ Build order: [`docs/plans/2026-09-01-milestone-1.md`](docs/plans/2026-09-01-mile
 
 ## A resource server of the otto platform
 
-otto-factory does not sign anyone in and does not store who anyone is. The **otto platform**
+otto-tower does not sign anyone in and does not store who anyone is. The **otto platform**
 is the OAuth 2.1 authorization server and the system of record for identity and billing;
-otto-factory is one of the *resource servers* it protects, and keeps only its own domain —
+otto-tower is one of the *resource servers* it protects, and keeps only its own domain —
 repos, jobs, leases, messages, trackers — in its own database.
 
 ```
@@ -175,7 +175,7 @@ works perfectly.
 ## Deployment
 
 ```bash
-podman build -t otto-factory .
+podman build -t otto-tower .
 ```
 
 One image: the console bundle is built by a `node` stage, the binary by a `rust` stage, and
@@ -233,7 +233,7 @@ resource, set the secrets) is a checklist in [`docs/deploy/fly.md`](docs/deploy/
 **You pay for outcomes, not for looking or coordinating.** Every tool call is free, including
 `watch`, the 30-second long poll every connected agent calls continuously. What is billed is a
 completed job: a successful `complete_job`, or a linked ticket closed as done in the tracker,
-records one `otto-factory/jobs_completed` event. Every call is still recorded so pricing can
+records one `otto-tower/jobs_completed` event. Every call is still recorded so pricing can
 change later without losing history.
 
 Events are written to a local outbox in the same transaction as the work (so a failed call is
@@ -246,7 +246,7 @@ be asked, the call goes through. Console changes take up to a minute to apply.
 ## Relationship to dark-agent
 
 `dark-agent` is the single-organization ancestor — a TUI hosting a `claude`
-PTY plus a queue server authenticated by AWS SigV4 with an IAM-ARN allowlist. otto-factory
+PTY plus a queue server authenticated by AWS SigV4 with an IAM-ARN allowlist. otto-tower
 takes the server's ideas (job lifecycle, atomic claim, dependency graph, `LISTEN`/`NOTIFY`
 watch, message channel, repo registry), re-tenants them, and drops the rest. It is not a fork
 and shares no code.

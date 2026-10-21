@@ -1,7 +1,7 @@
 # Claude Code — session-start marker
 
-Registers a session-start marker job on otto-factory automatically whenever a Claude Code
-session starts fresh in a repo registered with otto-factory, **and whose git remote host you
+Registers a session-start marker job on otto-tower automatically whenever a Claude Code
+session starts fresh in a repo registered with otto-tower, **and whose git remote host you
 have explicitly opted into** (see Install — this is a required step, not optional). This is
 the reference implementation for `client-skills/` — read `../README.md` first for the
 behavior contract this template follows.
@@ -9,10 +9,10 @@ behavior contract this template follows.
 ## What this does — a two-actor design
 
 A `SessionStart` hook in Claude Code is a detached OS subprocess: it has no access to the
-session's own authenticated otto-factory MCP connection, and there is no supported way for
+session's own authenticated otto-tower MCP connection, and there is no supported way for
 an external process to borrow it. So this template splits into two actors:
 
-- **`session-start-hook.sh`** (deterministic, no otto-factory access): reads the repo's
+- **`session-start-hook.sh`** (deterministic, no otto-tower access): reads the repo's
   `origin` remote, the current branch, and today's UTC date; produces nothing at all unless
   the remote's host is explicitly opted into beforehand, rejects a remote that isn't shaped
   like an actual git URL, and never carries the branch name itself any further, only a hex
@@ -27,7 +27,7 @@ an external process to borrow it. So this template splits into two actors:
   fenced *data* block, not interpolated into the instruction steps themselves — see
   Security.
 - **The model**, processing that injected context on its own next turn (already
-  otto-factory-authenticated through its own normal tool access), follows the instruction:
+  otto-tower-authenticated through its own normal tool access), follows the instruction:
   `resolve_repo` → `add_job` → branch on status → `claim_jobs` → `complete_job`.
 
 This is **compliance-based, not deterministic** — nothing mechanically guarantees the model
@@ -99,14 +99,14 @@ flat character-class allowlist:
    or owner on its own.
 2. **The hook is inert by default, in every repo, until the developer opts a specific
    `host/owner` in — not merely a host.** Before anything else is built,
-   `session-start-hook.sh` reads `~/.claude/otto-factory-repos` (one `host/owner` pair per
+   `session-start-hook.sh` reads `~/.claude/otto-tower-repos` (one `host/owner` pair per
    line, e.g. `github.com/savvagent`) and compares it against the host and owner taken from
    the same grammar match in control 1 above — never from a second, independently-written
    parser (see the note on `extract_host` just below). Absent the file, or no matching
    `host/owner` pair in it, the script exits `0` with no stdout — no `additionalContext` is
    ever produced, so no untrusted byte ever reaches the model's context. This is what closes
    the gap `resolve_repo` cannot: `resolve_repo` is the one step that checks a repo is
-   actually registered with otto-factory, but it is the *model* that calls it, one turn
+   actually registered with otto-tower, but it is the *model* that calls it, one turn
    after the untrusted bytes are already in front of it — merely opening or cloning a repo
    is enough to reach that point otherwise. See Install below; **this file is a required
    setup step, not an optional hardening step.**
@@ -114,7 +114,7 @@ flat character-class allowlist:
    **This is owner-scoped, not host-scoped, on purpose — an earlier version of this
    allowlist held only by accident of what the realistic file content looks like.** A
    host-scoped allowlist's realistic content is one line reading `github.com`, since that is
-   the only host most developers' otto-factory-registered repos live on — but that one line
+   the only host most developers' otto-tower-registered repos live on — but that one line
    arms the hook in *every* github.com repo the developer opens: a coworker's fork, a PR
    checkout, a cloned dependency. That is exactly the population the gate exists to exclude,
    not a narrow slice of it. Scoping the allowlist to `host/owner` (the org or user that
@@ -170,9 +170,9 @@ steps succeeded or failed (see Known Gaps' note on why unconditional silence was
 3. Merge `settings-snippet.json`'s `hooks.SessionStart` entry, as-is, into
    `~/.claude/settings.json`. Its `command` already points at
    `"${HOME:?}"/.claude/hooks/session-start-hook.sh` — no path edit needed for this case.
-4. **Required, not optional: create `~/.claude/otto-factory-repos` and list the
+4. **Required, not optional: create `~/.claude/otto-tower-repos` and list the
    `host/owner` pair(s) you want this hook to act on, one per line** — the git host *and*
-   the org/user that actually owns your otto-factory-registered repos (e.g.
+   the org/user that actually owns your otto-tower-registered repos (e.g.
    `github.com/your-org`, or your self-hosted GitLab/Gitea equivalent). A bare hostname is
    not enough and is deliberately not what this file expects — see the Security section's
    note on why a host-scoped allowlist arms the hook in every repo on that host, including
@@ -184,13 +184,17 @@ steps succeeded or failed (see Known Gaps' note on why unconditional silence was
    in any repo, on any remote, including ones that would otherwise resolve correctly. This
    is deliberate: it is what keeps a repo you merely open (clone, check out a PR from, browse
    a coworker's fork of) from ever putting that repo's git state in front of the model before
-   anything has checked it has anything to do with your otto-factory org. Listing a
+   anything has checked it has anything to do with your otto-tower org. Listing a
    `host/owner` pair is not the same as trusting every repo that pair could own — see the
    Security section's note on this — but it is the boundary this template can enforce
-   locally, before any MCP call happens.
-5. Confirm your coding agent already has a working otto-factory MCP connection (OAuth or a
+   locally, before any MCP call happens. (This file was named `~/.claude/otto-factory-repos`
+   before the rename to otto-tower; the hook still reads that name when the new one is absent.)
+5. Confirm your coding agent already has a working otto-tower MCP connection (OAuth or a
    personal access token) — this template assumes that connection exists; it does not
    configure one. See the root `docs/clients/matrix.md` and the console's connect page.
+   The connection is added with
+   `claude mcp add --transport http otto-tower https://otto-tower.savvagent.com/mcp`, which
+   exposes the tools as `mcp__otto-tower__*`.
    **The connection must carry at least the `repos:read` scope (for `resolve_repo`) and
    the `jobs:write` scope (for `add_job`, `claim_jobs`, and `complete_job`).** A
    least-privilege connection that has either scope but not the other silently no-ops —
@@ -274,7 +278,7 @@ way, so the real reason for `startup`-only is the first one, not a defeat of ide
      that `agentType` is "never enforced — any agent may claim any job"). An agent that
      filters its own `ready`/`claim_jobs` calls by its own `agentType` will not see this job;
      one that queries with no `agentType` filter at all (as this repo's own
-     `otto-factory-worker` skill currently does) still sees and could still claim it. This
+     `otto-tower-worker` skill currently does) still sees and could still claim it. This
      is a partial mitigation for the pending-window gap below, not a guarantee — see Known
      Gaps.
    - `metadata`: `{"kind": "session-marker", "source": "client-skills/claude-code", "branch_digest": "<16 hex chars>"}`
@@ -310,10 +314,10 @@ calls themselves always appear in the normal tool-call transcript.
   the remote URL, `branch_digest` (a 16-hex-character SHA-256 prefix, including for a branch
   containing `/` — `docs/client-skills-directory`, this branch's own name), and date
   substituted in correctly, but only once a matching `host/owner` entry exists in
-  `~/.claude/otto-factory-repos`. Confirmed it exits `0` with no stdout for: not a git
+  `~/.claude/otto-tower-repos`. Confirmed it exits `0` with no stdout for: not a git
   repository (including a directory that fails `git rev-parse --is-inside-work-tree`), a git
   repository with no `origin` remote, a detached `HEAD`, an empty branch name, a missing or
-  non-matching `~/.claude/otto-factory-repos`, an unset `$HOME`, and a remote that does not
+  non-matching `~/.claude/otto-tower-repos`, an unset `$HOME`, and a remote that does not
   match the URL grammar. Confirmed the allowlist and URL grammar together, not just in
   isolation: real GitHub HTTPS, GitHub SSH (`git@host:path` and `ssh://git@host/path`), and a
   self-hosted-GitLab-shaped remote (nested groups, non-default port) all produce a marker
@@ -337,7 +341,7 @@ calls themselves always appear in the normal tool-call transcript.
   remote and the allowlist file — confirmed the case-insensitive comparison still matches.
   All four run against the actual script, not asserted from reading it.
 - **The job-lifecycle contract** (`resolve_repo` → `add_job` → `claim_jobs` → `complete_job`,
-  idempotent replay, and the claim fence): exercised directly against a live otto-factory
+  idempotent replay, and the claim fence): exercised directly against a live otto-tower
   server, following the injected instruction's steps by hand exactly as written, using the
   shipped digest-based idempotency key. `resolve_repo` resolved the remote to the
   `otto-factory` slug; `add_job` accepted the key
@@ -363,7 +367,7 @@ calls themselves always appear in the normal tool-call transcript.
   claimed, per this repo's own `docs/clients/matrix.md` convention: "not run" is an honest
   answer, a silent claim of "verified" when it wasn't is not. A future contributor with an
   interactive Claude Code session available can close this gap by: installing the hook
-  (including the required `~/.claude/otto-factory-repos` entry), starting a real session,
+  (including the required `~/.claude/otto-tower-repos` entry), starting a real session,
   and confirming via `list_jobs`/`stats` that exactly one `"session marker — do not claim"`
   job appears, completed, with no more than a one-line acknowledgement in the reply.
 
@@ -375,23 +379,23 @@ calls themselves always appear in the normal tool-call transcript.
   catches or corrects that.
 - **The `add_job` → `claim_jobs` window is real, and this repo's own worker can act in it —
   this template is unsafe to install alongside the current, unfiltered
-  `otto-factory-worker` skill, and that is not merely a note in passing.** `add_job` and
+  `otto-tower-worker` skill, and that is not merely a note in passing.** `add_job` and
   `claim_jobs` are separate MCP round-trips the model issues, not one atomic step, so a
   marker job sits `pending` — visible in the general `ready` pool — for at least one model
-  turn between them. `.github/skills/otto-factory-worker` claims jobs out of `ready` with no
+  turn between them. `.github/skills/otto-tower-worker` claims jobs out of `ready` with no
   `agentType` filter today, so it can win that race and dispatch real development work
   against what is meant to be an inert marker. Two things narrow this, neither of which
   closes it: the `agentType: "session-marker"` tag lets a worker that deliberately filters
   by its own `agentType` exclude this job (`ready`/`claim_jobs`'s own contract is "omit
   `agentType` to see every job regardless," so a caller with no filter — this repo's current
-  `otto-factory-worker` — still sees and can still claim it); and `title` now reads
+  `otto-tower-worker` — still sees and can still claim it); and `title` now reads
   `"session marker — do not claim"` rather than the earlier `"session marker"`, so a human
   or an agent that inspects a job before acting on it has a louder, harder-to-miss signal in
   the field it reads first. **Neither is a guarantee.** Closing this fully means updating
-  `otto-factory-worker` (or `of-mcp`) to filter by `agentType` — out of scope for this
+  `otto-tower-worker` (or `of-mcp`) to filter by `agentType` — out of scope for this
   change, which touches no `crates/*` or `.github/skills/` dispatch logic. Until that
   happens: **do not install this template in a working copy where an unfiltered
-  `otto-factory-worker` (or an equivalent no-`agentType`-filter claimer) is also active
+  `otto-tower-worker` (or an equivalent no-`agentType`-filter claimer) is also active
   against the same org's queue.**
 - **A hostile repo can still get a marker job recorded under a registered slug, attributed to
   the developer** — the residual of the original "marker jobs are attacker-forgeable audit
@@ -404,11 +408,11 @@ calls themselves always appear in the normal tool-call transcript.
   residual is not fully closed by this
   template alone — but what such a forged marker can *contain* is now bounded to a slug string
 and a 16-character hex digest, never free text, so the worst outcome is a misleading but
-   inert audit-log entry, not an instruction reaching a model with real otto-factory
+   inert audit-log entry, not an instruction reaching a model with real otto-tower
    credentials. Even that narrower residue is bounded by `resolve_repo`'s own exact-match
    semantics: the server matches a supplied remote by equality against the org's registered,
    normalized remotes (`crates/of-core/src/repos.rs`), so a path under an opted-in
-   `host/owner` that the org never registered — an attacker-cloned `otto-factory-clone.git`
+   `host/owner` that the org never registered — an attacker-cloned `otto-tower-clone.git`
    — resolves to nothing and the instruction chain stops there.
    `metadata.branch` is `branch_digest` (hex) for exactly this reason.
 - **A stray `in-progress` marker job** (from `add_job`/`claim_jobs` succeeding but
@@ -437,7 +441,7 @@ and a 16-character hex digest, never free text, so the worst outcome is a mislea
   the developer would see. This is a narrower version of the original gap, not a new one.
 - **Only one developer's marker is recorded per branch per UTC day.** `add_job`'s
   idempotency fingerprint includes `created_by`
-  (`crates/of-core/src/jobs.rs`'s `job_idempotency_fingerprint`), so a *second* otto-factory
+  (`crates/of-core/src/jobs.rs`'s `job_idempotency_fingerprint`), so a *second* otto-tower
   user who opens the same repo and branch the same day does not replay the first user's key:
   the differing fingerprint makes the `add_job` an `idempotency_key_conflict`, which
   rejects the call and — per the silent-failure contract — leaves that second developer
@@ -448,7 +452,7 @@ and a 16-character hex digest, never free text, so the worst outcome is a mislea
   server-side change, both out of scope here.
 - **Every genuinely new marker job is one billed completed job.** Coordination calls
   (`add_job`, `claim_jobs`) are free; only the successful `complete_job` records an
-  `otto-factory/jobs_completed` event. A same-day replay on the same branch is short-circuited at
+  `otto-tower/jobs_completed` event. A same-day replay on the same branch is short-circuited at
   step 3's `completed` branch before any claim or complete, so it bills nothing. This is an
   ongoing cost every session start incurs once installed, not a one-time setup cost. The
   `host/owner` allowlist also bounds how many *unwanted* repos can incur it at all: a repo whose
