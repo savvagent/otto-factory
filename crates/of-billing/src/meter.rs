@@ -143,7 +143,7 @@ impl Meter {
                 self.refuse_if_spent(status, unshipped, tool)?;
             }
         }
-        outbox::enqueue(tx, Some(user), tool, class.is_billable()).await?;
+        outbox::enqueue(tx, Some(user), tool, class.is_billable(), None).await?;
         Ok(Charge {
             billable: class.is_billable(),
         })
@@ -160,7 +160,7 @@ impl Meter {
     /// nothing, so refusing it on a hard-stop plan would refuse a call that is,
     /// from the bucket's perspective, free to serve.
     pub async fn record_replay(&self, tx: &mut Tx<'_>, user: UserId, tool: &str) -> Result<()> {
-        outbox::enqueue(tx, Some(user), tool, false).await?;
+        outbox::enqueue(tx, Some(user), tool, false, None).await?;
         Ok(())
     }
 

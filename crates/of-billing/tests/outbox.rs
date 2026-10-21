@@ -7,7 +7,7 @@
 use std::time::Duration;
 
 use of_billing::outbox::{self, ShipperConfig};
-use of_billing::{BillingError, Meter};
+use of_billing::{BillingError, Meter, Metered, METER_JOBS_COMPLETED};
 use of_testkit::MockPlatform;
 use otto_tenant::ids::{OrgId, UserId};
 use otto_tenant::Db;
@@ -506,4 +506,91 @@ async fn warm_looks_the_org_up_before_any_transaction(pool: PgPool) {
     let off = Meter::new(platform.client(), false, "https://x.test/billing");
     off.warm(OrgId::new()).await;
     assert_eq!(platform.lookup_calls(), 1);
+}
+
+// ------------------------------------------------------------------- meters
+
+async fn enqueue_metered(db: &Db, org: OrgId, user: UserId, metered: Option<&Metered>) {
+    let mut tx = db.begin(org).await.unwrap();
+    outbox::enqueue(&mut tx, Some(user), "complete_job", true, metered)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+}
+
+#[sqlx::test(migrator = "of_core::MIGRATOR")]
+async fn a_metered_row_ships_its_meter_and_quantity(pool: PgPool) {
+    let platform = MockPlatform::start().await;
+    let db = Db::from_pool(pool);
+    let (org, user) = (OrgId::new(), UserId::new());
+    enqueue_metered(&db, org, user, Some(&Metered::jobs_completed())).await;
+    enqueue_metered(&db, org, user, None).await;
+
+    outbox::ship_once(&db, &platform.client(), &cfg())
+        .await
+        .unwrap();
+
+    let counted = platform.counted_usage();
+    assert_eq!(counted.len(), 2);
+    let metered: Vec<_> = counted.iter().filter(|e| e.meter.is_some()).collect();
+    assert_eq!(metered.len(), 1);
+    assert_eq!(
+        metered[0].meter.as_deref(),
+        Some("otto-factory/jobs_completed")
+    );
+    assert_eq!(metered[0].quantity, Some(1));
+    let plain = counted.iter().find(|e| e.meter.is_none()).unwrap();
+    assert_eq!(plain.quantity, None, "an unmetered row carries no quantity");
+}
+
+#[sqlx::test(migrator = "of_core::MIGRATOR")]
+async fn a_rejected_metered_row_keeps_its_meter_and_quantity(pool: PgPool) {
+    let platform = MockPlatform::start().await;
+    let db = Db::from_pool(pool);
+    let (gone, user) = (OrgId::new(), UserId::new());
+    platform.reject_usage_for(gone.as_uuid());
+    enqueue_metered(&db, gone, user, Some(&Metered::jobs_completed())).await;
+
+    let report = outbox::ship_once(&db, &platform.client(), &cfg())
+        .await
+        .unwrap();
+    assert_eq!(report.rejected, 1);
+
+    let (meter, quantity): (Option<String>, Option<i64>) =
+        sqlx::query_as("SELECT meter, quantity FROM usage_outbox_rejected")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    assert_eq!(meter.as_deref(), Some(METER_JOBS_COMPLETED));
+    assert_eq!(quantity, Some(1));
+}
+
+/// A meter without a quantity (or the reverse) would ship a half-formed event;
+/// a zero or negative quantity would not be a count. The schema refuses both.
+#[sqlx::test(migrator = "of_core::MIGRATOR")]
+async fn the_schema_refuses_a_half_metered_or_non_positive_row(pool: PgPool) {
+    for (meter, quantity) in [
+        (Some("otto-factory/jobs_completed"), None),
+        (None, Some(1_i64)),
+        (Some("otto-factory/jobs_completed"), Some(0)),
+        (Some("otto-factory/jobs_completed"), Some(-1)),
+    ] {
+        for table in ["usage_outbox", "usage_outbox_rejected"] {
+            let sql = if table == "usage_outbox" {
+                "INSERT INTO usage_outbox (org_id, tool, billable, meter, quantity) \
+                 VALUES ($1, 't', true, $2, $3)"
+            } else {
+                "INSERT INTO usage_outbox_rejected \
+                   (event_id, org_id, tool, billable, occurred_at, reason, meter, quantity) \
+                 VALUES (gen_random_uuid(), $1, 't', true, now(), 'r', $2, $3)"
+            };
+            let res = sqlx::query(sql)
+                .bind(OrgId::new().as_uuid())
+                .bind(meter)
+                .bind(quantity)
+                .execute(&pool)
+                .await;
+            assert!(res.is_err(), "{table} accepted {meter:?}/{quantity:?}");
+        }
+    }
 }

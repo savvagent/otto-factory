@@ -41,25 +41,57 @@ use uuid::Uuid;
 
 use crate::error::Result;
 
+/// The platform meter key for a completed job.
+pub const METER_JOBS_COMPLETED: &str = "otto-factory/jobs_completed";
+
+/// A value meter and quantity carried on a usage row, beside the per-call record.
+///
+/// `quantity` must be positive; the schema refuses anything else.
+///
+/// ```
+/// let m = of_billing::Metered::jobs_completed();
+/// assert_eq!((m.meter, m.quantity), (of_billing::METER_JOBS_COMPLETED, 1));
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Metered {
+    /// The meter's key, `<service>/<meter>`.
+    pub meter: &'static str,
+    pub quantity: i64,
+}
+
+impl Metered {
+    /// One completed job.
+    pub const fn jobs_completed() -> Self {
+        Self {
+            meter: METER_JOBS_COMPLETED,
+            quantity: 1,
+        }
+    }
+}
+
 /// Record one metered call in the caller's transaction.
 ///
 /// Returns the call's `event_id`. The row commits or rolls back with `tx`, which
-/// is what makes "a failed call is not billed" true.
+/// is what makes "a failed call is not billed" true. `metered` adds a value
+/// meter and quantity to the row; `None` records a plain call.
 pub async fn enqueue(
     tx: &mut Tx<'_>,
     user: Option<UserId>,
     tool: &str,
     billable: bool,
+    metered: Option<&Metered>,
 ) -> Result<Uuid> {
     let org = tx.org();
     let event_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO usage_outbox (org_id, user_id, tool, billable) \
-         VALUES ($1, $2, $3, $4) RETURNING event_id",
+        "INSERT INTO usage_outbox (org_id, user_id, tool, billable, meter, quantity) \
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING event_id",
     )
     .bind(org)
     .bind(user)
     .bind(tool)
     .bind(billable)
+    .bind(metered.map(|m| m.meter))
+    .bind(metered.map(|m| m.quantity))
     .fetch_one(tx.conn())
     .await?;
     Ok(event_id)
@@ -110,6 +142,8 @@ struct Row {
     tool: String,
     billable: bool,
     occurred_at: chrono::DateTime<chrono::Utc>,
+    meter: Option<String>,
+    quantity: Option<i64>,
 }
 
 /// Claim up to a batch of due rows, ship them, and delete what the platform
@@ -131,7 +165,8 @@ pub async fn ship_once(
          WHERE id IN ( \
              SELECT id FROM usage_outbox WHERE next_attempt_at <= now() \
              ORDER BY id LIMIT $1 FOR UPDATE SKIP LOCKED) \
-         RETURNING id, event_id, org_id, user_id, tool, billable, occurred_at",
+         RETURNING id, event_id, org_id, user_id, tool, billable, occurred_at, \
+                   meter, quantity",
     )
     .bind(cfg.batch as i64)
     .bind(cfg.claim_lease.as_secs_f64())
@@ -147,19 +182,33 @@ pub async fn ship_once(
     let ids: Vec<i64> = ordered.iter().map(|r| r.id).collect();
     let events: Vec<UsageEvent> = ordered
         .iter()
-        .map(|r| UsageEvent {
-            event_id: r.event_id,
-            org_id: r.org_id,
-            user_id: r.user_id,
-            tool: r.tool.clone(),
-            billable: r.billable,
-            occurred_at: r.occurred_at,
-            // The platform takes the service from the calling resource server.
-            service: None,
-            meter: None,
-            quantity: None,
+        .map(|r| {
+            // The schema guarantees a positive quantity; a row that says
+            // otherwise is corruption, surfaced rather than shipped.
+            let quantity = r
+                .quantity
+                .map(|q| {
+                    u64::try_from(q).map_err(|_| {
+                        sqlx::Error::Decode(
+                            format!("usage row {} has a negative quantity {q}", r.id).into(),
+                        )
+                    })
+                })
+                .transpose()?;
+            Ok(UsageEvent {
+                event_id: r.event_id,
+                org_id: r.org_id,
+                user_id: r.user_id,
+                tool: r.tool.clone(),
+                billable: r.billable,
+                occurred_at: r.occurred_at,
+                // The platform takes the service from the calling resource server.
+                service: None,
+                meter: r.meter.clone(),
+                quantity,
+            })
         })
-        .collect();
+        .collect::<std::result::Result<_, sqlx::Error>>()?;
 
     match platform.ship_usage(&events).await {
         Ok(receipt) => {
@@ -196,8 +245,10 @@ pub async fn ship_once(
                 );
                 sqlx::query(
                     "INSERT INTO usage_outbox_rejected \
-                       (event_id, org_id, user_id, tool, billable, occurred_at, reason) \
-                     SELECT event_id, org_id, user_id, tool, billable, occurred_at, $2 \
+                       (event_id, org_id, user_id, tool, billable, occurred_at, reason, \
+                        meter, quantity) \
+                     SELECT event_id, org_id, user_id, tool, billable, occurred_at, $2, \
+                            meter, quantity \
                      FROM usage_outbox WHERE event_id = $1",
                 )
                 .bind(r.event_id)
