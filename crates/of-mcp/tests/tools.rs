@@ -30,7 +30,7 @@ use sqlx::PgPool;
 
 /// The audience the mock platform's default resource server is registered as.
 const RESOURCE: &str = of_testkit::RESOURCE_URI;
-const PUBLIC: &str = "https://mcp.otto-factory.test";
+const PUBLIC: &str = "https://mcp.otto-tower.test";
 const PLATFORM: &str = "https://otto.test";
 const REMOTE: &str = "git@github.com:acme/api.git";
 
@@ -1911,7 +1911,7 @@ async fn post_mcp(app: &axum::Router, token: Option<&str>) -> http::Response<axu
     let mut req = http::Request::builder()
         .method("POST")
         .uri("/mcp")
-        .header("host", "mcp.otto-factory.test");
+        .header("host", "mcp.otto-tower.test");
     if let Some(token) = token {
         req = req.header("authorization", format!("Bearer {token}"));
     }
@@ -1943,7 +1943,7 @@ async fn unauthenticated_requests_are_told_where_to_authenticate(pool: PgPool) {
         .to_string();
     assert!(
         challenge.contains(
-            r#"resource_metadata="https://mcp.otto-factory.test/.well-known/oauth-protected-resource""#
+            r#"resource_metadata="https://mcp.otto-tower.test/.well-known/oauth-protected-resource""#
         ),
         "{challenge}"
     );
@@ -1960,7 +1960,7 @@ async fn unauthenticated_requests_are_told_where_to_authenticate(pool: PgPool) {
         .oneshot(
             http::Request::builder()
                 .uri("/.well-known/oauth-protected-resource")
-                .header("host", "mcp.otto-factory.test")
+                .header("host", "mcp.otto-tower.test")
                 .body(axum::body::Body::empty())
                 .unwrap(),
         )
@@ -3443,7 +3443,7 @@ async fn call_tool(
             http::Request::builder()
                 .method("POST")
                 .uri("/mcp")
-                .header("host", "mcp.otto-factory.test")
+                .header("host", "mcp.otto-tower.test")
                 .header("authorization", format!("Bearer {token}"))
                 .header("content-type", "application/json")
                 .header("accept", "application/json, text/event-stream")

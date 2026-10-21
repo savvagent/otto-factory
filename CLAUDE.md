@@ -50,6 +50,15 @@ kept identifiers, and a new hit outside the list is a bug:
   repo slug and idempotency-key examples they were recorded with).
 - The `factory-scanner:` key prefix, still recognised for back-compat.
 - The `x-otto-factory-auth` OpenAPI extension key, emitted by the server and read by the console.
+- The applied migration `0001_baseline.sql` (its comments and the `trigger_label` default): an
+  applied migration is never edited.
+- The old meter key `otto-factory/jobs_completed` where it names what is being renamed away from:
+  `0006_meter_otto_tower.sql`, `crates/of-core/tests/meter_rename.rs`, the startup rewrite's
+  `of_core::retired_meters::RENAMED`, and the runbook's preflight and rollback in `docs/deploy/fly.md`.
+- The old `otto-factory-worker:trio-cleared:` marker named in `.github/skills/otto-tower-worker/SKILL.md`'s
+  transition note (it says that marker no longer counts).
+- The GitHub App's display name in the `trackers_not_connected_github` message (every locale): it is
+  what the App is called on GitHub until a human renames it (`savvagent/otto-factory#232`).
 
 ## The three constraints
 

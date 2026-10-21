@@ -583,7 +583,7 @@ mod tests {
         assert_eq!(event.issue.state_reason, None);
         let comment = event.issue.comment.as_ref().expect("comment present");
         assert_eq!(comment.id, "20002");
-        assert_eq!(comment.body, "Sync this change into otto-factory.");
+        assert_eq!(comment.body, "Sync this change into otto-tower.");
     }
 
     #[test]

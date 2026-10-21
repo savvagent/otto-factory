@@ -756,7 +756,7 @@ async fn a_cross_origin_write_with_the_cookie_is_refused_and_a_bearer_write_is_n
     for origin in [
         "https://evil.test",
         // A same-site sibling: SameSite=Lax does not stop it.
-        "https://otto.console.otto-factory.test",
+        "https://otto.console.otto-tower.test",
         "null",
     ] {
         let reply = post("nope").header("origin", origin).send(&h.router).await;
