@@ -50,6 +50,11 @@ service's production slug is already set (`service=otto-factory`).
   down).
 - `fail_job` is not metered (#222 risk item, owner Rob; the issue's approach names only
   `complete_job`).
+- Merging the release-please PR that ships this is an agent action through the repo's normal PR
+  gate (as for the other otto-* releases), not a hand-off.
+- The outbox SQL already lives in `of-billing` (an existing, documented exception to the dev
+  skill's Invariant 3, "every SQL statement lives in of-core"); this change extends it, it does not
+  add a new place for SQL.
 
 ## Goal & success criteria
 
@@ -116,6 +121,23 @@ test `work_is_billable_and_looking_is_not` to assert everything is free.
   sets them on `UsageEvent` (`service: None`: the platform takes the service from the caller),
   and carries them into the dead-letter `INSERT … SELECT`.
 
+### Public-interface classification (dev skill Non-Negotiable Rule 6)
+
+All changes are **additive**, so no `!`/`BREAKING CHANGE` marker and no major release:
+
+- `whoami` / `usage` result (`of_billing::Status`): new fields added; every existing field is kept,
+  marked deprecated in its doc comment and JSON schema description.
+- MCP error codes: `budget_exceeded` and `payment_required` are added. `quota_exceeded` is no longer
+  produced: v0.10.0 always serves `hard_stop: false`, so it already could not fire against the
+  current platform; a client that branches on it simply never takes that branch, exactly as today.
+  Its variant is removed from the code.
+- `OF_ENFORCE_QUOTAS`: still accepted (a warning says it has no effect), so no deployment's config
+  becomes invalid.
+- Usage events gain `meter`/`quantity` (the platform's optional fields); the migration is additive.
+
+`docs/clients/matrix.md` needs no change: no client-visible behaviour a client depends on changes
+shape.
+
 ### Declaration at startup
 
 `of-server/src/main.rs`: between `check_platform` (:63) and the shipper spawn (:92), the shipper
@@ -123,37 +145,48 @@ task first calls `PlatformClient::declare_meters(&[jobs_completed])`, retrying w
 transport or 5xx errors, and only then starts shipping. Server startup is never blocked on the
 platform (CLAUDE.md: "never requires the platform"). A refused declaration (`service_not_set`, a
 rejected meter) is logged at `error` and retried slowly; the outbox keeps the rows, so nothing is
-lost while it waits.
+lost while it waits. This intentionally holds back all shipping, free rows included, until the
+meter is declared: the alternative, shipping metered rows that the platform would reject as
+`unknown_meter`, moves them to the dead letter. While waiting, the task logs at `error` once a
+minute with the number of rows waiting.
 
 ### Enforcement
 
 `of-billing/src/meter.rs`:
 
 - Remove `refuse_if_spent`, `unshipped_billable` and `would_refuse`, and the `enforce` flag.
-- A metered charge (only `complete_job`) looks up the org's status through the existing cached,
+- A metered charge (only `complete_job`) checks the org's status through the existing cached,
   fail-open `status_for` (2 s timeout, failure remembered 5 s) and refuses when
   `status.billable_blocked()`, with `BillingError::Blocked { reason, … }`; on lookup failure it
   allows the call. Free charges never look anything up.
+- **When the lookup happens.** `Factory::tx` (`of-mcp/src/server.rs:267-271`) stops calling
+  `meter.warm(org)` for every tool. `complete_job` calls `meter.warm(org)` itself, before
+  `self.tx(...)`, so the platform round trip happens with no transaction and no pooled connection
+  held, and free tools never wait on the platform. Inside the transaction, the metered charge reads
+  the warmed cache. CLAUDE.md Metering rule 4 and the `meter.rs` module doc are reworded to match.
 - `BillingError::Blocked` maps `code()` to the platform's reason (`budget_exceeded` or
-  `payment_required`; any other value → `budget_exceeded`), `retriable() = false`. The message
+  `payment_required`; any other value, or `billable_blocked()` true with no `blocked_reason` →
+  `budget_exceeded`), `retriable() = false`. The message
   says what happened, that free tools keep working, and where an owner raises the budget or adds
   a card (`PlatformClient::usage_page_url`, falling back to `OF_UPGRADE_URL`).
 - `of-mcp/src/error.rs` `from_billing`: the new variant maps like `QuotaExceeded` did (envelope
   with `code` and `retriable`); `QuotaExceeded` is removed.
 - `sync_ticket`'s pre-check (`would_refuse`) is removed; it is free now.
 - `of-server/src/config.rs`: `OF_ENFORCE_QUOTAS` is no longer read into config; when present in
-  the environment, log a warning that it is retired. `.env.example` and `fly.md` updated.
+  the environment, log a warning that it is retired. `.env.example` and `fly.md` updated. The
+  `enforce_quotas` field and its wiring go too: `of-mcp/src/lib.rs:85,124,184`,
+  `of-server/src/lib.rs:166,236`, `of-server/src/main.rs:115`, `of-server/tests/server.rs:44`.
+- The dev skill's Load-Bearing Invariant 11 (`.github/skills/otto-factory-development/SKILL.md`)
+  still describes `OF_ENFORCE_QUOTAS`; it is updated alongside CLAUDE.md.
 
 ### `whoami` and `usage`
 
-`of_billing::Status` (`meter.rs:291`) is reshaped (camelCase, JSON schema) to the new model:
-`plan`, `periodStart`, `meters: [{meter, displayName, unit, quantity}]` (this service's),
-`budget: {monthlyBudgetCents, spendCents, percentUsed, thresholdsReached, hardStop, blocked} |
-null`, `blockedReason: string | null`, and `usagePage`. The legacy fields (`includedOps`,
-`billableUsed`, `remaining`, `totalCalls`, `warning`, `hardStop`, `enforced`) are dropped: they
-describe a model the platform no longer applies. This changes the `whoami`/`usage` MCP output
-shape (agents read it as data; no client parses it), which is named in the PR as a deliberate
-output change. Tool descriptions (`org.rs:92-97`) and the server instructions (`server.rs:82-84`)
+`of_billing::Status` (`meter.rs:292`) gains (camelCase, JSON schema) `meters: [{meter,
+displayName, unit, quantity}]` (this service's), `budget: {monthlyBudgetCents, spendCents,
+percentUsed, thresholdsReached, hardStop, blocked} | null`, `blockedReason: string | null`, and
+`usagePage`. The legacy fields (`includedOps`, `billableUsed`, `remaining`, `totalCalls`, `warning`,
+`hardStop`, `enforced`) stay, filled from the platform's legacy values as today, and are marked
+deprecated (`enforced` now reports `true`: the platform's blocked reason is always enforced). Tool descriptions (`org.rs:92-97`) and the server instructions (`server.rs:82-84`)
 say: coordination calls are free; a completed job is billed per the org's otto-factory meter;
 `usage` shows this month's completed jobs and budget.
 
@@ -193,6 +226,8 @@ columns; the new release writes them only for `complete_job`.
 - **Deploy:** this ships with the next release-please release (agent merges the release PR per the
   repo's process); migration `0005` applies at boot.
 - No new secret, scope or config key.
+- Recurring cost: none. No new infrastructure; the only extra platform traffic is one meter
+  declaration per boot and `complete_job`'s status lookups, bounded by the 60 s status cache.
 
 ## Error handling & edge cases
 
@@ -224,7 +259,8 @@ gates (`npm run check`, `lint`, `test`, `build`) for the fixture change.
 ## Risks & open questions
 
 - Should `fail_job` count as delivered value? Owner: Rob (#222). Not metered here.
-- The `whoami`/`usage` output shape changes. Agents read it as data; noted in the PR.
+- The `whoami`/`usage` output grows (additive); the deprecated legacy fields can be removed in a
+  later, explicitly breaking change.
 - Enforcement is now always on: a production org with a hard stop set and spend past its budget
   will have `complete_job` refused. That is the epic's intent; with no prices set, spend is zero
   and nothing is refused until prices exist.
