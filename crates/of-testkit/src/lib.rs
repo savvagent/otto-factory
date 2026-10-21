@@ -229,6 +229,11 @@ impl MockPlatform {
             total_count: 0,
             included_ops: 500,
             hard_stop: true,
+            features: Default::default(),
+            service: None,
+            meters: Vec::new(),
+            budget: None,
+            blocked_reason: None,
         });
     }
 
@@ -315,6 +320,11 @@ impl MockPlatform {
             total_count: 0,
             included_ops: 0,
             hard_stop,
+            features: Default::default(),
+            service: None,
+            meters: Vec::new(),
+            budget: None,
+            blocked_reason: None,
         });
         entry.billable_count = billable;
         entry.total_count = billable;
@@ -369,6 +379,11 @@ impl MockPlatform {
                 total_count: 0,
                 included_ops: 500,
                 hard_stop: true,
+                features: Default::default(),
+                service: None,
+                meters: Vec::new(),
+                budget: None,
+                blocked_reason: None,
             });
         }
     }

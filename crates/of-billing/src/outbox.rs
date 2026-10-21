@@ -154,6 +154,10 @@ pub async fn ship_once(
             tool: r.tool.clone(),
             billable: r.billable,
             occurred_at: r.occurred_at,
+            // The platform takes the service from the calling resource server.
+            service: None,
+            meter: None,
+            quantity: None,
         })
         .collect();
 

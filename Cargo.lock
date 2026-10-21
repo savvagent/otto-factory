@@ -1431,8 +1431,8 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
 name = "otto-resource"
-version = "0.2.1"
-source = "git+https://github.com/savvagent/otto-platform?rev=a220608fa269321e4b8777e1ba88c0ef0bbd659d#a220608fa269321e4b8777e1ba88c0ef0bbd659d"
+version = "0.10.0"
+source = "git+https://github.com/savvagent/otto-platform?rev=bfda55e155be8985761850a7c42980cc926fd4cb#bfda55e155be8985761850a7c42980cc926fd4cb"
 dependencies = [
  "chrono",
  "hex",
@@ -1449,16 +1449,18 @@ dependencies = [
 
 [[package]]
 name = "otto-tenant"
-version = "0.2.1"
-source = "git+https://github.com/savvagent/otto-platform?rev=a220608fa269321e4b8777e1ba88c0ef0bbd659d#a220608fa269321e4b8777e1ba88c0ef0bbd659d"
+version = "0.10.0"
+source = "git+https://github.com/savvagent/otto-platform?rev=bfda55e155be8985761850a7c42980cc926fd4cb#bfda55e155be8985761850a7c42980cc926fd4cb"
 dependencies = [
  "aes-gcm",
  "base64",
  "chrono",
+ "hmac",
  "rand 0.8.8",
  "schemars",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "thiserror",
  "tokio",
