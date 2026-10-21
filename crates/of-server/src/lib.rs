@@ -38,7 +38,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use axum::body::Body;
-use axum::http::{header, HeaderValue, Request, StatusCode};
+use axum::http::{Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Router;
@@ -102,33 +102,15 @@ fn moves_to_canonical(path: &str) -> bool {
 }
 
 /// `308` a legacy-host console request to the same path and query on the
-/// canonical host. Runs inside [`of_mcp::legacy::mark`], so the redirect
-/// carries the same `Deprecation`/`Link`/`Sunset` notice as every other
-/// legacy-host response, and its `Location` is the `Link`'s target.
+/// canonical host ([`of_mcp::Legacy::redirect`]). Runs inside
+/// [`of_mcp::legacy::mark`], so the redirect carries the same
+/// `Deprecation`/`Link`/`Sunset` notice as every other legacy-host response,
+/// and its `Location` is the `Link`'s target.
 async fn legacy_console_redirect(req: Request<Body>, next: Next) -> Response {
-    let Some(legacy) = req.extensions().get::<of_mcp::Legacy>() else {
-        return next.run(req).await;
-    };
-    if !moves_to_canonical(req.uri().path()) {
-        return next.run(req).await;
+    match req.extensions().get::<of_mcp::Legacy>() {
+        Some(legacy) if moves_to_canonical(req.uri().path()) => legacy.redirect(req.uri()),
+        _ => next.run(req).await,
     }
-    let path_and_query = req.uri().path_and_query().map_or("/", |pq| pq.as_str());
-    let location = HeaderValue::from_str(&legacy.successor_url(path_and_query))
-        .or_else(|_| HeaderValue::from_str(&legacy.successor_url("/")));
-    let Ok(location) = location else {
-        // Unreachable with a validated `OF_PUBLIC_URL`; serving the page is a
-        // better failure than a redirect to nowhere.
-        return next.run(req).await;
-    };
-    let mut response = StatusCode::PERMANENT_REDIRECT.into_response();
-    let headers = response.headers_mut();
-    headers.insert(header::LOCATION, location);
-    headers.insert(
-        header::VARY,
-        HeaderValue::from_static(of_mcp::legacy::VARY_BY_HOST),
-    );
-    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    response
 }
 
 /// The client every call to the otto platform goes through.

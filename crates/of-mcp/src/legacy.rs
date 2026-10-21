@@ -43,7 +43,7 @@ use std::sync::Arc;
 
 use axum::extract::{Request, State};
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, SecondsFormat, Utc};
 use http::{HeaderMap, HeaderValue, Uri};
 
@@ -148,11 +148,39 @@ impl Legacy {
     }
 
     /// The same resource on the canonical host: `OF_PUBLIC_URL`'s origin
-    /// followed by `path_and_query` exactly as the request carried it. This is
-    /// both the `successor-version` link and where `of-server` redirects a
-    /// legacy-host console request, so the two can never disagree.
-    pub fn successor_url(&self, path_and_query: &str) -> String {
-        format!("{}{path_and_query}", self.0.successor_origin)
+    /// followed by `target`. This is both the `successor-version` link and
+    /// where [`Self::redirect`] sends a legacy-host console request, so the two
+    /// can never disagree.
+    ///
+    /// A `target` that does not start with `/` becomes `/`: appended to an
+    /// origin, `@evil.com` would turn the origin into userinfo and the URL into
+    /// one for another host. A request can carry such a target (HTTP/2's
+    /// `:path`, or `OPTIONS *`), so this never trusts its caller to have
+    /// checked.
+    pub fn successor_url(&self, target: &str) -> String {
+        let target = if target.starts_with('/') { target } else { "/" };
+        format!("{}{target}", self.0.successor_origin)
+    }
+
+    /// `308` to the same path and query on the canonical host, with `Vary` (the
+    /// answer depends on the host) and `no-store`. [`mark`] stamps it like
+    /// every other legacy-host response, with the query kept in the `Link` so
+    /// the link and `Location` name one URL.
+    pub fn redirect(&self, uri: &Uri) -> Response {
+        let location = HeaderValue::from_str(&self.successor_url(request_target(uri)))
+            .or_else(|_| HeaderValue::from_str(&self.successor_url("/")));
+        let mut response = http::StatusCode::PERMANENT_REDIRECT.into_response();
+        let headers = response.headers_mut();
+        if let Ok(location) = location {
+            headers.insert(http::header::LOCATION, location);
+        }
+        headers.insert(http::header::VARY, HeaderValue::from_static(VARY_BY_HOST));
+        headers.insert(
+            http::header::CACHE_CONTROL,
+            HeaderValue::from_static("no-store"),
+        );
+        response.extensions_mut().insert(Moved);
+        response
     }
 
     /// The paragraph `initialize` instructions open with on this host. Agents
@@ -193,17 +221,17 @@ impl Legacy {
     /// `Deprecation: true`, a `successor-version` `Link` (RFC 8288) and, with a
     /// sunset date, `Sunset` (RFC 8594). `true` rather than RFC 9745's
     /// `@<timestamp>`: the host was deprecated by an operator's cutover, not on
-    /// a date this binary knows. The successor link keeps the request's path
-    /// and query so a client following it lands on the same resource on the
-    /// canonical host. It is appended, so a `Link` a handler already set is
-    /// kept beside it.
-    fn stamp(&self, path_and_query: &str, headers: &mut HeaderMap) {
+    /// a date this binary knows. The successor link keeps `target` — the
+    /// request's path, and its query too when the response is a redirect — so a
+    /// client following it lands on the same resource on the canonical host.
+    /// It is appended, so a `Link` a handler already set is kept beside it.
+    fn stamp(&self, target: &str, headers: &mut HeaderMap) {
         headers.insert("deprecation", HeaderValue::from_static("true"));
 
         let origin = &self.0.successor_origin;
         let link = HeaderValue::from_str(&format!(
             "<{}>; rel=\"successor-version\"",
-            escape_for_link(&self.successor_url(path_and_query))
+            escape_for_link(&self.successor_url(target))
         ))
         .or_else(|_| HeaderValue::from_str(&format!("<{origin}/>; rel=\"successor-version\"")));
         if let Ok(link) = link {
@@ -228,15 +256,39 @@ pub async fn mark(
     let Some(legacy) = deprecation.classify(req.headers(), req.uri()) else {
         return next.run(req).await;
     };
-    let path_and_query = req
-        .uri()
-        .path_and_query()
-        .map_or("/", |pq| pq.as_str())
-        .to_string();
+    // The query goes into the `Link` only on a redirect, where it is already in
+    // `Location`. On a response served in place it would copy whatever the
+    // query carried — `/auth/callback?code=…&state=…` — into a header that
+    // proxies and logs keep with far less care than they keep the URL.
+    let path = request_path(req.uri()).to_string();
+    let path_and_query = request_target(req.uri()).to_string();
     req.extensions_mut().insert(legacy.clone());
     let mut response = next.run(req).await;
-    legacy.stamp(&path_and_query, response.headers_mut());
+    let moved = response.extensions().get::<Moved>().is_some();
+    let target = if moved { &path_and_query } else { &path };
+    legacy.stamp(target, response.headers_mut());
     response
+}
+
+/// Left on a response by [`Legacy::redirect`], so [`mark`] knows the query is
+/// already public in `Location` and may be repeated in the `Link`.
+#[derive(Debug, Clone, Copy)]
+struct Moved;
+
+/// The request's path and query, or `/` when it is not origin-form (an
+/// HTTP/2 `:path` that does not start with `/`, or `OPTIONS *`).
+pub fn request_target(uri: &Uri) -> &str {
+    uri.path_and_query()
+        .map(|pq| pq.as_str())
+        .filter(|pq| pq.starts_with('/'))
+        .unwrap_or("/")
+}
+
+/// [`request_target`] without the query.
+fn request_path(uri: &Uri) -> &str {
+    Some(uri.path())
+        .filter(|p| p.starts_with('/'))
+        .unwrap_or("/")
 }
 
 /// The value of `Vary` for a response that depends on which host was used:
@@ -425,6 +477,53 @@ mod tests {
             .stamp("/mcp", &mut out);
         assert_eq!(out["deprecation"], "true");
         assert!(out.get("sunset").is_none());
+    }
+
+    /// A target that is not origin-form never reaches a URL: appended to the
+    /// origin, `@evil.com` would make it a URL for another host.
+    #[test]
+    fn a_target_that_is_not_a_path_becomes_the_root() {
+        let h = headers(&[("x-forwarded-host", "factory.example.com")]);
+        let legacy = deprecation(None).classify(&h, &uri()).unwrap();
+        for bad in ["@evil.com", "evil.com", "*", ""] {
+            assert_eq!(
+                legacy.successor_url(bad),
+                "https://tower.example.com/",
+                "{bad:?}"
+            );
+        }
+        // Paths that merely look like other hosts stay on this origin.
+        for odd in ["//evil.com", "/\\evil.com", "/@evil.com"] {
+            assert_eq!(
+                legacy.successor_url(odd),
+                format!("https://tower.example.com{odd}"),
+                "{odd:?}"
+            );
+        }
+
+        // Whatever the request carried, the redirect's Location is the origin's.
+        let mut targets = vec![Uri::from_static("*")];
+        for raw in ["@evil.com", "//evil.com", "/@evil.com"] {
+            let built = http::uri::PathAndQuery::try_from(raw).ok().and_then(|pq| {
+                let mut parts = http::uri::Parts::default();
+                parts.path_and_query = Some(pq);
+                Uri::from_parts(parts).ok()
+            });
+            targets.extend(built);
+        }
+        for target in targets {
+            let response = legacy.redirect(&target);
+            let location = response.headers()[http::header::LOCATION].to_str().unwrap();
+            assert!(
+                location.starts_with("https://tower.example.com/"),
+                "{target:?} -> {location}"
+            );
+            assert!(
+                !location.starts_with("https://tower.example.com@"),
+                "{target:?} -> {location}"
+            );
+        }
+        assert_eq!(request_target(&Uri::from_static("*")), "/");
     }
 
     /// The successor keeps the query too: `/auth/login?org=acme` on the old

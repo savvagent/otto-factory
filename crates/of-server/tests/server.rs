@@ -646,6 +646,36 @@ async fn the_console_on_a_legacy_host_moves_to_the_canonical_host(pool: PgPool) 
                 "{method} {uri} must not move to the canonical host"
             );
             assert_eq!(header(&response, "deprecation"), Some("true"), "{uri}");
+            // Served in place, so the query (an authorization code, here) is
+            // not copied into the Link: only the path is.
+            let path = uri.split('?').next().unwrap();
+            assert_eq!(
+                header(&response, "link"),
+                Some(format!(r#"<{PUBLIC}{path}>; rel="successor-version""#).as_str()),
+                "{uri}"
+            );
+        }
+
+        // A target that only looks like another host stays on the canonical
+        // origin: the redirect is never to anywhere but `OF_PUBLIC_URL`.
+        for uri in [
+            "//evil.com",
+            "//evil.com/x?y=1",
+            "/\\evil.com",
+            "/@evil.com",
+        ] {
+            if uri.parse::<http::Uri>().is_err() {
+                continue; // not a request target `http` will carry at all
+            }
+            let response = send(&app, build("GET", uri)).await;
+            assert_eq!(
+                response.status(),
+                http::StatusCode::PERMANENT_REDIRECT,
+                "{uri}"
+            );
+            let location = header(&response, "location").unwrap();
+            assert_eq!(location, format!("{PUBLIC}{uri}"), "{uri}");
+            assert!(location.starts_with(&format!("{PUBLIC}/")), "{uri}");
         }
     }
 
