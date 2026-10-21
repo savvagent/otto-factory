@@ -232,9 +232,9 @@ resource, set the secrets) is a checklist in [`docs/deploy/fly.md`](docs/deploy/
 
 **You pay for outcomes, not for looking or coordinating.** Every tool call is free, including
 `watch`, the 30-second long poll every connected agent calls continuously. What is billed is a
-completed job: a successful `complete_job`, or a ticket closing in the tracker, records one
-`otto-factory/jobs_completed` event. Every call is still recorded so pricing can change later
-without losing history.
+completed job: a successful `complete_job`, or a linked ticket closed as done in the tracker,
+records one `otto-factory/jobs_completed` event. Every call is still recorded so pricing can
+change later without losing history.
 
 Events are written to a local outbox in the same transaction as the work (so a failed call is
 never billed) and shipped to the platform, which owns plans and totals, by a background task that

@@ -1,4 +1,4 @@
-//! Which tool calls consume the bucket.
+//! How each MCP tool call is classified for metering.
 //!
 //! **Every tool call is free.** Coordination is what the product is for, and
 //! pricing it would punish the behaviour the server asks for: `watch` is a
@@ -19,9 +19,9 @@
 /// What a tool call costs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Class {
-    /// Recorded, but does not consume the plan's bucket.
+    /// Recorded, never charged.
     Free,
-    /// Consumes one operation from the plan's bucket.
+    /// Charged per call. No tool is in this class today; value is billed by meter instead.
     Billable,
 }
 

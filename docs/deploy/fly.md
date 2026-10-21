@@ -265,7 +265,8 @@ Order matters; the platform goes first.
 4. Structured (JSON) logging via `tracing-subscriber`, filtered by `RUST_LOG`.
 5. The usage shipper (`of_billing::outbox::run`) declares the meters, then drains `usage_outbox` to the platform.
 6. Graceful shutdown on `SIGTERM`/Ctrl+C: stops accepting new connections,
-   waits for in-flight requests, makes a final usage flush, then calls
+   waits for in-flight requests, makes a final usage flush (skipped if the shipper is still
+   waiting for its meter declaration), then calls
    `Watcher::shutdown()` to release its detached `LISTEN` connection before the
    process exits.
 7. `Db::verify_tenant_isolation` runs after the migrations and **before the port

@@ -30,8 +30,8 @@ implementation).
 **Every issue this skill queues carries exactly one type label
 (`bug`/`enhancement`/`documentation`) at the moment it is queued, and no open issue is
 ever queued twice.** Queueing an untyped issue hands the next agent a job with no signal
-about what kind of change it is. Queueing a duplicate job wastes otto-factory allowance
-and confuses whoever is watching the queue.
+about what kind of change it is. Queueing a duplicate job wastes agent time
+(and is billed when an agent completes it) and confuses whoever is watching the queue.
 
 ## Context discipline: everything real happens in subagents
 

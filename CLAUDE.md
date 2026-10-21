@@ -443,7 +443,7 @@ copied into state, because a copy and the URL disagree for one frame after a nav
 and that frame is where one org's data renders under another's heading.
 
 Org pages live under `/o/[org]`, not `/[org]`, so no org slug can collide with a page name.
-The paths the *server* names — `/login`, `/verify`, `/recover`, `/invite/{org}`,
+The paths the *server* names — `/login`, `/verify`, `/recover` and `/invite/{org}` —
 are fixed by what the server puts in an invitation link, and cannot be renamed here alone.
 (The billing fix link is `OF_UPGRADE_URL` or the bare platform URL, so it names no console path.)
 
@@ -470,8 +470,9 @@ the decisions no single crate could make.
   and the usage shipper all take the same `Arc`.
 - **The usage shipper is a task of this binary** (`of_billing::outbox::run`, spawned in
   `main`), declaring the meters and then draining `usage_outbox` to the platform with per-row
-  backoff. It stops on shutdown
-  after a final flush; anything undelivered stays in the table for the next process.
+  backoff. It stops on shutdown after a final flush, except while it is still waiting for the
+  meter declaration: then it stops without one (shipping metered rows for an undeclared meter
+  would dead-letter them). Anything undelivered stays in the table for the next process.
 - **Startup checks the platform credential but never requires the platform.** One harmless
   `usage_status` call logs whether the credential was accepted (a `REJECTED` line is a
   deployment fault), and a transport failure only warns: a platform outage must not stop a
@@ -578,10 +579,14 @@ rules hold, and the first is what makes the others true:
    router against the price list; `every_tool_has_a_price` fails when they disagree. An
    unclassified tool is treated as free and logged.
 4. **Only `complete_job` can be refused, and a lookup failure never blocks work.** It is refused
-   (`retriable: false`) when the platform's usage status carries a `blocked_reason`
-   (`budget_exceeded` | `payment_required`); the error names `OF_UPGRADE_URL`, else the bare
+   (`retriable: false`) when the platform's usage status says billable work is blocked
+   (`UsageStatus::billable_blocked()`: a `blocked_reason` of `budget_exceeded` |
+   `payment_required`, or a tripped budget hard stop with no reason, refused as
+   `budget_exceeded`); the error names `OF_UPGRADE_URL`, else the bare
    platform URL. Free tools are never refused, so a blocked org can still read and find out why.
-   The status lookup happens before the transaction (`Meter::warm` in `Factory::tx`), is cached
+   The status lookup happens before the transaction: `complete_job` calls `Meter::warm` itself
+   before `Factory::tx` and hands the result to `charge_metered`, which never looks anything up
+   (`Factory::tx` does not warm, so free tools never wait on the platform). It is cached
    for 60 s (a failed lookup for 5 s), and a failed lookup lets the call through. A change made
    in the console therefore takes up to a minute to apply. `OF_ENFORCE_QUOTAS` is retired: it
    has no effect and the server warns if it is set.
