@@ -28,9 +28,10 @@ of-testkit = { path = "crates/of-testkit" }
 # identity, auth, orgs, teams, plans, and billing live there. This repo links only the
 # tenant-isolation substrate (`otto-tenant`: pinned transactions, RLS proof, Cipher, the
 # audit-trail pattern) and the resource-server client (`otto-resource`: introspection,
-# usage shipping, identity lookups, webhook verification). One rev for both.
-otto-tenant = { git = "https://github.com/savvagent/otto-platform", rev = "a220608fa269321e4b8777e1ba88c0ef0bbd659d" }
-otto-resource = { git = "https://github.com/savvagent/otto-platform", rev = "a220608fa269321e4b8777e1ba88c0ef0bbd659d" }
+# usage shipping, meter declarations, identity lookups, webhook verification). One rev for
+# both: v0.10.0, the release with per-service value meters (savvagent/otto-platform#55).
+otto-tenant = { git = "https://github.com/savvagent/otto-platform", rev = "bfda55e155be8985761850a7c42980cc926fd4cb" }
+otto-resource = { git = "https://github.com/savvagent/otto-platform", rev = "bfda55e155be8985761850a7c42980cc926fd4cb" }
 
 sqlx = { version = "0.8", default-features = false, features = [
   "runtime-tokio", "tls-rustls", "postgres", "chrono", "uuid", "macros", "migrate", "json",

@@ -163,7 +163,6 @@ fn mcp_config(platform: Arc<PlatformClient>, config: &Config) -> of_mcp::Config 
     );
     mcp.allowed_hosts = config.allowed_hosts();
     mcp.allowed_origins = config.allowed_origins.clone();
-    mcp.enforce_quotas = config.enforce_quotas;
     mcp.upgrade_url = config.upgrade_url.clone();
     mcp.github_app_id = config.github_app_id;
     mcp.github_app_private_key = config.github_app_private_key.clone();
@@ -233,7 +232,6 @@ mod tests {
         config.jira_client_id = Some("jira-client".into());
         config.jira_client_secret = Some("jira-secret".into());
         config.console_client_id = Some("console-client".into());
-        config.enforce_quotas = true;
 
         let web = web_config(&config);
 

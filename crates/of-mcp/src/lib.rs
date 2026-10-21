@@ -77,14 +77,10 @@ pub struct Config {
     /// the check, which is right for a surface reached by CLI agents rather
     /// than by pages.
     pub allowed_origins: Vec<String>,
-    /// Refuse billable calls once an org on a hard-stop plan is past its
-    /// bucket. **Off by default**, and off for milestone 1: recording history
-    /// is worth having long before anyone's work is refused over it, and a
-    /// counter that starts rejecting calls before the numbers have been
-    /// watched in anger is a support incident rather than a revenue feature.
-    pub enforce_quotas: bool,
-    /// Where a caller who has run out is sent. Named in the refusal itself,
-    /// because an error that says "upgrade" without saying where is a dead end.
+    /// Where an owner goes to lift a budget or payment block. Named in the
+    /// refusal itself, because an error that says "raise the budget" without
+    /// saying where is a dead end. Defaults to the platform console's home,
+    /// which lists the user's orgs; billing lives under each org there.
     pub upgrade_url: String,
     /// GitHub App id for outbound tracker sync. Optional because tracker sync
     /// itself is optional per deployment.
@@ -121,9 +117,8 @@ impl Config {
             resource_uri: resource_uri.into(),
             allowed_hosts: if host.is_empty() { vec![] } else { vec![host] },
             allowed_origins: vec![],
-            enforce_quotas: false,
-            // The platform owns billing now, so that is where a human goes.
-            upgrade_url: format!("{}/settings/billing", platform_url.trim_end_matches('/')),
+            // The platform owns billing, so its console is where a human goes.
+            upgrade_url: of_billing::default_fix_url(&platform_url),
             github_app_id: None,
             github_app_private_key: None,
             jira_client_id: None,
@@ -179,11 +174,7 @@ pub fn router(db: Db, watcher: Arc<Watcher>, config: Config) -> Router {
         db,
         watcher,
         config.platform.clone(),
-        of_billing::Meter::new(
-            config.platform.clone(),
-            config.enforce_quotas,
-            config.upgrade_url,
-        ),
+        of_billing::Meter::new(config.platform.clone(), config.upgrade_url),
         tracker_sync,
     );
     let service = StreamableHttpService::new(

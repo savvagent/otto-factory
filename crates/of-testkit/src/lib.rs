@@ -27,6 +27,19 @@
 //!   platform's `/oauth/authorize` once a person has signed in;
 //!   [`MockPlatform::refresh_calls`] counts rotations, which is how
 //!   "refreshes exactly once" is checked.
+//! - **Usage standing.** `GET /internal/orgs/{org}/usage-status` adds what was
+//!   shipped to the org's counts and sums its metered events this UTC month
+//!   into `meters`. [`MockPlatform::set_blocked_reason`] and
+//!   [`MockPlatform::set_budget`] set the fields enforcement reads, and
+//!   [`MockPlatform::status_calls`] counts the lookups on their own, so "this
+//!   tool never asked" is checkable without member and team lookups in the way.
+//! - **Meter declarations.** `PUT /internal/meters` records what a resource
+//!   server declares ([`MockPlatform::declared_meters`]) and makes
+//!   `usage-status` show the declared display name and unit.
+//!   [`MockPlatform::set_meter_mode`] switches it to a `409 service_not_set`,
+//!   an outage, or a `200` that rejects every meter, and
+//!   [`MockPlatform::usage_posts_before_declaration`] catches a shipper that
+//!   posts usage first.
 //! - **Webhook signing.** [`MockPlatform::webhook`] produces a signed delivery
 //!   (header + raw body) for a given event.
 
@@ -38,14 +51,15 @@ use std::sync::{Arc, Mutex};
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Form, Json, Router};
 use base64::Engine;
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use otto_resource::{
-    ClientConfig, IntrospectionResponse, MemberInfo, MemberTeams, OrgInfo, PlatformClient,
-    RejectedEvent, Role, TeamInfo, TokenKind, UsageBatch, UsageEvent, UsageReceipt, UsageStatus,
-    UserInfo,
+    BudgetStatus, ClientConfig, IntrospectionResponse, MemberInfo, MemberTeams, MeterDeclaration,
+    MeterDeclarationBatch, MeterDeclarationReceipt, MeterUsage, OrgInfo, PlatformClient,
+    RejectedEvent, RejectedMeter, Role, TeamInfo, TokenKind, UsageBatch, UsageEvent, UsageReceipt,
+    UsageStatus, UserInfo,
 };
 use serde::Deserialize;
 use uuid::Uuid;
@@ -84,6 +98,10 @@ struct Data {
     team_members: HashSet<(Uuid, Uuid, Uuid)>,
     usage: HashMap<Uuid, UsageStatus>,
     counted: Vec<UsageEvent>,
+    /// Meters declared through `PUT /internal/meters`, by key.
+    meters: Vec<MeterDeclaration>,
+    /// Usage POSTs that arrived while no meter had been declared.
+    usage_before_declaration: usize,
     seen: HashSet<Uuid>,
     /// Org ids whose usage the mock refuses, like a deleted org.
     unknown_orgs_for_usage: HashSet<Uuid>,
@@ -121,13 +139,23 @@ struct RefreshRecord {
 struct Inner {
     data: Mutex<Data>,
     down: AtomicBool,
+    /// While set, `usage-status` alone answers `503`.
+    status_down: AtomicBool,
     /// Fail the next N usage POSTs with 503, then recover.
     fail_usage: AtomicUsize,
+    /// How `PUT /internal/meters` answers; see [`MeterMode`].
+    meter_mode: Mutex<MeterMode>,
+    /// Calls to `PUT /internal/meters`, whatever they answered.
+    meter_calls: AtomicUsize,
     /// Answer the next N usage POSTs with a receipt that under-reports by one.
     short_receipts: AtomicUsize,
     introspect_calls: AtomicUsize,
     usage_calls: AtomicUsize,
     lookup_calls: AtomicUsize,
+    /// `GET /internal/orgs/{org}/usage-status` alone (also in `lookup_calls`).
+    status_calls: AtomicUsize,
+    /// Milliseconds `usage-status` waits before answering (after counting).
+    status_delay_ms: AtomicU64,
     code_exchanges: AtomicUsize,
     refresh_calls: AtomicUsize,
     /// Lifetime, in seconds, of access tokens minted by the token endpoint.
@@ -135,6 +163,20 @@ struct Inner {
     /// How long the token endpoint sleeps before answering a refresh, so a test
     /// can hold the window in which concurrent requests would double-refresh.
     refresh_delay_ms: AtomicU64,
+}
+
+/// How the mock answers `PUT /internal/meters`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MeterMode {
+    /// Declare every meter and say so (200, all in `declared`).
+    #[default]
+    Accept,
+    /// The resource server's service slug is unset: `409 service_not_set`.
+    ServiceNotSet,
+    /// An outage: `503`.
+    Outage,
+    /// A refusal: `200` with every meter in `rejected` and none declared.
+    Reject,
 }
 
 pub struct MockPlatform {
@@ -149,11 +191,16 @@ impl MockPlatform {
         let inner = Arc::new(Inner {
             data: Mutex::new(Data::default()),
             down: AtomicBool::new(false),
+            status_down: AtomicBool::new(false),
             fail_usage: AtomicUsize::new(0),
+            meter_mode: Mutex::new(MeterMode::Accept),
+            meter_calls: AtomicUsize::new(0),
             short_receipts: AtomicUsize::new(0),
             introspect_calls: AtomicUsize::new(0),
             usage_calls: AtomicUsize::new(0),
             lookup_calls: AtomicUsize::new(0),
+            status_calls: AtomicUsize::new(0),
+            status_delay_ms: AtomicU64::new(0),
             code_exchanges: AtomicUsize::new(0),
             refresh_calls: AtomicUsize::new(0),
             access_ttl_secs: AtomicI64::new(3600),
@@ -165,6 +212,7 @@ impl MockPlatform {
             .route("/oauth/token", post(token_endpoint))
             .route("/oauth/revoke", post(revoke_endpoint))
             .route("/internal/usage", post(ingest_usage))
+            .route("/internal/meters", put(declare_meters))
             .route("/internal/orgs/{org}/usage-status", get(usage_status))
             .route(
                 "/internal/orgs/{org}/members/by-email",
@@ -229,6 +277,11 @@ impl MockPlatform {
             total_count: 0,
             included_ops: 500,
             hard_stop: true,
+            features: Default::default(),
+            service: None,
+            meters: Vec::new(),
+            budget: None,
+            blocked_reason: None,
         });
     }
 
@@ -315,11 +368,30 @@ impl MockPlatform {
             total_count: 0,
             included_ops: 0,
             hard_stop,
+            features: Default::default(),
+            service: None,
+            meters: Vec::new(),
+            budget: None,
+            blocked_reason: None,
         });
         entry.billable_count = billable;
         entry.total_count = billable;
         entry.included_ops = included;
         entry.hard_stop = hard_stop;
+    }
+
+    /// Set (or clear, with `None`) why the platform tells the calling service to
+    /// refuse billable calls for `org`: `budget_exceeded`, `payment_required`,
+    /// or anything else a future platform might send.
+    pub fn set_blocked_reason(&self, org: Uuid, reason: Option<&str>) {
+        let mut d = self.inner.data.lock().unwrap();
+        usage_entry(&mut d, org).blocked_reason = reason.map(str::to_string);
+    }
+
+    /// Set (or clear, with `None`) the calling service's budget for `org`.
+    pub fn set_budget(&self, org: Uuid, budget: Option<BudgetStatus>) {
+        let mut d = self.inner.data.lock().unwrap();
+        usage_entry(&mut d, org).budget = budget;
     }
 
     /// Make the platform refuse usage for an org the way it refuses a deleted one.
@@ -369,6 +441,11 @@ impl MockPlatform {
                 total_count: 0,
                 included_ops: 500,
                 hard_stop: true,
+                features: Default::default(),
+                service: None,
+                meters: Vec::new(),
+                budget: None,
+                blocked_reason: None,
             });
         }
     }
@@ -528,12 +605,50 @@ impl MockPlatform {
         self.inner.down.store(down, Ordering::SeqCst);
     }
 
+    /// While down, only `GET /internal/orgs/{org}/usage-status` answers `503`;
+    /// introspection and member and team lookups keep working. That is the
+    /// outage enforcement has to fail open through, isolated from the lookups
+    /// that fail closed.
+    pub fn set_status_down(&self, down: bool) {
+        self.inner.status_down.store(down, Ordering::SeqCst);
+    }
+
+    /// Make `GET /internal/orgs/{org}/usage-status` wait `ms` before it
+    /// answers, so a test can change state while a lookup is in flight.
+    /// [`Self::status_calls`] already counts the call while it waits.
+    pub fn set_status_delay_ms(&self, ms: u64) {
+        self.inner.status_delay_ms.store(ms, Ordering::SeqCst);
+    }
+
     /// Fail the next `n` usage POSTs with `503`, then recover.
     pub fn fail_next_usage_posts(&self, n: usize) {
         self.inner.fail_usage.store(n, Ordering::SeqCst);
     }
 
+    /// Choose how `PUT /internal/meters` answers from now on.
+    pub fn set_meter_mode(&self, mode: MeterMode) {
+        *self.inner.meter_mode.lock().unwrap() = mode;
+    }
+
     // ------------------------------------------------------------ observation
+
+    /// The meters declared so far, in the order first declared. A redeclaration
+    /// replaces the display name and unit in place.
+    pub fn declared_meters(&self) -> Vec<MeterDeclaration> {
+        self.inner.data.lock().unwrap().meters.clone()
+    }
+
+    /// Calls to `PUT /internal/meters`, including refused ones.
+    pub fn meter_calls(&self) -> usize {
+        self.inner.meter_calls.load(Ordering::SeqCst)
+    }
+
+    /// Usage POSTs that arrived before any meter was declared. A shipper that
+    /// declares first leaves this at zero; the real platform would reject a
+    /// metered event in such a post as `unknown_meter`.
+    pub fn usage_posts_before_declaration(&self) -> usize {
+        self.inner.data.lock().unwrap().usage_before_declaration
+    }
 
     /// Usage events the platform has counted, each `event_id` once.
     pub fn counted_usage(&self) -> Vec<UsageEvent> {
@@ -551,6 +666,12 @@ impl MockPlatform {
     /// Calls to the `/internal/orgs/...` lookup endpoints.
     pub fn lookup_calls(&self) -> usize {
         self.inner.lookup_calls.load(Ordering::SeqCst)
+    }
+
+    /// Calls to `GET /internal/orgs/{org}/usage-status` alone: the lookup
+    /// enforcement makes. Member and team lookups are not counted here.
+    pub fn status_calls(&self) -> usize {
+        self.inner.status_calls.load(Ordering::SeqCst)
     }
 
     // --------------------------------------------------------------- webhooks
@@ -881,6 +1002,9 @@ async fn ingest_usage(
     }
 
     let mut d = inner.data.lock().unwrap();
+    if d.meters.is_empty() {
+        d.usage_before_declaration += 1;
+    }
     let mut receipt = UsageReceipt::default();
     for ev in batch.events {
         if d.unknown_orgs_for_usage.contains(&ev.org_id) {
@@ -907,11 +1031,63 @@ async fn ingest_usage(
     Json(receipt).into_response()
 }
 
+async fn declare_meters(
+    State(inner): S,
+    headers: HeaderMap,
+    Json(batch): Json<MeterDeclarationBatch>,
+) -> Response {
+    if let Err(res) = caller(&inner, &headers) {
+        return res;
+    }
+    inner.meter_calls.fetch_add(1, Ordering::SeqCst);
+    let mode = *inner.meter_mode.lock().unwrap();
+    let mut receipt = MeterDeclarationReceipt::default();
+    match mode {
+        MeterMode::ServiceNotSet => {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({ "error": "service_not_set" })),
+            )
+                .into_response();
+        }
+        MeterMode::Outage => return unavailable(),
+        MeterMode::Reject => {
+            receipt.rejected = batch
+                .meters
+                .into_iter()
+                .map(|m| RejectedMeter {
+                    key: m.key,
+                    reason: "the mock was told to refuse this meter".into(),
+                })
+                .collect();
+        }
+        MeterMode::Accept => {
+            let mut d = inner.data.lock().unwrap();
+            for m in batch.meters {
+                receipt.declared.push(m.key.clone());
+                match d.meters.iter_mut().find(|x| x.key == m.key) {
+                    Some(existing) => *existing = m,
+                    None => d.meters.push(m),
+                }
+            }
+        }
+    }
+    Json(receipt).into_response()
+}
+
 async fn usage_status(State(inner): S, headers: HeaderMap, Path(org): Path<Uuid>) -> Response {
     if let Err(res) = caller(&inner, &headers) {
         return res;
     }
     inner.lookup_calls.fetch_add(1, Ordering::SeqCst);
+    inner.status_calls.fetch_add(1, Ordering::SeqCst);
+    let delay = inner.status_delay_ms.load(Ordering::SeqCst);
+    if delay > 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+    }
+    if inner.status_down.load(Ordering::SeqCst) {
+        return unavailable();
+    }
     let d = inner.data.lock().unwrap();
     match d.usage.get(&org) {
         Some(u) => {
@@ -925,10 +1101,83 @@ async fn usage_status(State(inner): S, headers: HeaderMap, Path(org): Path<Uuid>
             let shipped_total = d.counted.iter().filter(|e| e.org_id == org).count() as i64;
             u.billable_count += shipped_billable;
             u.total_count += shipped_total;
+            u.meters = shipped_meters(&d.counted, &d.meters, org, Utc::now());
             Json(u).into_response()
         }
         None => StatusCode::NOT_FOUND.into_response(),
     }
+}
+
+/// A budget whose hard stop has tripped, as the platform reports one: spend
+/// past the budget, `blocked`, reason `budget_exceeded`. Hand it to
+/// [`MockPlatform::set_budget`], or spread it to build a budget that is not
+/// blocked.
+pub fn tripped_budget() -> BudgetStatus {
+    BudgetStatus {
+        monthly_budget_cents: 1000,
+        spend_cents: Some(1250),
+        percent_used: Some(125),
+        thresholds_reached: vec![50, 80, 100],
+        hard_stop: true,
+        blocked: true,
+        reason: Some(otto_resource::BUDGET_EXCEEDED.into()),
+    }
+}
+
+/// `org`'s usage record, created with the defaults `add_org` uses if missing.
+fn usage_entry(d: &mut Data, org: Uuid) -> &mut UsageStatus {
+    d.usage.entry(org).or_insert_with(|| UsageStatus {
+        org_id: org,
+        plan: "free".into(),
+        period_start: NaiveDate::from_ymd_opt(2026, 10, 1).unwrap(),
+        billable_count: 0,
+        total_count: 0,
+        included_ops: 500,
+        hard_stop: true,
+        features: Default::default(),
+        service: None,
+        meters: Vec::new(),
+        budget: None,
+        blocked_reason: None,
+    })
+}
+
+/// The quantity of each meter `org` shipped in `now`'s UTC month, summed the
+/// way the platform sums it (a metered event with no quantity counts one),
+/// ordered by key. A declared meter shows its declared display name and unit,
+/// and zero when nothing was shipped; one never declared shows its key and an
+/// empty unit.
+fn shipped_meters(
+    counted: &[UsageEvent],
+    declared: &[MeterDeclaration],
+    org: Uuid,
+    now: DateTime<Utc>,
+) -> Vec<MeterUsage> {
+    let mut sums: std::collections::BTreeMap<&str, u64> = Default::default();
+    for ev in counted.iter().filter(|e| {
+        e.org_id == org
+            && e.occurred_at.year() == now.year()
+            && e.occurred_at.month() == now.month()
+    }) {
+        if let Some(meter) = ev.meter.as_deref() {
+            *sums.entry(meter).or_default() += ev.quantity.unwrap_or(1);
+        }
+    }
+    // A declared meter with no usage this month shows zero, as the platform does.
+    for decl in declared {
+        sums.entry(decl.key.as_str()).or_default();
+    }
+    sums.into_iter()
+        .map(|(meter, quantity)| {
+            let decl = declared.iter().find(|m| m.key == meter);
+            MeterUsage {
+                meter: meter.to_string(),
+                display_name: decl.map_or_else(|| meter.to_string(), |m| m.display_name.clone()),
+                unit: decl.map(|m| m.unit.clone()).unwrap_or_default(),
+                quantity,
+            }
+        })
+        .collect()
 }
 
 fn member_info(d: &Data, org: Uuid, user: Uuid) -> Option<MemberInfo> {
@@ -1051,3 +1300,76 @@ async fn team_by_slug(
 
 /// Parsed `DateTime` re-export so tests need not depend on chrono directly for it.
 pub type Timestamp = DateTime<Utc>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn event(
+        org: Uuid,
+        at: DateTime<Utc>,
+        meter: Option<&str>,
+        quantity: Option<u64>,
+    ) -> UsageEvent {
+        UsageEvent {
+            event_id: Uuid::new_v4(),
+            org_id: org,
+            user_id: None,
+            tool: "complete_job".into(),
+            billable: meter.is_some(),
+            occurred_at: at,
+            service: None,
+            meter: meter.map(str::to_string),
+            quantity,
+        }
+    }
+
+    /// Only this org's metered events from this UTC month count, summed per
+    /// meter: what the enforcement and reporting tests read back.
+    #[test]
+    fn meters_sum_this_months_shipped_quantities_per_org() {
+        let (org, other) = (Uuid::new_v4(), Uuid::new_v4());
+        let now = "2026-10-20T12:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let last_month = "2026-09-30T23:59:59Z".parse::<DateTime<Utc>>().unwrap();
+        let jobs = "otto-factory/jobs_completed";
+        let counted = vec![
+            event(org, now, Some(jobs), Some(1)),
+            event(org, now, Some(jobs), None),
+            event(org, now, Some(jobs), Some(3)),
+            event(org, now, None, None),
+            event(org, last_month, Some(jobs), Some(100)),
+            event(other, now, Some(jobs), Some(50)),
+        ];
+
+        let meters = shipped_meters(&counted, &[], org, now);
+
+        assert_eq!(meters.len(), 1, "{meters:?}");
+        assert_eq!((meters[0].meter.as_str(), meters[0].quantity), (jobs, 5));
+        assert!(shipped_meters(&counted, &[], Uuid::new_v4(), now).is_empty());
+    }
+
+    /// A declared meter shows its declared name and unit; an undeclared one the
+    /// key and no unit.
+    #[test]
+    fn meters_use_the_declared_display_name_and_unit() {
+        let org = Uuid::new_v4();
+        let now = "2026-10-20T12:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let counted = vec![
+            event(org, now, Some("a/declared"), Some(2)),
+            event(org, now, Some("a/undeclared"), Some(1)),
+        ];
+        let declared = [MeterDeclaration::new("a/declared", "Declared", "thing")];
+
+        let meters = shipped_meters(&counted, &declared, org, now);
+
+        assert_eq!(meters.len(), 2, "{meters:?}");
+        assert_eq!(
+            (meters[0].display_name.as_str(), meters[0].unit.as_str()),
+            ("Declared", "thing")
+        );
+        assert_eq!(
+            (meters[1].display_name.as_str(), meters[1].unit.as_str()),
+            ("a/undeclared", "")
+        );
+    }
+}

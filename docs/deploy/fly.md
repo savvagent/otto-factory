@@ -130,21 +130,50 @@ machines.
 
 ## Usage metering
 
-Every tool call writes a row to `usage_outbox` in the tool's own transaction; a background
-task in `of-server` ships rows to the platform's `/internal/usage` in batches of up to 500,
-deleting what the platform accepted (it dedupes on the row's `event_id`, so retries are
-safe). While the platform is unreachable rows accumulate and nothing user-visible breaks;
-they drain, oldest first, when it returns. To watch the backlog:
+Every tool call writes a row to `usage_outbox` in the tool's own transaction; a successful
+`complete_job`, and a ticket close to Completed of a job that was ever claimed, carry the
+`otto-factory/jobs_completed` meter (quantity 1), which is what is billed. A close of a
+never-claimed job, or any close while the org is blocked, is recorded unbilled. A background task in `of-server` first **declares the
+meter** with the platform, then ships rows to `/internal/usage` in batches of up to 500, deleting
+what the platform accepted (it dedupes on the row's `event_id`, so retries are safe). Nothing ships
+until the declaration succeeds; it retries with backoff and logs an error about once a minute with
+the platform's reason and the rows waiting. While the platform is unreachable rows accumulate and
+nothing user-visible breaks; they drain, oldest first, when it returns. To watch the backlog:
 
 ```sql
 SELECT count(*), min(occurred_at), max(attempts), max(last_error) FROM usage_outbox;
 ```
 
 A backlog that keeps growing with `last_error` mentioning `credential` means
-`OF_INTROSPECTION_SECRET` is wrong. Quota checks (`OF_ENFORCE_QUOTAS=1`) read the platform's
-cached usage status, so a hard-stop org can overrun its bucket by one minute of usage plus
-whatever is still in the outbox; if the platform cannot answer, the call is allowed (and
-still recorded).
+`OF_INTROSPECTION_SECRET` is wrong. A declaration error `service_not_set` means the platform side
+is not prepared: the operator prerequisite is the platform's `resource set-service` for this
+resource server, which is already done for production (slug `otto-factory`).
+
+**The meter key's `otto-factory/` prefix must match the service slug the platform assigned to
+this resource server.** The key is a constant (`of_billing::METER_JOBS_COMPLETED`), not
+configuration, so a deployment registered under another slug (a staging resource server set to
+`otto-factory-staging`, say) has its declaration and its metered events refused. Set the slug to
+`otto-factory` for every environment that runs this binary, or the meter does not bill there.
+
+**Before rolling back across the release that added the meter** (migration `0005`), drain or
+check the metered rows:
+
+```sql
+SELECT count(*) FROM usage_outbox WHERE meter IS NOT NULL;
+```
+
+The previous release's shipper does not read `meter`/`quantity`, so a metered row it ships goes
+out as a plain call and its meter unit is lost. The same can happen during the brief overlap of
+a rolling deploy (production runs one machine). Wait for the count to reach zero (the current
+release ships them within seconds while the platform is up), then roll back. With no prices set
+the cost today is zero, but the completed-job count is lost.
+
+`OF_ENFORCE_QUOTAS` is retired and has no effect (the server warns if it is set); enforcement is
+always on. `complete_job` is refused, and a tracker close is applied but recorded unbilled, when
+the platform reports the org blocked (`budget_exceeded` or `payment_required`),
+judged from a status cached for a minute, so a console change takes up to a minute to apply; if
+the platform cannot answer, the call is allowed (and still recorded). The refusal points at
+`OF_UPGRADE_URL`, else `OF_PLATFORM_URL`.
 
 ## Tenant isolation on the shared Postgres instance
 
@@ -255,9 +284,10 @@ Order matters; the platform goes first.
    several machines starting concurrently on a fresh database wait rather than
    racing through the same DDL.
 4. Structured (JSON) logging via `tracing-subscriber`, filtered by `RUST_LOG`.
-5. The usage shipper (`of_billing::outbox::run`) drains `usage_outbox` to the platform.
+5. The usage shipper (`of_billing::outbox::run`) declares the meters, then drains `usage_outbox` to the platform.
 6. Graceful shutdown on `SIGTERM`/Ctrl+C: stops accepting new connections,
-   waits for in-flight requests, makes a final usage flush, then calls
+   waits for in-flight requests, makes a final usage flush (skipped if the shipper is still
+   waiting for its meter declaration), then calls
    `Watcher::shutdown()` to release its detached `LISTEN` connection before the
    process exits.
 7. `Db::verify_tenant_isolation` runs after the migrations and **before the port
@@ -333,7 +363,8 @@ check before routing traffic to the machine.
 
 ## Operational notes
 
-- `usage_outbox_rejected` holds usage events the platform refused (with its reason); a row there
+- `usage_outbox_rejected` holds usage events the platform refused (with its reason, and the meter and
+  quantity when the event carried one); a row there
   is billing the platform was never told about, and each one is also logged at error level.
 - `platform_events` markers older than 30 days and expired `removed_members` tombstones are swept
   hourly. `deleted_orgs` is permanent (the platform never reuses an org id).

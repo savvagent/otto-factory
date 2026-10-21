@@ -14,8 +14,11 @@
 //!
 //! Nothing here falls back quietly. A variable that is set but unparseable is
 //! an error naming the variable and what it accepts, never a default — a
-//! `OF_ENFORCE_QUOTAS=yes-please` that silently reads as "off" is how a billing
-//! control gets deployed switched off for a year.
+//! `OF_RUN_MIGRATIONS=yes-please` that silently reads as "off" is how a
+//! deployment ships a schema nobody migrated. A variable this server no longer
+//! reads is not ignored quietly either: [`RETIRED`] names each one, and
+//! [`Config::warn_retired`] logs it at startup, so an operator who sets it
+//! learns it does nothing instead of believing it does something.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -100,12 +103,14 @@ pub struct Config {
     /// server can be deployed before the client exists.
     pub console_client_id: Option<String>,
 
-    /// Refuse billable calls once an org on a hard-stop plan is past its bucket,
-    /// as the platform reports it (cached up to a minute, so overrun is bounded
-    /// by that window and by what is still in the usage outbox).
-    pub enforce_quotas: bool,
-    /// Where a caller who has run out is told to go. Defaults to the platform.
+    /// Where an owner goes to lift a budget or payment block, named in the
+    /// refusal. Defaults to `platform_url`, the console's home, which lists
+    /// the user's orgs (billing lives under each org there; there is no
+    /// org-independent billing page to link to).
     pub upgrade_url: String,
+    /// Retired variables ([`RETIRED`]) that are set in the environment, to be
+    /// warned about once logging is up. See [`Config::warn_retired`].
+    pub retired_set: Vec<&'static str>,
 
     /// Extra authorities accepted in the MCP endpoint's `Host` header, beyond
     /// the one derived from `public_url`.
@@ -130,7 +135,8 @@ impl std::fmt::Debug for Config {
             .field("resource_uri", &self.resource_uri)
             .field("platform_url", &self.platform_url)
             .field("console_client_id", &self.console_client_id)
-            .field("enforce_quotas", &self.enforce_quotas)
+            .field("upgrade_url", &self.upgrade_url)
+            .field("retired_set", &self.retired_set)
             .field("static_dir", &self.static_dir)
             .field("run_migrations", &self.run_migrations)
             .field("log_format", &self.log_format)
@@ -216,9 +222,8 @@ impl Config {
             jira_client_secret: optional("OF_JIRA_CLIENT_SECRET"),
             console_client_id: optional("OF_CONSOLE_CLIENT_ID"),
 
-            enforce_quotas: parse_var("OF_ENFORCE_QUOTAS", "0", parse_bool)?,
-            upgrade_url: optional("OF_UPGRADE_URL")
-                .unwrap_or_else(|| format!("{platform_url}/settings/billing")),
+            upgrade_url: upgrade_url(optional("OF_UPGRADE_URL"), &platform_url),
+            retired_set: retired_set(|name| std::env::var_os(name).is_some()),
 
             extra_allowed_hosts: list("OF_ALLOWED_HOSTS"),
             allowed_origins: list("OF_ALLOWED_ORIGINS"),
@@ -239,6 +244,14 @@ impl Config {
         })
     }
 
+    /// Log a warning for each retired variable that is set. Called once
+    /// tracing is initialised, which is after `from_env` has run.
+    pub fn warn_retired(&self) {
+        for name in &self.retired_set {
+            tracing::warn!(variable = name, "{}", retired_warning(name));
+        }
+    }
+
     /// Authorities the MCP endpoint accepts in `Host`.
     ///
     /// The public URL's host is always in the list, because that is the name
@@ -254,6 +267,38 @@ impl Config {
         hosts.extend(self.extra_allowed_hosts.iter().cloned());
         hosts
     }
+}
+
+/// Variables this server used to read and no longer does, with why. Each one
+/// that is set is warned about at startup rather than silently ignored.
+pub const RETIRED: &[(&str, &str)] = &[(
+    "OF_ENFORCE_QUOTAS",
+    "completed jobs are always refused when the otto platform reports the \
+     organization blocked (budget_exceeded or payment_required), and nothing \
+     else is ever refused for billing; remove it from the environment",
+)];
+
+/// The retired variables `is_set` reports as present. Presence is what
+/// matters, not the value: `OF_ENFORCE_QUOTAS=0` does nothing either.
+fn retired_set(is_set: impl Fn(&str) -> bool) -> Vec<&'static str> {
+    RETIRED
+        .iter()
+        .map(|(name, _)| *name)
+        .filter(|name| is_set(name))
+        .collect()
+}
+
+fn retired_warning(name: &str) -> String {
+    let why = RETIRED
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map_or("", |(_, why)| why);
+    format!("{name} is set but has no effect: it is retired. {why}")
+}
+
+/// `OF_UPGRADE_URL` when set, else the platform console's home.
+fn upgrade_url(explicit: Option<String>, platform_url: &str) -> String {
+    explicit.unwrap_or_else(|| of_billing::default_fix_url(platform_url))
 }
 
 fn optional(name: &str) -> Option<String> {
@@ -331,8 +376,8 @@ impl Config {
             jira_client_id: None,
             jira_client_secret: None,
             console_client_id: None,
-            enforce_quotas: false,
-            upgrade_url: "https://otto.example.com/settings/billing".into(),
+            upgrade_url: "https://otto.example.com".into(),
+            retired_set: vec![],
             extra_allowed_hosts: vec![],
             allowed_origins: vec![],
             static_dir: "web/build".into(),
@@ -356,7 +401,7 @@ mod tests {
         }
     }
 
-    /// The whole point of `parse_bool` returning a `Result`. `OF_ENFORCE_QUOTAS`
+    /// The whole point of `parse_bool` returning a `Result`. `OF_RUN_MIGRATIONS`
     /// reading as "off" because somebody wrote `enabled` is a control that is
     /// deployed switched off, and nothing says so.
     #[test]
@@ -364,6 +409,80 @@ mod tests {
         for bad in ["enabled", "y", "2", "please"] {
             assert!(parse_bool(bad).is_err(), "{bad} should not parse");
         }
+    }
+
+    /// The v0.10.0 console has no `/settings/billing`; billing lives under each
+    /// org. Without an override, the refusal points at the console's home,
+    /// which lists the user's orgs.
+    #[test]
+    fn the_fix_url_defaults_to_the_platform_console_home() {
+        assert_eq!(
+            upgrade_url(None, "https://otto.example.com"),
+            "https://otto.example.com"
+        );
+        assert_eq!(
+            upgrade_url(None, "https://otto.example.com/"),
+            "https://otto.example.com"
+        );
+        assert_eq!(
+            upgrade_url(
+                Some("https://billing.example.com/fix".into()),
+                "https://otto.example.com"
+            ),
+            "https://billing.example.com/fix"
+        );
+    }
+
+    /// A retired variable is noticed whatever its value, and only when set.
+    #[test]
+    fn a_retired_variable_is_noticed_when_set() {
+        assert_eq!(
+            retired_set(|name| name == "OF_ENFORCE_QUOTAS"),
+            vec!["OF_ENFORCE_QUOTAS"]
+        );
+        assert!(retired_set(|_| false).is_empty());
+    }
+
+    /// Setting `OF_ENFORCE_QUOTAS` must produce a warning that names it and
+    /// says it does nothing, not silence: an operator who set it to turn
+    /// enforcement off would otherwise believe they had.
+    #[test]
+    fn a_retired_variable_that_is_set_is_warned_about() {
+        #[derive(Clone, Default)]
+        struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Captured {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let captured = Captured::default();
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .finish();
+        let mut config = Config::for_test();
+        config.retired_set = vec!["OF_ENFORCE_QUOTAS"];
+        tracing::subscriber::with_default(subscriber, || config.warn_retired());
+
+        let logged = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        assert!(logged.contains("WARN"), "{logged}");
+        assert!(logged.contains("OF_ENFORCE_QUOTAS"), "{logged}");
+        assert!(logged.contains("no effect"), "{logged}");
+
+        // Nothing set, nothing logged.
+        let quiet = Captured::default();
+        let writer = quiet.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || Config::for_test().warn_retired());
+        assert!(quiet.0.lock().unwrap().is_empty());
     }
 
     #[test]

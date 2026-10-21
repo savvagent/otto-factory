@@ -7,8 +7,8 @@
 use std::time::Duration;
 
 use of_billing::outbox::{self, ShipperConfig};
-use of_billing::{BillingError, Meter};
-use of_testkit::MockPlatform;
+use of_billing::{BillingError, Meter, Metered, METER_JOBS_COMPLETED};
+use of_testkit::{tripped_budget, MeterMode, MockPlatform};
 use otto_tenant::ids::{OrgId, UserId};
 use otto_tenant::Db;
 use sqlx::PgPool;
@@ -19,6 +19,7 @@ fn cfg() -> ShipperConfig {
         claim_lease: Duration::from_millis(50),
         base_backoff: Duration::from_millis(20),
         max_backoff: Duration::from_millis(200),
+        declare_max_backoff: Duration::from_millis(200),
         poll: Duration::from_millis(10),
         ..ShipperConfig::default()
     }
@@ -30,15 +31,30 @@ async fn record(db: &Db, org: OrgId, user: UserId, meter: &Meter, tool: &str) {
     tx.commit().await.unwrap();
 }
 
+/// The billable twin of [`record`]: a completed job, the one metered call.
+async fn record_metered(db: &Db, org: OrgId, user: UserId, meter: &Meter) {
+    let status = meter.warm(org).await;
+    let mut tx = db.begin(org).await.unwrap();
+    meter
+        .charge_completion(&mut tx, user, &status)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+}
+
 #[sqlx::test(migrator = "of_core::MIGRATOR")]
 async fn a_failed_call_is_not_recorded(pool: PgPool) {
     let platform = MockPlatform::start().await;
     let db = Db::from_pool(pool);
-    let meter = Meter::new(platform.client(), false, "https://x.test/billing");
+    let meter = Meter::new(platform.client(), "https://x.test/billing");
     let (org, user) = (OrgId::new(), UserId::new());
 
+    let status = meter.warm(org).await;
     let mut tx = db.begin(org).await.unwrap();
-    meter.charge(&mut tx, user, "add_job").await.unwrap();
+    meter
+        .charge_completion(&mut tx, user, &status)
+        .await
+        .unwrap();
     // The tool fails after charging: its transaction rolls back, meter and all.
     tx.rollback().await.unwrap();
 
@@ -49,10 +65,10 @@ async fn a_failed_call_is_not_recorded(pool: PgPool) {
 async fn a_recorded_call_ships_once_and_leaves_the_outbox(pool: PgPool) {
     let platform = MockPlatform::start().await;
     let db = Db::from_pool(pool);
-    let meter = Meter::new(platform.client(), false, "https://x.test/billing");
+    let meter = Meter::new(platform.client(), "https://x.test/billing");
     let (org, user) = (OrgId::new(), UserId::new());
 
-    record(&db, org, user, &meter, "add_job").await;
+    record_metered(&db, org, user, &meter).await;
     record(&db, org, user, &meter, "list_jobs").await;
     assert_eq!(outbox::pending(&db).await.unwrap(), 2);
 
@@ -68,7 +84,7 @@ async fn a_recorded_call_ships_once_and_leaves_the_outbox(pool: PgPool) {
         .iter()
         .map(|e| (e.tool.as_str(), e.billable))
         .collect();
-    assert!(billable.contains(&("add_job", true)));
+    assert!(billable.contains(&("complete_job", true)));
     assert!(
         billable.contains(&("list_jobs", false)),
         "free calls are recorded too"
@@ -90,13 +106,13 @@ async fn an_outage_loses_nothing_and_the_backlog_ships_later_exactly_once(pool: 
     let platform = MockPlatform::start().await;
     let db = Db::from_pool(pool);
     let client = platform.client();
-    let meter = Meter::new(client.clone(), false, "https://x.test/billing");
+    let meter = Meter::new(client.clone(), "https://x.test/billing");
     let (org, user) = (OrgId::new(), UserId::new());
 
     platform.set_down(true);
     // The tools keep working and keep recording while the platform is away.
     for _ in 0..5 {
-        record(&db, org, user, &meter, "add_job").await;
+        record_metered(&db, org, user, &meter).await;
     }
     for _ in 0..3 {
         assert!(outbox::ship_once(&db, &client, &cfg()).await.is_err());
@@ -133,7 +149,7 @@ async fn a_partial_failure_retries_and_still_counts_each_call_once(pool: PgPool)
     let platform = MockPlatform::start().await;
     let db = Db::from_pool(pool);
     let client = platform.client();
-    let meter = Meter::new(client.clone(), false, "https://x.test/billing");
+    let meter = Meter::new(client.clone(), "https://x.test/billing");
     let (org, user) = (OrgId::new(), UserId::new());
     for _ in 0..4 {
         record(&db, org, user, &meter, "claim_jobs").await;
@@ -175,10 +191,10 @@ async fn concurrent_shippers_never_double_count(pool: PgPool) {
     let platform = MockPlatform::start().await;
     let db = Db::from_pool(pool);
     let client = platform.client();
-    let meter = Meter::new(client.clone(), false, "https://x.test/billing");
+    let meter = Meter::new(client.clone(), "https://x.test/billing");
     let (org, user) = (OrgId::new(), UserId::new());
     for _ in 0..40 {
-        record(&db, org, user, &meter, "add_job").await;
+        record_metered(&db, org, user, &meter).await;
     }
 
     let slow = ShipperConfig {
@@ -209,10 +225,10 @@ async fn a_rejected_event_is_kept_in_a_dead_letter_table_not_dropped(pool: PgPoo
     let platform = MockPlatform::start().await;
     let db = Db::from_pool(pool);
     let client = platform.client();
-    let meter = Meter::new(client.clone(), false, "https://x.test/billing");
+    let meter = Meter::new(client.clone(), "https://x.test/billing");
     let (gone, user) = (OrgId::new(), UserId::new());
     platform.reject_usage_for(gone.as_uuid());
-    record(&db, gone, user, &meter, "add_job").await;
+    record_metered(&db, gone, user, &meter).await;
 
     let report = outbox::ship_once(&db, &client, &cfg()).await.unwrap();
     assert_eq!(report.rejected, 1);
@@ -227,7 +243,7 @@ async fn a_rejected_event_is_kept_in_a_dead_letter_table_not_dropped(pool: PgPoo
             .fetch_one(db.pool())
             .await
             .unwrap();
-    assert_eq!((tool.as_str(), billable), ("add_job", true));
+    assert_eq!((tool.as_str(), billable), ("complete_job", true));
     assert!(
         reason.contains("does not exist"),
         "the platform's reason is kept: {reason}"
@@ -241,10 +257,10 @@ async fn a_receipt_that_does_not_add_up_deletes_nothing(pool: PgPool) {
     let platform = MockPlatform::start().await;
     let db = Db::from_pool(pool);
     let client = platform.client();
-    let meter = Meter::new(client.clone(), false, "https://x.test/billing");
+    let meter = Meter::new(client.clone(), "https://x.test/billing");
     let (org, user) = (OrgId::new(), UserId::new());
     for _ in 0..3 {
-        record(&db, org, user, &meter, "add_job").await;
+        record_metered(&db, org, user, &meter).await;
     }
 
     platform.short_receipts(1);
@@ -275,11 +291,11 @@ async fn the_background_task_drains_the_outbox_and_stops_on_shutdown(pool: PgPoo
     let platform = MockPlatform::start().await;
     let db = Db::from_pool(pool);
     let client = platform.client();
-    let meter = Meter::new(client.clone(), false, "https://x.test/billing");
+    let meter = Meter::new(client.clone(), "https://x.test/billing");
     let (org, user) = (OrgId::new(), UserId::new());
     platform.set_down(true);
     for _ in 0..3 {
-        record(&db, org, user, &meter, "add_job").await;
+        record_metered(&db, org, user, &meter).await;
     }
 
     let (tx, rx) = tokio::sync::watch::channel(false);
@@ -305,67 +321,142 @@ async fn the_background_task_drains_the_outbox_and_stops_on_shutdown(pool: PgPoo
         .unwrap();
 }
 
-// ------------------------------------------------------------------- quota
+// ------------------------------------------------------------- enforcement
 
+const FIX_URL: &str = "https://otto.test";
+
+fn meter(platform: &MockPlatform) -> Meter {
+    Meter::new(platform.client(), FIX_URL)
+}
+
+/// The tools recorded in the outbox, oldest first.
+async fn recorded_tools(db: &Db) -> Vec<String> {
+    sqlx::query_scalar("SELECT tool FROM usage_outbox ORDER BY id")
+        .fetch_all(db.pool())
+        .await
+        .unwrap()
+}
+
+/// Try one completed job the way `complete_job` does (warm, then charge in
+/// the transaction), committing whatever it wrote; the error if it was
+/// refused.
+async fn try_complete(db: &Db, org: OrgId, user: UserId, meter: &Meter) -> Option<BillingError> {
+    let status = meter.warm(org).await;
+    let mut tx = db.begin(org).await.unwrap();
+    let res = meter.charge_completion(&mut tx, user, &status).await;
+    tx.commit().await.unwrap();
+    res.err()
+}
+
+/// The platform's blocked reason is the whole rule: a completed job is refused
+/// with that reason as its code, nothing is written for it, and a free call in
+/// the same transaction still goes through.
 #[sqlx::test(migrator = "of_core::MIGRATOR")]
-async fn a_spent_hard_stop_bucket_refuses_billable_calls_and_records_nothing(pool: PgPool) {
+async fn a_budget_block_refuses_a_completed_job_and_records_nothing(pool: PgPool) {
     let platform = MockPlatform::start().await;
     let db = Db::from_pool(pool);
-    let meter = Meter::new(platform.client(), true, "https://x.test/billing");
+    let meter = meter(&platform);
     let (org, user) = (OrgId::new(), UserId::new());
     platform.add_org(org.as_uuid(), "acme", "Acme");
-    platform.set_usage(org.as_uuid(), 500, 500, true);
+    platform.set_blocked_reason(org.as_uuid(), Some(otto_resource::BUDGET_EXCEEDED));
 
+    let status = meter.warm(org).await;
     let mut tx = db.begin(org).await.unwrap();
-    let err = meter.charge(&mut tx, user, "add_job").await.unwrap_err();
-    assert!(
-        matches!(err, BillingError::QuotaExceeded { included: 500, .. }),
-        "{err:?}"
-    );
+    let err = meter
+        .charge_completion(&mut tx, user, &status)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, BillingError::Blocked { .. }), "{err:?}");
+    assert_eq!(err.code(), "budget_exceeded");
     assert!(!err.retriable());
-    // Reads still work.
+    assert!(err.to_string().contains(FIX_URL), "{err}");
+    // Free calls are never refused.
     meter.charge(&mut tx, user, "list_jobs").await.unwrap();
     tx.commit().await.unwrap();
 
-    let tools: Vec<String> = sqlx::query_scalar("SELECT tool FROM usage_outbox")
-        .fetch_all(db.pool())
-        .await
-        .unwrap();
-    assert_eq!(tools, vec!["list_jobs".to_string()]);
+    assert_eq!(recorded_tools(&db).await, vec!["list_jobs".to_string()]);
 }
 
 #[sqlx::test(migrator = "of_core::MIGRATOR")]
-async fn the_call_that_lands_on_the_limit_is_allowed(pool: PgPool) {
+async fn a_payment_block_refuses_a_completed_job_as_payment_required(pool: PgPool) {
     let platform = MockPlatform::start().await;
     let db = Db::from_pool(pool);
-    let meter = Meter::new(platform.client(), true, "https://x.test/billing");
+    let meter = meter(&platform);
     let (org, user) = (OrgId::new(), UserId::new());
     platform.add_org(org.as_uuid(), "acme", "Acme");
-    platform.set_usage(org.as_uuid(), 499, 500, true);
-    record(&db, org, user, &meter, "add_job").await;
+    platform.set_blocked_reason(org.as_uuid(), Some(otto_resource::PAYMENT_REQUIRED));
+
+    let err = try_complete(&db, org, user, &meter).await.expect("refused");
+    assert_eq!(err.code(), "payment_required");
+    assert!(!err.retriable());
+    assert!(recorded_tools(&db).await.is_empty());
 }
 
+/// A platform that reports the budget's hard stop but no `blocked_reason` (one
+/// that predates the field) still blocks, and the refusal has to carry a code
+/// an agent can branch on: `budget_exceeded`, which is what tripped.
 #[sqlx::test(migrator = "of_core::MIGRATOR")]
-async fn an_overage_plan_is_never_refused(pool: PgPool) {
+async fn a_tripped_budget_with_no_reason_refuses_as_budget_exceeded(pool: PgPool) {
     let platform = MockPlatform::start().await;
     let db = Db::from_pool(pool);
-    let meter = Meter::new(platform.client(), true, "https://x.test/billing");
+    let meter = meter(&platform);
     let (org, user) = (OrgId::new(), UserId::new());
     platform.add_org(org.as_uuid(), "acme", "Acme");
-    platform.set_usage(org.as_uuid(), 9_999, 500, false);
-    record(&db, org, user, &meter, "add_job").await;
+    platform.set_budget(org.as_uuid(), Some(tripped_budget()));
+
+    let err = try_complete(&db, org, user, &meter).await.expect("refused");
+    assert_eq!(err.code(), "budget_exceeded");
+    assert!(recorded_tools(&db).await.is_empty());
 }
 
+/// The legacy family-wide bucket no longer decides anything: an org past it on
+/// a hard-stop plan, with no blocked reason, completes jobs. (The old rule
+/// refused here; now the platform says when to refuse.)
 #[sqlx::test(migrator = "of_core::MIGRATOR")]
-async fn with_enforcement_off_the_platform_is_never_asked(pool: PgPool) {
+async fn a_spent_legacy_bucket_no_longer_refuses(pool: PgPool) {
     let platform = MockPlatform::start().await;
     let db = Db::from_pool(pool);
-    let meter = Meter::new(platform.client(), false, "https://x.test/billing");
+    let meter = meter(&platform);
     let (org, user) = (OrgId::new(), UserId::new());
     platform.add_org(org.as_uuid(), "acme", "Acme");
     platform.set_usage(org.as_uuid(), 9_999, 500, true);
+    // A budget under its limit does not block either.
+    platform.set_budget(
+        org.as_uuid(),
+        Some(otto_resource::BudgetStatus {
+            spend_cents: Some(10),
+            percent_used: Some(1),
+            thresholds_reached: vec![],
+            blocked: false,
+            reason: None,
+            ..tripped_budget()
+        }),
+    );
+
+    assert!(try_complete(&db, org, user, &meter).await.is_none());
+    assert_eq!(recorded_tools(&db).await, vec!["complete_job".to_string()]);
+}
+
+/// Free calls are never refused, so they never ask: a free call that waited on
+/// the platform would make every coordination call as slow as its worst
+/// lookup, for an answer it ignores.
+#[sqlx::test(migrator = "of_core::MIGRATOR")]
+async fn free_calls_never_ask_the_platform(pool: PgPool) {
+    let platform = MockPlatform::start().await;
+    let db = Db::from_pool(pool);
+    let meter = meter(&platform);
+    let (org, user) = (OrgId::new(), UserId::new());
+    platform.add_org(org.as_uuid(), "acme", "Acme");
+    platform.set_blocked_reason(org.as_uuid(), Some(otto_resource::BUDGET_EXCEEDED));
+
     record(&db, org, user, &meter, "add_job").await;
-    assert_eq!(platform.lookup_calls(), 0);
+    record(&db, org, user, &meter, "claim_jobs").await;
+    let mut tx = db.begin(org).await.unwrap();
+    meter.record_replay(&mut tx, user, "add_job").await.unwrap();
+    tx.commit().await.unwrap();
+
+    assert_eq!(platform.status_calls(), 0);
+    assert_eq!(outbox::pending(&db).await.unwrap(), 3);
 }
 
 /// Refusing paying customers' work because a lookup failed is worse than
@@ -374,21 +465,31 @@ async fn with_enforcement_off_the_platform_is_never_asked(pool: PgPool) {
 async fn a_platform_outage_does_not_block_work_it_only_defers_the_bill(pool: PgPool) {
     let platform = MockPlatform::start().await;
     let db = Db::from_pool(pool);
-    let meter = Meter::new(platform.client(), true, "https://x.test/billing");
+    let meter = meter(&platform);
     let (org, user) = (OrgId::new(), UserId::new());
+    platform.add_org(org.as_uuid(), "acme", "Acme");
+    platform.set_blocked_reason(org.as_uuid(), Some(otto_resource::BUDGET_EXCEEDED));
     platform.set_down(true);
-    record(&db, org, user, &meter, "add_job").await;
-    assert_eq!(outbox::pending(&db).await.unwrap(), 1);
+
+    assert!(try_complete(&db, org, user, &meter).await.is_none());
+
+    let (billable, meter_key): (bool, Option<String>) =
+        sqlx::query_as("SELECT billable, meter FROM usage_outbox")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    assert!(billable);
+    assert_eq!(meter_key.as_deref(), Some(METER_JOBS_COMPLETED));
 }
 
 #[sqlx::test(migrator = "of_core::MIGRATOR")]
 async fn a_replay_is_recorded_as_free_and_never_refused(pool: PgPool) {
     let platform = MockPlatform::start().await;
     let db = Db::from_pool(pool);
-    let meter = Meter::new(platform.client(), true, "https://x.test/billing");
+    let meter = meter(&platform);
     let (org, user) = (OrgId::new(), UserId::new());
     platform.add_org(org.as_uuid(), "acme", "Acme");
-    platform.set_usage(org.as_uuid(), 500, 500, true);
+    platform.set_blocked_reason(org.as_uuid(), Some(otto_resource::BUDGET_EXCEEDED));
 
     let mut tx = db.begin(org).await.unwrap();
     meter.record_replay(&mut tx, user, "add_job").await.unwrap();
@@ -404,7 +505,7 @@ async fn a_replay_is_recorded_as_free_and_never_refused(pool: PgPool) {
 #[tokio::test]
 async fn the_report_surfaces_a_platform_failure_instead_of_inventing_numbers() {
     let platform = MockPlatform::start().await;
-    let meter = Meter::new(platform.client(), true, "https://x.test/billing");
+    let meter = meter(&platform);
     let org = OrgId::new();
     platform.add_org(org.as_uuid(), "acme", "Acme");
     platform.set_usage(org.as_uuid(), 450, 500, true);
@@ -415,37 +516,13 @@ async fn the_report_surfaces_a_platform_failure_instead_of_inventing_numbers() {
         (450, 50, true)
     );
     assert_eq!(status.plan, "Free");
-    assert!(status.enforced);
+    assert!(
+        status.enforced,
+        "the platform's blocked reason is always enforced"
+    );
 
     // A different org the platform has never heard of: an error, not zeros.
     assert!(meter.report(OrgId::new()).await.is_err());
-}
-
-/// The platform's count lags by whatever is still in the outbox, so the check
-/// adds the org's unshipped billable usage before comparing to the limit.
-#[sqlx::test(migrator = "of_core::MIGRATOR")]
-async fn unshipped_usage_counts_against_the_bucket(pool: PgPool) {
-    let platform = MockPlatform::start().await;
-    let db = Db::from_pool(pool);
-    let meter = Meter::new(platform.client(), true, "https://x.test/billing");
-    let (org, user) = (OrgId::new(), UserId::new());
-    platform.add_org(org.as_uuid(), "acme", "Acme");
-    platform.set_usage(org.as_uuid(), 498, 500, true);
-
-    // Two calls fit (498 -> 500), and nothing has been shipped.
-    record(&db, org, user, &meter, "add_job").await;
-    record(&db, org, user, &meter, "add_job").await;
-
-    // The platform still says 498, but the outbox holds two more.
-    let mut tx = db.begin(org).await.unwrap();
-    let err = meter.charge(&mut tx, user, "add_job").await.unwrap_err();
-    assert!(
-        matches!(err, BillingError::QuotaExceeded { used: 500, .. }),
-        "{err:?}"
-    );
-    // Free calls are still fine.
-    meter.charge(&mut tx, user, "list_jobs").await.unwrap();
-    tx.commit().await.unwrap();
 }
 
 /// An outage adds one bounded lookup, not one per call.
@@ -459,51 +536,328 @@ async fn an_outage_is_remembered_so_it_does_not_slow_every_call(pool: PgPool) {
         of_testkit::SECRET,
     );
     c.usage_status_ttl = Duration::from_millis(1);
-    let meter = Meter::new(platform.client_with(c), true, "https://x.test/billing");
+    let meter = Meter::new(platform.client_with(c), FIX_URL);
     let (org, user) = (OrgId::new(), UserId::new());
     platform.add_org(org.as_uuid(), "acme", "Acme");
-    platform.set_down(true);
+    platform.set_status_down(true);
 
     for _ in 0..5 {
-        record(&db, org, user, &meter, "add_job").await;
+        assert!(try_complete(&db, org, user, &meter).await.is_none());
     }
     assert_eq!(
-        platform.lookup_calls(),
-        0,
-        "a down platform counts no lookups"
+        platform.status_calls(),
+        1,
+        "the first failure is remembered, so the next four never ask"
     );
-    // (set_down answers 503 before counting; what matters is the next check.)
-    platform.set_down(false);
-    platform.set_usage(org.as_uuid(), 500, 500, true);
+    platform.set_status_down(false);
+    platform.set_blocked_reason(org.as_uuid(), Some(otto_resource::BUDGET_EXCEEDED));
     // Still inside the remembered window: allowed without asking.
-    record(&db, org, user, &meter, "add_job").await;
+    assert!(try_complete(&db, org, user, &meter).await.is_none());
     assert_eq!(
-        platform.lookup_calls(),
-        0,
+        platform.status_calls(),
+        1,
         "the failed lookup was not remembered"
     );
+    assert_eq!(outbox::pending(&db).await.unwrap(), 6);
 }
 
-/// `warm` makes the network call before a transaction exists.
+/// `warm` makes the one network call before a transaction exists, and the
+/// charge inside the transaction judges what it returned without asking
+/// again — even when the client's cache has already expired, so no lookup can
+/// happen while a pooled connection is held.
 #[sqlx::test(migrator = "of_core::MIGRATOR")]
-async fn warm_looks_the_org_up_before_any_transaction(pool: PgPool) {
+async fn the_charge_judges_the_warmed_status_and_never_asks_itself(pool: PgPool) {
     let platform = MockPlatform::start().await;
     let db = Db::from_pool(pool);
-    let meter = Meter::new(platform.client(), true, "https://x.test/billing");
+    let mut c = otto_resource::ClientConfig::new(
+        &platform.url,
+        of_testkit::RESOURCE_URI,
+        of_testkit::SECRET,
+    );
+    // Expired before the charge runs: an in-transaction lookup would show.
+    c.usage_status_ttl = Duration::from_millis(1);
+    let meter = Meter::new(platform.client_with(c), FIX_URL);
     let (org, user) = (OrgId::new(), UserId::new());
     platform.add_org(org.as_uuid(), "acme", "Acme");
 
-    meter.warm(org).await;
-    assert_eq!(platform.lookup_calls(), 1);
-    record(&db, org, user, &meter, "add_job").await;
+    let status = meter.warm(org).await;
+    assert!(status.answered());
+    assert_eq!(platform.status_calls(), 1);
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    // Blocked after the warm: the charge judges the answer it was handed.
+    platform.set_blocked_reason(org.as_uuid(), Some(otto_resource::BUDGET_EXCEEDED));
+
+    let mut tx = db.begin(org).await.unwrap();
+    meter
+        .charge_completion(&mut tx, user, &status)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
     assert_eq!(
-        platform.lookup_calls(),
+        platform.status_calls(),
         1,
-        "the in-transaction check hit the cache"
+        "the charge must not look the org up inside the transaction"
     );
 
-    // Off, it never asks.
-    let off = Meter::new(platform.client(), false, "https://x.test/billing");
-    off.warm(OrgId::new()).await;
-    assert_eq!(platform.lookup_calls(), 1);
+    // And a blocked status handed in is refused, still without asking.
+    let blocked = meter.warm(org).await;
+    let mut tx = db.begin(org).await.unwrap();
+    let err = meter
+        .charge_completion(&mut tx, user, &blocked)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "budget_exceeded");
+    assert_eq!(platform.status_calls(), 2);
+}
+
+// ------------------------------------------------------------------- meters
+
+async fn enqueue_metered(db: &Db, org: OrgId, user: UserId, metered: Option<&Metered>) {
+    let mut tx = db.begin(org).await.unwrap();
+    outbox::enqueue(&mut tx, Some(user), "complete_job", true, metered)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+}
+
+#[sqlx::test(migrator = "of_core::MIGRATOR")]
+async fn a_metered_row_ships_its_meter_and_quantity(pool: PgPool) {
+    let platform = MockPlatform::start().await;
+    let db = Db::from_pool(pool);
+    let (org, user) = (OrgId::new(), UserId::new());
+    enqueue_metered(&db, org, user, Some(&Metered::jobs_completed())).await;
+    enqueue_metered(&db, org, user, None).await;
+
+    outbox::ship_once(&db, &platform.client(), &cfg())
+        .await
+        .unwrap();
+
+    let counted = platform.counted_usage();
+    assert_eq!(counted.len(), 2);
+    let metered: Vec<_> = counted.iter().filter(|e| e.meter.is_some()).collect();
+    assert_eq!(metered.len(), 1);
+    assert_eq!(
+        metered[0].meter.as_deref(),
+        Some("otto-factory/jobs_completed")
+    );
+    assert_eq!(metered[0].quantity, Some(1));
+    let plain = counted.iter().find(|e| e.meter.is_none()).unwrap();
+    assert_eq!(plain.quantity, None, "an unmetered row carries no quantity");
+}
+
+#[sqlx::test(migrator = "of_core::MIGRATOR")]
+async fn a_rejected_metered_row_keeps_its_meter_and_quantity(pool: PgPool) {
+    let platform = MockPlatform::start().await;
+    let db = Db::from_pool(pool);
+    let (gone, user) = (OrgId::new(), UserId::new());
+    platform.reject_usage_for(gone.as_uuid());
+    enqueue_metered(&db, gone, user, Some(&Metered::jobs_completed())).await;
+
+    let report = outbox::ship_once(&db, &platform.client(), &cfg())
+        .await
+        .unwrap();
+    assert_eq!(report.rejected, 1);
+
+    let (meter, quantity): (Option<String>, Option<i64>) =
+        sqlx::query_as("SELECT meter, quantity FROM usage_outbox_rejected")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    assert_eq!(meter.as_deref(), Some(METER_JOBS_COMPLETED));
+    assert_eq!(quantity, Some(1));
+}
+
+/// A meter without a quantity (or the reverse) would ship a half-formed event;
+/// a zero or negative quantity would not be a count. The schema refuses both.
+#[sqlx::test(migrator = "of_core::MIGRATOR")]
+async fn the_schema_refuses_a_half_metered_or_non_positive_row(pool: PgPool) {
+    for (meter, quantity) in [
+        (Some("otto-factory/jobs_completed"), None),
+        (None, Some(1_i64)),
+        (Some("otto-factory/jobs_completed"), Some(0)),
+        (Some("otto-factory/jobs_completed"), Some(-1)),
+    ] {
+        for table in ["usage_outbox", "usage_outbox_rejected"] {
+            let sql = if table == "usage_outbox" {
+                "INSERT INTO usage_outbox (org_id, tool, billable, meter, quantity) \
+                 VALUES ($1, 't', true, $2, $3)"
+            } else {
+                "INSERT INTO usage_outbox_rejected \
+                   (event_id, org_id, tool, billable, occurred_at, reason, meter, quantity) \
+                 VALUES (gen_random_uuid(), $1, 't', true, now(), 'r', $2, $3)"
+            };
+            let res = sqlx::query(sql)
+                .bind(OrgId::new().as_uuid())
+                .bind(meter)
+                .bind(quantity)
+                .execute(&pool)
+                .await;
+            assert!(res.is_err(), "{table} accepted {meter:?}/{quantity:?}");
+        }
+    }
+}
+
+// ------------------------------------------------------------------ declaration
+
+/// Every meter this crate can record must be declared before shipping, or the
+/// platform dead-letters its rows as `unknown_meter`. Add each new `Metered`
+/// constructor here.
+#[test]
+fn every_recordable_meter_is_declared() {
+    let recordable = [Metered::jobs_completed()];
+    for m in recordable {
+        assert!(
+            of_billing::METER_DECLARATIONS
+                .iter()
+                .any(|(key, _, _)| *key == m.meter()),
+            "{} is recorded but not in METER_DECLARATIONS",
+            m.meter()
+        );
+    }
+}
+
+/// Poll `f` until it holds or five seconds pass.
+async fn eventually(what: &str, mut f: impl FnMut() -> bool) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !f() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for {what}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+fn spawn_shipper(
+    db: &Db,
+    platform: &MockPlatform,
+    cfg: ShipperConfig,
+) -> (
+    tokio::sync::watch::Sender<bool>,
+    tokio::task::JoinHandle<()>,
+) {
+    let (stop, rx) = tokio::sync::watch::channel(false);
+    let task = tokio::spawn(outbox::run(db.clone(), platform.client(), cfg, rx));
+    (stop, task)
+}
+
+#[sqlx::test(migrator = "of_core::MIGRATOR")]
+async fn the_shipper_declares_the_meter_before_its_first_usage_post(pool: PgPool) {
+    let platform = MockPlatform::start().await;
+    let db = Db::from_pool(pool);
+    let meter = Meter::new(platform.client(), "https://x.test/billing");
+    let (org, user) = (OrgId::new(), UserId::new());
+    record_metered(&db, org, user, &meter).await;
+
+    let (stop, task) = spawn_shipper(&db, &platform, cfg());
+    eventually("the row to ship", || !platform.counted_usage().is_empty()).await;
+
+    let declared = platform.declared_meters();
+    assert_eq!(declared.len(), 1, "{declared:?}");
+    assert_eq!(declared[0].key, "otto-factory/jobs_completed");
+    assert_eq!(declared[0].display_name, "Jobs completed");
+    assert_eq!(declared[0].unit, "job");
+    assert_eq!(
+        platform.usage_posts_before_declaration(),
+        0,
+        "usage was posted before the meter was declared"
+    );
+
+    // A second batch ships without declaring again: once per process.
+    record_metered(&db, org, user, &meter).await;
+    eventually("the second row to ship", || {
+        platform.counted_usage().len() == 2
+    })
+    .await;
+    assert_eq!(platform.meter_calls(), 1, "declared more than once");
+
+    stop.send(true).unwrap();
+    task.await.unwrap();
+}
+
+/// In `mode` nothing ships and the row stays queued; once the platform
+/// recovers the shipper declares and drains.
+async fn a_failed_declaration_holds_shipping_back(pool: PgPool, mode: MeterMode) {
+    let platform = MockPlatform::start().await;
+    let db = Db::from_pool(pool);
+    let meter = Meter::new(platform.client(), "https://x.test/billing");
+    let (org, user) = (OrgId::new(), UserId::new());
+    record_metered(&db, org, user, &meter).await;
+    record(&db, org, user, &meter, "list_jobs").await;
+    platform.set_meter_mode(mode);
+
+    let (stop, task) = spawn_shipper(&db, &platform, cfg());
+    eventually("a second declaration attempt", || {
+        platform.meter_calls() >= 2
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    assert_eq!(platform.usage_calls(), 0, "{mode:?}: usage was posted");
+    assert!(platform.declared_meters().is_empty(), "{mode:?}");
+    assert_eq!(outbox::pending(&db).await.unwrap(), 2, "{mode:?}");
+
+    platform.set_meter_mode(MeterMode::Accept);
+    eventually("the outbox to drain", || {
+        platform.counted_usage().len() == 2
+    })
+    .await;
+    assert_eq!(platform.declared_meters().len(), 1);
+    assert_eq!(platform.usage_posts_before_declaration(), 0);
+    // The shipper deletes after the platform counts; wait for the delete.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while outbox::pending(&db).await.unwrap() != 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{mode:?}: rows linger"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    stop.send(true).unwrap();
+    task.await.unwrap();
+}
+
+#[sqlx::test(migrator = "of_core::MIGRATOR")]
+async fn service_not_set_holds_shipping_back(pool: PgPool) {
+    a_failed_declaration_holds_shipping_back(pool, MeterMode::ServiceNotSet).await;
+}
+
+#[sqlx::test(migrator = "of_core::MIGRATOR")]
+async fn an_outage_holds_shipping_back(pool: PgPool) {
+    a_failed_declaration_holds_shipping_back(pool, MeterMode::Outage).await;
+}
+
+#[sqlx::test(migrator = "of_core::MIGRATOR")]
+async fn a_rejected_meter_holds_shipping_back(pool: PgPool) {
+    a_failed_declaration_holds_shipping_back(pool, MeterMode::Reject).await;
+}
+
+#[sqlx::test(migrator = "of_core::MIGRATOR")]
+async fn shutdown_while_waiting_to_declare_returns_promptly(pool: PgPool) {
+    let platform = MockPlatform::start().await;
+    let db = Db::from_pool(pool);
+    let meter = Meter::new(platform.client(), "https://x.test/billing");
+    let (org, user) = (OrgId::new(), UserId::new());
+    record_metered(&db, org, user, &meter).await;
+    platform.set_meter_mode(MeterMode::Outage);
+
+    // A retry delay far longer than the test: only shutdown can end the wait.
+    let slow = ShipperConfig {
+        base_backoff: Duration::from_secs(300),
+        ..cfg()
+    };
+    let (stop, task) = spawn_shipper(&db, &platform, slow);
+    eventually("the first declaration attempt", || {
+        platform.meter_calls() >= 1
+    })
+    .await;
+
+    stop.send(true).unwrap();
+    tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .expect("the shipper did not stop during the declaration wait")
+        .unwrap();
+    assert_eq!(platform.usage_calls(), 0);
+    assert_eq!(outbox::pending(&db).await.unwrap(), 1);
 }

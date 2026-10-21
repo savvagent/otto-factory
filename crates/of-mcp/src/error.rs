@@ -173,12 +173,13 @@ pub fn from_platform(e: &otto_resource::Error) -> ErrorData {
 
 /// Convert a metering failure.
 ///
-/// A quota refusal is not an argument error and must not read like one: the
+/// A billing block is not an argument error and must not read like one: the
 /// call was well-formed and the agent should stop rather than rewrite it. The
-/// message names the plan, the limit, and the URL a human goes to, because an
-/// agent that cannot say *what to do about it* just retries.
+/// code is the platform's reason (`budget_exceeded` or `payment_required`),
+/// and the message says what still works and the URL a human goes to, because
+/// an agent that cannot say *what to do about it* just retries.
 pub fn from_billing(e: &of_billing::BillingError) -> ErrorData {
-    // Not quota refusals: a failed lookup or a database fault keeps its own
+    // Not blocks: a failed lookup or a database fault keeps its own
     // identity (and redaction) rather than being reported as a billing problem.
     match e {
         of_billing::BillingError::Platform(p) => return from_platform(p),
@@ -186,7 +187,7 @@ pub fn from_billing(e: &of_billing::BillingError) -> ErrorData {
         of_billing::BillingError::Db(_) => {
             return envelope(Fault::Database, e.to_string(), e.code(), true)
         }
-        of_billing::BillingError::QuotaExceeded { .. } => {}
+        of_billing::BillingError::Blocked { .. } => {}
     }
 
     ErrorData::new(
@@ -284,29 +285,32 @@ mod tests {
     /// A refusal an agent cannot fix by trying again has to say so, and say
     /// where a human can fix it, or the agent retries until something gives up.
     #[test]
-    fn a_quota_refusal_is_actionable_and_not_retriable() {
-        let e = from_billing(&of_billing::BillingError::QuotaExceeded {
-            tool: "add_job".into(),
-            used: 500,
-            included: 500,
-            plan: "Free".into(),
-            upgrade_url: "https://example.test/settings/billing".into(),
-        });
+    fn a_billing_block_is_actionable_and_not_retriable() {
+        for (reason, code) in [
+            (Some("budget_exceeded"), "budget_exceeded"),
+            (Some("payment_required"), "payment_required"),
+            (None, "budget_exceeded"),
+        ] {
+            let e = from_billing(&of_billing::BillingError::Blocked {
+                reason: reason.map(str::to_string),
+                fix_url: "https://otto.example.test".into(),
+            });
 
-        let data = e.data.as_ref().unwrap();
-        assert_eq!(data["code"], "quota_exceeded");
-        assert_eq!(data["retriable"], false);
-        assert!(e.message.contains("add_job"));
-        assert!(e.message.contains("Free"));
-        assert!(e.message.contains("https://example.test/settings/billing"));
-        assert!(
-            e.message.contains("Reads still work"),
-            "the caller needs to know what it can still do"
-        );
+            assert_eq!(e.code, ErrorCode::INVALID_REQUEST);
+            let data = e.data.as_ref().unwrap();
+            assert_eq!(data["code"], code);
+            assert_eq!(data["retriable"], false);
+            assert!(e.message.contains("https://otto.example.test"));
+            assert!(
+                e.message.contains("free and keeps working"),
+                "the caller needs to know what it can still do: {}",
+                e.message
+            );
+        }
     }
 
     /// A database failure that reaches us through billing is still a database
-    /// failure, and must not be reported as a quota problem.
+    /// failure, and must not be reported as a billing block.
     #[test]
     fn a_database_failure_under_billing_keeps_its_own_identity() {
         let e = from_billing(&of_billing::BillingError::Tenant(otto_tenant::Error::Db(

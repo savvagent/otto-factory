@@ -79,9 +79,10 @@ messages never wake you.
 Jobs carry a free-form `metadata` object that this server never reads or \
 interprets. Put whatever your own workflow needs in it.
 
-You are billed for work performed, not for looking: reads, watch, and lease \
-renewals cost nothing, while queueing, claiming, completing and messaging \
-consume the plan's monthly allowance. Call usage to see where you stand.";
+Coordination calls are free. Each completed job is billed on the \
+organization's otto-factory meter, including one completed by closing its \
+linked ticket. Call usage to see this month's completed \
+jobs, the budget and any block.";
 
 #[derive(Debug, Clone, Default)]
 pub struct TrackerSyncConfig {
@@ -146,29 +147,27 @@ impl Factory {
         &self.tracker_sync
     }
 
-    /// Meter this call inside the tool's own transaction, refusing it if the
-    /// org is out of budget.
+    /// Record this free call inside the tool's own transaction. Never refuses
+    /// and never asks the platform anything: every tool is free, and the one
+    /// billable outcome, a completed job, goes through
+    /// [`Self::charge_completion`] instead.
     ///
     /// Called immediately after the transaction opens and **before** the tool
-    /// does anything. That ordering is what makes "a failed call is not billed"
-    /// true rather than aspirational: the usage row lives in the same
-    /// transaction as the work, so a tool that returns an error rolls back the
-    /// meter along with everything else. Charging afterwards would need a
-    /// second transaction, which can fail on its own, and a bill that
-    /// disagrees with what happened is worse than no bill.
-    ///
-    /// It also puts the quota check where a refusal is cheapest — before the
-    /// work, not after it.
+    /// does anything. That ordering is what makes "every call is recorded,
+    /// and a failed one is not" true rather than aspirational: the usage row
+    /// lives in the same transaction as the work, so a tool that returns an
+    /// error rolls back the record along with everything else. Recording
+    /// afterwards would need a second transaction, which can fail on its own,
+    /// and a history that disagrees with what happened is worse than none.
     ///
     /// `sync_ticket` (`tools::jobs`) is a second exception, alongside
     /// `watch`: its "work" is an outbound call to the tracker that has
-    /// already happened by the time any Tx opens, so charging in the same Tx
-    /// as the DB write-back would let a quota refusal roll back loop-safety
-    /// state (`remote_revision`, rotated credentials) for a tracker call that
-    /// cannot be un-made. It writes back first, in its own Tx, then charges
-    /// in a second one — a quota refusal there means the call is not billed
-    /// and the caller sees an error, but the write-back survives so a retry
-    /// does not re-post to the tracker.
+    /// already happened by the time any Tx opens, so recording in the same
+    /// Tx as the DB write-back would let a failed record roll back
+    /// loop-safety state (`remote_revision`, rotated credentials) for a
+    /// tracker call that cannot be un-made. It writes back first, in its own
+    /// Tx, then records in a second one, so the write-back survives whatever
+    /// happens to the record and a retry does not re-post to the tracker.
     ///
     /// A third, different-shaped exception: `add_job`/`send_message`'s
     /// idempotent-replay check. Unlike `watch`/`sync_ticket` above, this one
@@ -201,6 +200,31 @@ impl Factory {
             .map_err(|e| error::from_billing(&e))
     }
 
+    /// [`Self::charge`] for the one billed outcome, a job `complete_job` is
+    /// about to complete: records the completion, billed, through
+    /// `of_billing::record_job_completed` (the one place that decides what a
+    /// completion writes), or refuses it (`budget_exceeded` or
+    /// `payment_required`, nothing written) when the platform says the org's
+    /// billable calls are blocked.
+    ///
+    /// Same placement rule as `charge`: in the tool's own transaction, before
+    /// the work, so a failed call rolls it back. `warmed` is what
+    /// [`Meter::warm`] returned *before* that transaction was opened, so the
+    /// platform round trip never holds a pooled connection and this makes no
+    /// network call. A lookup that failed allows the call (it is still
+    /// recorded): a platform outage never blocks work.
+    pub async fn charge_completion(
+        &self,
+        tx: &mut Tx<'_>,
+        caller: &Principal,
+        warmed: &of_billing::Warmed,
+    ) -> Result<of_billing::Charge, ErrorData> {
+        self.meter
+            .charge_completion(tx, caller.user_id, warmed)
+            .await
+            .map_err(|e| error::from_billing(&e))
+    }
+
     /// Record an idempotent replay of `tool` as `Free`, never billed and
     /// never refused — see [`Self::charge`]'s doc comment for why this has
     /// to run instead of, not before, `charge` on a replay. Called by
@@ -216,19 +240,6 @@ impl Factory {
     ) -> Result<(), ErrorData> {
         self.meter
             .record_replay(tx, caller.user_id, tool)
-            .await
-            .map_err(|e| error::from_billing(&e))
-    }
-
-    /// Read-only quota check for `sync_ticket`'s two-transaction charging
-    /// shape — see [`Self::charge`]'s doc comment for why that tool cannot
-    /// charge before its outbound call the way every other tool does. This
-    /// runs the same enforcement/hard-stop/bucket check `charge` does,
-    /// without recording usage, so `sync_ticket` can refuse before making
-    /// that call.
-    pub async fn would_refuse(&self, tx: &mut Tx<'_>, tool: &str) -> Result<(), ErrorData> {
-        self.meter
-            .would_refuse(tx, tool)
             .await
             .map_err(|e| error::from_billing(&e))
     }
@@ -265,10 +276,10 @@ impl Factory {
     /// Open a transaction pinned to the caller's org, refused if the org was
     /// deleted or the caller removed since their token was introspected (see
     /// `of_core::platform_events::begin_live`).
+    ///
+    /// Asks the platform nothing about billing: free tools have nothing to ask.
+    /// The metered tool warms its own status lookup before calling this.
     pub async fn tx(&self, caller: &Principal) -> Result<Tx<'static>, ErrorData> {
-        // The quota lookup is a network call: do it before a pooled connection
-        // is held, so a slow platform costs this call time and nothing else.
-        self.meter.warm(caller.org_id).await;
         of_core::platform_events::begin_live(&self.db, caller.org_id, Some(caller.user_id))
             .await
             .map_err(|e| error::from_core(&e))

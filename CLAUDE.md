@@ -220,7 +220,7 @@ compile-time layering discipline, not separate services.
 | `of-core` | Domain + **all** SQL. No HTTP, no auth. Every tenant fn takes an `OrgId`. |
 | (otto-platform) | Two crates from `savvagent/otto-platform`, pinned by one rev in the workspace `Cargo.toml`: `otto-tenant` (the pinned-transaction/RLS substrate, `Cipher`, the audit-trail pattern) and `otto-resource` (the resource-server client: introspection, usage shipping, member/team lookups, webhook verification). Nothing else — no `otto-core`/`otto-auth`/`otto-billing`, and no identity tables. Never call `otto_tenant::Db::migrate` on this database; use `of_core::migrate`. |
 | `of-mcp` | `rmcp` Streamable HTTP server, tool surface, bearer middleware (introspects at the platform). |
-| `of-billing` | The price list (`classify`), quota policy, and the usage outbox + shipper. |
+| `of-billing` | The price list (`classify`), what a completed job records (`completion`), enforcement of the platform's billing block (`meter`), and the usage outbox + shipper. |
 | `of-trackers` | GitHub App + JIRA clients, webhook ingest, two-way sync. |
 | `of-web` | Console REST API (console session cookie or platform bearer token), console sign-in (`/auth/*`), tracker webhooks, the platform's lifecycle webhook. |
 | `of-server` | Config, migrations, router assembly, the usage shipper task, graceful shutdown. |
@@ -230,7 +230,10 @@ compile-time layering discipline, not separate services.
 built to static files that `of-server` serves beside `/api`. See `web/README.md`.
 
 **Every SQL statement lives in `of-core`.** A query in `of-mcp` or `of-web` is a bug — it
-bypasses the `Tx` pinning that guard 2 depends on.
+bypasses the `Tx` pinning that guard 2 depends on. The one exception is the usage outbox:
+its SQL lives in `of-billing` (`outbox.rs`), because the outbox row must be written in the
+tool's own `Tx` by the crate that owns metering, and the shipper drains it across all orgs.
+It still writes through the caller's pinned `Tx`; nothing else in `of-billing` touches SQL.
 
 ## The MCP surface
 
@@ -443,9 +446,9 @@ copied into state, because a copy and the URL disagree for one frame after a nav
 and that frame is where one org's data renders under another's heading.
 
 Org pages live under `/o/[org]`, not `/[org]`, so no org slug can collide with a page name.
-The paths the *server* names — `/login`, `/verify`, `/recover`, `/invite/{org}`,
-`/settings/billing` — are fixed by what the server puts in an invitation link and in
-`of-billing`'s upgrade prompt, and cannot be renamed here alone.
+The paths the *server* names — `/login`, `/verify`, `/recover` and `/invite/{org}` —
+are fixed by what the server puts in an invitation link, and cannot be renamed here alone.
+(The billing fix link is `OF_UPGRADE_URL` or the bare platform URL, so it names no console path.)
 
 ## `of-server` — assembly, and the two things only it can get wrong
 
@@ -469,15 +472,16 @@ the decisions no single crate could make.
   usage-status caches, so a second client would be a second, colder cache. `of-mcp`, `of-web`,
   and the usage shipper all take the same `Arc`.
 - **The usage shipper is a task of this binary** (`of_billing::outbox::run`, spawned in
-  `main`), draining `usage_outbox` to the platform with per-row backoff. It stops on shutdown
-  after a final flush; anything undelivered stays in the table for the next process.
+  `main`), declaring the meters and then draining `usage_outbox` to the platform with per-row
+  backoff. It stops on shutdown after a final flush, except while it is still waiting for the
+  meter declaration: then it stops without one (shipping metered rows for an undeclared meter
+  would dead-letter them). Anything undelivered stays in the table for the next process.
 - **Startup checks the platform credential but never requires the platform.** One harmless
   `usage_status` call logs whether the credential was accepted (a `REJECTED` line is a
   deployment fault), and a transport failure only warns: a platform outage must not stop a
   restart.
 - **`Config::from_env` never falls back quietly.** A variable that is *set* but unparseable
-  is a startup error naming it, not a default — `OF_ENFORCE_QUOTAS=yes-please` reading as
-  "off" is how a billing control gets deployed switched off for a year. `OF_PUBLIC_URL`,
+  is a startup error naming it, not a default. `OF_PUBLIC_URL`,
   `OF_PLATFORM_URL`, `OF_INTROSPECTION_SECRET`, `OF_PLATFORM_WEBHOOK_SECRET`, and
   `OF_ENCRYPTION_KEY` have no defaults at all, because a wrong value for any of them fails
   silently: a discovery pointer that goes nowhere, tokens validated against the wrong
@@ -545,40 +549,66 @@ means in this repository:
 
 ## Metering
 
-The billable unit is the MCP tool call, but the free/billable classification in
-`of-billing::classify` is load-bearing: `watch` is a continuous long poll, and billing it
-flat would charge an idle agent tens of thousands of calls a month. Record every call
-regardless of class so the classification can be repriced without losing history.
+The billed unit is a completed job, not a tool call. Every MCP tool is free, but each call is
+still recorded and classified in `of-billing::classify`, so a price can be reintroduced without
+losing history. Every completed job, through `complete_job` or an inbound ticket close, writes
+exactly one completion row through `of_billing::record_job_completed`, in the same transaction
+as the state change: billed (`otto-factory/jobs_completed`, quantity 1) or an unmetered,
+unbilled row. Nothing else writes a completion row, so `org_counters.jobs_completed_total`
+equals the number of completion rows (a parity test in `of-web/tests/webhooks_http.rs`). `watch` is a continuous long poll, which is why per-call
+pricing was never viable.
 
-The platform owns plans, standing, and monthly totals; this service owns the price list and
-the *record*. Four rules hold, and the first is what makes the others true:
+The platform owns plans, standing, and monthly totals; this service owns the *record*. Four
+rules hold, and the first is what makes the others true:
 
-1. **The record is written inside the tool's own transaction, before the work.**
-   `Factory::charge` is the first thing after `self.tx(...)` and inserts a `usage_outbox` row
-   (with a fresh `event_id`) in that transaction. A failed call rolls the row back with
-   everything else, so it is never billed; a successful one has no second transaction to
-   retry, so it is never lost. `watch` is the one exception — it meters in a short
-   transaction of its own, because holding one open across a thirty-second poll would pin a
-   connection per idle agent.
-2. **Delivery is a background task, and it is idempotent.** `of_billing::outbox::run` claims due
-   rows (`FOR UPDATE SKIP LOCKED`, `next_attempt_at` as claim lease and retry backoff), posts them
-   with `PlatformClient::ship_usage`, and deletes what the platform answered for (accepted,
-   duplicate, or rejected — all final; a rejected event is moved to `usage_outbox_rejected` with the
-   platform's reason and an error log, never dropped, and a receipt whose counts do not add up to the
-   batch deletes nothing). The platform dedupes on `event_id`, so any retry, from
-   any replica, counts once. A platform outage delays billing and never loses it, and never
-   affects a tool call.
-3. **A new tool must be classified.** `exhaustive_over` compares the router against the
-   price list and `every_tool_has_a_price` fails when they disagree. An unclassified tool
-   is treated as free and logged: over-billing a customer for something nobody decided to
-   charge for is a worse failure than under-billing ourselves.
-4. **Enforcement never blocks a read, and a lookup failure never blocks work.** It is behind
-   `OF_ENFORCE_QUOTAS`, off by default, and refuses only billable tools on hard-stop plans, judged
-   against the platform's usage status cached for 60 s (`UsageStatus::is_blocked`) plus the org's
-   unshipped billable outbox rows, looked up in `Factory::tx` before the transaction opens, and a
-   failed lookup is remembered per org for 5 s. That makes
-   overrun bounded by one cache window plus the unshipped outbox — an accepted cost of the split.
-   If the platform cannot answer, the call is allowed (and still recorded).
+1. **The record is written inside the work's own transaction.** `Factory::charge` is the first
+   thing after `self.tx(...)` and inserts a `usage_outbox` row (with a fresh `event_id`) in that
+   transaction. `complete_job` instead records its completion, billed, through
+   `Meter::charge_completion`. The ticket-close path (`of-web/src/routes/webhooks.rs`) records
+   one completion row after `close_from_ticket` moves the job to Completed, in the webhook's
+   transaction, billed only when the job was ever claimed (`attempts > 0`: claim history, not
+   the status at the close, since `repend_job` and an expired claim return a worked job to
+   `pending` but keep `attempts`) and the org is not blocked (rule 4); a never-claimed job's
+   close is recorded unbilled. A failed call rolls the row back with everything
+   else, so it is never billed; a successful one has no second transaction to retry, so it is
+   never lost. A close on a job already Completed (a later event, or a job completed through
+   `complete_job`) is a no-op and writes no second row. `watch` is the one exception — it meters in a short transaction of its own, because
+   holding one open across a thirty-second poll would pin a connection per idle agent.
+2. **Delivery is a background task, and it is idempotent.** `of_billing::outbox::run` first
+   declares the meters in `METER_DECLARATIONS` with the platform (retrying until it succeeds;
+   nothing ships meanwhile, since the platform rejects an undeclared meter as `unknown_meter`),
+   then claims due rows (`FOR UPDATE SKIP LOCKED`, `next_attempt_at` as claim lease and retry
+   backoff), posts them with `PlatformClient::ship_usage`, and deletes what the platform answered
+   for (accepted, duplicate, or rejected — all final; a rejected event is moved to
+   `usage_outbox_rejected` with the platform's reason, meter and quantity and an error log, never
+   dropped, and a receipt whose counts do not add up to the batch deletes nothing). The platform
+   dedupes on `event_id`, so any retry, from any replica, counts once. A platform outage delays
+   billing and never loses it, and never affects a tool call. Every meter a row can carry must
+   be in `METER_DECLARATIONS`.
+3. **A new tool must be classified.** Every tool is free, and `exhaustive_over` compares the
+   router against the price list; `every_tool_has_a_price` fails when they disagree. An
+   unclassified tool is treated as free and logged.
+4. **The hard stop applies to both completion paths, and a lookup failure never blocks work.**
+   When the platform's usage status says billable work is blocked
+   (`UsageStatus::billable_blocked()`: a `blocked_reason` of `budget_exceeded` |
+   `payment_required`, or a tripped budget hard stop with no reason, treated as
+   `budget_exceeded`):
+   - `complete_job` is **refused** (`retriable: false`); the error names `OF_UPGRADE_URL`, else
+     the bare platform URL.
+   - A tracker close is **applied but recorded unbilled** (the tracker already closed the
+     ticket). For a `payment_required` org that means **tracker closes are free**: an org with
+     no card in good standing can still complete jobs by closing their tickets, unbilled.
+
+   Free tools are never refused, so a blocked org can still read and find out why.
+   The status lookup happens before the transaction: `complete_job` calls `Meter::warm` itself
+   before `Factory::tx` and hands the result, a `Warmed` (only `warm` can make one), to
+   `charge_completion`, which never looks anything up; the webhook looks it up only
+   for a verified close to completed of a claimed job: it stops that pass without writing, drops
+   the transaction, warms, then reopens one and applies again (`Factory::tx` does not warm, so
+   free tools never wait on the platform, and an unverified request never causes a lookup). It is cached
+   for 60 s (a failed lookup for 5 s), and a failed lookup lets the call through. A change made
+   in the console therefore takes up to a minute to apply. `OF_ENFORCE_QUOTAS` is retired: it
+   has no effect and the server warns if it is set.
 
 ## Style
 

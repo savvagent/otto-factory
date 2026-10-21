@@ -1,26 +1,27 @@
-//! Which tool calls consume the bucket.
+//! How each MCP tool call is classified for metering.
 //!
-//! **Not every call is billable, and this is a product decision before it is a
-//! technical one.** `watch` is a thirty-second long poll that every connected
-//! agent calls continuously. Billing it flat would charge an idle agent roughly
-//! 86,000 operations a month for doing nothing, which makes a bill impossible
-//! to predict and punishes the very behaviour the server asks for — waiting
-//! instead of polling.
+//! **Every tool call is free.** Coordination is what the product is for, and
+//! pricing it would punish the behaviour the server asks for: `watch` is a
+//! thirty-second long poll that every connected agent calls continuously, and
+//! billing it, or the claims, leases and messages around it, would make a bill
+//! impossible to predict.
 //!
-//! The rule stated to customers is: **you pay for work performed, not for
-//! looking.** Every classification below has to be defensible against that
-//! sentence, so each one that is not obvious carries its reason.
+//! What is billed is an outcome, not a call: a completed job, recorded as a
+//! value meter on the usage row by `completion::record_job_completed`. That is a property
+//! of the row, not of the tool's class, so [`BILLABLE`] is empty. It is kept,
+//! with [`exhaustive_over`], so a tool that is ever priced per call again has
+//! one place to go and one test that notices when it is missing.
 //!
-//! Both classes are recorded regardless. Repricing later needs history to
+//! Every call is recorded regardless. Repricing later needs history to
 //! reprice against, and a call that was never written down cannot be
 //! reconsidered.
 
 /// What a tool call costs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Class {
-    /// Recorded, but does not consume the plan's bucket.
+    /// Recorded, never charged.
     Free,
-    /// Consumes one operation from the plan's bucket.
+    /// Charged per call. No tool is in this class today; value is billed by meter instead.
     Billable,
 }
 
@@ -30,7 +31,10 @@ impl Class {
     }
 }
 
-/// Reads, polls, and bookkeeping.
+/// Every tool. All of them are free: coordination is the product, and a price
+/// on any of it would punish the behaviour the server asks for (see the module
+/// docs). What is billed is a completed job, carried as a meter on its usage
+/// row, which does not depend on this table.
 pub const FREE: &[&str] = &[
     // Reads. Looking is free, and an agent that checks before acting is an
     // agent doing the right thing.
@@ -48,8 +52,7 @@ pub const FREE: &[&str] = &[
     "usage",
     // The long poll. The whole reason this table exists.
     "watch",
-    // Renewing and releasing a lease you already paid to acquire, and renewing
-    // a job claim you already paid to take with claim_jobs. Charging per
+    // Renewing and releasing a lease, and renewing a job claim. Charging per
     // renewal would bill an agent for holding still, and charging for release
     // would create an incentive not to release — which costs everyone else the
     // resource until the lease expires. Coordination hygiene must never have a
@@ -60,10 +63,9 @@ pub const FREE: &[&str] = &[
     // Advancing your own read cursor. Bookkeeping on a read, and billing it
     // would penalise the agents that keep their inbox tidy.
     "ack_messages",
-];
-
-/// Work.
-pub const BILLABLE: &[&str] = &[
+    // Changing the queue, messaging, leasing and repo setup. Free like the
+    // rest: queueing and claiming are coordination, not the outcome a
+    // customer pays for.
     "add_job",
     "update_job",
     "delete_job",
@@ -78,11 +80,13 @@ pub const BILLABLE: &[&str] = &[
     "send_message",
     "acquire_lease",
     "register_repo",
-    // Same category as register_repo: it changes what the org has registered.
     "update_repo",
     "link_ticket",
     "sync_ticket",
 ];
+
+/// Tools priced per call. Empty: see the module docs.
+pub const BILLABLE: &[&str] = &[];
 
 /// Classify a tool call.
 ///
@@ -166,19 +170,12 @@ mod tests {
     }
 
     #[test]
-    fn work_is_billable_and_looking_is_not() {
-        for tool in [
-            "add_job",
-            "claim_jobs",
-            "activate_job",
-            "complete_job",
-            "acquire_lease",
-            "request_cancel",
-            "cancel_job",
-        ] {
-            assert_eq!(classify(tool), Class::Billable, "{tool}");
+    fn every_tool_is_free() {
+        assert!(BILLABLE.is_empty());
+        for tool in FREE {
+            assert_eq!(classify(tool), Class::Free, "{tool}");
         }
-        for tool in ["get_job", "ready", "stats", "inbox", "whoami"] {
+        for tool in ["add_job", "claim_jobs", "complete_job", "acquire_lease"] {
             assert_eq!(classify(tool), Class::Free, "{tool}");
         }
     }

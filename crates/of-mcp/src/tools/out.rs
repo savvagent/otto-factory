@@ -157,10 +157,10 @@ pub struct WhoAmI {
     /// The caller's role in this org, as the platform last reported it.
     pub role: Option<Role>,
     pub token: TokenOut,
-    /// Where this org stands against its monthly allowance. Here as well as in
-    /// `usage` because an agent that calls one thing at the start of a session
-    /// calls this one, and finding out it is nearly out of budget after the
-    /// work is queued is finding out too late.
+    /// This month's completed jobs, budget and any block for this org. Here as
+    /// well as in `usage` because an agent that calls one thing at the start of
+    /// a session calls this one, and finding out it is nearly out of budget
+    /// after the work is queued is finding out too late.
     pub usage: of_billing::Status,
 }
 
