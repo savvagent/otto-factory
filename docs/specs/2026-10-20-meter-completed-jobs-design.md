@@ -37,6 +37,15 @@ service's production slug is already set (`service=otto-factory`).
   flipped a flag, the epic's criterion 4 would not hold. The platform's `blocked_reason` is
   enforced unconditionally (failing open), and `OF_ENFORCE_QUOTAS` is retired.
 
+- **`complete_job` is not the only way a job is completed.** An inbound tracker webhook that
+  closes a linked ticket moves the job to Completed through `close_from_ticket`
+  (`of-web/src/routes/webhooks.rs:~248`, `of-core/src/jobs.rs:1458`). Metering only the MCP tool
+  would let an agent close the ticket instead and never be billed. Both paths meter: the webhook
+  handler writes the same `otto-factory/jobs_completed` row in its transaction when the close moves
+  a job to Completed (a close of an already-terminal job fails `WrongStatus` and rolls back, so
+  this is exactly once too). An inbound close is never refused (a webhook can't be meaningfully
+  turned away; the platform's block applies to the agent's `complete_job`).
+
 ## Assumptions
 
 - The repo has no `## Development Workflow` section. Its facts come from

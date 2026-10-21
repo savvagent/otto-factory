@@ -163,6 +163,23 @@ Model: opus
   rule, named in the commit body.
 - [ ] Gates green; commit `feat(of-billing): refuse completed jobs on the platform's budget or payment block`.
 
+## Task 4b — Meter inbound ticket closes too ⬜
+
+Model: sonnet
+
+- [ ] Failing test first, in the webhook route's existing tests (`crates/of-web/tests/`, alongside
+  the inbound-close tests): an inbound tracker webhook that closes a linked ticket as done moves the
+  job to Completed and writes exactly one usage row with `meter = "otto-factory/jobs_completed"`,
+  `quantity = 1`, `billable = true`, `user_id = NULL`; a redelivered webhook for the same close
+  writes no second row; a close to Failed writes no metered row. Run red.
+- [ ] `crates/of-web/src/routes/webhooks.rs` (`InboundDecision::Close`): after `close_from_ticket`
+  returns Ok and `to == Status::Completed`, call `of_billing::outbox::enqueue(&mut tx, None,
+  "inbound_ticket_close", false|true…)` — i.e. enqueue a metered row (`Some(&Metered::jobs_completed())`,
+  billable true, tool name `inbound_ticket_close`) in the same transaction. No enforcement on this
+  path (document why in a comment: a webhook can't be refused meaningfully; the platform's block
+  applies to the agent's `complete_job`).
+- [ ] Gates green; commit `feat(of-web): meter jobs completed by an inbound ticket close`.
+
 ## Task 5 — Declare the meter before shipping ⬜
 
 Model: sonnet
