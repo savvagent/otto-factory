@@ -1,24 +1,24 @@
 ---
-name: otto-factory-development
-description: Use when developing any feature or fix in the otto-factory repository (the hosted multi-tenant MCP server for coordinating agentic coding work) end-to-end — from a GitHub issue or plain task brief, through ship and verify, fully autonomously with no mid-run questions. Bundles the plan-by-plan discipline (committed design specs in docs/specs/ and implementation plans in docs/plans/), the Rust workspace conventions (of-core owns all SQL, the two-guard tenant isolation rule, the passkey auth spine, substrate-not-workflow scope discipline), autonomous spec generation, plan generation, task-by-task implementation, PR review loops, verification, and close-out. For other repositories use general-development; for fs-ci use ce-development.
+name: otto-tower-development
+description: Use when developing any feature or fix in the otto-tower repository (the hosted multi-tenant MCP server for coordinating agentic coding work) end-to-end — from a GitHub issue or plain task brief, through ship and verify, fully autonomously with no mid-run questions. Bundles the plan-by-plan discipline (committed design specs in docs/specs/ and implementation plans in docs/plans/), the Rust workspace conventions (of-core owns all SQL, the two-guard tenant isolation rule, the passkey auth spine, substrate-not-workflow scope discipline), autonomous spec generation, plan generation, task-by-task implementation, PR review loops, verification, and close-out. For other repositories use general-development; for fs-ci use ce-development.
 ---
 
-# Otto-Factory Development — Autonomous End-to-End
+# Otto-Tower Development — Autonomous End-to-End
 
-Autonomous, plan-driven feature/fix workflow for the **otto-factory** repository (the hosted,
+Autonomous, plan-driven feature/fix workflow for the **otto-tower** repository (the hosted,
 multi-tenant MCP server for coordinating agentic coding work). Walks from intake (a GitHub issue OR
 a plain task brief) through spec → plan → implement → PR → review → merge → verify → close, with no
 mid-run human questions. Returns control only when the work is shipped + verified, or on a true
 blocker.
 
-This is the **otto-factory-specific sibling** of `general-development`. Same spine; the
+This is the **otto-tower-specific sibling** of `general-development`. Same spine; the
 repo-agnostic convention-discovery phase is replaced by the hardcoded conventions below (Rust
 workspace, plan-by-plan docs, the tenant-isolation and passkey spines), the way `ce-development`
 hardcodes fs-ci's. If you are working in any other repository, use `general-development`.
 
 ## Why this shape
 
-The spine mirrors what this repository builds: otto-factory is a **coordination substrate** — a
+The spine mirrors what this repository builds: otto-tower is a **coordination substrate** — a
 queue of jobs anchored on repos, where the specification of work lives outside the server in the
 customer's own skills. The workflow below is that separation applied to the repo itself: a design
 spec and a plan document first (the specification), implementation against them (the mechanical
@@ -99,7 +99,7 @@ These hold for every run of this skill, no exceptions, no fast-path carve-outs:
 
 | Situation                                                             | Use                                                      |
 | --------------------------------------------------------------------- | -------------------------------------------------------- |
-| Any feature/fix in otto-factory, full lifecycle, no human in the loop | **otto-factory-development** (this skill)                |
+| Any feature/fix in otto-tower, full lifecycle, no human in the loop | **otto-tower-development** (this skill)                |
 | Work in another repository                                            | `general-development`                                    |
 | Work in fs-ci / Contract Explorer                                     | `ce-development`                                         |
 | Already mid-implementation, just need to address PR review comments   | the Review-Response step here (Phase 4 step 9)           |
@@ -144,7 +144,7 @@ Concrete examples that qualify:
 repo — a fast-path ticket still lands a minimal single-task plan at
 `docs/plans/YYYY-MM-DD-<slug>.md` in the plan's task form (Goal + one `## Task` with `- [ ]` steps +
 TDD + commit step). The design spec and both critique loops are the parts that are skipped. Add to
-the PR body: `Fast-path: no design spec per otto-factory-development trivial-task criteria — <reason>.`
+the PR body: `Fast-path: no design spec per otto-tower-development trivial-task criteria — <reason>.`
 
 If you find yourself rationalizing into the fast-path on something that touches 3+ source files,
 introduces a new interface, touches the auth spine or tenant isolation, adds a migration, adds a
@@ -165,11 +165,11 @@ triviality, not "I think this is small."
 | "It's only one bullet, hardly a substantial rewrite"       | The rule doesn't turn on size — any change to dispatch/orchestration logic under `.github/skills/` disqualifies, however small. Grading your own edit as "not substantial" is the exact rationalization this section exists to refuse. Spec first (a prose/typo fix is the only carve-out). |
 | "No spec, but I'll still write a one-line plan"            | Either the work needs a plan (then write the spec too) or it doesn't (then it doesn't need the plan either — and per house style, even fast-path keeps a minimal plan doc). |
 
-## Repository Conventions (otto-factory)
+## Repository Conventions (otto-tower)
 
 | Convention                 | Value                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Repo                       | `savvagent/otto-factory` — pass `--repo savvagent/otto-factory` on `gh` commands run from a worktree or outside the checkout.                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| Repo                       | `savvagent/otto-factory` — pass `--repo savvagent/otto-factory` on `gh` commands run from a worktree or outside the checkout. The product is otto-tower but the GitHub repo is still named `savvagent/otto-factory` until a human renames it (GitHub redirects the old name afterwards); update these slugs then.                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | Trunk                      | `master`. **All** work happens in a worktree; **all** master-branch changes land via merged PRs. No direct commits, pushes, or merges to `master` outside a PR (Non-Negotiable Rules 1–2).                                                                                                                                                                                                                                                                                                                                                                  |
 | Worktree                   | **Required.** `git worktree add .worktrees/<branch> -b <branch> origin/master` — the worktrees live **inside the repo** at `.worktrees/<branch>`, not as sibling directories. Confirm `.worktrees/` is gitignored before creating the first one — **never `git add .`** in the main checkout (a nested worktree's contents, including a developer-local `.env`, could be staged). Branch off `origin/master`, never local `master` (see Phase 0 trunk-sync). Every code edit, commit, and push happens from inside this worktree.                           |
 | Branch name                | `<area>/<kebab-slug>`, matching the repo's history — `passkeys/webauthn`, `deploy/isolation-startup-check`, `ci/github-actions`. Area is a crate short name (`core`, `auth`, `mcp`, `billing`, `trackers`, `web`, `server`) or a theme (`deploy`, `ci`, `docs`).                                                                                                                                                                                                                                                                                            |
@@ -300,7 +300,7 @@ explains the reasoning behind each at length — read it, and treat the list her
 
 ## Tracker abstraction (GitHub Issues or ticketless)
 
-otto-factory uses **GitHub Issues when an issue exists, ticketless otherwise.** There is no JIRA.
+otto-tower uses **GitHub Issues when an issue exists, ticketless otherwise.** There is no JIRA.
 Resolve once at intake and stay on that path for the whole task.
 
 > **One-time bootstrap.** The `status:*` tracker labels below are NOT GitHub defaults, and this repo
@@ -331,7 +331,7 @@ abandoned plans, half-finished refactors.
 **Two valid paths to fresh context:**
 
 1. **Subagent dispatch** (default mid-conversation). Use the `Agent` tool with a self-contained
-   prompt: issue number or task brief + "follow otto-factory-development end-to-end" + any caller
+   prompt: issue number or task brief + "follow otto-tower-development end-to-end" + any caller
    constraints. The subagent's context is fresh by construction; the parent session sees only the
    summary string. **When this path is used, see "Adaptation: when this skill runs inside a
    subagent" below** — interior reviewer dispatches collapse to named inline passes because a
@@ -663,7 +663,7 @@ gh pr create --title "<scope>: <subject>" --body "$(cat <<'EOF'
 - Plan: `docs/plans/<slug>.md`
 
 <"Closes #<n>", or — ticketless — the task brief restated as AC>
-<"Fast-path: no design spec per otto-factory-development trivial-task criteria — <reason>." if fast-pathed>
+<"Fast-path: no design spec per otto-tower-development trivial-task criteria — <reason>." if fast-pathed>
 
 ## Test plan
 - [ ] cargo test --workspace
@@ -805,7 +805,7 @@ This is how the plan-by-plan record stays current — the docs ARE the project's
 
 ## Phase 5 — Deploy, verify, close
 
-**CI exists; a deploy pipeline does not.** otto-factory is one Axum binary (`of-server`) deployed to
+**CI exists; a deploy pipeline does not.** otto-tower is one Axum binary (`of-server`) deployed to
 Fly.io from `Dockerfile` + `fly.toml`, with a Cloudflare Worker in front (`web/wrangler.jsonc`) and
 PostgreSQL behind it, migrated at startup by `of-core`'s embedded migrations. `.github/workflows/ci.yml`
 gates every PR and every push to `master`; deploys are manual and out of band. Phase 5 is: confirm
@@ -828,7 +828,7 @@ jobs (`rust` and `web`) must pass.
 CI does NOT apply these. Verify whatever the change touched, explicitly:
 
 - **Container image** — if `Dockerfile` or `fly.toml` changed: build it. **No docker on this machine;
-  podman is available** (`podman build -t otto-factory .`). The image has a console stage, a rust
+  podman is available** (`podman build -t otto-tower .`). The image has a console stage, a rust
   stage, and a slim runtime; confirm the binary starts, answers `/healthz` and `/readyz`, and serves
   the console (the console stage must have produced `web/build`, or every page 404s).
 - **Console bundle** — if `web/` changed: `cd web && npm run check && npm run lint && npm test &&
@@ -881,7 +881,7 @@ Smoke: <one-line outcome>
 Output a single concise message:
 
 ```
-otto-factory-development complete.
+otto-tower-development complete.
 
 Source: <issue #> / task brief — <title> — Closed
 PR: <url>
@@ -934,7 +934,7 @@ Stop the pipeline and return control to the developer when ANY of these is true:
 On escalation, output:
 
 ```
-otto-factory-development halted at Phase <N> — <step name>.
+otto-tower-development halted at Phase <N> — <step name>.
 
 Reason: <one of the conditions above, with specifics>
 Source: <issue/brief>

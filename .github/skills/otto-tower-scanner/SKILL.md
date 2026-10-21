@@ -1,18 +1,18 @@
 ---
-name: otto-factory-scanner
-description: Use when scanning open GitHub issues in savvagent/otto-factory and enqueuing eligible ones into the otto-factory job queue — checking each issue carries exactly one type label (bug/enhancement/documentation) first, adding one in place if missing, then queueing it. Trigger on "scan issues", "sync issues to otto-factory", "queue open issues", "run otto-factory-scanner", or a scheduled/periodic invocation of this skill. Not for creating a brand-new issue or for claiming and working a queued job (otto-factory-worker, which dispatches otto-factory-development for the per-job mechanics).
+name: otto-tower-scanner
+description: Use when scanning open GitHub issues in savvagent/otto-factory and enqueuing eligible ones into the otto-tower job queue — checking each issue carries exactly one type label (bug/enhancement/documentation) first, adding one in place if missing, then queueing it. Trigger on "scan issues", "sync issues to otto-tower", "queue open issues", "run otto-tower-scanner", or a scheduled/periodic invocation of this skill. Not for creating a brand-new issue or for claiming and working a queued job (otto-tower-worker, which dispatches otto-tower-development for the per-job mechanics).
 ---
 
-# Otto Factory Scanner
+# Otto Tower Scanner
 
 This skill is the periodic bridge between GitHub Issues on `savvagent/otto-factory` and
-the otto-factory job queue: it finds open issues that have no job yet, makes sure each
-one carries exactly one type label, and queues it via the `otto-factory` MCP server. It
-is Claude-Code-native — it orchestrates via the Agent tool and calls `otto-factory` MCP
-tools directly. Like `otto-factory-development`, this file's own canonical location is
-`.github/skills/otto-factory-scanner/SKILL.md` — the same single source of truth every
+the otto-tower job queue: it finds open issues that have no job yet, makes sure each
+one carries exactly one type label, and queues it via the `otto-tower` MCP server. It
+is Claude-Code-native — it orchestrates via the Agent tool and calls `otto-tower` MCP
+tools directly. Like `otto-tower-development`, this file's own canonical location is
+`.github/skills/otto-tower-scanner/SKILL.md` — the same single source of truth every
 skill in this repo uses — and it is visible to Claude Code at
-`.claude/skills/otto-factory-scanner/SKILL.md` only because of this repo's existing
+`.claude/skills/otto-tower-scanner/SKILL.md` only because of this repo's existing
 `.claude/skills` → `.github/skills` symlink. Unlike `otto`, this repo has no CI
 port-verification/diff-checking system (`check-claude-skill-ports.sh`-equivalent) — no
 second copy of this file to keep in sync (CI does assert `.claude/skills` still resolves
@@ -21,8 +21,8 @@ ordinary skill files here, no `NATIVE_SKILLS`-allowlist concept, no diff record 
 regenerate.
 
 This skill only **queues** work. It never implements an issue, opens a PR, or
-claims a job itself — that is `otto-factory-worker`'s job once it claims what this
-skill queues (which in turn dispatches `otto-factory-development` for the actual
+claims a job itself — that is `otto-tower-worker`'s job once it claims what this
+skill queues (which in turn dispatches `otto-tower-development` for the actual
 implementation).
 
 ## The Iron Law
@@ -50,10 +50,10 @@ context) with this task:
 
 1. Call `whoami`. Confirm the organization it returns is `savvagent` — this
    token should open the org that owns `savvagent/otto-factory`'s
-   otto-factory registration. If you cannot confirm that with certainty,
+   otto-tower registration. If you cannot confirm that with certainty,
    stop and report which org `whoami` returned rather than proceeding as if
    it were correct.
-2. Resolve the otto-factory repo slug for `savvagent/otto-factory` — call
+2. Resolve the otto-tower repo slug for `savvagent/otto-factory` — call
    `resolve_repo` with `remote` set to `git remote get-url origin`
    (`https://github.com/savvagent/otto-factory.git`). If it fails to
    resolve, call `list_repos`. If `savvagent/otto-factory` is truly
@@ -158,7 +158,7 @@ the repo slug, and the label name list from Step 1, and this task:
      Do not queue this issue, and do not remove either label. Return `#<n>
      — needs human triage (multiple type labels: <label>, <label>)` and
      skip the rest of this task.
-   - Do **not** edit the issue body. `otto-factory-development`'s own tracker
+   - Do **not** edit the issue body. `otto-tower-development`'s own tracker
      abstraction treats the issue body as the acceptance criteria verbatim, with no
      required section structure — there is no body shape to bring into compliance here.
    - Do **not** search for or flag duplicates of this issue — you're fixing its type
@@ -169,7 +169,7 @@ the repo slug, and the label name list from Step 1, and this task:
    - `add_job` with `repo` = the slug you were given, `title` = the issue
      title, `description` = the issue body (post-fix, if any) plus the issue URL,
      `ticketRef` = `savvagent/otto-factory#<n>`, and `idempotencyKey` =
-     `otto-factory-scanner-issue-<n>` (guards against a dropped-connection retry
+     `otto-tower-scanner-issue-<n>` (guards against a dropped-connection retry
      double-queueing).
    - If `add_job` fails because that `idempotencyKey` was already used with
      *different* arguments, this issue is already queued under a job
@@ -221,7 +221,7 @@ one-line result. Do not re-fetch the issue, the job, or re-run `list_jobs` to
 Output one concise summary:
 
 ```
-Otto Factory Scanner — savvagent/otto-factory
+Otto Tower Scanner — savvagent/otto-factory
 
 Queued (<n>):
   #<n> — queued as <job-id> (type: ok)
@@ -241,7 +241,7 @@ Job list possibly truncated at Step 1 — dedup may be incomplete for older jobs
 ```
 
 Then STOP. Do not start implementing any queued issue — claiming and working
-a job is `otto-factory-worker`'s job, done by whichever agent picks it up next.
+a job is `otto-tower-worker`'s job, done by whichever agent picks it up next.
 
 ## Common Rationalizations (all are violations)
 
@@ -290,9 +290,9 @@ Each = stop, do the step correctly, continue.
 
 ## Cross-references
 
-- `otto-factory-development` — the spec → plan → implement → PR → review →
+- `otto-tower-development` — the spec → plan → implement → PR → review →
   merge mechanics that actually implement a queued job, run by a subagent
-  `otto-factory-worker` dispatches. This skill only gets an issue onto the
+  `otto-tower-worker` dispatches. This skill only gets an issue onto the
   queue; it never claims or works one.
-- `otto-factory-worker` — claims a job this skill queued and dispatches a subagent to
-  work it via `otto-factory-development`. This skill never claims a job itself.
+- `otto-tower-worker` — claims a job this skill queued and dispatches a subagent to
+  work it via `otto-tower-development`. This skill never claims a job itself.

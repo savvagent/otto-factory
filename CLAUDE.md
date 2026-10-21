@@ -4,18 +4,52 @@ Guidance for Claude Code working in this repository.
 
 ## What this is
 
-**otto-factory** is a hosted, multi-tenant MCP server for coordinating agentic coding work
+**otto-tower** is a hosted, multi-tenant MCP server for coordinating agentic coding work
 across enterprises and teams. Server-only — no TUI, no PTY, no local binary, no plugin.
 
 It is a **resource server of the otto platform** (`savvagent/otto-platform`). The platform
 is the OAuth authorization server and the system of record for identity (accounts, orgs,
-teams, members), SSO, and billing; otto-factory holds only the coordination domain, in its
+teams, members), SSO, and billing; otto-tower holds only the coordination domain, in its
 own database, and asks the platform who a token belongs to. Nothing in this repository
 issues a token, signs anyone in, or stores who a person is.
 
 Read [`docs/specs/2026-09-01-otto-factory-design.md`](docs/specs/2026-09-01-otto-factory-design.md)
 before any non-trivial change. The build order is in
 [`docs/plans/2026-09-01-milestone-1.md`](docs/plans/2026-09-01-milestone-1.md).
+
+## Naming: otto-tower, and the identifiers that keep the old name
+
+The product was renamed from otto-factory to **otto-tower** (epic `savvagent/otto-platform#81`;
+design of record `docs/specs/2026-10-21-otto-tower-rename-design.md` in otto-platform). Everything a
+person or agent reads says otto-tower: the MCP server name (`mcp__otto-tower__*`), the canonical
+endpoint `https://otto-tower.savvagent.com/mcp` once the operator cutover has run (until then the live host is `https://otto-factory.savvagent.com/mcp`), the console, the docs, the skills and the meter
+(`otto-tower/jobs_completed`). `git grep -i otto-factory` is expected to find only these deliberately
+kept identifiers, and a new hit outside the list is a bug:
+
+- The `of-*` crates, the `OF_*` env vars (including `OF_LEGACY_HOSTS` / `OF_LEGACY_SUNSET`), the
+  `otto_factory` database and the `factory` Postgres role.
+- The Fly app `otto-factory-mcp` and its `fly.dev` host.
+- The Rust type `Factory`.
+- `savvagent/otto-factory#NNN` issue references, and the repo slug `savvagent/otto-factory` itself
+  until the GitHub repo is renamed (a separate human step).
+- The GitHub App slug `otto-factory` (`savvagent/otto-factory#232`).
+- The tracker trigger-label default `otto-factory` (stored data and a behaviour;
+  `savvagent/otto-factory#233`).
+- The Cloudflare Worker script names (`otto-factory-console`, `otto-factory-console-dev`).
+- `CHANGELOG.md`, and the dated historical `docs/specs/*` and `docs/plans/*` (including the design
+  of record's filename `2026-09-01-otto-factory-design.md`, which links depend on).
+- The legacy host `otto-factory.savvagent.com` where it appears as deprecation config or in the
+  cutover runbook (`docs/deploy/fly.md`). Until the cutover it is also the live
+  host that user-facing docs and `ci.yml`'s `environment.url` link to; the prepared URL-flip PRs
+  (runbook step 8a) move them to `otto-tower.savvagent.com`.
+- The `otto-factory release` GitHub App named in `.github/workflows/ci.yml` (an App, renamed by a
+  human like the one above).
+- The legacy file name `~/.claude/otto-factory-repos`, still read as a fallback by
+  `client-skills/claude-code/session-start-hook.sh` and documented in `client-skills/claude-code/README.md`.
+- Historical session records in `client-skills/claude-code/README.md` (the verification notes keep the
+  repo slug and idempotency-key examples they were recorded with).
+- The `factory-scanner:` key prefix, still recognised for back-compat.
+- The `x-otto-factory-auth` OpenAPI extension key, emitted by the server and read by the console.
 
 ## The three constraints
 
@@ -24,7 +58,7 @@ These decide scope disputes. When a change conflicts with one of them, the chang
 1. **Coordination is anchored on repos.** A repo is a first-class entity, not a config
    string. Jobs belong to repos (`repo_id` is `NOT NULL`); leases are repo-scoped; an
    unresolvable repo is an error naming the registered slugs, never a silent fallback.
-2. **Substrate, not workflow.** otto-factory ships no opinion about how work is specified,
+2. **Substrate, not workflow.** otto-tower ships no opinion about how work is specified,
    planned, reviewed, or measured. If a capability could live either in the server or in a
    customer's own skill calling the server, **it belongs in the skill**. Jobs carry an
    opaque `metadata` JSONB field for exactly this reason — the server never interprets it.
@@ -177,7 +211,7 @@ npm test                      # vitest — the Cloudflare Worker's routing rule
 npm run build                 # static bundle into web/build
 
 cargo run -p of-server        # everything on one port, reading .env
-podman build -t otto-factory .   # console stage + rust stage + slim runtime
+podman build -t otto-tower .   # console stage + rust stage + slim runtime
 ```
 
 `OF_PUBLIC_URL`, `OF_PLATFORM_URL`, `OF_INTROSPECTION_SECRET`, `OF_PLATFORM_WEBHOOK_SECRET`,
@@ -553,7 +587,7 @@ The billed unit is a completed job, not a tool call. Every MCP tool is free, but
 still recorded and classified in `of-billing::classify`, so a price can be reintroduced without
 losing history. Every completed job, through `complete_job` or an inbound ticket close, writes
 exactly one completion row through `of_billing::record_job_completed`, in the same transaction
-as the state change: billed (`otto-factory/jobs_completed`, quantity 1) or an unmetered,
+as the state change: billed (`otto-tower/jobs_completed`, quantity 1) or an unmetered,
 unbilled row. Nothing else writes a completion row, so `org_counters.jobs_completed_total`
 equals the number of completion rows (a parity test in `of-web/tests/webhooks_http.rs`). `watch` is a continuous long poll, which is why per-call
 pricing was never viable.
@@ -623,7 +657,7 @@ rules hold, and the first is what makes the others true:
 
 ## Releases & versioning
 
-otto-factory is one product — a single deployed binary plus the console it serves — not a set of
+otto-tower is one product — a single deployed binary plus the console it serves — not a set of
 independently published crates, so it carries one SemVer version, not seven. The workspace's
 `[workspace.package] version` (every crate inherits it via `version.workspace = true`) and
 `web/package.json`'s `version` move together.
@@ -639,7 +673,7 @@ crate/area vocabulary (a crate directory name, or `web`/`docs`/`ci`/`release`), 
 change with no single honest scope. A `pr-title` CI check enforces this on every PR.
 
 **A breaking change to a public interface gets its version bump from the same signal the
-otto-factory-development skill's Non-Negotiable Rule 6 already requires you to raise there.**
+otto-tower-development skill's Non-Negotiable Rule 6 already requires you to raise there.**
 Write `<type>(<scope>)!: <subject>` or add a `BREAKING CHANGE: …` footer, and release-please cuts
 a major version from it — the same marker that tells the architect reviewer to look hard is what
 tells the release automation to treat it as one.

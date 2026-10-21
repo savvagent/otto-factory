@@ -8,7 +8,7 @@
   import Loading from '$lib/components/Loading.svelte';
 
   /**
-   * `/` is otto-factory's public front page.
+   * `/` is otto-tower's public front page.
    *
    * A signed-out visitor reads it — per `+layout.svelte`'s `UNGATED` list, it
    * is the one page a stranger can reach without a session. A signed-in

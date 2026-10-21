@@ -444,7 +444,7 @@
                             </span>
                             <input
                               class="of-input of-mono"
-                              placeholder="otto-factory"
+                              placeholder="otto-tower"
                               bind:value={labelDraft[key]}
                             />
                           </label>

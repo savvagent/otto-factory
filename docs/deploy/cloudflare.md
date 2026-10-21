@@ -1,4 +1,4 @@
-# The console on Cloudflare
+# The otto-tower console on Cloudflare
 
 Closes the question in [issue #2](https://github.com/savvagent/otto-factory/issues/2):
 how to put `web/` on Cloudflare without giving up the single origin the session cookie
@@ -8,6 +8,11 @@ depends on.
 browser sees one hostname. `web/wrangler.jsonc` and `web/worker/index.ts` are the whole of
 it; this file is the account-side setup neither of them can express, and the two traps that
 a first deploy hits.
+
+The product is **otto-tower** (renamed from otto-factory). The Worker scripts keep their
+old names, `otto-factory-console` and `otto-factory-console-dev`, because a Worker script name
+is an identity in the Cloudflare account; the Fly origin keeps `otto-factory-mcp.fly.dev`. The
+public hostname moves to `otto-tower.savvagent.com` in the operator cutover described below.
 
 Self-hosted deployments are unaffected. `of-server` still serves `web/build` itself, the
 `Dockerfile` still bakes it in at `/srv/console`, and nothing in this document is required
@@ -49,12 +54,38 @@ Another environment is a block in `wrangler.jsonc` beside `production`, or a one
 override:
 
 ```bash
-npx wrangler deploy --var OF_ORIGIN:https://otto-factory-staging.fly.dev
+npx wrangler deploy --var OF_ORIGIN:https://otto-tower-staging.fly.dev
 ```
 
 Then attach the hostname the humans will use (`console.example.com`) to the Worker as a
 custom domain. That hostname — not the origin's — is the public origin, and every value
 below follows from that.
+
+## The otto-tower hostname and the legacy host
+
+Production serves two hostnames from the one production Worker during the deprecation window:
+`otto-tower.savvagent.com` (canonical) and `otto-factory.savvagent.com` (legacy, until the
+published sunset). This is step 5 of the ordered runbook in `docs/deploy/fly.md` (*The rename
+cutover*), which also gives the platform commands that must run before and after it.
+
+1. Add `otto-tower.savvagent.com` as a **custom domain** on the production Worker
+   (in the dashboard, or a `routes` entry with `custom_domain: true` in `wrangler.jsonc`), alongside the existing one. Do not remove the
+   old custom domain: it must keep serving until the sunset. The zone for the new name has to be
+   on the same Cloudflare account.
+2. `OF_ORIGIN` does not change (`https://otto-factory-mcp.fly.dev`), and neither does
+   `OF_ALLOWED_HOSTS` for the Fly host. Both hostnames reach the origin through the same
+   subrequest, so the origin tells them apart by the `X-Forwarded-Host` header the Worker sets
+   from the request URL (never from anything the client sent). The legacy host also has to be
+   listed in `OF_LEGACY_HOSTS`, which adds it to the accepted hosts (step 8 of the runbook).
+3. On a legacy host the Worker answers the console's SPA paths and `/auth/login` with a `308` to
+   the canonical host, and proxies every origin prefix (`/mcp`, `/.well-known`, `/api`, `/auth/*`
+   except login, `/platform/webhooks`, `/webhooks`, `/oauth`) unchanged. Webhook deliveries are
+   never redirected, so customers' tracker webhooks keep landing until they move them.
+4. After the sunset (runbook step 11), remove the old custom domain.
+
+Nothing here is deployed by merging the code: it is account-side, and ordered after the platform
+alias exists, so a request on the new host is never answered before the platform can authenticate
+this service as the new URI.
 
 ## What must change on the origin
 
