@@ -345,8 +345,8 @@ calls themselves always appear in the normal tool-call transcript.
   completed cleanly (passing the claim_jobs response's `attempts` through as
   `expectedAttempts`); a same-day replay with identical arguments returned the original job
   already `completed`, with no second job created and no second claim attempted, and was
-  recorded server-side as a free replay, not a billable call — confirming the idempotency
-  behavior and the billing note below. The earlier branch-with-`/` question — whether a raw
+  recorded server-side as a replay — confirming the idempotency behavior and the billing note
+  below. The earlier branch-with-`/` question — whether a raw
   `/` is legal inside an `idempotencyKey` — was answered separately, before the digest
   change: a hand-built key containing a literal `/`
   (`session-otto-factory-docs/client-skills-directory-<date>`, the then-current key shape)
@@ -446,14 +446,13 @@ and a 16-character hex digest, never free text, so the worst outcome is a mislea
   per-branch-per-day dedup intent holds for the common case (one developer, many sessions).
   Recording every user's sessions would need a per-user component in the key or a
   server-side change, both out of scope here.
-- **Every genuinely new marker job costs three billable otto-factory calls**
-  (`add_job` + `claim_jobs` + `complete_job`); a same-day replay on the same branch costs
-  **zero** — `add_job`'s replay path is recorded as a free call (`Meter::record_replay`),
-  not a billable one, short-circuited at step 3's `completed` branch before any claim or
-  complete. This is an ongoing cost every session start incurs once installed, not a
-  one-time setup cost. The `host/owner` allowlist also bounds how many *unwanted* repos can
-  incur this cost at all: a repo whose `host/owner` was never opted in never reaches
-  `add_job`.
+- **Every genuinely new marker job is one billed completed job.** Coordination calls
+  (`add_job`, `claim_jobs`) are free; only the successful `complete_job` records an
+  `otto-factory/jobs_completed` event. A same-day replay on the same branch is short-circuited at
+  step 3's `completed` branch before any claim or complete, so it bills nothing. This is an
+  ongoing cost every session start incurs once installed, not a one-time setup cost. The
+  `host/owner` allowlist also bounds how many *unwanted* repos can incur it at all: a repo whose
+  `host/owner` was never opted in never reaches `add_job`.
 - **The `cwd` extracted from the hook's stdin JSON is read with a bounded regex, not a JSON
   parser** — considered and deliberately kept as-is rather than adding an optional `jq`
   dependency. A `cwd` containing a literal backslash or an escaped double-quote is read

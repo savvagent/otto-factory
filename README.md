@@ -220,7 +220,7 @@ resource, set the secrets) is a checklist in [`docs/deploy/fly.md`](docs/deploy/
 | `crates/of-core` | Domain + all SQL. Every tenant operation takes an `OrgId`. |
 | `crates/of-core/migrations` | Append-only schema, from a domain-only baseline. |
 | `crates/of-mcp` | MCP server and tool surface. |
-| `crates/of-billing` | The price list, quota policy, and the usage outbox/shipper. |
+| `crates/of-billing` | The tool classification, the blocked-org policy, and the usage outbox/shipper. |
 | `crates/of-trackers` | GitHub App + JIRA sync. |
 | `crates/of-web` | Console REST API, tracker and platform webhooks. |
 | `crates/of-server` | The binary: config, migrations, router assembly, health, usage shipper. |
@@ -230,16 +230,18 @@ resource, set the secrets) is a checklist in [`docs/deploy/fly.md`](docs/deploy/
 
 ## Metering
 
-The billable unit is the MCP tool call, but **not every call is billable**. `watch` is a
-30-second long poll every connected agent calls continuously; billing it flat would charge an
-idle agent ~86,000 calls a month for doing nothing. Tools are classified as free (reads and
-polls) or billable (work); both are recorded so the classification can be repriced later
-without losing history. The rule customers are told: **you pay for work performed, not for
-looking.**
+**You pay for outcomes, not for looking or coordinating.** Every tool call is free, including
+`watch`, the 30-second long poll every connected agent calls continuously. What is billed is a
+completed job: a successful `complete_job`, or a ticket closing in the tracker, records one
+`otto-factory/jobs_completed` event. Every call is still recorded so pricing can change later
+without losing history.
 
-Each call is recorded in a local outbox in the same transaction as its work (so a failed call
-is never billed) and shipped to the platform, which owns plans and totals, by a background
-task that can retry forever without double-counting.
+Events are written to a local outbox in the same transaction as the work (so a failed call is
+never billed) and shipped to the platform, which owns plans and totals, by a background task that
+can retry forever without double-counting. When the platform reports an org blocked
+(`budget_exceeded` or `payment_required`), `complete_job` is refused with a link to fix it
+(`OF_UPGRADE_URL`, else the platform URL); everything else keeps working. If the platform cannot
+be asked, the call goes through. Console changes take up to a minute to apply.
 
 ## Relationship to dark-agent
 

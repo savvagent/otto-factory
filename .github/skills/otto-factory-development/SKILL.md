@@ -257,12 +257,15 @@ explains the reasoning behind each at length — read it, and treat the list her
     `/.well-known/oauth-protected-resource`. Runes only: `$state` / `$derived` / `$props` / `$effect`,
     no Svelte 4 stores, no `export let`. Every coding agent gets the same shape from
     `src/lib/clients.ts`; a bespoke wizard for one client is where agent-agnosticism breaks first.
-11. **Metering runs inside the tool's own transaction, before the work.** `Factory::charge` is the
-    first thing after `self.tx(...)`, so a failed call is never billed and a successful one is never
-    double-billed; `watch` is the single exception and meters in its own short transaction. **A new
-    tool must be classified in `of-billing::classify`** — `exhaustive_over` and
-    `every_tool_has_a_price` fail when the router and the price list disagree. Enforcement is behind
-    `OF_ENFORCE_QUOTAS`, off by default, and never blocks a read.
+11. **Metering bills completed jobs, inside the work's own transaction.** Every tool is free;
+    a successful `complete_job` and an inbound ticket close to Completed each write one
+    `otto-factory/jobs_completed` usage row in the same transaction, so a failed call is never
+    billed and a successful one never double-billed (a repeat close is a no-op). The shipper
+    declares every meter in `METER_DECLARATIONS` before it ships. **A new tool must be classified
+    in `of-billing::classify`** — `exhaustive_over` and `every_tool_has_a_price` fail when the
+    router and the price list disagree. Only `complete_job` can be refused, on the platform's
+    `blocked_reason` (`budget_exceeded` | `payment_required`); the status is looked up before the
+    transaction, and a failed lookup lets the call through. `OF_ENFORCE_QUOTAS` is retired.
 12. **Migrations are append-only, one file per concern, in `crates/of-core/migrations/`.** Never
     edit a migration that has been applied anywhere — add a new one. (`0001_baseline.sql` is a
     one-time squash, done at the platform cutover; the schema is domain-only and holds no foreign
