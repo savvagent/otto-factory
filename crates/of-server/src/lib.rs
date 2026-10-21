@@ -15,7 +15,9 @@
 //! ```
 //!
 //! Around all of it, `of_mcp::legacy::mark` stamps a deprecation notice on
-//! every response to a request that came through an `OF_LEGACY_HOSTS` host.
+//! every response to a request that came through an `OF_LEGACY_HOSTS` host,
+//! and such a request for the console (or `/auth/login`) is `308`-redirected
+//! to the same path on `OF_PUBLIC_URL` instead of being served.
 //!
 //! otto-tower is a resource server of the otto platform, which is the OAuth
 //! authorization server and the system of record for identity and billing. There
@@ -36,7 +38,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::http::{header, HeaderValue, Request, StatusCode};
+use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 use of_core::watch::Watcher;
@@ -76,6 +79,58 @@ fn is_api_path(path: &str) -> bool {
         .any(|prefix| path == *prefix || path.starts_with(&format!("{prefix}/")))
 }
 
+/// Whether a request that arrived through a legacy host is sent to the
+/// canonical host instead of being served: the console, and the console's
+/// sign-in.
+///
+/// The console cannot work on the old host. `/auth/login` would set its PKCE
+/// cookie on the old host while the platform sends the browser back to
+/// `OF_PUBLIC_URL`'s `/auth/callback`, where that cookie does not exist, so the
+/// sign-in fails; and a session cookie set on the old host would make every
+/// cookie-authenticated write fail the CSRF origin check. Moving the browser
+/// before either happens is the only fix. In a Worker-fronted deployment the
+/// Worker already does this before the request reaches here; production is
+/// not fronted by it, which is why the origin has to.
+///
+/// Everything an agent, a provider or the platform calls stays where it is
+/// for the whole deprecation window: `/mcp`, discovery, `/api`, the webhook
+/// receivers, `/platform/webhooks` and the health probes are never redirected.
+/// A redirect there would break a client that does not follow one (most
+/// webhook senders) or that pins its OAuth resource to the URL it was given.
+fn moves_to_canonical(path: &str) -> bool {
+    path == "/auth/login" || (!is_api_path(path) && !health::PATHS.contains(&path))
+}
+
+/// `308` a legacy-host console request to the same path and query on the
+/// canonical host. Runs inside [`of_mcp::legacy::mark`], so the redirect
+/// carries the same `Deprecation`/`Link`/`Sunset` notice as every other
+/// legacy-host response, and its `Location` is the `Link`'s target.
+async fn legacy_console_redirect(req: Request<Body>, next: Next) -> Response {
+    let Some(legacy) = req.extensions().get::<of_mcp::Legacy>() else {
+        return next.run(req).await;
+    };
+    if !moves_to_canonical(req.uri().path()) {
+        return next.run(req).await;
+    }
+    let path_and_query = req.uri().path_and_query().map_or("/", |pq| pq.as_str());
+    let location = HeaderValue::from_str(&legacy.successor_url(path_and_query))
+        .or_else(|_| HeaderValue::from_str(&legacy.successor_url("/")));
+    let Ok(location) = location else {
+        // Unreachable with a validated `OF_PUBLIC_URL`; serving the page is a
+        // better failure than a redirect to nowhere.
+        return next.run(req).await;
+    };
+    let mut response = StatusCode::PERMANENT_REDIRECT.into_response();
+    let headers = response.headers_mut();
+    headers.insert(header::LOCATION, location);
+    headers.insert(
+        header::VARY,
+        HeaderValue::from_static(of_mcp::legacy::VARY_BY_HOST),
+    );
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
 /// The client every call to the otto platform goes through.
 ///
 /// Built once and shared: it holds the introspection and usage-status caches,
@@ -113,6 +168,9 @@ pub fn router(
         .merge(web)
         .merge(mcp)
         .fallback_service(console(config))
+        // Inside `mark`, which is what puts the `Legacy` marker it reads in the
+        // request, and so that the redirect it answers is stamped too.
+        .layer(axum::middleware::from_fn(legacy_console_redirect))
         // Request spans, without headers. `DefaultMakeSpan::include_headers`
         // would put `Authorization` in the logs — every bearer token, in
         // plaintext, in whatever the log aggregator retains. Do not turn it on.
@@ -351,5 +409,28 @@ mod tests {
         assert!(!is_api_path("/authors"));
         assert!(!is_api_path("/o/acme/queue"));
         assert!(!is_api_path("/"));
+    }
+
+    #[test]
+    fn only_the_console_and_its_sign_in_move_to_the_canonical_host() {
+        for moved in ["/", "/o/acme/queue", "/apiary", "/_app/x.js", "/auth/login"] {
+            assert!(moves_to_canonical(moved), "{moved}");
+        }
+        for kept in [
+            "/mcp",
+            "/.well-known/oauth-protected-resource",
+            "/api/orgs/acme/repos",
+            "/api/openapi.json",
+            "/webhooks/github",
+            "/platform/webhooks",
+            "/auth/callback",
+            "/auth/logout",
+            "/auth/login/extra",
+            "/oauth/authorize",
+            "/healthz",
+            "/readyz",
+        ] {
+            assert!(!moves_to_canonical(kept), "{kept}");
+        }
     }
 }

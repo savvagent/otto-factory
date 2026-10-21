@@ -467,8 +467,8 @@ fn mcp_post(public_host: &str, token: &str, body: Body) -> http::Request<Body> {
 
 /// Every surface answers a legacy-host request with the notice — the agent
 /// surface's `401`, discovery, the console API, a webhook receiver, health, and
-/// the SPA fallback — and the same requests on the canonical host carry none
-/// of it.
+/// the SPA fallback (which answers with a redirect there, carrying the notice
+/// too) — and the same requests on the canonical host carry none of it.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn every_response_through_a_legacy_host_carries_the_deprecation_notice(pool: PgPool) {
     let bundle = Bundle::new("legacy-notice");
@@ -511,7 +511,14 @@ async fn every_response_through_a_legacy_host_carries_the_deprecation_notice(poo
                 .unwrap(),
         )
         .await;
-        assert_eq!(canonical.status(), legacy.status(), "{path}");
+        if path == "/o/acme/queue" {
+            // The console moves to the canonical host rather than being
+            // served on the old one (`the_console_on_a_legacy_host_moves_to_the_canonical_host`).
+            assert_eq!(legacy.status(), http::StatusCode::PERMANENT_REDIRECT);
+            assert_eq!(canonical.status(), http::StatusCode::OK);
+        } else {
+            assert_eq!(canonical.status(), legacy.status(), "{path}");
+        }
         for name in ["deprecation", "link", "sunset"] {
             assert_eq!(header(&canonical, name), None, "{path} {name}");
         }
@@ -543,6 +550,131 @@ async fn every_response_through_a_legacy_host_carries_the_deprecation_notice(poo
     )
     .await;
     assert_eq!(header(&forwarded_canonical, "deprecation"), None);
+
+    watcher.shutdown().await;
+}
+
+/// A browser that opens the console on the old host is sent to the same page
+/// on the canonical one, and so is the console's sign-in — answered on the old
+/// host it would set its PKCE cookie where the platform's redirect back to
+/// `OF_PUBLIC_URL` never brings the browser. Both with the Worker's
+/// `X-Forwarded-Host` and with the old name in `Host` itself, which is how
+/// production serves it (no Worker in front). Nothing an agent, a provider or
+/// the platform calls is redirected.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn the_console_on_a_legacy_host_moves_to_the_canonical_host(pool: PgPool) {
+    let bundle = Bundle::new("legacy-redirect");
+    let db = Db::from_pool(pool.clone());
+    let platform = MockPlatform::start().await;
+    let watcher = Watcher::spawn(pool).await.unwrap();
+    let mut config = legacy_config(bundle.path(), Some("2027-01-31T00:00:00Z"));
+    config.console_client_id = Some("console-client".into());
+    let app = of_server::router(db, watcher.clone(), platform.client(), &config).expect("router");
+
+    let direct = |method: &str, uri: &str| {
+        http::Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("host", LEGACY)
+            .body(Body::empty())
+            .unwrap()
+    };
+    let forwarded = |method: &str, uri: &str| via(method, uri, LEGACY).body(Body::empty()).unwrap();
+
+    for build in [
+        &direct as &dyn Fn(&str, &str) -> http::Request<Body>,
+        &forwarded,
+    ] {
+        for (method, uri) in [
+            ("GET", "/"),
+            ("GET", "/o/acme/queue?status=pending"),
+            ("GET", "/auth/login?org=acme&next=%2Fo%2Facme%2Fqueue"),
+            ("GET", "/_app/immutable/entry.js"),
+            ("POST", "/o/acme/queue"),
+        ] {
+            let response = send(&app, build(method, uri)).await;
+            assert_eq!(
+                response.status(),
+                http::StatusCode::PERMANENT_REDIRECT,
+                "{method} {uri}"
+            );
+            let target = format!("{PUBLIC}{uri}");
+            assert_eq!(
+                header(&response, "location"),
+                Some(target.as_str()),
+                "{uri}"
+            );
+            assert_eq!(header(&response, "deprecation"), Some("true"), "{uri}");
+            assert_eq!(
+                header(&response, "link"),
+                Some(format!(r#"<{target}>; rel="successor-version""#).as_str()),
+                "{uri}"
+            );
+            assert_eq!(
+                header(&response, "sunset"),
+                Some("Sun, 31 Jan 2027 00:00:00 GMT"),
+                "{uri}"
+            );
+            assert!(
+                header(&response, "set-cookie").is_none(),
+                "{uri}: nothing may be set on the old host"
+            );
+        }
+
+        // Never redirected: the agent surface, discovery, the console API, the
+        // webhook receivers, the platform's webhooks, the rest of sign-in, and
+        // the probes.
+        for (method, uri) in [
+            ("POST", "/mcp"),
+            ("GET", "/.well-known/oauth-protected-resource"),
+            ("GET", "/.well-known/oauth-protected-resource/mcp"),
+            ("GET", "/api/orgs/acme/repos"),
+            ("GET", "/api/openapi.json"),
+            ("POST", "/webhooks/github"),
+            ("POST", "/platform/webhooks"),
+            ("GET", "/auth/callback?code=x&state=y"),
+            ("GET", "/healthz"),
+        ] {
+            let response = send(&app, build(method, uri)).await;
+            assert_ne!(
+                response.status(),
+                http::StatusCode::PERMANENT_REDIRECT,
+                "{method} {uri} must be served on the old host"
+            );
+            assert!(
+                !header(&response, "location").is_some_and(|l| l.starts_with(PUBLIC)),
+                "{method} {uri} must not move to the canonical host"
+            );
+            assert_eq!(header(&response, "deprecation"), Some("true"), "{uri}");
+        }
+    }
+
+    // On the canonical host the console and its sign-in are served, not moved.
+    let canonical = send(
+        &app,
+        http::Request::builder()
+            .uri("/o/acme/queue")
+            .header("host", "factory.test")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(canonical.status(), http::StatusCode::OK);
+    let login = send(
+        &app,
+        http::Request::builder()
+            .uri("/auth/login?org=acme")
+            .header("host", "factory.test")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_ne!(login.status(), http::StatusCode::PERMANENT_REDIRECT);
+    assert!(
+        header(&login, "location").is_some_and(|l| l.starts_with(PLATFORM)),
+        "canonical sign-in goes to the platform: {:?}",
+        header(&login, "location")
+    );
 
     watcher.shutdown().await;
 }

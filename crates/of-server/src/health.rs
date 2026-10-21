@@ -29,10 +29,15 @@ use otto_tenant::Db;
 /// and the answer it eventually gives arrives after the decision was needed.
 const READY_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// The paths this module serves. Named so that `of-server` can tell a probe
+/// from a console page without repeating them.
+pub const PATHS: [&str; 2] = ["/healthz", "/readyz"];
+
 pub fn router(db: Db) -> Router {
+    let [live, ready] = PATHS;
     Router::new()
-        .route("/healthz", get(healthz))
-        .route("/readyz", get(readyz))
+        .route(live, get(healthz))
+        .route(ready, get(readyz))
         .with_state(db)
 }
 
