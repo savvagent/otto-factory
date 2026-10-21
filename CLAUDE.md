@@ -54,7 +54,7 @@ kept identifiers, and a new hit outside the list is a bug:
   applied migration is never edited.
 - The old meter key `otto-factory/jobs_completed` where it names what is being renamed away from:
   `0006_meter_otto_tower.sql`, `crates/of-core/tests/meter_rename.rs`, the startup rewrite's
-  `of_core::retired_meters::RENAMED`, and the runbook's preflight and rollback in `docs/deploy/fly.md`.
+  `of_billing::RETIRED_METERS`, and the runbook's preflight and rollback in `docs/deploy/fly.md`.
 - The old `otto-factory-worker:trio-cleared:` marker named in `.github/skills/otto-tower-worker/SKILL.md`'s
   transition note (it says that marker no longer counts).
 - The GitHub App's display name in the `trackers_not_connected_github` message (every locale): it is
@@ -276,7 +276,9 @@ built to static files that `of-server` serves beside `/api`. See `web/README.md`
 bypasses the `Tx` pinning that guard 2 depends on. The one exception is the usage outbox:
 its SQL lives in `of-billing` (`outbox.rs`), because the outbox row must be written in the
 tool's own `Tx` by the crate that owns metering, and the shipper drains it across all orgs.
-It still writes through the caller's pinned `Tx`; nothing else in `of-billing` touches SQL.
+It still writes through the caller's pinned `Tx`. The same file also holds the shipper's org-less
+statements and `rewrite_retired_meters`, the startup rewrite of queued rows on a renamed meter key
+(per org, with both guards); nothing else in `of-billing` touches SQL.
 
 ## The MCP surface
 
@@ -519,11 +521,13 @@ the decisions no single crate could make.
   backoff. It stops on shutdown after a final flush, except while it is still waiting for the
   meter declaration: then it stops without one (shipping metered rows for an undeclared meter
   would dead-letter them). Anything undelivered stays in the table for the next process.
-  Before it starts, `main` runs `of_core::retired_meters::rewrite`, which moves queued rows still on
-  a renamed meter key (`RENAMED`) to its successor, per org with both guards: an image rolled back
-  past `0006_meter_otto_tower.sql` keeps enqueuing the old key, and on the roll forward those rows
-  would otherwise ship under an undeclared meter and be dead-lettered as `unknown_meter`. A rename
-  of a meter adds its pair to `RENAMED` as well as writing its migration.
+  An image that predates a meter rename (rolled back past `0006_meter_otto_tower.sql`, or still
+  running beside a newer one during a deploy) keeps enqueuing the retired key, which would ship
+  under an undeclared meter and be dead-lettered as `unknown_meter`. So the shipper maps every row
+  it ships through `of_billing::outbox::current_meter` (`RETIRED_METERS`, beside
+  `METER_DECLARATIONS`), and before it starts `main` runs `outbox::rewrite_retired_meters`, which
+  moves the queued rows themselves, per org with both guards. A rename of a meter adds its pair to
+  `RETIRED_METERS` as well as writing its migration.
 - **Startup checks the platform credential but never requires the platform.** One harmless
   `usage_status` call logs whether the credential was accepted (a `REJECTED` line is a
   deployment fault), and a transport failure only warns: a platform outage must not stop a

@@ -51,13 +51,15 @@ async fn main() -> Result<()> {
         tracing::warn!("OF_RUN_MIGRATIONS is off; assuming the schema is already current");
     }
 
-    // Before the shipper declares the meters and starts draining: rows an older
-    // image enqueued under a meter key that has since been renamed (a rollback
-    // past `0006_meter_otto_tower.sql`, then this roll forward) would otherwise
-    // ship under an undeclared meter and be dead-lettered as `unknown_meter`.
-    // Idempotent, and a no-op on every ordinary start. Run whether or not this
-    // process applied the migrations, since the rows are not a schema matter.
-    let moved = of_core::retired_meters::rewrite(&db)
+    // Before the shipper declares the meters and starts draining: move rows an
+    // older image enqueued under a meter key that has since been renamed (a
+    // rollback past `0006_meter_otto_tower.sql`, then this roll forward) to the
+    // key they will be billed under. The shipper maps such keys on every batch
+    // as well (rows an older replica writes after this point), so this keeps
+    // the table honest rather than billing right. Idempotent, and a no-op on
+    // every ordinary start. Run whether or not this process applied the
+    // migrations, since the rows are not a schema matter.
+    let moved = of_billing::outbox::rewrite_retired_meters(&db)
         .await
         .context("could not move queued usage off a retired meter key")?;
     if moved > 0 {

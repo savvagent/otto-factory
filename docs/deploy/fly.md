@@ -554,12 +554,14 @@ fronted by the Worker: also remove `OF_PUBLIC_URL` and `OF_LEGACY_HOSTS` from th
   safely, but do not stay there.
 - **Rolling the image forward again is safe for billing.** While an older image runs it enqueues
   completed jobs under `otto-factory/jobs_completed`, after `0006_meter_otto_tower.sql` has already
-  been applied, so that migration never rewrites them. Every `of-server` start therefore runs
-  `of_core::retired_meters::rewrite` before the usage shipper declares its meters: it moves every
+  been applied, so that migration never rewrites them. The usage shipper therefore bills every row
+  on a retired key (`of_billing::RETIRED_METERS`) under its successor, on every batch, including
+  rows an older replica writes while two versions run at once. Every `of-server` start also runs
+  `of_billing::outbox::rewrite_retired_meters` before the shipper declares its meters: it moves every
   queued `usage_outbox` row still on a retired key to its successor (per org, safe under either RLS
   shape), logs `moved queued usage rows from a retired meter key` with the count when there were
-  any, and is a no-op otherwise. Without it those rows would ship under an undeclared meter and be
-  dead-lettered as `unknown_meter`. It does not touch `usage_outbox_rejected`; a row an older image
+  any, and is a no-op otherwise. Without these those rows would ship under an undeclared meter and
+  be dead-lettered as `unknown_meter`. It does not touch `usage_outbox_rejected`; a row an older image
   already had refused stays there as history. To check after the roll forward (on `otto_factory`):
   ```sql
   BEGIN READ ONLY;

@@ -716,21 +716,157 @@ fn every_recordable_meter_is_declared() {
     }
 }
 
-/// The startup rewrite (`of_core::retired_meters`) moves queued rows from a
-/// retired key to its successor. A successor the shipper does not declare would
-/// only move them from one dead letter to another, and a retired key that is
-/// still declared was never retired.
+// ------------------------------------------------------------ retired meters
+
+const RETIRED: &str = "otto-factory/jobs_completed";
+
+/// A retired key's successor must be declared, or the rewrite only moves rows
+/// from one dead letter to another; and a key that is still declared was never
+/// retired. `0006_meter_otto_tower.sql`'s rename must be on the list.
 #[test]
-fn every_renamed_meter_moves_to_a_declared_one() {
+fn every_retired_meter_moves_to_a_declared_one() {
     let declared = |key: &str| {
         of_billing::METER_DECLARATIONS
             .iter()
             .any(|(declared, _, _)| *declared == key)
     };
-    for (old, new) in of_core::retired_meters::RENAMED {
-        assert!(declared(new), "{old} is rewritten to undeclared {new}");
+    for (old, new) in of_billing::RETIRED_METERS {
+        assert!(declared(new), "{old} is mapped to undeclared {new}");
         assert!(!declared(old), "{old} is retired but still declared");
     }
+    assert!(of_billing::RETIRED_METERS.contains(&(RETIRED, METER_JOBS_COMPLETED)));
+}
+
+/// What an image that predates the rename writes: a completion under the old
+/// key. Raw SQL, because this binary can no longer produce one.
+async fn enqueue_retired(pool: &PgPool, org: OrgId) {
+    sqlx::query(
+        "INSERT INTO usage_outbox (org_id, tool, billable, meter, quantity) \
+         VALUES ($1, 'complete_job', true, $2, 1)",
+    )
+    .bind(org.as_uuid())
+    .bind(RETIRED)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn meters(pool: &PgPool, org: OrgId) -> Vec<Option<String>> {
+    sqlx::query_scalar("SELECT meter FROM usage_outbox WHERE org_id = $1 ORDER BY id")
+        .bind(org.as_uuid())
+        .fetch_all(pool)
+        .await
+        .unwrap()
+}
+
+/// Two versions running at once: a replica of the older image keeps writing
+/// the old key after this one's startup rewrite has run. The shipper still
+/// bills it under the successor, never under a meter the platform refuses.
+#[sqlx::test(migrator = "of_core::MIGRATOR")]
+async fn a_row_enqueued_under_a_retired_key_after_startup_ships_under_its_successor(pool: PgPool) {
+    let platform = MockPlatform::start().await;
+    let db = Db::from_pool(pool.clone());
+    let org = OrgId::new();
+
+    assert_eq!(outbox::rewrite_retired_meters(&db).await.unwrap(), 0);
+    enqueue_retired(&pool, org).await;
+
+    let report = outbox::ship_once(&db, &platform.client(), &cfg())
+        .await
+        .unwrap();
+    assert_eq!(
+        (report.claimed, report.accepted, report.rejected),
+        (1, 1, 0)
+    );
+    let counted = platform.counted_usage();
+    assert_eq!(counted.len(), 1);
+    assert_eq!(counted[0].meter.as_deref(), Some(METER_JOBS_COMPLETED));
+    assert_eq!(counted[0].quantity, Some(1));
+    assert_eq!(outbox::pending(&db).await.unwrap(), 0);
+}
+
+#[sqlx::test(migrator = "of_core::MIGRATOR")]
+async fn the_startup_rewrite_moves_every_orgs_rows_when_rls_is_bypassed(pool: PgPool) {
+    let db = Db::from_pool(pool.clone());
+    let (a, b, user) = (OrgId::new(), OrgId::new(), UserId::new());
+    for org in [a, b] {
+        enqueue_retired(&pool, org).await;
+        enqueue_retired(&pool, org).await;
+        enqueue_metered(&db, org, user, None).await;
+    }
+
+    assert_eq!(outbox::rewrite_retired_meters(&db).await.unwrap(), 4);
+    for org in [a, b] {
+        let want = vec![
+            Some(METER_JOBS_COMPLETED.to_string()),
+            Some(METER_JOBS_COMPLETED.to_string()),
+            None,
+        ];
+        assert_eq!(meters(&pool, org).await, want, "org {org:?}");
+    }
+}
+
+#[sqlx::test(migrator = "of_core::MIGRATOR")]
+async fn the_startup_rewrite_moves_every_orgs_rows_when_rls_applies(pool: PgPool) {
+    let db = Db::from_pool(pool.clone());
+    let (a, b) = (OrgId::new(), OrgId::new());
+    for org in [a, b] {
+        enqueue_retired(&pool, org).await;
+    }
+
+    // As the non-owner role RLS binds, with no app.org_id: the discovery read
+    // goes through the policy's org-less branch, and each UPDATE through the
+    // org the loop pins.
+    let mut tx = db.begin_unpinned().await.unwrap();
+    sqlx::query("SET LOCAL ROLE otto_app")
+        .execute(tx.conn())
+        .await
+        .unwrap();
+    let moved = outbox::rewrite_retired_meters_in(tx.conn()).await.unwrap();
+    // Nothing later in the same transaction inherits the last org pinned.
+    let left: String = sqlx::query_scalar("SELECT current_setting('app.org_id', true)")
+        .fetch_one(tx.conn())
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    assert_eq!(moved, 2);
+    assert_eq!(left, "");
+    for org in [a, b] {
+        assert_eq!(
+            meters(&pool, org).await,
+            vec![Some(METER_JOBS_COMPLETED.to_string())]
+        );
+    }
+}
+
+#[sqlx::test(migrator = "of_core::MIGRATOR")]
+async fn the_startup_rewrite_is_idempotent_and_leaves_rejected_history(pool: PgPool) {
+    let db = Db::from_pool(pool.clone());
+    let org = OrgId::new();
+    enqueue_retired(&pool, org).await;
+    sqlx::query(
+        "INSERT INTO usage_outbox_rejected (event_id, org_id, tool, billable, occurred_at, reason, meter, quantity) \
+         VALUES (gen_random_uuid(), $1, 'complete_job', true, now(), 'x', $2, 1)",
+    )
+    .bind(org.as_uuid())
+    .bind(RETIRED)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    assert_eq!(outbox::rewrite_retired_meters(&db).await.unwrap(), 1);
+    assert_eq!(outbox::rewrite_retired_meters(&db).await.unwrap(), 0);
+
+    let kept: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM usage_outbox_rejected WHERE org_id = $1 AND meter = $2",
+    )
+    .bind(org.as_uuid())
+    .bind(RETIRED)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(kept, 1);
 }
 
 /// Poll `f` until it holds or five seconds pass.

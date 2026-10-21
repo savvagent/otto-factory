@@ -42,7 +42,6 @@ pub mod messages;
 pub mod migrate;
 pub mod platform_events;
 pub mod repos;
-pub mod retired_meters;
 pub mod scopes;
 pub mod teams;
 pub mod trackers;
