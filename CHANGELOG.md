@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.0](https://github.com/savvagent/otto-factory/compare/v0.13.0...v0.14.0) (2026-10-21)
+
+
+### Features
+
+* rename the product to otto-tower, with a deprecated legacy host ([#234](https://github.com/savvagent/otto-factory/issues/234)) ([4414245](https://github.com/savvagent/otto-factory/commit/44142458eda84f4d33100a6dd5b22d57708741ce)), closes [#230](https://github.com/savvagent/otto-factory/issues/230)
+
 ## [0.13.0](https://github.com/savvagent/otto-factory/compare/v0.12.0...v0.13.0) (2026-10-21)
 
 
