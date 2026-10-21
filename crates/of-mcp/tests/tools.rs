@@ -18,7 +18,7 @@ use of_core::watch::Watcher;
 use of_mcp::auth::Principal;
 use of_mcp::server::Factory;
 use of_mcp::tools;
-use of_testkit::MockPlatform;
+use of_testkit::{tripped_budget, MockPlatform};
 use otto_resource::{ClientConfig, PlatformClient, Role, TokenKind};
 use otto_tenant::ids::{OrgId, UserId};
 use otto_tenant::Db;
@@ -2464,22 +2464,11 @@ async fn whoami_reports_the_allowance(pool: PgPool) {
     assert_eq!(out["usage"]["warning"], false);
 }
 
-/// A budget this service's hard stop has tripped, as the platform reports it.
-fn tripped_budget() -> otto_resource::BudgetStatus {
-    otto_resource::BudgetStatus {
-        monthly_budget_cents: 1000,
-        spend_cents: Some(1250),
-        percent_used: Some(125),
-        thresholds_reached: vec![50, 80, 100],
-        hard_stop: true,
-        blocked: true,
-        reason: Some(otto_resource::BUDGET_EXCEEDED.into()),
-    }
-}
-
 /// Complete `id`, expecting the platform's block to refuse it: the refusal
 /// is not retriable, names where a human fixes it, says free tools keep
-/// working, and leaves no `complete_job` row behind.
+/// working and what to do with the held job, leaves no `complete_job` row
+/// behind, and rolls back entirely — the job is still in progress, still
+/// held by the caller, exactly as the message promises.
 async fn assert_completion_blocked(env: &Env, caller: &Principal, id: &str, code: &str) {
     let e = env.complete(caller, id, None).await.unwrap_err();
 
@@ -2491,10 +2480,27 @@ async fn assert_completion_blocked(env: &Env, caller: &Principal, id: &str, code
     );
     assert!(e.message.contains(PLATFORM), "{}", e.message);
     assert!(e.message.contains("free"), "{}", e.message);
+    assert!(e.message.contains("renew_claim"), "{}", e.message);
+    assert!(e.message.contains("repend_job"), "{}", e.message);
+    assert!(e.message.contains("up to a minute"), "{}", e.message);
     assert!(
         outbox_rows(env, "complete_job").await.is_empty(),
         "a refused completion is not work performed"
     );
+
+    let job = ok(env
+        .factory
+        .get_job(
+            Extension(parts(caller)),
+            Parameters(tools::jobs::JobArgs {
+                job: id.to_string(),
+            }),
+        )
+        .await)["job"]
+        .clone();
+    assert_eq!(job["status"], "in-progress", "{job}");
+    assert_eq!(job["claimedBy"], caller.user_id.to_string(), "{job}");
+    assert_eq!(job["claimedByLabel"], "agent-one", "{job}");
 }
 
 /// The platform's blocked reason stops the one billable call and nothing
@@ -2540,6 +2546,15 @@ async fn a_budget_block_refuses_completion_and_free_tools_keep_working(pool: PgP
         .await);
     let usage = env.usage(&caller).await;
     assert_eq!(usage["enforced"], true);
+
+    // The advice holds: once an owner lifts the block, the same claim
+    // completes the job (this fixture caches the status for 1 ms).
+    env.platform
+        .set_blocked_reason(caller.org_id.as_uuid(), None);
+    env.complete(&caller, &id, None)
+        .await
+        .expect("the claim the refusal left in place completes the job");
+    assert_eq!(outbox_rows(&env, "complete_job").await.len(), 1);
 }
 
 #[sqlx::test(migrations = "../of-core/migrations")]
@@ -2653,22 +2668,6 @@ async fn a_spent_legacy_bucket_never_refuses_a_completion(pool: PgPool) {
     assert_eq!(usage["billableUsed"], 9001);
     assert_eq!(usage["remaining"], 0);
     assert_eq!(usage["warning"], true);
-}
-
-/// The same org, one operation short of the limit, must be allowed the call
-/// that lands exactly on it. A plan sold as 500 operations has to deliver 500.
-#[sqlx::test(migrations = "../of-core/migrations")]
-async fn the_last_included_operation_is_allowed(pool: PgPool) {
-    let (env, caller) = env(pool).await;
-    env.register(&caller).await;
-
-    env.set_standing(caller.org_id, 499, 500).await;
-
-    env.complete_one(&caller, "the five hundredth").await;
-
-    let usage = env.usage(&caller).await;
-    assert_eq!(usage["billableUsed"], 500);
-    assert_eq!(usage["remaining"], 0);
 }
 
 /// A tenant's meter is its own. Two orgs sharing a counter would be a billing

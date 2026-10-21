@@ -17,10 +17,18 @@
 //!   platform's point of view because it dedupes on the row's `event_id`.
 //! - **Enforcing** reads the platform's answer to "must this service refuse
 //!   billable calls for this org now" ([`UsageStatus::billable_blocked`]),
-//!   cached by `PlatformClient::usage_status`. The platform decides; this
-//!   crate only obeys, and the platform's spend lags by whatever is still in
-//!   the outbox plus one cache window. That bound is the price of the split and
-//!   is deliberately accepted.
+//!   cached by `PlatformClient::usage_status` for `otto_resource::USAGE_STATUS_TTL`
+//!   (a minute). The platform decides; this crate only obeys, and the
+//!   platform's spend lags by whatever is still in the outbox plus one cache
+//!   window. That bound is the price of the split and is deliberately
+//!   accepted.
+//!
+//! **A change in the console takes up to that minute to apply, in both
+//! directions.** An owner who raises the budget or adds a card can still see
+//! completions refused until the cached "blocked" answer expires, and an org
+//! that has just been blocked can still complete jobs until the cached "not
+//! blocked" one does. The refusal says so, so an agent waits a minute rather
+//! than concluding the fix did not work.
 //!
 //! ## Why charging happens *before* the work
 //!
@@ -51,10 +59,11 @@
 //! per few seconds, not one per call.
 //!
 //! **The lookup happens before the transaction opens.** `complete_job` calls
-//! [`Meter::warm`] before it opens its transaction, so a slow platform never
-//! holds a pooled database connection; the check inside the transaction then
-//! reads the client's cache. No other tool calls `warm`: they have nothing to
-//! ask.
+//! [`Meter::warm`] before it opens its transaction and hands the answer to
+//! [`Meter::charge_metered`], which never makes a network call itself. A slow
+//! platform therefore never holds a pooled database connection, and the
+//! answer the charge judges cannot expire between the two. No other tool
+//! calls `warm`: they have nothing to ask.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -71,14 +80,12 @@ use crate::outbox::{self, Metered};
 
 /// How long the status lookup waits on the platform before allowing the call.
 ///
-/// [`Meter::warm`] makes the lookup before the transaction opens, but the
-/// check inside the transaction looks again if that answer has already left
-/// the cache, and there a slow platform would hold a pooled database
-/// connection for as long as it dawdles; the client's own 10 s timeout is far
-/// too long for that. A cache hit (the normal case) costs nothing and a miss
-/// gets this long, after which the call goes ahead and is recorded like any
-/// other — the same outcome as the platform being down.
-const QUOTA_LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+/// The lookup runs before the transaction opens, so no connection is held
+/// while it waits, but the agent is: the client's own 10 s timeout is far too
+/// long to add to a `complete_job`. A cache hit (the normal case) costs
+/// nothing and a miss gets this long, after which the call goes ahead and is
+/// recorded like any other — the same outcome as the platform being down.
+const STATUS_LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// How long a failed status lookup is remembered, per org, as "allow".
 const FAIL_OPEN_FOR: std::time::Duration = std::time::Duration::from_secs(5);
@@ -101,31 +108,32 @@ pub struct Meter {
     /// dead end for an agent and an annoyance for a human. Not a per-org link:
     /// the charge knows only the org id, and resolving its slug would put a
     /// platform call inside the transaction.
-    pub upgrade_url: String,
+    pub fix_url: String,
 }
 
 impl std::fmt::Debug for Meter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Meter")
-            .field("upgrade_url", &self.upgrade_url)
+            .field("fix_url", &self.fix_url)
             .finish_non_exhaustive()
     }
 }
 
 impl Meter {
-    pub fn new(platform: Arc<PlatformClient>, upgrade_url: impl Into<String>) -> Self {
+    pub fn new(platform: Arc<PlatformClient>, fix_url: impl Into<String>) -> Self {
         Self {
             platform,
             fail_open: Arc::default(),
-            upgrade_url: upgrade_url.into(),
+            fix_url: fix_url.into(),
         }
     }
 
-    /// Look the org's standing up now, so the check inside the tool's
-    /// transaction finds it cached. Called by the metered tool before its
-    /// transaction opens. Never fails: see the module docs.
-    pub async fn warm(&self, org: OrgId) {
-        let _ = self.status_for(org).await;
+    /// Look the org's standing up now, before the metered tool opens its
+    /// transaction, and return it for [`Self::charge_metered`] to judge.
+    /// `None` when the platform could not answer in time, which allows the
+    /// call (fail open). Never fails: see the module docs.
+    pub async fn warm(&self, org: OrgId) -> Option<UsageStatus> {
+        self.status_for(org).await
     }
 
     /// Record one free tool call. Never refuses and never asks the platform:
@@ -144,25 +152,27 @@ impl Meter {
 
     /// Charge one metered tool call, or refuse it.
     ///
-    /// Refused with [`BillingError::Blocked`] when the platform's status for
-    /// the org is `billable_blocked()`, and then nothing is written. Allowed
-    /// when the status cannot be read (fail open; see the module docs).
-    /// Otherwise the call is recorded with `metered`'s meter and quantity and
-    /// `billable = true`, inside `tx`.
+    /// `status` is what [`Self::warm`] returned for this org before `tx` was
+    /// opened; this never asks the platform itself, so nothing here waits on
+    /// the network while a connection is held. Refused with
+    /// [`BillingError::Blocked`] when `status` is `billable_blocked()`, and
+    /// then nothing is written. Allowed when `status` is `None`, the lookup
+    /// having failed (fail open; see the module docs). Otherwise the call is
+    /// recorded with `metered`'s meter and quantity and `billable = true`,
+    /// inside `tx`.
     pub async fn charge_metered(
         &self,
         tx: &mut Tx<'_>,
         user: UserId,
         tool: &str,
         metered: &Metered,
+        status: Option<&UsageStatus>,
     ) -> Result<Charge> {
-        if let Some(status) = self.status_for(tx.org()).await {
-            if status.billable_blocked() {
-                return Err(BillingError::Blocked {
-                    reason: status.blocked_reason,
-                    fix_url: self.upgrade_url.clone(),
-                });
-            }
+        if let Some(status) = status.filter(|s| s.billable_blocked()) {
+            return Err(BillingError::Blocked {
+                reason: status.blocked_reason.clone(),
+                fix_url: self.fix_url.clone(),
+            });
         }
         outbox::enqueue(tx, Some(user), tool, true, Some(metered)).await?;
         Ok(Charge { billable: true })
@@ -184,7 +194,7 @@ impl Meter {
 
     /// The platform's usage status for `org`, or `None` if it could not be read
     /// in time (the caller then allows the call). Bounded by
-    /// [`QUOTA_LOOKUP_TIMEOUT`], and a failure is remembered for
+    /// [`STATUS_LOOKUP_TIMEOUT`], and a failure is remembered for
     /// [`FAIL_OPEN_FOR`] so an outage does not add that wait to every call.
     async fn status_for(&self, org: OrgId) -> Option<UsageStatus> {
         if let Some(until) = self
@@ -198,7 +208,7 @@ impl Meter {
             }
         }
         let failure = match tokio::time::timeout(
-            QUOTA_LOOKUP_TIMEOUT,
+            STATUS_LOOKUP_TIMEOUT,
             self.platform.usage_status(org.as_uuid()),
         )
         .await

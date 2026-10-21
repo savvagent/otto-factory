@@ -16,10 +16,13 @@ pub enum BillingError {
     /// platform's own word for it, kept raw; [`BillingError::code`] maps it to
     /// a stable code.
     #[error(
-        "{what}, so this job was not marked completed. Every other otto-factory tool \
-         is free and keeps working: you can still queue, claim, and inspect jobs. To \
-         complete jobs again, an owner of this organization needs to {fix} in the otto \
-         console at {fix_url}.",
+        "{what}, so this job was not marked completed. The job and your claim on it are \
+         unchanged: keep the claim alive with renew_claim while an owner fixes billing and \
+         then call complete_job again, or hand the job back to the queue with repend_job. \
+         Every other otto-factory tool is free and keeps working: you can still queue, \
+         claim, and inspect jobs. To complete jobs again, an owner of this organization \
+         needs to {fix} in the otto console at {fix_url}. Changes made in the otto console \
+         can take up to a minute to reach otto-factory.",
         what = blocked_what(reason.as_deref()),
         fix = blocked_fix(reason.as_deref()),
     )]
@@ -119,6 +122,13 @@ mod tests {
         );
     }
 
+    /// The message promises a console change applies within a minute. That is
+    /// only true while the platform client caches the status for no longer.
+    #[test]
+    fn the_message_promises_no_less_than_the_status_cache_delivers() {
+        assert!(otto_resource::USAGE_STATUS_TTL <= std::time::Duration::from_secs(60));
+    }
+
     #[test]
     fn a_block_is_never_retriable() {
         assert!(!blocked(Some("budget_exceeded")).retriable());
@@ -136,6 +146,10 @@ mod tests {
         assert!(budget.contains("free"), "{budget}");
         assert!(budget.contains("owner"), "{budget}");
         assert!(budget.contains("https://otto.example"), "{budget}");
+
+        assert!(budget.contains("renew_claim"), "{budget}");
+        assert!(budget.contains("repend_job"), "{budget}");
+        assert!(budget.contains("up to a minute"), "{budget}");
 
         let payment = blocked(Some("payment_required")).to_string();
         assert!(payment.contains("add or fix a card"), "{payment}");

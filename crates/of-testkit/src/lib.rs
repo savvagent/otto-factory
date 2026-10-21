@@ -991,6 +991,22 @@ async fn usage_status(State(inner): S, headers: HeaderMap, Path(org): Path<Uuid>
     }
 }
 
+/// A budget whose hard stop has tripped, as the platform reports one: spend
+/// past the budget, `blocked`, reason `budget_exceeded`. Hand it to
+/// [`MockPlatform::set_budget`], or spread it to build a budget that is not
+/// blocked.
+pub fn tripped_budget() -> BudgetStatus {
+    BudgetStatus {
+        monthly_budget_cents: 1000,
+        spend_cents: Some(1250),
+        percent_used: Some(125),
+        thresholds_reached: vec![50, 80, 100],
+        hard_stop: true,
+        blocked: true,
+        reason: Some(otto_resource::BUDGET_EXCEEDED.into()),
+    }
+}
+
 /// `org`'s usage record, created with the defaults `add_org` uses if missing.
 fn usage_entry(d: &mut Data, org: Uuid) -> &mut UsageStatus {
     d.usage.entry(org).or_insert_with(|| UsageStatus {

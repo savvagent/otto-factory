@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use of_billing::outbox::{self, ShipperConfig};
 use of_billing::{BillingError, Meter, Metered, METER_JOBS_COMPLETED};
-use of_testkit::MockPlatform;
+use of_testkit::{tripped_budget, MockPlatform};
 use otto_tenant::ids::{OrgId, UserId};
 use otto_tenant::Db;
 use sqlx::PgPool;
@@ -32,9 +32,16 @@ async fn record(db: &Db, org: OrgId, user: UserId, meter: &Meter, tool: &str) {
 
 /// The billable twin of [`record`]: a completed job, the one metered call.
 async fn record_metered(db: &Db, org: OrgId, user: UserId, meter: &Meter) {
+    let status = meter.warm(org).await;
     let mut tx = db.begin(org).await.unwrap();
     meter
-        .charge_metered(&mut tx, user, "complete_job", &Metered::jobs_completed())
+        .charge_metered(
+            &mut tx,
+            user,
+            "complete_job",
+            &Metered::jobs_completed(),
+            status.as_ref(),
+        )
         .await
         .unwrap();
     tx.commit().await.unwrap();
@@ -47,9 +54,16 @@ async fn a_failed_call_is_not_recorded(pool: PgPool) {
     let meter = Meter::new(platform.client(), "https://x.test/billing");
     let (org, user) = (OrgId::new(), UserId::new());
 
+    let status = meter.warm(org).await;
     let mut tx = db.begin(org).await.unwrap();
     meter
-        .charge_metered(&mut tx, user, "complete_job", &Metered::jobs_completed())
+        .charge_metered(
+            &mut tx,
+            user,
+            "complete_job",
+            &Metered::jobs_completed(),
+            status.as_ref(),
+        )
         .await
         .unwrap();
     // The tool fails after charging: its transaction rolls back, meter and all.
@@ -334,25 +348,20 @@ async fn recorded_tools(db: &Db) -> Vec<String> {
         .unwrap()
 }
 
-/// A budget this service's hard stop has tripped, as the platform reports it.
-fn tripped_budget() -> otto_resource::BudgetStatus {
-    otto_resource::BudgetStatus {
-        monthly_budget_cents: 1000,
-        spend_cents: Some(1250),
-        percent_used: Some(125),
-        thresholds_reached: vec![50, 80, 100],
-        hard_stop: true,
-        blocked: true,
-        reason: Some(otto_resource::BUDGET_EXCEEDED.into()),
-    }
-}
-
-/// Try one completed job, committing whatever it wrote; the error if it was
+/// Try one completed job the way `complete_job` does (warm, then charge in
+/// the transaction), committing whatever it wrote; the error if it was
 /// refused.
 async fn try_complete(db: &Db, org: OrgId, user: UserId, meter: &Meter) -> Option<BillingError> {
+    let status = meter.warm(org).await;
     let mut tx = db.begin(org).await.unwrap();
     let res = meter
-        .charge_metered(&mut tx, user, "complete_job", &Metered::jobs_completed())
+        .charge_metered(
+            &mut tx,
+            user,
+            "complete_job",
+            &Metered::jobs_completed(),
+            status.as_ref(),
+        )
         .await;
     tx.commit().await.unwrap();
     res.err()
@@ -370,9 +379,16 @@ async fn a_budget_block_refuses_a_completed_job_and_records_nothing(pool: PgPool
     platform.add_org(org.as_uuid(), "acme", "Acme");
     platform.set_blocked_reason(org.as_uuid(), Some(otto_resource::BUDGET_EXCEEDED));
 
+    let status = meter.warm(org).await;
     let mut tx = db.begin(org).await.unwrap();
     let err = meter
-        .charge_metered(&mut tx, user, "complete_job", &Metered::jobs_completed())
+        .charge_metered(
+            &mut tx,
+            user,
+            "complete_job",
+            &Metered::jobs_completed(),
+            status.as_ref(),
+        )
         .await
         .unwrap_err();
     assert!(matches!(err, BillingError::Blocked { .. }), "{err:?}");
@@ -570,24 +586,65 @@ async fn an_outage_is_remembered_so_it_does_not_slow_every_call(pool: PgPool) {
     assert_eq!(outbox::pending(&db).await.unwrap(), 6);
 }
 
-/// `warm` makes the network call before a transaction exists, so the check
-/// inside the transaction reads the cache.
+/// `warm` makes the one network call before a transaction exists, and the
+/// charge inside the transaction judges what it returned without asking
+/// again — even when the client's cache has already expired, so no lookup can
+/// happen while a pooled connection is held.
 #[sqlx::test(migrator = "of_core::MIGRATOR")]
-async fn warm_looks_the_org_up_before_any_transaction(pool: PgPool) {
+async fn the_charge_judges_the_warmed_status_and_never_asks_itself(pool: PgPool) {
     let platform = MockPlatform::start().await;
     let db = Db::from_pool(pool);
-    let meter = meter(&platform);
+    let mut c = otto_resource::ClientConfig::new(
+        &platform.url,
+        of_testkit::RESOURCE_URI,
+        of_testkit::SECRET,
+    );
+    // Expired before the charge runs: an in-transaction lookup would show.
+    c.usage_status_ttl = Duration::from_millis(1);
+    let meter = Meter::new(platform.client_with(c), FIX_URL);
     let (org, user) = (OrgId::new(), UserId::new());
     platform.add_org(org.as_uuid(), "acme", "Acme");
 
-    meter.warm(org).await;
+    let status = meter.warm(org).await;
+    assert!(status.is_some());
     assert_eq!(platform.status_calls(), 1);
-    record_metered(&db, org, user, &meter).await;
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    // Blocked after the warm: the charge judges the answer it was handed.
+    platform.set_blocked_reason(org.as_uuid(), Some(otto_resource::BUDGET_EXCEEDED));
+
+    let mut tx = db.begin(org).await.unwrap();
+    meter
+        .charge_metered(
+            &mut tx,
+            user,
+            "complete_job",
+            &Metered::jobs_completed(),
+            status.as_ref(),
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
     assert_eq!(
         platform.status_calls(),
         1,
-        "the in-transaction check hit the cache"
+        "the charge must not look the org up inside the transaction"
     );
+
+    // And a blocked status handed in is refused, still without asking.
+    let blocked = meter.warm(org).await;
+    let mut tx = db.begin(org).await.unwrap();
+    let err = meter
+        .charge_metered(
+            &mut tx,
+            user,
+            "complete_job",
+            &Metered::jobs_completed(),
+            blocked.as_ref(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "budget_exceeded");
+    assert_eq!(platform.status_calls(), 2);
 }
 
 // ------------------------------------------------------------------- meters

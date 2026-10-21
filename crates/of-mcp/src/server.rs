@@ -205,10 +205,10 @@ impl Factory {
     /// the platform says the org's billable calls are blocked.
     ///
     /// Same placement rule as `charge`: in the tool's own transaction, before
-    /// the work, so a failed call rolls it back. The caller must
-    /// [`Meter::warm`] the org's status *before* opening that transaction, so
-    /// the platform round trip never holds a pooled connection; the check here
-    /// then reads the cache. A lookup that fails allows the call (it is still
+    /// the work, so a failed call rolls it back. `status` is what
+    /// [`Meter::warm`] returned *before* that transaction was opened, so the
+    /// platform round trip never holds a pooled connection and this makes no
+    /// network call. A lookup that failed (`None`) allows the call (it is still
     /// recorded): a platform outage never blocks work.
     pub async fn charge_metered(
         &self,
@@ -216,9 +216,10 @@ impl Factory {
         caller: &Principal,
         tool: &str,
         metered: &of_billing::Metered,
+        status: Option<&otto_resource::UsageStatus>,
     ) -> Result<of_billing::Charge, ErrorData> {
         self.meter
-            .charge_metered(tx, caller.user_id, tool, metered)
+            .charge_metered(tx, caller.user_id, tool, metered, status)
             .await
             .map_err(|e| error::from_billing(&e))
     }
