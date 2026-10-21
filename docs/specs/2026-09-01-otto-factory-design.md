@@ -1,10 +1,14 @@
-# otto-factory — Design
+# otto-tower — Design
 
 Status: accepted (2026-09-01)
 
+> **Renamed.** This product was named otto-factory when this design was written; it is now
+> **otto-tower** (epic `savvagent/otto-platform#81`). The rest of this document is a dated record
+> and keeps the original name; this file keeps its filename because other documents link to it.
+
 ## Summary
 
-**otto-factory** is a hosted, multi-tenant **MCP server for coordinating agentic coding
+**otto-tower** is a hosted, multi-tenant **MCP server for coordinating agentic coding
 work** across enterprises and teams. It is *server-only*: no TUI, no PTY, no local bridge
 binary, no plugin to install.
 
@@ -14,7 +18,7 @@ complete jobs; to see what every other agent on the team is working on and where
 keep GitHub Issues / JIRA in sync with that work.
 
 ```
-claude mcp add --transport http factory https://mcp.<domain>/mcp
+claude mcp add --transport http otto-tower https://otto-factory.savvagent.com/mcp
 ```
 
 That is the entire client-side install.

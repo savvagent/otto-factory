@@ -1331,7 +1331,7 @@ mod tests {
         let (org, other) = (Uuid::new_v4(), Uuid::new_v4());
         let now = "2026-10-20T12:00:00Z".parse::<DateTime<Utc>>().unwrap();
         let last_month = "2026-09-30T23:59:59Z".parse::<DateTime<Utc>>().unwrap();
-        let jobs = "otto-factory/jobs_completed";
+        let jobs = "otto-tower/jobs_completed";
         let counted = vec![
             event(org, now, Some(jobs), Some(1)),
             event(org, now, Some(jobs), None),

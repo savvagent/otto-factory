@@ -39,6 +39,7 @@ use std::sync::Arc;
 use axum::extract::{Request, State};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
+use axum::Extension;
 use axum::Json;
 use chrono::{DateTime, Utc};
 use http::{HeaderMap, StatusCode};
@@ -46,6 +47,8 @@ use otto_resource::{PlatformClient, Role, TokenClaims, TokenKind};
 use otto_tenant::ids::{OrgId, UserId};
 use otto_tenant::Db;
 use uuid::Uuid;
+
+use crate::legacy::Legacy;
 
 /// Everything the middleware needs, shared by the whole surface.
 #[derive(Clone)]
@@ -89,6 +92,23 @@ impl ResourceServer {
     /// Where an unauthenticated client is sent to find out what to do.
     pub fn metadata_url(&self) -> String {
         metadata_url(&self.public_url)
+    }
+
+    /// As [`Self::metadata_url`], on the host the request came through: a
+    /// legacy host points at its own copy of the document, so a client that
+    /// started there finds a `resource` equal to the URL it was given.
+    pub fn metadata_url_for(&self, legacy: Option<&Legacy>) -> String {
+        legacy.map_or_else(|| self.metadata_url(), Legacy::metadata_url)
+    }
+
+    /// The `resource` the metadata document names on this request's host.
+    ///
+    /// Discovery only. The audience a token is checked against is
+    /// [`Self::resource_uri`] on every host, because the platform is asked as
+    /// that resource and nothing else; a legacy host changes what is
+    /// *advertised*, never what is *accepted*.
+    pub fn advertised_resource(&self, legacy: Option<&Legacy>) -> String {
+        legacy.map_or_else(|| self.resource_uri.clone(), Legacy::resource_uri)
     }
 }
 
@@ -181,7 +201,7 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
 /// RFC 9728 and is the field MCP clients actually read.
 fn challenge(metadata_url: &str, reason: &str) -> Response {
     let header = format!(
-        r#"Bearer realm="otto-factory", error="invalid_token", error_description="{reason}", resource_metadata="{metadata_url}""#
+        r#"Bearer realm="otto-tower", error="invalid_token", error_description="{reason}", resource_metadata="{metadata_url}""#
     );
 
     let mut response = (
@@ -198,10 +218,16 @@ fn challenge(metadata_url: &str, reason: &str) -> Response {
     // pointer and leave the client with a bare 401 it cannot act on, so fall
     // back to the pointer alone rather than to nothing.
     let value = http::HeaderValue::from_str(&header)
-        .unwrap_or_else(|_| http::HeaderValue::from_static(r#"Bearer realm="otto-factory""#));
+        .unwrap_or_else(|_| http::HeaderValue::from_static(r#"Bearer realm="otto-tower""#));
     response
         .headers_mut()
         .insert(http::header::WWW_AUTHENTICATE, value);
+    // The pointer differs on a legacy host, so a cache must not hand one
+    // host's challenge to a caller of the other.
+    response.headers_mut().insert(
+        http::header::VARY,
+        http::HeaderValue::from_static(crate::legacy::VARY_BY_HOST),
+    );
 
     response
 }
@@ -216,8 +242,14 @@ pub async fn require_bearer(
     mut req: Request,
     next: Next,
 ) -> Response {
+    // Which discovery document to point at. The legacy marker (set by the
+    // outermost layer from configured hosts only) selects the URL; it plays no
+    // part in deciding whether the token is good — `introspect` below asks the
+    // platform as `rs.resource_uri` whichever host this came through.
+    let metadata_url = rs.metadata_url_for(req.extensions().get::<Legacy>());
+
     let Some(token) = bearer(req.headers()) else {
-        return challenge(&rs.metadata_url(), "an OAuth 2.1 bearer token is required");
+        return challenge(&metadata_url, "an OAuth 2.1 bearer token is required");
     };
 
     match rs.platform.introspect(token).await {
@@ -236,7 +268,7 @@ pub async fn require_bearer(
                 Ok(false) => {}
                 Ok(true) => {
                     return challenge(
-                        &rs.metadata_url(),
+                        &metadata_url,
                         "this token is no longer valid for this resource; sign in again",
                     )
                 }
@@ -256,7 +288,7 @@ pub async fn require_bearer(
         // one a client can fix by changing what it asks for, but the platform
         // does not tell us which it was, so the message covers it.
         Ok(None) => challenge(
-            &rs.metadata_url(),
+            &metadata_url,
             "this token is not valid for this resource; obtain a new one, requesting \
              the resource indicator this server advertises",
         ),
@@ -297,15 +329,28 @@ fn unavailable() -> Response {
 /// understands — which is also what the operator registers with the platform
 /// (`otto-platform-server resource register --scopes …`), so what is advertised
 /// is what the authorization server will issue.
-pub async fn protected_resource_metadata(State(rs): State<Arc<ResourceServer>>) -> Response {
-    Json(serde_json::json!({
-        "resource": rs.resource_uri,
-        "resource_name": of_core::scopes::RESOURCE_NAME,
-        "authorization_servers": [rs.authorization_server.trim_end_matches('/')],
-        "scopes_supported": of_core::scopes::KNOWN,
-        "bearer_methods_supported": ["header"],
-    }))
-    .into_response()
+///
+/// On a legacy host the document names that host's own resource URI
+/// ([`ResourceServer::advertised_resource`]). RFC 9728 §3.3 has the client
+/// compare `resource` with the URL it started from, so naming the canonical URI
+/// there would fail every fresh sign-in on the old address until the sunset.
+pub async fn protected_resource_metadata(
+    State(rs): State<Arc<ResourceServer>>,
+    legacy: Option<Extension<Legacy>>,
+) -> Response {
+    let resource = rs.advertised_resource(legacy.as_ref().map(|Extension(l)| l));
+    let vary = [(http::header::VARY, crate::legacy::VARY_BY_HOST)];
+    (
+        vary,
+        Json(serde_json::json!({
+            "resource": resource,
+            "resource_name": of_core::scopes::RESOURCE_NAME,
+            "authorization_servers": [rs.authorization_server.trim_end_matches('/')],
+            "scopes_supported": of_core::scopes::KNOWN,
+            "bearer_methods_supported": ["header"],
+        })),
+    )
+        .into_response()
 }
 
 /// The authenticated caller of a tool call.
@@ -374,6 +419,10 @@ mod tests {
         assert!(header.contains(
             r#"resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource""#
         ));
+        assert_eq!(
+            response.headers()[http::header::VARY],
+            "X-Forwarded-Host, Host"
+        );
     }
 
     /// A trailing slash on the configured public URL must not produce a

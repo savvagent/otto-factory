@@ -4,18 +4,70 @@ Guidance for Claude Code working in this repository.
 
 ## What this is
 
-**otto-factory** is a hosted, multi-tenant MCP server for coordinating agentic coding work
+**otto-tower** is a hosted, multi-tenant MCP server for coordinating agentic coding work
 across enterprises and teams. Server-only — no TUI, no PTY, no local binary, no plugin.
 
 It is a **resource server of the otto platform** (`savvagent/otto-platform`). The platform
 is the OAuth authorization server and the system of record for identity (accounts, orgs,
-teams, members), SSO, and billing; otto-factory holds only the coordination domain, in its
+teams, members), SSO, and billing; otto-tower holds only the coordination domain, in its
 own database, and asks the platform who a token belongs to. Nothing in this repository
 issues a token, signs anyone in, or stores who a person is.
 
 Read [`docs/specs/2026-09-01-otto-factory-design.md`](docs/specs/2026-09-01-otto-factory-design.md)
 before any non-trivial change. The build order is in
 [`docs/plans/2026-09-01-milestone-1.md`](docs/plans/2026-09-01-milestone-1.md).
+
+## Naming: otto-tower, and the identifiers that keep the old name
+
+The product was renamed from otto-factory to **otto-tower** (epic `savvagent/otto-platform#81`;
+design of record `docs/specs/2026-10-21-otto-tower-rename-design.md` in otto-platform). Everything a
+person or agent reads says otto-tower: the MCP server name (`mcp__otto-tower__*`), the canonical
+endpoint `https://otto-tower.savvagent.com/mcp` once the operator cutover has run (until then the live host is `https://otto-factory.savvagent.com/mcp`), the console, the docs, the skills and the meter
+(`otto-tower/jobs_completed`). `git grep -i otto-factory` is expected to find only these deliberately
+kept identifiers, and a new hit outside the list is a bug:
+
+- The `of-*` crates, the `OF_*` env vars (including `OF_LEGACY_HOSTS` / `OF_LEGACY_SUNSET`), the
+  `otto_factory` database and the `factory` Postgres role.
+- The Fly app `otto-factory-mcp` and its `fly.dev` host.
+- The Rust type `Factory`.
+- `savvagent/otto-factory#NNN` issue references, and the repo slug `savvagent/otto-factory` itself
+  until the GitHub repo is renamed (a separate human step).
+- The GitHub App slug `otto-factory` (`savvagent/otto-factory#232`), including the test fixtures
+  that configure it and the `github.com/apps/otto-factory/…` install URL a test expects.
+- The tracker trigger-label default `otto-factory` (stored data and a behaviour;
+  `savvagent/otto-factory#233`), with the tests, OpenAPI descriptions and examples that exercise it.
+- The Cloudflare Worker script names (`otto-factory-console`, `otto-factory-console-dev`).
+- `CHANGELOG.md`, and the dated historical `docs/specs/*` and `docs/plans/*` (including the design
+  of record's filename `2026-09-01-otto-factory-design.md`, which links depend on).
+- The legacy host `otto-factory.savvagent.com` where it appears as deprecation config or in the
+  cutover runbook (`docs/deploy/fly.md`). Until the cutover it is also the live
+  host that user-facing docs and `ci.yml`'s `environment.url` link to; the prepared URL-flip PRs
+  (runbook step 8a) move them to `otto-tower.savvagent.com`.
+- The `otto-factory release` GitHub App named in `.github/workflows/ci.yml` (an App, renamed by a
+  human like the one above).
+- The legacy file name `~/.claude/otto-factory-repos`, still read as a fallback by
+  `client-skills/claude-code/session-start-hook.sh` and documented in `client-skills/claude-code/README.md`.
+- Historical session records in `client-skills/claude-code/README.md` (the verification notes keep the
+  repo slug and idempotency-key examples they were recorded with).
+- The `factory-scanner:` key prefix, still recognised for back-compat.
+- The `x-otto-factory-auth` OpenAPI extension key, emitted by the server and read by the console.
+- The applied migration `0001_baseline.sql` (its comments and the `trigger_label` default): an
+  applied migration is never edited.
+- The old meter key `otto-factory/jobs_completed` (and its `otto-factory/` prefix) where it names
+  what is being renamed away from: `0006_meter_otto_tower.sql`, `crates/of-core/tests/meter_rename.rs`,
+  `of_billing::RETIRED_METERS` with its doc example and `crates/of-billing/tests/outbox.rs`, and the
+  runbook's preflight and rollback in `docs/deploy/fly.md`.
+- The old `otto-factory-worker:trio-cleared:` marker named in `.github/skills/otto-tower-worker/SKILL.md`'s
+  transition note (it says that marker no longer counts).
+- The GitHub App's display name in the `trackers_not_connected_github` message (every locale): it is
+  what the App is called on GitHub until a human renames it (`savvagent/otto-factory#232`).
+- In the cutover runbook (`docs/deploy/fly.md`): the platform's service slug `otto-factory` that
+  `rename-service` changes (step 2, the preflight in step 3, and the resource registration notes),
+  this repository named by its current name in the runbook's prose ("Release and deploy
+  otto-factory", "the otto-factory flip PR"), and the customer instruction
+  `claude mcp remove otto-factory`, which names what customers registered the server as.
+- Sentences recording the rename itself ("renamed from otto-factory"), here, in `docs/deploy/fly.md`
+  and in `docs/deploy/cloudflare.md`, and this list.
 
 ## The three constraints
 
@@ -24,7 +76,7 @@ These decide scope disputes. When a change conflicts with one of them, the chang
 1. **Coordination is anchored on repos.** A repo is a first-class entity, not a config
    string. Jobs belong to repos (`repo_id` is `NOT NULL`); leases are repo-scoped; an
    unresolvable repo is an error naming the registered slugs, never a silent fallback.
-2. **Substrate, not workflow.** otto-factory ships no opinion about how work is specified,
+2. **Substrate, not workflow.** otto-tower ships no opinion about how work is specified,
    planned, reviewed, or measured. If a capability could live either in the server or in a
    customer's own skill calling the server, **it belongs in the skill**. Jobs carry an
    opaque `metadata` JSONB field for exactly this reason — the server never interprets it.
@@ -177,7 +229,7 @@ npm test                      # vitest — the Cloudflare Worker's routing rule
 npm run build                 # static bundle into web/build
 
 cargo run -p of-server        # everything on one port, reading .env
-podman build -t otto-factory .   # console stage + rust stage + slim runtime
+podman build -t otto-tower .   # console stage + rust stage + slim runtime
 ```
 
 `OF_PUBLIC_URL`, `OF_PLATFORM_URL`, `OF_INTROSPECTION_SECRET`, `OF_PLATFORM_WEBHOOK_SECRET`,
@@ -233,7 +285,9 @@ built to static files that `of-server` serves beside `/api`. See `web/README.md`
 bypasses the `Tx` pinning that guard 2 depends on. The one exception is the usage outbox:
 its SQL lives in `of-billing` (`outbox.rs`), because the outbox row must be written in the
 tool's own `Tx` by the crate that owns metering, and the shipper drains it across all orgs.
-It still writes through the caller's pinned `Tx`; nothing else in `of-billing` touches SQL.
+It still writes through the caller's pinned `Tx`. The same file also holds the shipper's org-less
+statements and `rewrite_retired_meters`, the startup rewrite of queued rows on a renamed meter key
+(per org, with both guards); nothing else in `of-billing` touches SQL.
 
 ## The MCP surface
 
@@ -476,6 +530,13 @@ the decisions no single crate could make.
   backoff. It stops on shutdown after a final flush, except while it is still waiting for the
   meter declaration: then it stops without one (shipping metered rows for an undeclared meter
   would dead-letter them). Anything undelivered stays in the table for the next process.
+  An image that predates a meter rename (rolled back past `0006_meter_otto_tower.sql`, or still
+  running beside a newer one during a deploy) keeps enqueuing the retired key, which would ship
+  under an undeclared meter and be dead-lettered as `unknown_meter`. So the shipper maps every row
+  it ships through `of_billing::outbox::current_meter` (`RETIRED_METERS`, beside
+  `METER_DECLARATIONS`), and before it starts `main` runs `outbox::rewrite_retired_meters`, which
+  moves the queued rows themselves, per org with both guards. A rename of a meter adds its pair to
+  `RETIRED_METERS` as well as writing its migration.
 - **Startup checks the platform credential but never requires the platform.** One harmless
   `usage_status` call logs whether the credential was accepted (a `REJECTED` line is a
   deployment fault), and a transport failure only warns: a platform outage must not stop a
@@ -533,6 +594,20 @@ means in this repository:
   expiry) and an inactive one for 5 s; failures are never cached.
 - **The audience is configuration, not the request.** `OF_RESOURCE_URI` is what the platform
   mints tokens for; it is never derived from a `Host` header, which an attacker controls.
+- **A legacy host changes what is advertised, never what is accepted.** During a rename's
+  deprecation window `OF_LEGACY_HOSTS` names the old host(s). `of_mcp::legacy::mark`, `of-server`'s
+  outermost layer, reads the origin host (`X-Forwarded-Host`, which the Worker sets, else `Host`),
+  stamps `Deprecation`/`Link`/`Sunset` on every response through a legacy host, and leaves a
+  `Legacy` marker that discovery, the `401` challenge and `initialize` read to name the legacy URL
+  and the successor. The host only selects among configured values; introspection still asks as
+  `OF_RESOURCE_URI` (`a_legacy_host_never_chooses_the_audience`). The console cannot work on a legacy
+  host (`/auth/login` there would set its PKCE cookie on a host the platform never sends the browser
+  back to, and its cookie writes would fail CSRF), so `of-server`'s `legacy_console_redirect`, just
+  inside `mark`, answers a legacy-host request for exactly `/auth/login` or for anything that would
+  reach the SPA fallback (not under `API_PREFIXES`, not a health probe) with a `308` to the same path
+  and query on `OF_PUBLIC_URL`. `/mcp`, discovery, `/api`, the webhook receivers and
+  `/platform/webhooks` are never redirected. Production is not behind the Worker, so this is the
+  redirect that runs there; the Worker's own copy applies only to a Worker-fronted deployment.
 - **Discovery.** `/.well-known/oauth-protected-resource` (RFC 9728) names the platform in
   `authorization_servers` and lists `of_core::scopes::KNOWN`; the `401` challenge points at it.
   This service serves no authorization-server metadata, registration, authorize, or token endpoint.
@@ -553,7 +628,7 @@ The billed unit is a completed job, not a tool call. Every MCP tool is free, but
 still recorded and classified in `of-billing::classify`, so a price can be reintroduced without
 losing history. Every completed job, through `complete_job` or an inbound ticket close, writes
 exactly one completion row through `of_billing::record_job_completed`, in the same transaction
-as the state change: billed (`otto-factory/jobs_completed`, quantity 1) or an unmetered,
+as the state change: billed (`otto-tower/jobs_completed`, quantity 1) or an unmetered,
 unbilled row. Nothing else writes a completion row, so `org_counters.jobs_completed_total`
 equals the number of completion rows (a parity test in `of-web/tests/webhooks_http.rs`). `watch` is a continuous long poll, which is why per-call
 pricing was never viable.
@@ -623,7 +698,7 @@ rules hold, and the first is what makes the others true:
 
 ## Releases & versioning
 
-otto-factory is one product — a single deployed binary plus the console it serves — not a set of
+otto-tower is one product — a single deployed binary plus the console it serves — not a set of
 independently published crates, so it carries one SemVer version, not seven. The workspace's
 `[workspace.package] version` (every crate inherits it via `version.workspace = true`) and
 `web/package.json`'s `version` move together.
@@ -639,7 +714,7 @@ crate/area vocabulary (a crate directory name, or `web`/`docs`/`ci`/`release`), 
 change with no single honest scope. A `pr-title` CI check enforces this on every PR.
 
 **A breaking change to a public interface gets its version bump from the same signal the
-otto-factory-development skill's Non-Negotiable Rule 6 already requires you to raise there.**
+otto-tower-development skill's Non-Negotiable Rule 6 already requires you to raise there.**
 Write `<type>(<scope>)!: <subject>` or add a `BREAKING CHANGE: …` footer, and release-please cuts
 a major version from it — the same marker that tells the architect reviewer to look hard is what
 tells the release automation to treat it as one.

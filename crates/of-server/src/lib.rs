@@ -14,7 +14,12 @@
 //!   everything else           web/build   the console SPA, index.html fallback
 //! ```
 //!
-//! otto-factory is a resource server of the otto platform, which is the OAuth
+//! Around all of it, `of_mcp::legacy::mark` stamps a deprecation notice on
+//! every response to a request that came through an `OF_LEGACY_HOSTS` host,
+//! and such a request for the console (or `/auth/login`) is `308`-redirected
+//! to the same path on `OF_PUBLIC_URL` instead of being served.
+//!
+//! otto-tower is a resource server of the otto platform, which is the OAuth
 //! authorization server and the system of record for identity and billing. There
 //! is no `/oauth/*` or account surface here; the console signs in *through* the
 //! platform (`/auth/*`, an OAuth client), and both HTTP surfaces validate the
@@ -34,6 +39,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 use of_core::watch::Watcher;
@@ -73,6 +79,49 @@ fn is_api_path(path: &str) -> bool {
         .any(|prefix| path == *prefix || path.starts_with(&format!("{prefix}/")))
 }
 
+/// Whether a request that arrived through a legacy host is sent to the
+/// canonical host instead of being served: the console, and the console's
+/// sign-in.
+///
+/// The console cannot work on the old host. `/auth/login` would set its PKCE
+/// cookie on the old host while the platform sends the browser back to
+/// `OF_PUBLIC_URL`'s `/auth/callback`, where that cookie does not exist, so the
+/// sign-in fails; and a session cookie set on the old host would make every
+/// cookie-authenticated write fail the CSRF origin check. Moving the browser
+/// before either happens is the only fix. In a Worker-fronted deployment the
+/// Worker already does this before the request reaches here; production is
+/// not fronted by it, which is why the origin has to.
+///
+/// Everything an agent, a provider or the platform calls stays where it is
+/// for the whole deprecation window: `/mcp`, discovery, `/api`, the webhook
+/// receivers, `/platform/webhooks` and the health probes are never redirected.
+/// A redirect there would break a client that does not follow one (most
+/// webhook senders) or that pins its OAuth resource to the URL it was given.
+fn moves_to_canonical(path: &str) -> bool {
+    path == "/auth/login" || (!is_api_path(path) && !is_health_path(path))
+}
+
+/// A health probe, matched on segment boundaries like [`is_api_path`] — the
+/// same rule the Worker's `belongsToOrigin` applies to them, so `/readyz/x` is
+/// the origin's (a `404`) whether or not the Worker is in front.
+fn is_health_path(path: &str) -> bool {
+    health::PATHS
+        .iter()
+        .any(|probe| path == *probe || path.starts_with(&format!("{probe}/")))
+}
+
+/// `308` a legacy-host console request to the same path and query on the
+/// canonical host ([`of_mcp::Legacy::redirect`]). Runs inside
+/// [`of_mcp::legacy::mark`], so the redirect carries the same
+/// `Deprecation`/`Link`/`Sunset` notice as every other legacy-host response,
+/// and its `Location` is the `Link`'s target.
+async fn legacy_console_redirect(req: Request<Body>, next: Next) -> Response {
+    match req.extensions().get::<of_mcp::Legacy>() {
+        Some(legacy) if moves_to_canonical(req.uri().path()) => legacy.redirect(req.uri()),
+        _ => next.run(req).await,
+    }
+}
+
 /// The client every call to the otto platform goes through.
 ///
 /// Built once and shared: it holds the introspection and usage-status caches,
@@ -110,10 +159,44 @@ pub fn router(
         .merge(web)
         .merge(mcp)
         .fallback_service(console(config))
+        // Inside `mark`, which is what puts the `Legacy` marker it reads in the
+        // request, and so that the redirect it answers is stamped too.
+        .layer(axum::middleware::from_fn(legacy_console_redirect))
         // Request spans, without headers. `DefaultMakeSpan::include_headers`
         // would put `Authorization` in the logs — every bearer token, in
         // plaintext, in whatever the log aggregator retains. Do not turn it on.
-        .layer(TraceLayer::new_for_http()))
+        .layer(TraceLayer::new_for_http())
+        // Outermost, so every response through a legacy host carries the
+        // deprecation notice whichever surface — or the console fallback, or a
+        // `401` — answered it, and so the marker it leaves in the request is
+        // there for `/mcp` and discovery to read. With no `OF_LEGACY_HOSTS` it
+        // passes every request through untouched.
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::new(deprecation(config)?),
+            of_mcp::legacy::mark,
+        )))
+}
+
+/// The legacy hosts and what their callers are told: the canonical public
+/// origin and MCP URI as successors, and the sunset date if one is set.
+///
+/// Fallible for the same reason as [`router`]: a hand-built `Config` need not
+/// have come through `from_env`'s checks, and a legacy URL built from a value
+/// that does not parse would be a discovery document nobody can follow.
+fn deprecation(config: &Config) -> Result<of_mcp::Deprecation> {
+    if config.legacy_hosts.is_empty() {
+        return Ok(of_mcp::Deprecation::default());
+    }
+    let public_url = url::Url::parse(&config.public_url)
+        .with_context(|| format!("OF_PUBLIC_URL is not a URL: {:?}", config.public_url))?;
+    let resource_uri = url::Url::parse(&config.resource_uri)
+        .with_context(|| format!("OF_RESOURCE_URI is not a URL: {:?}", config.resource_uri))?;
+    Ok(of_mcp::Deprecation::new(
+        &public_url,
+        &resource_uri,
+        config.legacy_hosts.iter().cloned(),
+        config.legacy_sunset,
+    ))
 }
 
 /// `of-web`'s state, with the settings that are this deployment's to decide.
@@ -317,5 +400,57 @@ mod tests {
         assert!(!is_api_path("/authors"));
         assert!(!is_api_path("/o/acme/queue"));
         assert!(!is_api_path("/"));
+    }
+
+    #[test]
+    fn only_the_console_and_its_sign_in_move_to_the_canonical_host() {
+        for moved in ["/", "/o/acme/queue", "/apiary", "/_app/x.js", "/auth/login"] {
+            assert!(moves_to_canonical(moved), "{moved}");
+        }
+        for kept in [
+            "/mcp",
+            "/.well-known/oauth-protected-resource",
+            "/api/orgs/acme/repos",
+            "/api/openapi.json",
+            "/webhooks/github",
+            "/platform/webhooks",
+            "/auth/callback",
+            "/auth/logout",
+            "/auth/login/extra",
+            "/oauth/authorize",
+            "/healthz",
+            "/readyz",
+            "/readyz/x",
+        ] {
+            assert!(!moves_to_canonical(kept), "{kept}");
+        }
+        assert!(moves_to_canonical("/readyzzz"));
+    }
+
+    /// No routed path is ever redirected off a legacy host: every console API
+    /// route, sign-in route and webhook receiver in `of-web`'s catalog, both of
+    /// `of-mcp`'s, and the probes. A route added outside `API_PREFIXES` would
+    /// otherwise answer a `308` to the canonical host on the old one, which a
+    /// webhook sender or an agent will not follow. `/auth/login` is the one
+    /// deliberate exception.
+    #[test]
+    fn no_routed_path_moves_to_the_canonical_host() {
+        let routed = of_web::catalog::catalog()
+            .into_iter()
+            .map(|endpoint| endpoint.path)
+            .chain(of_mcp::ROUTES)
+            .chain(health::PATHS)
+            .filter(|path| *path != "/auth/login")
+            .collect::<Vec<_>>();
+        assert!(routed.len() > 10, "the catalog came back nearly empty");
+        for path in routed {
+            assert!(!moves_to_canonical(path), "{path} would be redirected");
+        }
+        assert!(
+            of_web::catalog::catalog()
+                .iter()
+                .any(|e| e.path == "/auth/login"),
+            "the exception names a route that no longer exists"
+        );
     }
 }

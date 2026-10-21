@@ -35,6 +35,7 @@
 
 pub mod auth;
 pub mod error;
+pub mod legacy;
 pub mod server;
 pub mod tools;
 
@@ -49,6 +50,7 @@ use rmcp::transport::streamable_http_server::session::local::LocalSessionManager
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 
 pub use auth::ResourceServer;
+pub use legacy::{Deprecation, Legacy};
 pub use server::Factory;
 
 /// Deployment-dependent settings the MCP surface cannot infer for itself.
@@ -141,13 +143,18 @@ impl Config {
 ///   validated by the platform.
 ///
 /// The transport runs **stateless** (`stateful_mode: false`, `json_response:
-/// true`). otto-factory never pushes to a client — `watch` is a long poll the
+/// true`). otto-tower never pushes to a client — `watch` is a long poll the
 /// agent initiates — so a server-held session would buy nothing and cost the
 /// one thing a hosted multi-replica deployment cannot easily give it: every
 /// request from one client landing on the replica that holds its session.
 /// Stateless means any replica can serve any request, with no sticky routing
 /// and no shared session store.
+/// Every path [`router`] serves, so `of-server` can check what it would do with
+/// them (a legacy host must never redirect one) without starting a server.
+pub const ROUTES: [&str; 2] = ["/.well-known/oauth-protected-resource", "/mcp"];
+
 pub fn router(db: Db, watcher: Arc<Watcher>, config: Config) -> Router {
+    let [metadata, mcp] = ROUTES;
     let rs = Arc::new(ResourceServer::new(
         db.clone(),
         config.platform.clone(),
@@ -187,13 +194,10 @@ pub fn router(db: Db, watcher: Arc<Watcher>, config: Config) -> Router {
     );
 
     Router::new()
-        .route(
-            "/.well-known/oauth-protected-resource",
-            get(auth::protected_resource_metadata),
-        )
+        .route(metadata, get(auth::protected_resource_metadata))
         .with_state(rs.clone())
         .route_service(
-            "/mcp",
+            mcp,
             any_service(service).layer(axum::middleware::from_fn_with_state(
                 rs,
                 auth::require_bearer,

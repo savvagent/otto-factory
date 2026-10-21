@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use crate::{Error, Result};
 
-const USER_AGENT: &str = "otto-factory/0.1";
+const USER_AGENT: &str = concat!("otto-tower/", env!("CARGO_PKG_VERSION"));
 const MAX_ERROR_BODY_BYTES: usize = 256;
 /// The outbound sync path (Task 4) calls into this client synchronously,
 /// after the job's own transaction has already committed, so a stalled

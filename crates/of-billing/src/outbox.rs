@@ -42,7 +42,7 @@ use uuid::Uuid;
 use crate::error::Result;
 
 /// The platform meter key for a completed job.
-pub const METER_JOBS_COMPLETED: &str = "otto-factory/jobs_completed";
+pub const METER_JOBS_COMPLETED: &str = "otto-tower/jobs_completed";
 
 /// The meters this server declares to the platform before it ships usage, as
 /// `(key, display name, unit)`.
@@ -57,6 +57,43 @@ pub const METER_JOBS_COMPLETED: &str = "otto-factory/jobs_completed";
 /// ```
 pub const METER_DECLARATIONS: &[(&str, &str, &str)] =
     &[(METER_JOBS_COMPLETED, "Jobs completed", "job")];
+
+/// Every meter key that has been renamed, as `(retired, successor)`. Each
+/// successor must be in [`METER_DECLARATIONS`] and no retired key may be; a test
+/// holds the list to both.
+///
+/// A rename's migration (`0006_meter_otto_tower.sql` for this one) rewrites the
+/// rows queued when it runs, once. That is not enough: an image that predates
+/// the rename keeps enqueuing completions under the retired key — after a
+/// rollback past the migration, or while it is still running beside a newer
+/// one during a deploy — and the platform refuses an undeclared meter as
+/// `unknown_meter`, which is final. So the retired key never reaches the
+/// platform from this binary: [`ship_once`] maps every row it ships through
+/// [`current_meter`], and [`rewrite_retired_meters`] (run by `of-server` at
+/// startup, before the shipper) moves the queued rows themselves, so that what
+/// is in the table says what will be billed.
+///
+/// ```
+/// assert_eq!(
+///     of_billing::outbox::current_meter("otto-factory/jobs_completed"),
+///     of_billing::METER_JOBS_COMPLETED
+/// );
+/// assert_eq!(
+///     of_billing::outbox::current_meter(of_billing::METER_JOBS_COMPLETED),
+///     of_billing::METER_JOBS_COMPLETED
+/// );
+/// ```
+pub const RETIRED_METERS: &[(&str, &str)] =
+    &[("otto-factory/jobs_completed", METER_JOBS_COMPLETED)];
+
+/// The key a meter is billed under today: its successor if it was renamed,
+/// itself otherwise.
+pub fn current_meter(key: &str) -> &str {
+    RETIRED_METERS
+        .iter()
+        .find(|(retired, _)| *retired == key)
+        .map_or(key, |(_, successor)| successor)
+}
 
 /// A value meter and quantity carried on a usage row, beside the per-call record.
 ///
@@ -237,7 +274,9 @@ pub async fn ship_once(
                 occurred_at: r.occurred_at,
                 // The platform takes the service from the calling resource server.
                 service: None,
-                meter: r.meter.clone(),
+                // A row an older image enqueued under a retired key is billed
+                // under its successor (see `RETIRED_METERS`).
+                meter: r.meter.as_deref().map(|m| current_meter(m).to_string()),
                 quantity,
             })
         })
@@ -342,6 +381,74 @@ pub enum ShipError {
     Platform(#[from] otto_resource::Error),
     #[error("outbox database error: {0}")]
     Db(#[from] sqlx::Error),
+}
+
+/// Move every queued row still on a [`RETIRED_METERS`] key to its successor, for
+/// every org, in one transaction. Returns how many rows moved. Idempotent: with
+/// nothing on a retired key it reads the outbox and writes nothing.
+///
+/// [`ship_once`] already ships such a row under its successor, so this is not
+/// what keeps billing right; it keeps the table honest about what will be
+/// billed, and it runs at startup so a rollback's leftovers are visible once,
+/// in one log line, rather than row by row.
+///
+/// It rewrites tenant data with no org of its own, so it follows the one
+/// pattern that is safe under every deployment shape (CLAUDE.md, "A migration
+/// that touches a tenant table's data"): for each org that has such rows it
+/// pins `app.org_id` to that org **and** names it in the `UPDATE`'s own
+/// predicate. Finding the orgs is an org-less read, which
+/// `usage_outbox_tenant_isolation`'s `current_org() IS NULL` branch allows —
+/// the branch [`ship_once`]'s claim uses too.
+pub async fn rewrite_retired_meters(db: &Db) -> std::result::Result<u64, sqlx::Error> {
+    let mut tx = db.pool().begin().await?;
+    let moved = rewrite_retired_meters_in(&mut tx).await?;
+    tx.commit().await?;
+    Ok(moved)
+}
+
+/// [`rewrite_retired_meters`] on a connection the caller holds, inside whatever
+/// transaction it has open — which is how a test runs it as a role RLS applies
+/// to. `app.org_id` is set transaction-locally and restored to unset before
+/// this returns, so nothing after it in the same transaction inherits an org.
+pub async fn rewrite_retired_meters_in(
+    conn: &mut sqlx::PgConnection,
+) -> std::result::Result<u64, sqlx::Error> {
+    let mut moved = 0;
+    for (retired, successor) in RETIRED_METERS {
+        // Unpinned for the discovery read, or on a shape RLS binds it would
+        // see only the org the previous key's loop left pinned.
+        unpin(conn).await?;
+        let orgs: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT DISTINCT org_id FROM usage_outbox WHERE meter = $1 ORDER BY org_id",
+        )
+        .bind(retired)
+        .fetch_all(&mut *conn)
+        .await?;
+        for org in orgs {
+            sqlx::query("SELECT set_config('app.org_id', $1, true)")
+                .bind(org.to_string())
+                .execute(&mut *conn)
+                .await?;
+            moved +=
+                sqlx::query("UPDATE usage_outbox SET meter = $3 WHERE org_id = $1 AND meter = $2")
+                    .bind(org)
+                    .bind(retired)
+                    .bind(successor)
+                    .execute(&mut *conn)
+                    .await?
+                    .rows_affected();
+        }
+    }
+    unpin(conn).await?;
+    Ok(moved)
+}
+
+/// Restore `app.org_id` to unset for the rest of the transaction.
+async fn unpin(conn: &mut sqlx::PgConnection) -> std::result::Result<(), sqlx::Error> {
+    sqlx::query("SELECT set_config('app.org_id', '', true)")
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
 }
 
 /// Rows waiting to be shipped (due or backing off).

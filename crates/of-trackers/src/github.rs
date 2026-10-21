@@ -9,7 +9,7 @@ use serde_json::Value;
 use crate::{Error, Result};
 
 const GITHUB_API_VERSION: &str = "2022-11-28";
-const USER_AGENT: &str = "otto-factory/0.1";
+const USER_AGENT: &str = concat!("otto-tower/", env!("CARGO_PKG_VERSION"));
 const JWT_IAT_SKEW_SECONDS: i64 = 30;
 const INSTALLATION_TOKEN_REFRESH_SKEW_SECONDS: i64 = 30;
 const MAX_ERROR_BODY_BYTES: usize = 256;

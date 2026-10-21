@@ -1,4 +1,6 @@
-# otto-factory on Fly.io, org "savvagent".
+# otto-tower on Fly.io, org "savvagent". (The Fly app keeps its pre-rename name,
+# `otto-factory-mcp`: Fly cannot rename an app slug, and `otto-factory-mcp.fly.dev`
+# is the Worker's origin.)
 #
 # A resource server of the otto platform (https://otto.savvagent.com): identity, OAuth,
 # orgs, teams, and billing live there; this app holds only the coordination domain.
@@ -12,7 +14,7 @@
 # `fly postgres attach`, is a superuser, so it BYPASSES RLS entirely, FORCE included:
 # isolation rests wholly on `otto_tenant::Db::begin` issuing `SET LOCAL ROLE otto_app`,
 # and any statement that runs directly on the pool (every migration, the usage shipper)
-# sees every org's rows. otto-factory keeps its own migration history -- a squashed
+# sees every org's rows. otto-tower keeps its own migration history -- a squashed
 # domain-only baseline since the platform cutover -- and never runs the platform's.
 #
 # Secrets are NOT in this file -- `fly secrets set` puts these in the machine's
@@ -37,6 +39,12 @@ primary_region = "iad"
   # The hostname a browser and an agent both see. `otto-factory-mcp.fly.dev`
   # still answers, but nothing advertises it: the discovery pointer in a 401 and
   # the tracker OAuth callbacks are built from OF_PUBLIC_URL.
+  #
+  # The canonical host is otto-tower.savvagent.com, but the values below are
+  # still the pre-rename host until the operator cutover (docs/deploy/fly.md,
+  # step 8) flips OF_PUBLIC_URL, OF_RESOURCE_URI and OF_CONSOLE_CLIENT_ID and
+  # adds OF_LEGACY_HOSTS / OF_LEGACY_SUNSET. Flipping any of them earlier makes
+  # the platform reject this app's credential.
   OF_PUBLIC_URL = "https://otto-factory.savvagent.com"
   # The token audience: exactly the resource_uri registered at the platform
   # (`otto-platform-server resource register <this>`), and the HTTP Basic user on
@@ -48,8 +56,10 @@ primary_region = "iad"
   OF_PLATFORM_URL = "https://otto.savvagent.com"
   # The console's OAuth client at the platform, for console sign-in. NOT a secret
   # (a public client; PKCE is what binds a code to its browser). Printed by
-  # `otto-platform-server client register --name "otto-factory console"
-  # --redirect-uri https://otto-factory.savvagent.com/auth/callback --first-party`
+  # `otto-platform-server client register --name "otto-tower console"
+  # --redirect-uri https://otto-tower.savvagent.com/auth/callback --first-party`
+  # (this id is for the pre-rename host's redirect URI; the cutover registers a
+  # new one for the new host).
   # (docs/deploy/fly.md). Unset, `/auth/login` answers 503
   # console_login_disabled and everything else runs.
   OF_CONSOLE_CLIENT_ID = "otto_client_BY6fncRMJV2hDPnDv8n9R1LYE004vJJi4GJDvhJPuTQ"

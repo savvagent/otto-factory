@@ -29,7 +29,7 @@ use sqlx::PgPool;
 use tower::ServiceExt;
 
 pub const RESOURCE: &str = of_testkit::RESOURCE_URI;
-pub const PUBLIC_URL: &str = "https://console.otto-factory.test";
+pub const PUBLIC_URL: &str = "https://console.otto-tower.test";
 /// The console's OAuth client id at the (mock) platform.
 pub const CONSOLE_CLIENT: &str = "of_console_test";
 

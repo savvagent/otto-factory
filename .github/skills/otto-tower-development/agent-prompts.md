@@ -1,4 +1,4 @@
-# otto-factory-development — Agent Dispatch Prompt Templates
+# otto-tower-development — Agent Dispatch Prompt Templates
 
 Verbatim prompt bodies for every `Agent`-tool dispatch in `SKILL.md`. The skill spine owns the
 *decision* logic (when to dispatch, which `model:` / `subagent_type`, status handling, fix-loop caps,
@@ -355,7 +355,7 @@ Agent tool:
   description: "Address PR review feedback"
   prompt: |
     You are addressing PR review feedback on PR #<N> of savvagent/otto-factory, for <ref>.
-    Follow otto-factory-development requirements (Phase 4 step 9).
+    Follow otto-tower-development requirements (Phase 4 step 9).
 
     Your job:
     - Read all unresolved review threads on the PR

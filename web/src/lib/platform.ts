@@ -3,7 +3,7 @@
  *
  * Identity is not this app's: members, teams, SSO, usage, tokens, the account,
  * and the list of orgs all live at the platform, which is also what signed this
- * person in. The factory console links there rather than re-implementing any of
+ * person in. The otto-tower console links there rather than re-implementing any of
  * it. Every such link is built here, from the `platformUrl` the server reports
  * (`GET /api/session`), so a deployment's platform address is never baked into
  * the bundle and there is one place to fix a path when the platform's console

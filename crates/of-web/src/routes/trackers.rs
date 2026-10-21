@@ -332,11 +332,11 @@ async fn connect_jira(
                     .collect::<Vec<_>>()
                     .join(", ");
                 return Err(ApiError::bad_request(format!(
-                "that Atlassian authorization covers {} JIRA sites ({names}), and otto-factory \
+                    "that Atlassian authorization covers {} JIRA sites ({names}), and otto-tower \
                  stores one site per organization. Run Connect JIRA again and grant access to \
                  only the site this org works from.",
-                many.len()
-            )));
+                    many.len()
+                )));
             }
         };
 

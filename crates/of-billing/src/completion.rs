@@ -8,7 +8,7 @@
 //! **Exactly one row per completion**, written in the transaction that moves
 //! the job to `completed`, so it commits or rolls back with the transition:
 //!
-//! - **billed**: `meter = otto-factory/jobs_completed`, quantity 1,
+//! - **billed**: `meter = otto-tower/jobs_completed`, quantity 1,
 //!   `billable = true`. The platform prices it.
 //! - **not billed**: a plain, unmetered `billable = false` row. Still recorded,
 //!   so the history shows the completion and `org_counters.jobs_completed_total`

@@ -37,11 +37,16 @@ use of_core::watch::Watcher;
 use otto_resource::PlatformClient;
 use otto_tenant::{Db, Tx};
 use rmcp::handler::server::tool::ToolRouter;
-use rmcp::model::{ErrorData, Implementation, ServerCapabilities, ServerInfo};
-use rmcp::{tool_handler, ServerHandler};
+use rmcp::model::{
+    ErrorData, Implementation, InitializeRequestParams, InitializeResult, ServerCapabilities,
+    ServerInfo,
+};
+use rmcp::service::RequestContext;
+use rmcp::{tool_handler, RoleServer, ServerHandler};
 
 use crate::auth::{MissingScope, Principal};
 use crate::error;
+use crate::legacy::Legacy;
 
 /// What the MCP surface tells a client it is, in the client's own words.
 ///
@@ -50,7 +55,7 @@ use crate::error;
 /// first session are naming the repo, claiming without checking `ready`, and
 /// polling instead of waiting.
 const INSTRUCTIONS: &str = "\
-otto-factory coordinates agentic coding work across a team. Everything here is \
+otto-tower coordinates agentic coding work across a team. Everything here is \
 anchored on repositories: a job belongs to a repo, a lease is taken on a resource \
 within a repo — a branch (spelled `branch:<name>`, e.g. `branch:main`), or anything \
 else your team needs to serialize on, such as a staging slot or a migration lock — \
@@ -80,7 +85,7 @@ Jobs carry a free-form `metadata` object that this server never reads or \
 interprets. Put whatever your own workflow needs in it.
 
 Coordination calls are free. Each completed job is billed on the \
-organization's otto-factory meter, including one completed by closing its \
+organization's otto-tower meter, including one completed by closing its \
 linked ticket. Call usage to see this month's completed \
 jobs, the budget and any block.";
 
@@ -295,11 +300,45 @@ impl ServerHandler for Factory {
         // Left unset, this defaults to `Implementation::from_build_env()`,
         // which expands `CARGO_CRATE_NAME`/`CARGO_PKG_VERSION` in `rmcp`'s
         // own build context — every client would see "rmcp" 2.0.0 at
-        // `initialize`, not otto-factory.
-        info.server_info = Implementation::new("otto-factory", env!("CARGO_PKG_VERSION"));
+        // `initialize`, not otto-tower.
+        info.server_info = Implementation::new("otto-tower", env!("CARGO_PKG_VERSION"));
         info.instructions = Some(INSTRUCTIONS.to_string());
         info
     }
+
+    /// `rmcp`'s default, plus the deprecation notice when the handshake came
+    /// through a legacy host.
+    ///
+    /// The notice has to be decided here and not in `get_info`: `get_info`
+    /// sees no request, and the host is a property of the request — the
+    /// transport carries its `Parts` (with the [`Legacy`] marker the outermost
+    /// layer put there) into this call's context. Instructions are what an agent
+    /// actually reads, so this is where a move to the new address reaches it.
+    async fn initialize(
+        &self,
+        request: InitializeRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<InitializeResult, ErrorData> {
+        context.peer.set_peer_info(request);
+        let legacy = context
+            .extensions
+            .get::<http::request::Parts>()
+            .and_then(|parts| parts.extensions.get::<Legacy>());
+        Ok(info_for(self.get_info(), legacy))
+    }
+}
+
+/// The handshake answer for a request that did, or did not, come through a
+/// legacy host: on one, the instructions open with the deprecation paragraph.
+fn info_for(mut info: InitializeResult, legacy: Option<&Legacy>) -> InitializeResult {
+    if let Some(legacy) = legacy {
+        let notice = legacy.notice();
+        info.instructions = Some(match info.instructions.take() {
+            Some(rest) => format!("{notice}\n\n{rest}"),
+            None => notice,
+        });
+    }
+    info
 }
 
 /// Map an `of-core`, `otto-tenant`, or billing failure into the MCP envelope at
@@ -370,6 +409,47 @@ mod tests {
                 "the instructions should tell an agent about {tool}"
             );
         }
+    }
+
+    /// The deprecation paragraph opens the instructions over a legacy host and
+    /// is absent otherwise; the operating guidance follows it unchanged.
+    #[test]
+    fn the_instructions_open_with_the_notice_only_over_a_legacy_host() {
+        let base = || {
+            let mut info = ServerInfo::new(ServerCapabilities::builder().enable_tools().build());
+            info.instructions = Some(INSTRUCTIONS.to_string());
+            info
+        };
+
+        let canonical = info_for(base(), None);
+        assert_eq!(canonical.instructions.as_deref(), Some(INSTRUCTIONS));
+
+        let deprecation = crate::legacy::Deprecation::new(
+            &url::Url::parse("https://tower.example.com").unwrap(),
+            &url::Url::parse("https://tower.example.com/mcp").unwrap(),
+            ["factory.example.com"],
+            None,
+        );
+        let mut headers = http::HeaderMap::new();
+        headers.insert("x-forwarded-host", "factory.example.com".parse().unwrap());
+        let legacy = deprecation
+            .classify(&headers, &"/mcp".parse().unwrap())
+            .expect("legacy");
+
+        let instructions = info_for(base(), Some(&legacy))
+            .instructions
+            .expect("instructions");
+        assert!(instructions.starts_with(&legacy.notice()), "{instructions}");
+        assert!(instructions.ends_with(INSTRUCTIONS), "{instructions}");
+
+        // With nothing to follow it, the notice stands alone: no dangling blank
+        // lines.
+        let mut bare = base();
+        bare.instructions = None;
+        assert_eq!(
+            info_for(bare, Some(&legacy)).instructions,
+            Some(legacy.notice())
+        );
     }
 
     /// Constraint 3: coding-agent agnostic. The instructions must not name a

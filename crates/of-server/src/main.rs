@@ -1,4 +1,4 @@
-//! otto-factory server binary. Assembles every HTTP surface on one port.
+//! otto-tower server binary. Assembles every HTTP surface on one port.
 
 use anyhow::{Context, Result};
 use of_billing::outbox::ShipperConfig;
@@ -24,6 +24,7 @@ async fn main() -> Result<()> {
 
     init_tracing(config.log_format)?;
     config.warn_retired();
+    config.warn_past_sunset(chrono::Utc::now());
     match dotenv {
         Ok(path) => tracing::debug!(path = %path.display(), "loaded .env"),
         Err(_) => tracing::debug!("no .env file; using the process environment"),
@@ -48,6 +49,25 @@ async fn main() -> Result<()> {
         of_core::migrate(&db).await.context("migrations failed")?;
     } else {
         tracing::warn!("OF_RUN_MIGRATIONS is off; assuming the schema is already current");
+    }
+
+    // Before the shipper declares the meters and starts draining: move rows an
+    // older image enqueued under a meter key that has since been renamed (a
+    // rollback past `0006_meter_otto_tower.sql`, then this roll forward) to the
+    // key they will be billed under. The shipper maps such keys on every batch
+    // as well (rows an older replica writes after this point), so this keeps
+    // the table honest rather than billing right. Idempotent, and a no-op on
+    // every ordinary start. Run whether or not this process applied the
+    // migrations, since the rows are not a schema matter.
+    let moved = of_billing::outbox::rewrite_retired_meters(&db)
+        .await
+        .context("could not move queued usage off a retired meter key")?;
+    if moved > 0 {
+        tracing::warn!(
+            rows = moved,
+            "moved queued usage rows from a retired meter key to its successor \
+             (an older image ran since the rename)"
+        );
     }
 
     // Prove tenant isolation before binding a port, never after. Row-level

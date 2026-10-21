@@ -33,4 +33,4 @@ pub use completion::{
 };
 pub use error::{BillingError, Result};
 pub use meter::{default_fix_url, BudgetReport, Charge, Meter, MeterStatus, Status, Warmed};
-pub use outbox::{Metered, METER_DECLARATIONS, METER_JOBS_COMPLETED};
+pub use outbox::{Metered, METER_DECLARATIONS, METER_JOBS_COMPLETED, RETIRED_METERS};

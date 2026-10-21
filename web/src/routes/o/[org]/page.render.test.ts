@@ -54,8 +54,8 @@ const repos = [
   {
     id: 'repo-1',
     orgId: 'org-1',
-    slug: 'otto-factory',
-    name: 'otto-factory',
+    slug: 'otto-tower',
+    name: 'otto-tower',
     provider: 'github',
     defaultBranch: 'master',
     teamId: null,
@@ -124,7 +124,7 @@ describe('the overview', () => {
     await settle();
 
     expect(container.textContent).toContain('Wire the webhook ingest');
-    expect(container.textContent).toContain('otto-factory');
+    expect(container.textContent).toContain('otto-tower');
     expect(container.querySelector('[role="status"]')).toBeNull();
 
     healthy = false;
