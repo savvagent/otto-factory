@@ -411,6 +411,78 @@ async fn an_inbound_close_of_a_claimed_job_bills_it_exactly_once(pool: PgPool) {
     assert_eq!(completion_rows(&pool).await, vec![billed_close()]);
 }
 
+/// The platform is asked for the org's standing only when the answer is used:
+/// a verified close to `completed` of a claimed job. Opening, updating or
+/// failing a ticket, and closing a job nobody claimed, never ask.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn the_standing_is_looked_up_only_for_a_close_of_a_claimed_job(pool: PgPool) {
+    let h = harness(pool.clone()).await;
+    let org = OrgId::new();
+    bind_github_repo(&h, org, INSTALLATION, "acme/api").await;
+
+    open_issue(&h, org, INSTALLATION, "acme/api", 1).await;
+    assert_eq!(h.platform.status_calls(), 0, "an open asks nothing");
+    // Never claimed: completed unbilled, without a lookup.
+    close_issue(&h, INSTALLATION, "acme/api", 1, "completed").await;
+    assert_eq!(h.platform.status_calls(), 0, "a never-claimed close");
+    // Claimed, closed as not planned: fails the job, no completion.
+    let dropped = open_issue(&h, org, INSTALLATION, "acme/api", 2).await;
+    claim(&h, org, &dropped, UserId::new()).await;
+    close_issue(&h, INSTALLATION, "acme/api", 2, "not_planned").await;
+    assert_eq!(h.platform.status_calls(), 0, "a not-planned close");
+
+    // Claimed and closed as done: the one case that asks, once.
+    let claimed = open_issue(&h, org, INSTALLATION, "acme/api", 3).await;
+    claim(&h, org, &claimed, UserId::new()).await;
+    close_issue(&h, INSTALLATION, "acme/api", 3, "completed").await;
+    assert_eq!(h.platform.status_calls(), 1);
+    assert_eq!(
+        completion_rows(&pool).await,
+        vec![unbilled_close(), billed_close()]
+    );
+}
+
+/// A request that fails verification never reaches the platform, whichever
+/// provider it names: an unauthenticated caller cannot spend lookups.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn an_unverified_request_makes_no_status_lookup(pool: PgPool) {
+    let h = harness(pool).await;
+    let org = OrgId::new();
+    let sealed_secret = h.cipher.seal(JIRA_SECRET.as_bytes()).unwrap();
+    let mut tx = h.db.begin(org).await.unwrap();
+    upsert_connection(
+        &mut tx,
+        Provider::Jira,
+        "cloud-123",
+        None,
+        Some(&sealed_secret),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    let wrong = post_webhook(
+        &h,
+        "/webhooks/jira?site=cloud-123",
+        JIRA_FIXTURE,
+        &[("x-of-webhook-secret", "wrong-secret")],
+    )
+    .await;
+    let missing = post_webhook(&h, "/webhooks/jira?site=cloud-123", JIRA_FIXTURE, &[]).await;
+    let forged_github = post_webhook(
+        &h,
+        "/webhooks/github",
+        b"{}",
+        &[("x-hub-signature-256", "sha256=00")],
+    )
+    .await;
+
+    assert_eq!(wrong.status(), StatusCode::NOT_FOUND);
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    assert_eq!(forged_github.status(), StatusCode::NOT_FOUND);
+    assert_eq!(h.platform.status_calls(), 0);
+}
+
 /// Billing follows claim history, not the status at the close: a job an
 /// agent claimed and then handed back (`repend_job`, or a claim left to
 /// expire) was worked, so closing its ticket from `pending` is still billed.
@@ -549,6 +621,12 @@ async fn a_later_close_of_a_job_completed_by_complete_job_records_nothing_more(p
 /// completion row, so `org_counters.jobs_completed_total` always equals the
 /// number of completion rows. A path that completes a job without recording
 /// it (or records one twice) breaks this.
+///
+/// It covers the scenarios listed below, driving `complete_job`'s path through
+/// the same `of-billing` call the tool makes and the tracker-close path through
+/// the webhook. It cannot see a new completion path added in `of-core` on its
+/// own: such a path trips it only once a scenario here exercises it, so add one
+/// when adding the path.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn every_completion_writes_exactly_one_completion_row(pool: PgPool) {
     let h = harness(pool.clone()).await;

@@ -53,8 +53,8 @@ service's production slug is already set (`service=otto-factory`).
     never reset: `repend_job` and an expired claim both keep it. Deciding on the status at the
     close would let an agent repend a worked job (or let its claim lapse) back to `pending` and
     close the ticket to complete it unbilled.
-  - The hard stop holds on this path too. The webhook warms the platform status before opening
-    its transaction (failing open on a lookup failure, exactly like `complete_job`); when
+  - The hard stop holds on this path too. The webhook looks the platform status up (only for a
+    verified close of a claimed job, with no transaction held; failing open on a lookup failure, exactly like `complete_job`); when
     `billable_blocked()`, the close is applied but recorded unbilled. Otherwise an agent refused
     at `budget_exceeded` could close the issue (say, with a "Fixes #N" merge) and be billed
     anyway. For a `payment_required` org this makes tracker closes free.
@@ -208,8 +208,10 @@ minute with the number of rows waiting.
 - **When the lookup happens.** `Factory::tx` (`of-mcp/src/server.rs:267-271`) stops calling
   `meter.warm(org)` for every tool. `complete_job` calls `meter.warm(org)` itself, before
   `self.tx(...)`, so the platform round trip happens with no transaction and no pooled connection
-  held, and free tools never wait on the platform. The tracker webhook does the same before its
-  transaction, to decide whether a close is billed. `warm` returns a `Warmed`, which only it can
+  held, and free tools never wait on the platform. The tracker webhook does the same, but only for a verified close to
+  `completed` of a claimed job: that pass stops without writing, drops its transaction, warms, then
+  reopens a transaction and applies the event again (the job is re-read and re-locked), so an
+  unauthenticated request never causes a lookup. `warm` returns a `Warmed`, which only it can
   construct, and the charge inside the transaction judges that value and makes no lookup: a
   charge cannot be handed a bare `None` that means "allow" by accident (a failed lookup still
   yields a `Warmed` that allows). CLAUDE.md Metering rule 4 and the `meter.rs` module doc are
@@ -288,7 +290,8 @@ not set, so the cost today is zero. `docs/deploy/fly.md` says to drain or check
   repo's process); migration `0005` applies at boot.
 - No new secret, scope or config key.
 - Recurring cost: none. No new infrastructure; the only extra platform traffic is one meter
-  declaration per boot and `complete_job`'s status lookups, bounded by the 60 s status cache.
+  declaration per boot, `complete_job`'s status lookups, and a status lookup per verified tracker
+  close of a claimed job, all bounded by the 60 s status cache.
 
 ## Error handling & edge cases
 

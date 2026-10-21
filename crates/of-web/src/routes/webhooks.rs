@@ -40,11 +40,7 @@ pub async fn receive(
     // verifying the shared secret — through that one transaction. Never split
     // this into a bootstrap `Tx` plus a second one for the rest; the two
     // reads must observe the same connection row.
-    // `warmed` is the org's billing standing, read before the transaction
-    // opens (a slow platform never holds a pooled connection) and failing
-    // open like `complete_job`'s. It decides only whether a ticket close is
-    // billed, never whether it applies.
-    let (mut tx, connection, parsed, warmed) = match provider {
+    let (mut tx, connection, parsed) = match provider {
         Provider::Github => {
             let secret = state
                 .config
@@ -84,7 +80,6 @@ pub async fn receive(
                     webhook_not_found()
                 })?;
 
-            let warmed = state.meter.warm(org_id).await;
             let mut tx = of_core::platform_events::begin_live(&state.db, org_id, None)
                 .await
                 .map_err(ApiError::from)?;
@@ -106,7 +101,7 @@ pub async fn receive(
                     );
                     webhook_not_found()
                 })?;
-            (tx, connection, parsed, warmed)
+            (tx, connection, parsed)
         }
         Provider::Jira => {
             let site_id = jira_site_id(query.as_deref()).map_err(|error| {
@@ -121,11 +116,6 @@ pub async fn receive(
                     webhook_not_found()
                 })?;
 
-            // Before the secret is checked, because that check reads the
-            // connection inside the transaction. Bounded and cached per org
-            // (see `of_billing::Meter::warm`), so an unverified request naming
-            // a known site costs at most one cached status lookup.
-            let warmed = state.meter.warm(org_id).await;
             let mut tx = of_core::platform_events::begin_live(&state.db, org_id, None)
                 .await
                 .map_err(ApiError::from)?;
@@ -166,18 +156,65 @@ pub async fn receive(
                 );
                 webhook_not_found()
             })?;
-            (tx, connection, parsed, warmed)
+            (tx, connection, parsed)
         }
     };
 
     let org_id = connection.org_id;
 
-    match &parsed {
+    // The org's billing standing decides only whether a verified close of a
+    // claimed job is billed, so it is read only then. The first pass applies
+    // everything else and, on reaching such a close, stops without writing
+    // (`Applied::NeedsStatus`). The transaction is then dropped (a pooled
+    // connection is never held across a platform call), the standing is
+    // looked up, and a second pass reopens a transaction and applies the
+    // event again against fresh state: the job is re-read and re-locked by
+    // `close_from_ticket`, so a job that changed in the gap is judged as it
+    // now is. A failed lookup fails open, like `complete_job`'s.
+    if apply(&mut tx, provider, &connection, &parsed, None).await? == Applied::NeedsStatus {
+        drop(tx);
+        let warmed = state.meter.warm(org_id).await;
+        tx = of_core::platform_events::begin_live(&state.db, org_id, None)
+            .await
+            .map_err(ApiError::from)?;
+        let connection = get_connection(&mut tx, provider)
+            .await
+            .map_err(ApiError::from)?
+            .ok_or_else(webhook_not_found)?;
+        apply(&mut tx, provider, &connection, &parsed, Some(&warmed)).await?;
+    }
+
+    tx.commit().await.map_err(ApiError::from)?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// How far [`apply`] got.
+#[derive(Debug, PartialEq, Eq)]
+enum Applied {
+    /// The event was applied (or needed nothing); commit.
+    Done,
+    /// A verified close to `completed` of a claimed job: nothing was kept.
+    /// Drop the transaction, look the org's standing up, and apply again with
+    /// it.
+    NeedsStatus,
+}
+
+/// Apply a verified webhook inside `tx`. `warmed` is the org's billing
+/// standing, `None` until the caller has looked it up.
+async fn apply(
+    tx: &mut otto_tenant::Tx<'_>,
+    provider: Provider,
+    connection: &of_core::trackers::TrackerConnection,
+    parsed: &ParsedWebhook,
+    warmed: Option<&of_billing::Warmed>,
+) -> ApiResult<Applied> {
+    let org_id = connection.org_id;
+
+    match parsed {
         ParsedWebhook::Event(event) => {
-            let binding =
-                find_binding_by_external_ref(&mut tx, provider, &event.binding_external_ref)
-                    .await
-                    .map_err(ApiError::from)?;
+            let binding = find_binding_by_external_ref(tx, provider, &event.binding_external_ref)
+                .await
+                .map_err(ApiError::from)?;
 
             tracing::info!(
                 provider = %event.provider,
@@ -255,6 +292,12 @@ pub async fn receive(
                                 remote_revision,
                             } => {
                                 if let Some(existing) = existing.as_ref() {
+                                    if to == Status::Completed
+                                        && existing.attempts > 0
+                                        && warmed.is_none()
+                                    {
+                                        return Ok(Applied::NeedsStatus);
+                                    }
                                     let closed = tx
                                         .close_from_ticket(
                                             &existing.id,
@@ -266,10 +309,15 @@ pub async fn receive(
                                         .await
                                         .map_err(ApiError::from)?;
                                     if to == Status::Completed {
-                                        record_inbound_completion(
-                                            &mut tx, &closed, &warmed, org_id,
-                                        )
-                                        .await?;
+                                        // `existing` was read unlocked; if a
+                                        // claim landed since, the close above
+                                        // is undone with the transaction and
+                                        // redone with the standing.
+                                        if closed.attempts > 0 && warmed.is_none() {
+                                            return Ok(Applied::NeedsStatus);
+                                        }
+                                        record_inbound_completion(tx, &closed, warmed, org_id)
+                                            .await?;
                                     }
                                 }
                             }
@@ -290,8 +338,7 @@ pub async fn receive(
         }
     }
 
-    tx.commit().await.map_err(ApiError::from)?;
-    Ok(Json(json!({ "ok": true })))
+    Ok(Applied::Done)
 }
 
 /// Record a job completed by its ticket closing, in the transaction that
@@ -311,16 +358,16 @@ pub async fn receive(
 async fn record_inbound_completion(
     tx: &mut otto_tenant::Tx<'_>,
     closed: &of_core::jobs::Job,
-    warmed: &of_billing::Warmed,
+    warmed: Option<&of_billing::Warmed>,
     org_id: otto_tenant::ids::OrgId,
 ) -> ApiResult<()> {
     let claimed = closed.attempts > 0;
-    let blocked = warmed.billable_blocked();
+    let blocked = warmed.is_some_and(of_billing::Warmed::billable_blocked);
     if claimed && blocked {
         tracing::info!(
             org_id = %org_id,
             job_id = %closed.id,
-            reason = warmed.blocked_reason().unwrap_or("blocked"),
+            reason = warmed.and_then(of_billing::Warmed::blocked_reason).unwrap_or("blocked"),
             "ticket close completed a job for an org whose billable work is blocked; recorded unbilled"
         );
     }

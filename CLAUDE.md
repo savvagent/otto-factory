@@ -602,9 +602,10 @@ rules hold, and the first is what makes the others true:
    Free tools are never refused, so a blocked org can still read and find out why.
    The status lookup happens before the transaction: `complete_job` calls `Meter::warm` itself
    before `Factory::tx` and hands the result, a `Warmed` (only `warm` can make one), to
-   `charge_completion`, which never looks anything up; the webhook warms before opening its
-   transaction the same way (`Factory::tx` does not warm, so free tools never wait on the
-   platform). It is cached
+   `charge_completion`, which never looks anything up; the webhook looks it up only
+   for a verified close to completed of a claimed job: it stops that pass without writing, drops
+   the transaction, warms, then reopens one and applies again (`Factory::tx` does not warm, so
+   free tools never wait on the platform, and an unverified request never causes a lookup). It is cached
    for 60 s (a failed lookup for 5 s), and a failed lookup lets the call through. A change made
    in the console therefore takes up to a minute to apply. `OF_ENFORCE_QUOTAS` is retired: it
    has no effect and the server warns if it is set.
