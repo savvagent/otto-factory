@@ -213,6 +213,133 @@ async fn a_labelled_issue_webhook_creates_one_job_and_a_stale_redelivery_does_no
     assert_eq!(jobs.len(), 1);
 }
 
+/// Register a repo bound to the fixture GitHub installation and sync the
+/// fixture issue in as a pending job.
+async fn github_bound_repo_with_synced_job(h: &Harness, org: otto_tenant::ids::OrgId) {
+    let mut tx = h.db.begin(org).await.unwrap();
+    let repo = tx
+        .register_repo(NewRepo {
+            slug: "api".into(),
+            name: Some("Acme API".into()),
+            remotes: vec!["git@github.com:acme/api.git".into()],
+            created_by: Some(otto_tenant::ids::UserId::new()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let connection = upsert_connection(&mut tx, Provider::Github, "123456", None, None)
+        .await
+        .unwrap();
+    upsert_binding(
+        &mut tx,
+        repo.id,
+        Some(connection.id),
+        Provider::Github,
+        "acme/api",
+        "trackers",
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    let reply = post_github_issue(h, GITHUB_ISSUES_FIXTURE).await;
+    assert_eq!(reply.status(), StatusCode::OK);
+}
+
+async fn post_github_issue(h: &Harness, body: &[u8]) -> http::Response<Body> {
+    post_webhook(
+        h,
+        "/webhooks/github",
+        body,
+        &[
+            ("x-github-event", "issues"),
+            (
+                "x-hub-signature-256",
+                &format!("sha256={}", github_signature(body)),
+            ),
+        ],
+    )
+    .await
+}
+
+fn github_close_payload(state_reason: &str) -> Vec<u8> {
+    format!(
+        r#"{{
+  "action":"closed",
+  "installation":{{"id":123456}},
+  "repository":{{"full_name":"acme/api"}},
+  "issue":{{"id":7001,"number":17,"title":"Implement webhook ingest","body":"x","state":"closed","updated_at":"2026-09-04T09:00:00Z","state_reason":"{state_reason}","labels":[{{"name":"trackers"}}]}}
+}}"#
+    )
+    .into_bytes()
+}
+
+async fn metered_rows(pool: &PgPool) -> Vec<(String, i64, bool, Option<uuid::Uuid>, String)> {
+    sqlx::query_as(
+        "SELECT meter, quantity, billable, user_id, tool FROM usage_outbox \
+         WHERE meter IS NOT NULL",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn an_inbound_close_as_done_completes_the_job_and_meters_it_exactly_once(pool: PgPool) {
+    let h = harness(pool.clone()).await;
+    let org = otto_tenant::ids::OrgId::new();
+    github_bound_repo_with_synced_job(&h, org).await;
+
+    let body = github_close_payload("completed");
+    for _ in 0..2 {
+        let reply = post_github_issue(&h, &body).await;
+        assert_eq!(reply.status(), StatusCode::OK);
+    }
+
+    let mut tx = h.db.begin(org).await.unwrap();
+    let repo = tx.get_repo_by_slug("api").await.unwrap().expect("repo");
+    let job = tx
+        .get_job_by_ticket_for_repo(repo.id, Tracker::Github, "acme/api#17")
+        .await
+        .unwrap()
+        .expect("job");
+    tx.commit().await.unwrap();
+    assert_eq!(job.status, of_core::jobs::Status::Completed);
+
+    // The redelivery is dropped as stale, so the close meters once.
+    assert_eq!(
+        metered_rows(&pool).await,
+        vec![(
+            "otto-factory/jobs_completed".to_string(),
+            1,
+            true,
+            None,
+            "inbound_ticket_close".to_string()
+        )]
+    );
+}
+
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn an_inbound_close_as_not_planned_fails_the_job_and_meters_nothing(pool: PgPool) {
+    let h = harness(pool.clone()).await;
+    let org = otto_tenant::ids::OrgId::new();
+    github_bound_repo_with_synced_job(&h, org).await;
+
+    let reply = post_github_issue(&h, &github_close_payload("not_planned")).await;
+    assert_eq!(reply.status(), StatusCode::OK);
+
+    let mut tx = h.db.begin(org).await.unwrap();
+    let repo = tx.get_repo_by_slug("api").await.unwrap().expect("repo");
+    let job = tx
+        .get_job_by_ticket_for_repo(repo.id, Tracker::Github, "acme/api#17")
+        .await
+        .unwrap()
+        .expect("job");
+    tx.commit().await.unwrap();
+    assert_eq!(job.status, of_core::jobs::Status::Failed);
+    assert!(metered_rows(&pool).await.is_empty());
+}
+
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn jira_webhooks_require_the_site_and_secret_but_acknowledge_a_valid_request(pool: PgPool) {
     let h = harness(pool).await;

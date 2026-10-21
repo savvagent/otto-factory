@@ -5,7 +5,7 @@ use axum::body::Bytes;
 use axum::extract::{Path, RawQuery, State};
 use axum::http::HeaderMap;
 use axum::Json;
-use of_core::jobs::Tracker;
+use of_core::jobs::{Status, Tracker};
 use of_core::trackers::{
     find_binding_by_external_ref, get_connection, resolve_connection_org, Provider,
 };
@@ -254,6 +254,29 @@ pub async fn receive(
                                     )
                                     .await
                                     .map_err(ApiError::from)?;
+                                    if to == Status::Completed {
+                                        // Closing the linked ticket completes the job
+                                        // without `complete_job`, so meter it here, in
+                                        // the same transaction as the transition. No
+                                        // enforcement: a webhook cannot be meaningfully
+                                        // refused (the tracker already closed the
+                                        // ticket), and the platform's block applies to
+                                        // the agent's `complete_job`. A redelivery is
+                                        // dropped before this point (stale revision or
+                                        // terminal job), so the row is written once.
+                                        of_billing::outbox::enqueue(
+                                            &mut tx,
+                                            None,
+                                            "inbound_ticket_close",
+                                            true,
+                                            Some(&of_billing::Metered::jobs_completed()),
+                                        )
+                                        .await
+                                        // Fail the delivery (rolling the close back) so
+                                        // the tracker retries, rather than complete an
+                                        // unmetered job.
+                                        .map_err(|e| ApiError::internal("usage metering", e))?;
+                                    }
                                 }
                             }
                         }
