@@ -18,6 +18,12 @@
  * exception is a rename's deprecation window: on a legacy host the console's
  * pages are redirected to the canonical one (see `movesToCanonical`), because a
  * session cookie bound to the old host is a session the new one cannot use.
+ *
+ * That redirect applies only to a deployment fronted by this Worker. Production
+ * today is not (the public hosts resolve straight to Fly), so `of-server` makes
+ * the same redirect itself (`legacy_console_redirect` in
+ * `crates/of-server/src/lib.rs`); with the Worker in front, the Worker answers
+ * first and the origin never sees the request.
  */
 
 /**
@@ -159,6 +165,15 @@ function legacyDecision(url: URL, env: Env): Response | null {
       'this Worker’s OF_LEGACY_HOSTS is not a comma-separated list of bare hostnames ' +
         '(no scheme, port, path, empty entry or trailing dot), so it cannot tell whether ' +
         'this host is a legacy one. Set it to the same value as of-server’s.'
+    );
+  }
+  if (canonical && hosts.includes(new URL(canonical).hostname)) {
+    // of-server refuses to boot with this (`the_canonical_host_cannot_also_be_legacy`).
+    // Here it would 308 the canonical host's console to itself, forever.
+    return misconfigured(
+      'this Worker’s OF_LEGACY_HOSTS names OF_PUBLIC_URL’s own host, so the canonical ' +
+        'console would be redirected to itself. Remove the canonical host from ' +
+        'OF_LEGACY_HOSTS; of-server refuses the same value at startup.'
     );
   }
   if (!hosts.includes(host)) {

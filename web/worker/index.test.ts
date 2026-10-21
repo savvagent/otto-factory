@@ -249,6 +249,27 @@ describe('the proxy', () => {
     }
   });
 
+  it('refuses a legacy list that names the canonical host, as the origin does at boot', async () => {
+    const { forwarded, assets, call } = setup({
+      OF_PUBLIC_URL: CANONICAL,
+      OF_LEGACY_HOSTS: `${LEGACY}, TOWER.example.com`
+    });
+    for (const url of [`${CANONICAL}/o/acme`, `${CANONICAL}/auth/login`, `https://${LEGACY}/`]) {
+      const refused = await call(url);
+      expect(refused.status, url).toBe(500);
+      const body = (await refused.json()) as { error: string; error_description: string };
+      expect(body.error, url).toBe('misconfigured');
+      expect(body.error_description).toContain('OF_PUBLIC_URL');
+    }
+    expect(assets).not.toHaveBeenCalled();
+
+    // Agents, discovery and webhooks keep working whatever the vars say.
+    for (const url of [`${CANONICAL}/mcp`, `https://${LEGACY}/webhooks/github`]) {
+      expect((await call(url, { method: 'POST' })).status, url).toBe(200);
+    }
+    expect(forwarded).toHaveLength(2);
+  });
+
   it('parses OF_LEGACY_HOSTS as strictly as the origin does', () => {
     expect(parseLegacyHosts(undefined)).toEqual([]);
     expect(parseLegacyHosts('  ')).toEqual([]);
