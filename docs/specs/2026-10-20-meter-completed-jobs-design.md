@@ -168,8 +168,10 @@ minute with the number of rows waiting.
 - `BillingError::Blocked` maps `code()` to the platform's reason (`budget_exceeded` or
   `payment_required`; any other value, or `billable_blocked()` true with no `blocked_reason` →
   `budget_exceeded`), `retriable() = false`. The message
-  says what happened, that free tools keep working, and where an owner raises the budget or adds
-  a card (`PlatformClient::usage_page_url`, falling back to `OF_UPGRADE_URL`).
+  says what happened, that free tools keep working, and that an owner raises the budget or adds a
+  card in the otto console at `OF_UPGRADE_URL` when set, else `OF_PLATFORM_URL` (the console home).
+  No per-org link: the charge path knows only the org id, and resolving the slug would put a
+  platform call inside the transaction.
 - `of-mcp/src/error.rs` `from_billing`: the new variant maps like `QuotaExceeded` did (envelope
   with `code` and `retriable`); `QuotaExceeded` is removed.
 - `sync_ticket`'s pre-check (`would_refuse`) is removed; it is free now.
@@ -184,8 +186,7 @@ minute with the number of rows waiting.
 
 `of_billing::Status` (`meter.rs:292`) gains (camelCase, JSON schema) `meters: [{meter,
 displayName, unit, quantity}]` (this service's), `budget: {monthlyBudgetCents, spendCents,
-percentUsed, thresholdsReached, hardStop, blocked} | null`, `blockedReason: string | null`, and
-`usagePage`. The legacy fields (`includedOps`, `billableUsed`, `remaining`, `totalCalls`, `warning`,
+percentUsed, thresholdsReached, hardStop, blocked} | null` and `blockedReason: string | null`. The legacy fields (`includedOps`, `billableUsed`, `remaining`, `totalCalls`, `warning`,
 `hardStop`, `enforced`) stay, filled from the platform's legacy values as today, and are marked
 deprecated (`enforced` now reports `true`: the platform's blocked reason is always enforced). Tool descriptions (`org.rs:92-97`) and the server instructions (`server.rs:82-84`)
 say: coordination calls are free; a completed job is billed per the org's otto-factory meter;

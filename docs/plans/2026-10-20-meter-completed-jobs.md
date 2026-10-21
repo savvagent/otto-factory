@@ -24,12 +24,17 @@ otto-platform v0.10.0.
 
 ## Global constraints
 
-- Worktree only (`.worktrees/billing/222-meter-completed-jobs`); `master` only via the PR.
+- Worktree only (`.worktrees/billing/222-meter-completed-jobs`); trunk is `master`, reached only
+  through the PR. Never edit the main checkout.
 - Gates after every task, from the worktree: `cargo fmt --all -- --check`,
   `cargo clippy --all-targets -- -D warnings`,
   `DATABASE_URL=postgres://factory:factory@localhost:15433/otto_factory cargo test --workspace`
-  (DB tests must run, not skip; report pass/fail/ignored counts). Run `cargo fmt --all` before each
-  commit.
+  (DB tests must run, not skip; report pass/fail/ignored counts), and
+  `podman build -t otto-factory .` (the image must build with the new git dependency rev). Run
+  `cargo fmt --all` before each commit.
+- **Red first, every task:** after writing the failing tests, run them with the `DATABASE_URL=…`
+  command above (filtered to the new tests is fine) and record that they fail for the expected
+  reason before implementing. Report that red run in the task report.
 - Invariants: CLAUDE.md "Metering" rules 1–4 (metering in the tool's own transaction before the
   work; idempotent delivery with a dead letter; every tool classified; enforcement never blocks a
   read and a lookup failure never blocks work), append-only migrations, tenant isolation (no new
@@ -58,7 +63,8 @@ Model: sonnet
 
 Model: sonnet
 
-- [ ] New `crates/of-core/migrations/0005_usage_meter.sql`: on `usage_outbox` and
+- [ ] Failing tests first (see below), run red, then: new `crates/of-core/migrations/0005_usage_meter.sql`
+  (applies at boot in production; additive only): on `usage_outbox` and
   `usage_outbox_rejected` add `meter text`, `quantity bigint`, `CHECK ((meter IS NULL) = (quantity
   IS NULL))`, `CHECK (quantity IS NULL OR quantity > 0)`; header comment says why (#222).
 - [ ] Failing tests first in `crates/of-billing/tests/outbox.rs`: a row enqueued with a meter ships
@@ -88,9 +94,18 @@ Model: sonnet
   (`Factory::charge_metered(tx, caller, "complete_job", &Metered::jobs_completed())`) that records
   the row with the meter and `billable = true`; `complete_job` (`tools/jobs.rs:1013-1043`) uses it
   in place of `charge`. Every other tool keeps `charge` (now always free).
-- [ ] Rewrite the existing tests that assumed `add_job` was billable (`work_is_billed_and_looking_is_not`,
-  `usage_is_counted_per_org`, and the outbox tests that use `add_job` as the billable example) to
-  use `complete_job`; say in the commit body which tests changed and why.
+- [ ] Retarget every existing test that uses a formerly billable tool as its billable example to
+  `complete_job` (still billable, and still under the old quota enforcement until Task 4), so the
+  gates stay green at the end of this task:
+  `crates/of-mcp/tests/tools.rs` `work_is_billed_and_looking_is_not` (:2190),
+  `usage_is_counted_per_org` (:2379), `enforcement_stops_work_but_never_reads` (:2293),
+  `with_enforcement_off_an_over_budget_org_keeps_working` (:2361), the `sync_ticket` quota tests
+  (~:2703-2853; `sync_ticket` is free now, so these move to asserting it is never refused);
+  `crates/of-billing/tests/outbox.rs` `a_spent_hard_stop_bucket_refuses_billable_calls_and_records_nothing`
+  (:311), `unshipped_usage_counts_against_the_bucket` (:427),
+  `an_outage_is_remembered_so_it_does_not_slow_every_call` (:453),
+  `warm_looks_the_org_up_before_any_transaction` (:489), and any other `charge(.., "add_job")`
+  there. Name each changed test and why in the commit body.
 - [ ] Gates green; commit `feat(of-mcp): bill completed jobs, make coordination calls free`.
 
 ## Task 4 — Enforce the platform's blocked reason ⬜
@@ -104,15 +119,23 @@ Model: opus
   (`add_job`, `claim_jobs`, `whoami`, `usage`, `watch`) keep working while blocked; a platform
   outage lets `complete_job` through (fail open) and still meters it; free tools make no status
   lookup at all (assert via `MockPlatform::usage_calls()` or the status-call counter).
-- [ ] `crates/of-testkit/src/lib.rs`: helpers to set an org's `blocked_reason` and `budget`.
-- [ ] `crates/of-billing/src/meter.rs`: remove `enforce`, `refuse_if_spent`, `unshipped_billable`,
-  `would_refuse`; the metered charge refuses when `status_for(org)` returns a status with
+- [ ] `crates/of-testkit/src/lib.rs`: helpers to set an org's `blocked_reason` and `budget`; a
+  dedicated counter of `GET /internal/orgs/{org}/usage-status` calls (`status_calls()`), separate
+  from `lookup_calls()` (which also counts member/team lookups); and make `usage_status` compute
+  `meters` from the shipped metered events it has received (per org, this month).
+- [ ] `crates/of-billing/src/meter.rs`: remove `enforce` (so `Meter::new` loses its `enforce`
+  argument — callers: `crates/of-mcp/src/lib.rs:184` and every `Meter::new(.., true|false, ..)` in
+  `crates/of-billing/tests/outbox.rs`), `refuse_if_spent`, `unshipped_billable`, `would_refuse`; the metered charge refuses when `status_for(org)` returns a status with
   `billable_blocked()`; `warm` always warms (it is only called for metered tools now). Rewrite the
   module doc.
-- [ ] `crates/of-billing/src/error.rs`: replace `QuotaExceeded` with `Blocked { reason, usage_page }`;
+- [ ] `crates/of-billing/src/error.rs`: replace `QuotaExceeded` with `Blocked { reason, fix_url }`;
   `code()` returns the reason (`budget_exceeded` | `payment_required`, unknown/none →
   `budget_exceeded`), `retriable()` false; the message says what happened, that free tools keep
-  working, and where an owner fixes it (`PlatformClient::usage_page_url`, else `OF_UPGRADE_URL`).
+  working, and that an owner raises the budget or adds a card in the otto console at `fix_url`.
+  `fix_url` is `OF_UPGRADE_URL` when set, else `OF_PLATFORM_URL` (the platform console home, which
+  lists the user's orgs). No org-slug lookup: the charge path has only the org id, and a lookup
+  inside the transaction would break Metering rule 4. Plumb the URL into `Meter::new` (it already
+  takes `upgrade_url`).
 - [ ] `crates/of-mcp/src/server.rs`: `Factory::tx` (:267-271) stops calling `warm`; `complete_job`
   calls `self.meter().warm(org)` before `self.tx(...)`; delete `would_refuse` and rewrite the
   doc comments on `charge` (:150-195) to the new model.
@@ -133,28 +156,34 @@ Model: opus
 
 Model: sonnet
 
-- [ ] `crates/of-testkit/src/lib.rs`: `PUT /internal/meters` route recording declarations, with a
-  switchable `service_not_set` (409) mode and an outage mode.
-- [ ] Failing tests first (`crates/of-billing/tests/outbox.rs` or `crates/of-server/tests/server.rs`):
-  the shipper declares `otto-factory/jobs_completed` (display "Jobs completed", unit "job") before
-  its first `POST /internal/usage`; with declarations failing, nothing ships and rows stay queued;
-  once the platform recovers, it declares and drains; the server starts and answers `/readyz` while
-  declaration is failing.
+- [ ] `crates/of-testkit/src/lib.rs`: `PUT /internal/meters` route recording declarations, with
+  switchable modes: `service_not_set` (409), outage (503), and "reject" (200 with the meter in
+  `rejected`).
+- [ ] Failing tests first, in `crates/of-billing/tests/outbox.rs` against `of_billing::outbox::run`
+  (the server-test harness does not run the shipper): the shipper declares
+  `otto-factory/jobs_completed` (display "Jobs completed", unit "job") before its first
+  `POST /internal/usage`; in each failure mode (409, 503, 200-with-rejected) nothing ships and rows
+  stay queued; once the platform recovers, it declares and drains; shutdown during the wait returns
+  promptly.
 - [ ] `crates/of-billing/src/outbox.rs` `run`: before the ship loop, `declare_meters` with
-  exponential backoff (cap ~1 min), honouring shutdown; log at `error` once a minute with the
-  number of rows waiting while refused. `of_billing::METER_DECLARATIONS` holds the declaration.
+  exponential backoff (cap ~1 min), honouring shutdown. A declaration counts as done only when the
+  call returns `Ok(receipt)` with `receipt.is_complete()`; an `Err` (transport, 5xx, 409
+  `service_not_set`) or an incomplete receipt (a meter in `rejected`) is a failure: log at `error`
+  (with the platform's reason) once a minute with the number of rows waiting, and retry.
+  `of_billing::METER_DECLARATIONS` holds the declaration.
 - [ ] Gates green; commit `feat(of-billing): declare the completed-jobs meter before shipping`.
 
 ## Task 6 — whoami and usage report the meter and budget ⬜
 
 Model: sonnet
 
-- [ ] Failing tests first (`crates/of-mcp/tests/tools.rs`): `whoami` and `usage` include
-  `meters: [{meter: "otto-factory/jobs_completed", displayName, unit, quantity}]`, `budget`
-  (null without one; populated with `monthlyBudgetCents`, `spendCents`, `percentUsed`,
-  `thresholdsReached`, `hardStop`, `blocked`), `blockedReason`, `usagePage`; every existing field is
-  still present.
-- [ ] `crates/of-billing/src/meter.rs` `Status` (:292): add the fields (camelCase, JsonSchema);
+- [ ] Failing tests first (`crates/of-mcp/tests/tools.rs`): after a `complete_job` has shipped,
+  `whoami` and `usage` include `meters: [{meter: "otto-factory/jobs_completed", displayName, unit,
+  quantity: 1}]` (the mock computes it, Task 4), `budget` (null without one; populated with
+  `monthlyBudgetCents`, `spendCents`, `percentUsed`, `thresholdsReached`, `hardStop`, `blocked`),
+  and `blockedReason`; every existing field is still present.
+- [ ] `crates/of-billing/src/meter.rs` `Status` (:292): add `meters`, `budget`, `blockedReason`
+  (camelCase, JsonSchema) — no per-org usage-page URL (no slug on this path; see Task 4);
   keep the legacy fields with deprecated doc comments, and say in `enforced`'s that it now always
   reports `true` because the platform's blocked reason is always enforced.
 - [ ] `crates/of-mcp/src/tools/org.rs:92-97` descriptions and `crates/of-mcp/src/server.rs:82-84`
@@ -177,6 +206,13 @@ Model: haiku
   additive; change only if a test asserts removed meaning). Run `cd web && npm run check && npm
   run lint && npm test && npm run build`.
 - [ ] Gates green (Rust + web); commit `docs: describe metering by completed jobs`.
+
+## Out-of-band
+
+- The platform slug is already set in production (`service=otto-factory`); no operator step is
+  needed for this change.
+- Migration `0005` applies at boot. The change ships with the next release-please release, whose PR
+  the agent merges through the normal gate.
 
 ## Known plan gaps
 
