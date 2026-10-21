@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import worker, { belongsToOrigin } from './index';
+import worker, { belongsToOrigin, movesToCanonical, parseLegacyHosts } from './index';
 
 /**
  * `belongsToOrigin` is a second copy of `API_PREFIXES` in
@@ -210,12 +210,81 @@ describe('the proxy', () => {
     expect(assets).toHaveBeenCalledTimes(1);
   });
 
-  it('refuses loudly when legacy hosts are configured without a usable canonical URL', async () => {
+  it('stamps its own 308 with the deprecation notice', async () => {
+    const { call } = setup(legacyVars);
+    const response = await call(`https://${LEGACY}/o/acme`);
+    expect(response.status).toBe(308);
+    expect(response.headers.get('deprecation')).toBe('true');
+    expect(response.headers.get('link')).toBe(`<${CANONICAL}/o/acme>; rel="successor-version"`);
+  });
+
+  it('redirects exactly /auth/login, and proxies /auth/login/ like any other origin path', async () => {
+    const { forwarded, call } = setup(legacyVars);
+    const response = await call(`https://${LEGACY}/auth/login/`);
+    expect(response.status).toBe(200);
+    expect(forwarded).toHaveLength(1);
+    expect(movesToCanonical('/auth/login')).toBe(true);
+    expect(movesToCanonical('/auth/login/')).toBe(false);
+  });
+
+  it('with an unusable OF_PUBLIC_URL, refuses only a legacy host’s console', async () => {
     for (const OF_PUBLIC_URL of [undefined, '', 'tower.example.com']) {
-      const { call } = setup({ OF_LEGACY_HOSTS: LEGACY, OF_PUBLIC_URL });
-      const response = await call(`https://${LEGACY}/`);
-      expect(response.status, String(OF_PUBLIC_URL)).toBe(500);
-      expect(((await response.json()) as { error: string }).error).toBe('misconfigured');
+      const { forwarded, assets, call } = setup({ OF_LEGACY_HOSTS: LEGACY, OF_PUBLIC_URL });
+      const refused = await call(`https://${LEGACY}/`);
+      expect(refused.status, String(OF_PUBLIC_URL)).toBe(500);
+      expect(((await refused.json()) as { error: string }).error).toBe('misconfigured');
+
+      // Machine surfaces on the legacy host, and every host's own pages, are untouched.
+      for (const url of [
+        `https://${LEGACY}/mcp`,
+        `https://${LEGACY}/webhooks/github`,
+        'https://tower.example.com/mcp',
+        'https://tower.example.com/.well-known/oauth-protected-resource'
+      ]) {
+        expect((await call(url, { method: 'POST' })).status, url).toBe(200);
+      }
+      expect((await call('https://tower.example.com/o/acme')).status).toBe(200);
+      expect(forwarded).toHaveLength(4);
+      expect(assets).toHaveBeenCalledTimes(1);
     }
+  });
+
+  it('parses OF_LEGACY_HOSTS as strictly as the origin does', () => {
+    expect(parseLegacyHosts(undefined)).toEqual([]);
+    expect(parseLegacyHosts('  ')).toEqual([]);
+    expect(parseLegacyHosts(' Factory.Example.com , old.example.com')).toEqual([
+      'factory.example.com',
+      'old.example.com'
+    ]);
+    for (const bad of [
+      'https://factory.example.com',
+      'factory.example.com:443',
+      'factory.example.com/mcp',
+      'user@factory.example.com',
+      'factory.example.com.',
+      'factory..example.com',
+      'factory.example.com,',
+      'a.example.com,,b.example.com',
+      'factory example.com'
+    ]) {
+      expect(parseLegacyHosts(bad), bad).toBeNull();
+    }
+  });
+
+  it('with a malformed OF_LEGACY_HOSTS, still serves the canonical host and every origin path', async () => {
+    const { forwarded, assets, call } = setup({
+      OF_LEGACY_HOSTS: `https://${LEGACY}`,
+      OF_PUBLIC_URL: CANONICAL
+    });
+    expect((await call(`${CANONICAL}/o/acme`)).status).toBe(200);
+    expect(assets).toHaveBeenCalledTimes(1);
+    for (const url of [`https://${LEGACY}/mcp`, `https://${LEGACY}/platform/webhooks`]) {
+      expect((await call(url, { method: 'POST' })).status, url).toBe(200);
+    }
+    expect(forwarded).toHaveLength(2);
+
+    // A page on a host it cannot classify is refused rather than guessed at.
+    const refused = await call(`https://${LEGACY}/o/acme`);
+    expect(refused.status).toBe(500);
   });
 });

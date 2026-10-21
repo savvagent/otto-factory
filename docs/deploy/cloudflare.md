@@ -83,8 +83,13 @@ cutover*), which also gives the platform commands that must run before and after
    never redirected, so customers' tracker webhooks keep landing until they move them. The Worker
    learns which hosts are legacy and where to send them from two vars in `env.production.vars`,
    `OF_LEGACY_HOSTS` and `OF_PUBLIC_URL`, with the same values as `of-server`'s; they are added in
-   runbook step 8, after the Fly flip, and with them unset nothing is redirected. `OF_LEGACY_HOSTS`
-   set with no usable `OF_PUBLIC_URL` answers every request `500 misconfigured` rather than guess.
+   runbook step 8, after the Fly flip, and with them unset nothing is redirected. The Worker parses
+   `OF_LEGACY_HOSTS` exactly as `of-server` does (bare hostnames only). If either var is unusable it
+   refuses, with `500 misconfigured`, only the console pages it can no longer route — a legacy
+   host's, or with a malformed host list any host but `OF_PUBLIC_URL`'s — and keeps proxying every
+   origin prefix, so agents and webhooks never notice. Its `308` carries `Deprecation: true` and a
+   `successor-version` `Link`; `Sunset` comes only from the origin, which is the one told the date.
+   `/auth/login/` (trailing slash) is proxied, not redirected: no such route exists to redirect to.
 4. After the sunset (runbook step 11), remove the old custom domain and the two vars.
 
 Nothing here is deployed by merging the code: it is account-side, and ordered after the platform

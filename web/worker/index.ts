@@ -16,7 +16,7 @@
  * This Worker therefore proxies rather than redirects, and it is the reason the
  * split-origin option in the issue was never really an option. The one
  * exception is a rename's deprecation window: on a legacy host the console's
- * pages are redirected to the canonical one (see `legacyRedirect`), because a
+ * pages are redirected to the canonical one (see `movesToCanonical`), because a
  * session cookie bound to the old host is a session the new one cannot use.
  */
 
@@ -78,34 +78,45 @@ export interface Env {
 }
 
 /**
- * Where a request on a legacy host is redirected, or `null` to serve it here.
+ * Whether a path is one a legacy host sends to the canonical host: the
+ * console's pages, and exactly `/auth/login`.
  *
- * Only a browser's routes move: the console's pages, and `/auth/login`, so
- * sign-in starts on — and its `__Host-` session cookie lands on — the canonical
- * host. Everything else under an origin prefix keeps working where it is until
- * the sunset, because a machine sent it: an agent on `/mcp` and `/.well-known`
- * that would not follow a redirect with its bearer token, a tracker or the
- * platform delivering a webhook that would not follow one at all, and the rest
- * of `/auth` (`/auth/callback` must complete on the host that set the PKCE
- * cookie). The origin stamps those responses with the deprecation notice.
+ * Only a browser's routes move, and `/auth/login` so sign-in starts on — and
+ * its `__Host-` session cookie lands on — the canonical host. Everything else
+ * under an origin prefix keeps working where it is until the sunset, because a
+ * machine sent it: an agent on `/mcp` and `/.well-known` that would not follow
+ * a redirect with its bearer token, a tracker or the platform delivering a
+ * webhook that would not follow one at all, and the rest of `/auth`
+ * (`/auth/callback` must complete on the host that set the PKCE cookie). The
+ * origin stamps those responses with the deprecation notice.
  *
- * `308` rather than `301`: it keeps the method and is never turned into a `GET`.
+ * `/auth/login/` is deliberately *not* redirected: the origin serves no such
+ * route, so it is proxied and answers its JSON `404` (with the notice) exactly
+ * as on the canonical host. Matching it here too would mean a redirect to a
+ * page that does not exist.
  */
-export function legacyRedirect(url: URL, legacyHosts: string[], canonical: string): string | null {
-  if (!legacyHosts.includes(url.hostname.toLowerCase())) {
-    return null;
-  }
-  if (belongsToOrigin(url.pathname) && url.pathname !== '/auth/login') {
-    return null;
-  }
-  return `${canonical}${url.pathname}${url.search}`;
+export function movesToCanonical(path: string): boolean {
+  return !belongsToOrigin(path) || path === '/auth/login';
 }
 
-function legacyHosts(env: Env): string[] {
-  return (env.OF_LEGACY_HOSTS ?? '')
-    .split(',')
-    .map((host) => host.trim().toLowerCase())
-    .filter((host) => host.length > 0);
+/**
+ * One label-dotted bare hostname: what the origin's `OF_LEGACY_HOSTS` parser
+ * accepts, and nothing it refuses — no scheme, port, path, credentials, empty
+ * entry or trailing dot.
+ */
+const BARE_HOSTNAME = /^[a-z0-9-]+(\.[a-z0-9-]+)*$/;
+
+/**
+ * `OF_LEGACY_HOSTS`, parsed as strictly as `of-server` parses it. `[]` when it
+ * is unset or blank (outside a rename), `null` when it is set but not a list of
+ * bare hostnames.
+ */
+export function parseLegacyHosts(raw: string | undefined): string[] | null {
+  if (!raw || raw.trim() === '') {
+    return [];
+  }
+  const hosts = raw.split(',').map((host) => host.trim().toLowerCase());
+  return hosts.every((host) => BARE_HOSTNAME.test(host)) ? hosts : null;
 }
 
 /** `OF_PUBLIC_URL` as a bare origin, or `null` when it is not an http(s) URL. */
@@ -116,6 +127,63 @@ function canonicalOrigin(env: Env): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * What to do with a request during a rename's deprecation window: a `308` to
+ * the canonical host, a refusal because the configuration cannot say, or
+ * `null` to handle it as on any other day.
+ *
+ * A broken configuration is refused only where it matters — a request that
+ * might have been redirected and whose host cannot be vouched for. Every origin
+ * prefix (agents, discovery, webhooks) is proxied whatever the vars say, and so
+ * is the canonical host's console when `OF_PUBLIC_URL` names it, so a typo in
+ * these two vars cannot take the service down.
+ */
+function legacyDecision(url: URL, env: Env): Response | null {
+  if (!env.OF_LEGACY_HOSTS || env.OF_LEGACY_HOSTS.trim() === '') {
+    return null;
+  }
+  if (!movesToCanonical(url.pathname)) {
+    return null;
+  }
+  const host = url.hostname.toLowerCase();
+  const canonical = canonicalOrigin(env);
+  const hosts = parseLegacyHosts(env.OF_LEGACY_HOSTS);
+
+  if (hosts === null) {
+    if (canonical && new URL(canonical).hostname === host) {
+      return null;
+    }
+    return misconfigured(
+      'this Worker’s OF_LEGACY_HOSTS is not a comma-separated list of bare hostnames ' +
+        '(no scheme, port, path, empty entry or trailing dot), so it cannot tell whether ' +
+        'this host is a legacy one. Set it to the same value as of-server’s.'
+    );
+  }
+  if (!hosts.includes(host)) {
+    return null;
+  }
+  if (!canonical) {
+    return misconfigured(
+      'this Worker has OF_LEGACY_HOSTS but no usable OF_PUBLIC_URL, so it does not ' +
+        'know the canonical host to send a legacy host’s console to. Set OF_PUBLIC_URL ' +
+        'to the same https:// origin as of-server’s.'
+    );
+  }
+  const location = `${canonical}${url.pathname}${url.search}`;
+  // `308` rather than `301`: it keeps the method and is never turned into a
+  // `GET`. It carries the same notice the origin puts on everything else from a
+  // legacy host; `Sunset` is the origin's to announce, since only it is told
+  // the date.
+  return new Response(null, {
+    status: 308,
+    headers: {
+      location,
+      deprecation: 'true',
+      link: `<${location}>; rel="successor-version"`
+    }
+  });
 }
 
 function misconfigured(description: string): Response {
@@ -129,23 +197,9 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
-    const legacy = legacyHosts(env);
-    if (legacy.length > 0) {
-      const canonical = canonicalOrigin(env);
-      if (!canonical) {
-        // Loud for the same reason as a missing OF_ORIGIN below: a legacy host
-        // with nowhere to send its browsers is a deployment fault, and guessing
-        // a destination would be worse than saying so.
-        return misconfigured(
-          'this Worker has OF_LEGACY_HOSTS but no usable OF_PUBLIC_URL, so it does not ' +
-            'know the canonical host to send a legacy host’s console to. Set OF_PUBLIC_URL ' +
-            'to the same https:// origin as of-server’s.'
-        );
-      }
-      const location = legacyRedirect(url, legacy, canonical);
-      if (location) {
-        return new Response(null, { status: 308, headers: { location } });
-      }
+    const legacy = legacyDecision(url, env);
+    if (legacy) {
+      return legacy;
     }
 
     if (!belongsToOrigin(url.pathname)) {
