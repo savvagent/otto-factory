@@ -318,21 +318,35 @@ non-empty after a few minutes.
 
 ### 5. Set up the new host
 
-Add the hostname without removing the old one: both serve until the sunset. The new name uses the
-**same A and AAAA addresses as the old one** (the app's shared IPv4 and dedicated IPv6, listed in
-*The hostname* below).
+Add the hostname without removing the old one: both serve until the sunset. Production is **not**
+fronted by the Cloudflare Worker: both public names resolve straight to the Fly app, whose
+certificate and DNS records are the whole of this step.
 
-- **Certificate and DNS** (the app answering directly): `fly certs add otto-tower.savvagent.com -a otto-factory-mcp`,
-  then the `A` and `AAAA` records for the new name. `fly certs check otto-tower.savvagent.com -a otto-factory-mcp`
-  goes green when the certificate is issued.
-- **Cloudflare Worker** (the console fronting the app): add `otto-tower.savvagent.com` as a custom
-  domain on the production Worker (`docs/deploy/cloudflare.md`), keeping the old custom domain. The
-  Worker's script name does not change.
+1. **Certificate.**
+   ```bash
+   fly certs add otto-tower.savvagent.com -a otto-factory-mcp
+   ```
+2. **Addresses.** Read them from Fly at the time you do this, never from a document (including
+   this one): the app's shared IPv4 and its dedicated IPv6.
+   ```bash
+   fly ips list -a otto-factory-mcp      # v4 "public ingress (shared)", v6 "public ingress (dedicated)"
+   ```
+3. **DNS.** At the zone's **current** DNS provider (check with `dig +short NS savvagent.com`; it is
+   Namecheap today), add an `A` record for `otto-tower.savvagent.com` to that IPv4 and an `AAAA`
+   record to that IPv6. They must be the same addresses the old name resolves to
+   (`dig +short otto-factory.savvagent.com A` / `AAAA`); if they differ, stop and find out why
+   before going on.
+4. **Only if the deployment is fronted by the Worker** (it is not today): instead of the records
+   above, add `otto-tower.savvagent.com` as a custom domain on the production Worker
+   (`docs/deploy/cloudflare.md`), keeping the old custom domain. The Worker's script name does not
+   change.
 
-**Verify:** `fly certs check` reports the certificate as issued (Ready), and
-`curl -fsS https://otto-tower.savvagent.com/healthz` answers. Until step 8 the app still treats the
-old host as canonical, so only the health probes are meaningful on the new host.
-**Stop if:** the certificate stays pending (DNS not propagated) or `/healthz` does not answer on the new name.
+**Verify:** `dig +short otto-tower.savvagent.com A` and `AAAA` give the `fly ips list` addresses;
+`fly certs check otto-tower.savvagent.com -a otto-factory-mcp` reports the certificate as issued
+(Ready); `curl -fsS https://otto-tower.savvagent.com/healthz` answers. Until step 8 the app still
+treats the old host as canonical, so only the health probes are meaningful on the new host.
+**Stop if:** the records do not resolve to the `fly ips list` addresses, the certificate stays
+pending (DNS not propagated), or `/healthz` does not answer on the new name.
 
 ### 6. Rename the resource URI, keeping the old one as an alias
 
@@ -383,7 +397,14 @@ boot when set but unparseable, as does a sunset with no legacy host or a legacy 
 `OF_PUBLIC_URL`'s. Past the sunset the app keeps serving the old host until step 11, says in its
 notice that the host was retired, and logs a warning at every startup.
 
-Once that deploy is live, give the production Worker the same two facts, in `web/wrangler.jsonc`'s
+From that deploy on, the app itself sends a browser on the old host to the new one: the console's
+pages and `/auth/login` answer `308` to the same path and query on `OF_PUBLIC_URL`, carrying the
+deprecation notice. That is what keeps console sign-in working (a sign-in started on the old host
+would set its PKCE cookie where the platform's redirect back to the new host never arrives).
+Everything a machine calls stays where it is.
+
+**Only if the deployment is fronted by the Worker** (production is not today): once that deploy is
+live, give the production Worker the same two facts, in `web/wrangler.jsonc`'s
 `env.production.vars`, and redeploy it (`npm run deploy` in `web/`):
 
 ```jsonc
@@ -391,10 +412,10 @@ Once that deploy is live, give the production Worker the same two facts, in `web
 "OF_LEGACY_HOSTS": "otto-factory.savvagent.com"
 ```
 
-The Worker uses them only to send the old host's console pages and `/auth/login` to the new host
-with a `308`; it already sets `X-Forwarded-Host` on everything it proxies, which is how the origin
-knows which host a request used. Set them before the Fly flip and browsers are redirected to a
-console that cannot sign them in yet.
+The Worker then makes the same `308` at the edge, before the origin sees the request; it already
+sets `X-Forwarded-Host` on everything it proxies, which is how the origin knows which host a
+request used. Set them before the Fly flip and browsers are redirected to a console that cannot
+sign them in yet.
 
 **Verify:**
 - `GET https://otto-tower.savvagent.com/.well-known/oauth-protected-resource` names the new
@@ -402,8 +423,11 @@ console that cannot sign them in yet.
 - A request through the old host still works and carries `Deprecation: true`, a
   `Link: <https://otto-tower.savvagent.com/…>; rel="successor-version"` and, with a sunset
   configured, a `Sunset:` header. The browser console on the old host (its pages and `/auth/login`)
-  answers `308` to the new host (the Worker); `/mcp`, `/.well-known`, `/api`, the rest of `/auth`,
-  `/oauth`, `/platform/webhooks` and `/webhooks` are proxied, never redirected.
+  answers `308` to the same path and query on the new host:
+  `curl -sI 'https://otto-factory.savvagent.com/auth/login?org=acme'` shows
+  `location: https://otto-tower.savvagent.com/auth/login?org=acme`. `/mcp`, `/.well-known`, `/api`,
+  the rest of `/auth`, `/oauth`, `/platform/webhooks`, `/webhooks` and the health probes are served
+  on the old host, never redirected (`curl -sI https://otto-factory.savvagent.com/healthz` is `200`).
 - `GET https://otto-factory.savvagent.com/.well-known/oauth-protected-resource` names
   `https://otto-factory.savvagent.com/mcp` as `resource` (so a fresh sign-in on the old URL still
   passes the client's resource check), and an MCP client still configured with the old URL sees
@@ -461,9 +485,11 @@ otto-platform-server resource drop-alias https://otto-factory.savvagent.com/mcp
 ```
 
 The alias row is kept as a tombstone, so the old URI can never be registered to a different server.
-Then clear `OF_LEGACY_HOSTS` and `OF_LEGACY_SUNSET` from `fly.toml`, redeploy, remove
-`OF_PUBLIC_URL` and `OF_LEGACY_HOSTS` from the Worker's `env.production.vars` and redeploy it, and remove the old
-hostname's custom domain, DNS records and certificate (`fly certs remove otto-factory.savvagent.com -a otto-factory-mcp`).
+Then clear `OF_LEGACY_HOSTS` and `OF_LEGACY_SUNSET` from `fly.toml`, redeploy, and remove the old
+hostname's DNS records (at the current DNS provider) and certificate
+(`fly certs remove otto-factory.savvagent.com -a otto-factory-mcp`). Only if the deployment is
+fronted by the Worker: also remove `OF_PUBLIC_URL` and `OF_LEGACY_HOSTS` from the Worker's
+`env.production.vars`, redeploy it, and remove the old custom domain.
 
 ### Rollback
 
@@ -473,12 +499,14 @@ hostname's custom domain, DNS records and certificate (`fly certs remove otto-fa
   otto-platform-server resource rename $NEW $OLD --alias-until $SUNSET
   ```
   (Run with `$NEW` as the first argument: when `$OLD` is a live alias of `$NEW`, the rename swaps the
-  two.) The new host's certificate and custom domain can stay or be removed. The unregistered new
+  two.) The new host's certificate and DNS records (or, Worker-fronted, its custom domain) can stay
+  or be removed. The unregistered new
   console client is harmless.
 - **After step 8**: first restore `OF_PUBLIC_URL`, `OF_RESOURCE_URI` and `OF_CONSOLE_CLIENT_ID` in
   `fly.toml` to the old values (the old `OF_CONSOLE_CLIENT_ID` is in `fly.toml`'s git history),
-  remove `OF_LEGACY_*`, and deploy; remove the Worker's `OF_PUBLIC_URL` and `OF_LEGACY_HOSTS` vars
-  and redeploy it, or it keeps sending the old host's browsers to the new one. The app keeps working
+  remove `OF_LEGACY_*`, and deploy (that deploy also stops the app sending the old host's browsers
+  to the new one). Only if the deployment is fronted by the Worker: remove the Worker's
+  `OF_PUBLIC_URL` and `OF_LEGACY_HOSTS` vars and redeploy it, or it keeps sending them there. The app keeps working
   meanwhile because the old URI is still a live alias. Then swap the URIs back as above. If the URL-flip PRs (8a) were merged, revert them too.
 - **If step 9 had run**, also point the webhook back with
   `resource set-webhook $OLD https://otto-factory.savvagent.com/platform/webhooks` and set the secret
@@ -609,12 +637,19 @@ The hostname below is production's live one. *The rename cutover* moves the prod
 until the sunset; the URL-flip step (8a) then updates this section.
 
 The public hostname is **`otto-factory.savvagent.com`**, and the app answers on
-`otto-factory-mcp.fly.dev` without advertising it. DNS is at Namecheap:
+`otto-factory-mcp.fly.dev` without advertising it. No Cloudflare Worker or proxy sits in front:
+the name resolves straight to the Fly app. DNS is at Namecheap, with an `A` record to the app's
+shared IPv4 and an `AAAA` record to its dedicated IPv6. Do not copy the addresses from here; read
+them from Fly, which is the source of truth:
 
+```bash
+fly ips list -a otto-factory-mcp          # v4 public ingress (shared), v6 public ingress (dedicated)
+dig +short otto-factory.savvagent.com A   # must match the v4
+dig +short otto-factory.savvagent.com AAAA   # must match the v6
 ```
-A     otto-factory.savvagent.com  →  66.241.124.65             (Fly shared IPv4)
-AAAA  otto-factory.savvagent.com  →  2a09:8280:1::186:67e:0     (this app's dedicated IPv6)
-```
+
+(As of 2026-10-21 they are `66.241.125.222` and `2a09:8280:1::1aa:4d42:0`; an address this file
+once listed had gone stale, which is why it no longer pins them.)
 
 `fly certs add otto-factory.savvagent.com -a otto-factory-mcp` issues and renews the
 certificate; nothing else in DNS is needed, because the dedicated IPv6 is what Fly
@@ -626,7 +661,7 @@ hostname** — they belong to the platform's host — so, unlike before the spli
 does not invalidate anyone's credentials (it does require re-registering the resource at the
 platform under the new URI, and re-authorizing clients).
 
-A later move behind a Cloudflare Worker keeps this same hostname: a Worker custom
+A later move behind a Cloudflare Worker (not made today) would keep this same hostname: a Worker custom
 domain serves `otto-factory.savvagent.com` directly and proxies to the Fly app, so
 `OF_ORIGIN` becomes `otto-factory-mcp.fly.dev` and `OF_PUBLIC_URL` does not
 change. See `cloudflare.md`, whose `OF_ALLOWED_HOSTS` trap is exactly about that

@@ -578,7 +578,14 @@ means in this repository:
   stamps `Deprecation`/`Link`/`Sunset` on every response through a legacy host, and leaves a
   `Legacy` marker that discovery, the `401` challenge and `initialize` read to name the legacy URL
   and the successor. The host only selects among configured values; introspection still asks as
-  `OF_RESOURCE_URI` (`a_legacy_host_never_chooses_the_audience`).
+  `OF_RESOURCE_URI` (`a_legacy_host_never_chooses_the_audience`). The console cannot work on a legacy
+  host (`/auth/login` there would set its PKCE cookie on a host the platform never sends the browser
+  back to, and its cookie writes would fail CSRF), so `of-server`'s `legacy_console_redirect`, just
+  inside `mark`, answers a legacy-host request for exactly `/auth/login` or for anything that would
+  reach the SPA fallback (not under `API_PREFIXES`, not a health probe) with a `308` to the same path
+  and query on `OF_PUBLIC_URL`. `/mcp`, discovery, `/api`, the webhook receivers and
+  `/platform/webhooks` are never redirected. Production is not behind the Worker, so this is the
+  redirect that runs there; the Worker's own copy applies only to a Worker-fronted deployment.
 - **Discovery.** `/.well-known/oauth-protected-resource` (RFC 9728) names the platform in
   `authorization_servers` and lists `of_core::scopes::KNOWN`; the `401` challenge points at it.
   This service serves no authorization-server metadata, registration, authorize, or token endpoint.
