@@ -74,7 +74,7 @@ impl BillingError {
 /// platform that predates `blocked_reason`) or one this build does not know —
 /// is `budget_exceeded`, so an agent always gets a code it can branch on
 /// rather than a string nobody documented.
-fn blocked_code(reason: Option<&str>) -> &'static str {
+pub(crate) fn blocked_code(reason: Option<&str>) -> &'static str {
     match reason {
         Some(otto_resource::PAYMENT_REQUIRED) => otto_resource::PAYMENT_REQUIRED,
         _ => otto_resource::BUDGET_EXCEEDED,

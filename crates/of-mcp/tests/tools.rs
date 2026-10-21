@@ -2717,6 +2717,11 @@ async fn a_tripped_budget_without_a_reason_refuses_as_budget_exceeded(pool: PgPo
         .set_budget(caller.org_id.as_uuid(), Some(tripped_budget()));
 
     assert_completion_blocked(&env, &caller, &id, "budget_exceeded").await;
+
+    // The status reports the same code the refusal used, not null.
+    for status in [env.usage(&caller).await, env.whoami_usage(&caller).await] {
+        assert_eq!(status["blockedReason"], "budget_exceeded", "{status}");
+    }
 }
 
 /// The platform failing to answer the status lookup is not a reason to refuse

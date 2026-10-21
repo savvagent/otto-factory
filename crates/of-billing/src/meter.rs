@@ -377,6 +377,13 @@ pub struct BudgetReport {
 
 impl Status {
     fn new(usage: UsageStatus) -> Self {
+        // Report the code a refusal would carry: a block the platform gave no
+        // reason for is still `budget_exceeded`, never null.
+        let blocked_reason = if usage.billable_blocked() {
+            Some(crate::error::blocked_code(usage.blocked_reason.as_deref()).to_string())
+        } else {
+            usage.blocked_reason.clone()
+        };
         Self {
             plan: plan_name(&usage.plan),
             meters: usage
@@ -398,7 +405,7 @@ impl Status {
                 blocked: b.blocked,
                 reason: b.reason,
             }),
-            blocked_reason: usage.blocked_reason,
+            blocked_reason,
             included_ops: usage.included_ops,
             billable_used: usage.billable_count,
             remaining: remaining(usage.billable_count, usage.included_ops),
