@@ -100,8 +100,8 @@ jobs:
             echo "::error::.claude/skills points at '$safe_target', expected '../.github/skills'"
             exit 1
           fi
-          if [ ! -f .claude/skills/otto-factory-development/SKILL.md ]; then
-            echo "::error::.claude/skills/otto-factory-development/SKILL.md not reachable through the symlink"
+          if [ ! -f .claude/skills/otto-tower-development/SKILL.md ]; then
+            echo "::error::.claude/skills/otto-tower-development/SKILL.md not reachable through the symlink"
             exit 1
           fi
 
@@ -308,6 +308,8 @@ jobs:
     # as release-please's `release` environment above.
     environment:
       name: production
+      # Flip to https://otto-tower.savvagent.com after the cutover (docs/deploy/fly.md, step 8);
+      # until then that host does not resolve to this app.
       url: https://otto-factory.savvagent.com
     permissions:
       contents: read
