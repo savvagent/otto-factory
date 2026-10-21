@@ -149,7 +149,12 @@ impl Config {
 /// request from one client landing on the replica that holds its session.
 /// Stateless means any replica can serve any request, with no sticky routing
 /// and no shared session store.
+/// Every path [`router`] serves, so `of-server` can check what it would do with
+/// them (a legacy host must never redirect one) without starting a server.
+pub const ROUTES: [&str; 2] = ["/.well-known/oauth-protected-resource", "/mcp"];
+
 pub fn router(db: Db, watcher: Arc<Watcher>, config: Config) -> Router {
+    let [metadata, mcp] = ROUTES;
     let rs = Arc::new(ResourceServer::new(
         db.clone(),
         config.platform.clone(),
@@ -189,13 +194,10 @@ pub fn router(db: Db, watcher: Arc<Watcher>, config: Config) -> Router {
     );
 
     Router::new()
-        .route(
-            "/.well-known/oauth-protected-resource",
-            get(auth::protected_resource_metadata),
-        )
+        .route(metadata, get(auth::protected_resource_metadata))
         .with_state(rs.clone())
         .route_service(
-            "/mcp",
+            mcp,
             any_service(service).layer(axum::middleware::from_fn_with_state(
                 rs,
                 auth::require_bearer,

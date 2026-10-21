@@ -98,7 +98,16 @@ fn is_api_path(path: &str) -> bool {
 /// A redirect there would break a client that does not follow one (most
 /// webhook senders) or that pins its OAuth resource to the URL it was given.
 fn moves_to_canonical(path: &str) -> bool {
-    path == "/auth/login" || (!is_api_path(path) && !health::PATHS.contains(&path))
+    path == "/auth/login" || (!is_api_path(path) && !is_health_path(path))
+}
+
+/// A health probe, matched on segment boundaries like [`is_api_path`] — the
+/// same rule the Worker's `belongsToOrigin` applies to them, so `/readyz/x` is
+/// the origin's (a `404`) whether or not the Worker is in front.
+fn is_health_path(path: &str) -> bool {
+    health::PATHS
+        .iter()
+        .any(|probe| path == *probe || path.starts_with(&format!("{probe}/")))
 }
 
 /// `308` a legacy-host console request to the same path and query on the
@@ -411,8 +420,37 @@ mod tests {
             "/oauth/authorize",
             "/healthz",
             "/readyz",
+            "/readyz/x",
         ] {
             assert!(!moves_to_canonical(kept), "{kept}");
         }
+        assert!(moves_to_canonical("/readyzzz"));
+    }
+
+    /// No routed path is ever redirected off a legacy host: every console API
+    /// route, sign-in route and webhook receiver in `of-web`'s catalog, both of
+    /// `of-mcp`'s, and the probes. A route added outside `API_PREFIXES` would
+    /// otherwise answer a `308` to the canonical host on the old one, which a
+    /// webhook sender or an agent will not follow. `/auth/login` is the one
+    /// deliberate exception.
+    #[test]
+    fn no_routed_path_moves_to_the_canonical_host() {
+        let routed = of_web::catalog::catalog()
+            .into_iter()
+            .map(|endpoint| endpoint.path)
+            .chain(of_mcp::ROUTES)
+            .chain(health::PATHS)
+            .filter(|path| *path != "/auth/login")
+            .collect::<Vec<_>>();
+        assert!(routed.len() > 10, "the catalog came back nearly empty");
+        for path in routed {
+            assert!(!moves_to_canonical(path), "{path} would be redirected");
+        }
+        assert!(
+            of_web::catalog::catalog()
+                .iter()
+                .any(|e| e.path == "/auth/login"),
+            "the exception names a route that no longer exists"
+        );
     }
 }
