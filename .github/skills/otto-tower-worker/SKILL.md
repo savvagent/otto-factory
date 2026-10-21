@@ -783,7 +783,7 @@ and do not run any command using it.
     `<!-- otto-tower-worker:trio-cleared:<job-id>:<nonce>:<sha> -->` naming
     this job's id and the nonce this orchestrator generated at the start of
     Step 4.5 — not just any trio-cleared marker present on the PR, and not
-    just a matching job id: the nonce must match exactly too. Then
+    just a matching job id: the nonce must match exactly too. (Transition from the rename: only the `otto-tower-worker:` marker counts; a PR carrying the old `otto-factory-worker:trio-cleared:` marker is treated as not cleared, so its trio is re-run once, with no duplicate work.) Then
     independently confirm the marker's embedded `<sha>` equals the PR's
     **actual, current** `headRefOid` (the same `gh pr view --json
     mergeCommit,headRefOid` call above). **This SHA check, not the nonce

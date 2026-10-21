@@ -40,8 +40,14 @@ kept identifiers, and a new hit outside the list is a bug:
   of record's filename `2026-09-01-otto-factory-design.md`, which links depend on).
 - The legacy host `otto-factory.savvagent.com` where it appears as deprecation config or in the
   cutover runbook (`docs/deploy/fly.md`). Until the cutover it is also the live
-  host that user-facing docs link to (reverting the "keep otto-tower links on the live host" commit
-  moves those links to `otto-tower.savvagent.com`).
+  host that user-facing docs and `ci.yml`'s `environment.url` link to; the prepared URL-flip PRs
+  (runbook step 8a) move them to `otto-tower.savvagent.com`.
+- The `otto-factory release` GitHub App named in `.github/workflows/ci.yml` (an App, renamed by a
+  human like the one above).
+- The legacy file name `~/.claude/otto-factory-repos`, still read as a fallback by
+  `client-skills/claude-code/session-start-hook.sh` and documented in `client-skills/claude-code/README.md`.
+- Historical session records in `client-skills/claude-code/README.md` (the verification notes keep the
+  repo slug and idempotency-key examples they were recorded with).
 - The `factory-scanner:` key prefix, still recognised for back-compat.
 - The `x-otto-factory-auth` OpenAPI extension key, emitted by the server and read by the console.
 

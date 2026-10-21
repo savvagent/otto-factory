@@ -44,7 +44,7 @@ npx wrangler deploy --env production   # or: npm run deploy, which does both
 ```
 
 **Naming the environment is load-bearing.** The default configuration is the development
-one: a different Worker (`otto-tower-console-dev`) whose `OF_ORIGIN` is
+one: a different Worker (`otto-factory-console-dev`) whose `OF_ORIGIN` is
 `http://127.0.0.1:8080`. A bare `wrangler deploy` therefore cannot overwrite the Worker the
 console runs on, and cannot silently point a staging build at production — it deploys
 something that proxies to an origin nobody is running, which fails immediately and visibly.

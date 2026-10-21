@@ -219,7 +219,9 @@ The product was renamed from otto-factory to otto-tower (epic `savvagent/otto-pl
 code that ships the rename changes **no deployed value**: not `fly.toml`'s `[env]`, not the Worker
 routes, certificates, DNS or the platform's registrations. Merging and deploying it ahead of the
 cutover is safe. The cutover itself is a human-run sequence of production writes, and **the order
-below is load-bearing**. Read it end to end before starting. Placeholders:
+below is load-bearing**. Read it end to end before starting. Each of steps 3 to 9 ends with a
+**Verify** line and a **Stop if** condition: if a stop condition holds, do not go on to the next
+step (see *Rollback*). Placeholders:
 
 ```bash
 OLD=https://otto-factory.savvagent.com/mcp     # the resource URI registered today
@@ -235,15 +237,18 @@ working then.
 
 The platform release carries the guarded service rename (`resource rename-service`), the
 time-boxed URI alias (`resource rename`, `drop-alias`) and OAuth alias resolution. Nothing below
-works without it. Check `resource describe $OLD` runs on the new binary.
+works without it. Check `otto-platform-server resource describe $OLD` runs on the deployed binary.
 
 ### 2. Release and deploy otto-factory (this repo)
 
-Merge the release PR as usual (the `deploy` job runs `flyctl deploy`). The new binary declares the
-meter `otto-tower/jobs_completed`. The platform still has this resource server's service slug as
-`otto-factory`, so it **refuses the declaration** (the key is outside the service's namespace). That
-is expected, and nothing is lost: the shipper retries with backoff and pauses shipping while usage
-rows stay queued in `usage_outbox`. Expect this error to repeat about once a minute until step 4:
+The platform release from step 1 must be live first. Merging this repo's release PR deploys
+automatically (the `deploy` job runs `flyctl deploy`). **This release must include the
+`OF_LEGACY_HOSTS` / `OF_LEGACY_SUNSET` support (#231)**; step 8 sets those variables and an older
+binary would ignore them. The new binary declares the meter `otto-tower/jobs_completed`. The platform
+still has this resource server's service slug as `otto-factory`, so it **refuses the declaration**
+(the key is outside the service's namespace). That is expected and nothing is lost: the shipper
+retries with backoff and pauses shipping while usage rows stay queued in `usage_outbox`. Expect this
+error to repeat about once a minute until step 4:
 
 ```
 ERROR could not declare the usage meters; no usage ships until they are declared
@@ -251,26 +256,40 @@ ERROR could not declare the usage meters; no usage ships until they are declared
 ```
 
 The rest of the service is unaffected: MCP, the console and webhooks keep working on the old host.
-Do not skip ahead; do not leave this state longer than needed, because the backlog only grows.
+Do not leave this state longer than needed, because the backlog only grows.
 
 ### 3. Preflight
 
-Run both checks and proceed only if they are clean. The rename is guarded and refuses when metered
-usage or Stripe objects exist under the old slug, but find out before you are mid-sequence.
+`rename-service` is itself the authoritative guard: it refuses if any metered usage or Stripe
+object exists under the old slug. This read-only check tells you beforehand, so you are not
+surprised mid-sequence. Open a console on the platform database and paste the query
+(`fly postgres connect` takes no command flag; its flags are `-a`, `-d`, `-u`, `-p`, `-c` for a
+config file):
 
 ```bash
-# On the platform (a machine with otto-platform-server and its OTTO_* environment):
-otto-platform-server resource describe $OLD      # service slug is otto-factory; note the secret/webhook are set
-otto-platform-server resource list               # no alias for $NEW exists yet, $NEW is not registered
-
-# Read-only, on the platform database (`otto_platform` on otto-db): both counts must be 0.
-fly postgres connect -a otto-db -d otto_platform -c \
-  "SELECT (SELECT count(*) FROM stripe_meters WHERE to_jsonb(stripe_meters)::text LIKE '%otto-factory/%') AS meters,
-          (SELECT count(*) FROM stripe_prices WHERE to_jsonb(stripe_prices)::text LIKE '%otto-factory/%') AS prices;"
+fly postgres connect -a otto-db -d otto_platform
 ```
 
-If either count is non-zero, **stop**: usage or Stripe data already exists under the old slug and
-the rename is refused by design. Resolve that at the platform first.
+```sql
+SELECT
+  (SELECT count(*) FROM usage_events           WHERE meter LIKE 'otto-factory/%')       AS usage_events,
+  (SELECT count(*) FROM org_meter_period_usage WHERE meter LIKE 'otto-factory/%')       AS org_meter_period_usage,
+  (SELECT count(*) FROM stripe_meters          WHERE meter LIKE 'otto-factory/%')       AS stripe_meters,
+  (SELECT count(*) FROM stripe_prices          WHERE meter LIKE 'otto-factory/%')       AS stripe_prices,
+  (SELECT count(*) FROM stripe_meter_outbox    WHERE event_name LIKE 'otto\_factory\_\_%') AS stripe_meter_outbox;
+```
+
+(`event_name` is `otto_factory__<meter>`, the meter key with `-` turned into `_` and `/` into `__`.)
+Also run, on the platform's machine:
+
+```bash
+otto-platform-server resource describe $OLD      # service slug is otto-factory
+otto-platform-server resource list               # $NEW is not registered or aliased yet
+```
+
+**Verify:** all five counts are 0; `describe` shows the slug `otto-factory`; `list` has no entry for `$NEW`.
+**Stop if:** any count is non-zero (usage or Stripe data already exists under the old slug and
+`rename-service` will refuse by design: resolve that at the platform first), or `$NEW` already appears.
 
 ### 4. Rename the billing service, immediately
 
@@ -280,26 +299,34 @@ otto-platform-server resource rename-service $OLD otto-tower
 
 Do this straight after step 3 and before anything else. The shipper's next retry declares
 `otto-tower/jobs_completed`, logs `declared usage meters`, and drains the queued rows (oldest
-first). Confirm the backlog empties:
+first). Watch the backlog and the logs (`fly logs -a otto-factory-mcp`):
 
 ```sql
 SELECT count(*), min(occurred_at), max(attempts), max(last_error) FROM usage_outbox;
 ```
 
+**Verify:** the command succeeded; `declared usage meters` appears in the log; the count falls to 0.
+**Stop if:** `rename-service` errors (do not continue; the platform changed nothing, so the old name
+stays in force: find out why and retry), or the backlog does not drain / `last_error` stays
+non-empty after a few minutes.
+
 ### 5. Set up the new host
 
-Add the hostname without removing the old one: both serve until the sunset.
+Add the hostname without removing the old one: both serve until the sunset. The new name uses the
+**same A and AAAA addresses as the old one** (the app's shared IPv4 and dedicated IPv6, listed in
+*The hostname* below).
 
 - **Certificate and DNS** (the app answering directly): `fly certs add otto-tower.savvagent.com -a otto-factory-mcp`,
-  then the `A` and `AAAA` records shown for the hostname in *The hostname* below. `fly certs check
-  otto-tower.savvagent.com -a otto-factory-mcp` goes green when the certificate is issued.
+  then the `A` and `AAAA` records for the new name. `fly certs check otto-tower.savvagent.com -a otto-factory-mcp`
+  goes green when the certificate is issued.
 - **Cloudflare Worker** (the console fronting the app): add `otto-tower.savvagent.com` as a custom
-  domain on the production Worker (`docs/deploy/cloudflare.md`; `wrangler deploy --env production`
-  with the custom domain, or in the dashboard), keeping the old custom domain. The Worker's script
-  name does not change.
+  domain on the production Worker (`docs/deploy/cloudflare.md`), keeping the old custom domain. The
+  Worker's script name does not change.
 
-Check `https://otto-tower.savvagent.com/healthz` answers. Until step 8 the app still treats the old
-host as canonical, so only the health probes are meaningful on the new host yet.
+**Verify:** `fly certs check` reports the certificate as issued (Ready), and
+`curl -fsS https://otto-tower.savvagent.com/healthz` answers. Until step 8 the app still treats the
+old host as canonical, so only the health probes are meaningful on the new host.
+**Stop if:** the certificate stays pending (DNS not propagated) or `/healthz` does not answer on the new name.
 
 ### 6. Rename the resource URI, keeping the old one as an alias
 
@@ -309,9 +336,14 @@ otto-platform-server resource list      # confirm: $NEW canonical, $OLD alias un
 ```
 
 `--name` sets the name the consent screen shows. The rename also rewrites existing tokens and
-authorization codes from `$OLD` to `$NEW`. **Confirm `resource list` shows the alias before step 8.**
-From here the running app (still configured with `OF_RESOURCE_URI=$OLD`) authenticates to the
-platform as the alias and keeps working with no configuration change.
+authorization codes from `$OLD` to `$NEW`. From here the running app (still configured with
+`OF_RESOURCE_URI=$OLD`) authenticates to the platform as the alias and keeps working with no
+configuration change.
+
+**Verify:** `resource list` shows `$NEW` canonical and `$OLD` as a live alias with the sunset; the old
+host's `GET /readyz` and an MCP call still work.
+**Stop if:** the alias is not shown in `resource list`. **STOP: do not do step 8.** Flipping the app
+to `$NEW` without the alias makes introspection authentication fail and the server answers 503 everywhere.
 
 ### 7. Register the console client for the new host
 
@@ -319,14 +351,17 @@ platform as the alias and keeps working with no configuration change.
 fly ssh console -a otto-platform -C \
   'otto-platform-server client register --name "otto-tower console" \
      --redirect-uri https://otto-tower.savvagent.com/auth/callback --first-party'
-#   -> prints the client_id for the new host: this becomes OF_CONSOLE_CLIENT_ID in step 8
 ```
+
+It prints a `client_id`. **Record it**: it becomes `OF_CONSOLE_CLIENT_ID` in step 8.
+
+**Verify:** a `client_id` (`otto_client_…`) was printed and you have noted it.
+**Stop if:** the command errors or prints no `client_id`.
 
 ### 8. Flip the Fly environment
 
-Only now, with the alias confirmed in step 6. **Flipping `OF_RESOURCE_URI` before the alias exists
-fails introspection authentication and the server answers 503 everywhere.** Edit `fly.toml`'s
-`[env]` (or `fly secrets`/`fly deploy --env` as you prefer, but keep the file the source of truth):
+Only now, with the alias confirmed in step 6. These are non-secret values, so they live in
+`fly.toml`'s `[env]`: edit the file, merge the change through a PR, and let the deploy run.
 
 ```toml
 OF_PUBLIC_URL        = "https://otto-tower.savvagent.com"
@@ -337,9 +372,9 @@ OF_LEGACY_SUNSET     = "<the same RFC 3339 $SUNSET>"
 ```
 
 `OF_LEGACY_HOSTS` is a comma-separated list of extra, deprecated hosts; `OF_LEGACY_SUNSET` is
-optional but you should set it. Both fail the boot when set but unparseable. Then deploy
-(`fly deploy -a otto-factory-mcp`) and verify:
+optional but you should set it. Both fail the boot when set but unparseable.
 
+**Verify:**
 - `GET https://otto-tower.savvagent.com/.well-known/oauth-protected-resource` names the new
   resource; an MCP client added with the new URL signs in and `whoami` says otto-tower.
 - A request through the old host still works and carries `Deprecation: true`, a
@@ -349,26 +384,30 @@ optional but you should set it. Both fail the boot when set but unparseable. The
   proxied, never redirected.
 - `https://otto-tower.savvagent.com/` signs in (the new console client) and the header reads otto-tower.
 
+**Stop if:** the app answers 503, fails to boot (an unparseable `OF_LEGACY_*` value), or any check
+above fails. Roll back (see *Rollback*) before doing anything else.
+
 ### 8a. Flip the documentation URLs
 
-Until this point the repo's user-facing docs (README, `docs/clients/matrix.md`, `client-skills/`, the
-design of record's intro, and the non-runbook sections of this file) keep their links on the live
-host `https://otto-factory.savvagent.com`, so every command a reader copies works on the day the
-code ships. After step 8 verifies, merge the prepared URL-flip PRs: the revert of the
-"docs: keep otto-tower links on the live host until the cutover" commit in otto-factory, and the
-matching revert in otto-platform. Those reverts put the `claude mcp add` commands and other links
-on `https://otto-tower.savvagent.com`.
+Only after step 8's verification passes, merge the prepared URL-flip PRs in `savvagent/otto-factory`
+and `savvagent/otto-platform`. They move public links to `https://otto-tower.savvagent.com`. Until
+then the user-facing docs (README, `docs/clients/matrix.md`, `client-skills/`, the design of
+record's intro, and the live-host sections of this file) keep their links on the live host
+`https://otto-factory.savvagent.com`, so every command a reader copies works on the day the code
+ships. The otto-factory flip PR also changes `.github/workflows/ci.yml`'s `environment.url`.
 
 ### 9. Point the lifecycle webhook at the new host
 
 ```bash
 otto-platform-server resource set-webhook $NEW https://otto-tower.savvagent.com/platform/webhooks
-#   -> prints a NEW signing secret ONCE: fly secrets set -a otto-factory-mcp OF_PLATFORM_WEBHOOK_SECRET=…
+#   -> prints a NEW signing secret ONCE
+fly secrets set -a otto-factory-mcp OF_PLATFORM_WEBHOOK_SECRET='otto_whsec_…'
 ```
 
-Set the printed secret before relying on lifecycle events, then delete a throwaway team at the
-platform and check for a `platform.team.deleted` audit row (see *Webhooks* in the historical
-checklist below).
+**Verify:** delete a throwaway team at the platform and check for a `platform.team.deleted` row
+(`GET /api/orgs/{org}/audit?actionPrefix=platform.`).
+**Stop if:** no such row appears: the secret was not set, or the URL is wrong. The old host keeps
+receiving nothing new, so fix this before telling customers anything.
 
 ### 10. Tell customers
 
@@ -409,11 +448,13 @@ hostname's custom domain, DNS records and certificate (`fly certs remove otto-fa
   (Run with `$NEW` as the first argument: when `$OLD` is a live alias of `$NEW`, the rename swaps the
   two.) The new host's certificate and custom domain can stay or be removed. The unregistered new
   console client is harmless.
-- **After step 8**: first restore `OF_PUBLIC_URL`, `OF_RESOURCE_URI` and `OF_CONSOLE_CLIENT_ID` to the
-  old values, remove `OF_LEGACY_*`, and deploy. The app keeps working meanwhile because the old URI
-  is still a live alias. Then swap the URIs back as above, and point the webhook back with
-  `resource set-webhook $OLD https://otto-factory.savvagent.com/platform/webhooks` (and set the secret
-  it prints).
+- **After step 8**: first restore `OF_PUBLIC_URL`, `OF_RESOURCE_URI` and `OF_CONSOLE_CLIENT_ID` in
+  `fly.toml` to the old values (the old `OF_CONSOLE_CLIENT_ID` is in `fly.toml`'s git history),
+  remove `OF_LEGACY_*`, and deploy. The app keeps working meanwhile because the old URI is still a
+  live alias. Then swap the URIs back as above. If the URL-flip PRs (8a) were merged, revert them too.
+- **If step 9 had run**, also point the webhook back with
+  `resource set-webhook $OLD https://otto-factory.savvagent.com/platform/webhooks` and set the secret
+  it prints as `OF_PLATFORM_WEBHOOK_SECRET`. If it had not, leave the webhook alone.
 - **`rename-service` (step 4) is not rolled back.** Once metering is declared under `otto-tower/`,
   keep it: the binary that is deployed declares only that key. Rolling the *image* back to a pre-rename
   release would declare `otto-factory/jobs_completed`, which the platform then refuses; its shipper pauses

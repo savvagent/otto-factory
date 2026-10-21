@@ -308,7 +308,7 @@ jobs:
     # as release-please's `release` environment above.
     environment:
       name: production
-      # Flip to https://otto-tower.savvagent.com after the cutover (docs/deploy/fly.md, step 8);
+      # Flip to https://otto-tower.savvagent.com after the cutover (docs/deploy/fly.md, step 8a);
       # until then that host does not resolve to this app.
       url: https://otto-factory.savvagent.com
     permissions:
