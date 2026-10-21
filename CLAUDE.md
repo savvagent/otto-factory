@@ -567,6 +567,13 @@ means in this repository:
   expiry) and an inactive one for 5 s; failures are never cached.
 - **The audience is configuration, not the request.** `OF_RESOURCE_URI` is what the platform
   mints tokens for; it is never derived from a `Host` header, which an attacker controls.
+- **A legacy host changes what is advertised, never what is accepted.** During a rename's
+  deprecation window `OF_LEGACY_HOSTS` names the old host(s). `of_mcp::legacy::mark`, `of-server`'s
+  outermost layer, reads the origin host (`X-Forwarded-Host`, which the Worker sets, else `Host`),
+  stamps `Deprecation`/`Link`/`Sunset` on every response through a legacy host, and leaves a
+  `Legacy` marker that discovery, the `401` challenge and `initialize` read to name the legacy URL
+  and the successor. The host only selects among configured values; introspection still asks as
+  `OF_RESOURCE_URI` (`a_legacy_host_never_chooses_the_audience`).
 - **Discovery.** `/.well-known/oauth-protected-resource` (RFC 9728) names the platform in
   `authorization_servers` and lists `of_core::scopes::KNOWN`; the `401` challenge points at it.
   This service serves no authorization-server metadata, registration, authorize, or token endpoint.

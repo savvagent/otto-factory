@@ -24,6 +24,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use anyhow::{anyhow, Context, Result};
+use chrono::{DateTime, NaiveDate, Utc};
 
 /// The whole deployment, resolved.
 ///
@@ -115,6 +116,15 @@ pub struct Config {
     /// Extra authorities accepted in the MCP endpoint's `Host` header, beyond
     /// the one derived from `public_url`.
     pub extra_allowed_hosts: Vec<String>,
+    /// Hostnames this deployment still answers on but no longer advertises
+    /// (`OF_LEGACY_HOSTS`): after a rename, the old public host until its
+    /// sunset. Accepted like `extra_allowed_hosts`, and every response through
+    /// one carries a deprecation notice (`of_mcp::legacy`). Bare, lowercase
+    /// hostnames; never `public_url`'s own.
+    pub legacy_hosts: Vec<String>,
+    /// When the legacy hosts stop working (`OF_LEGACY_SUNSET`), announced in a
+    /// `Sunset` header and in the MCP instructions. Requires `legacy_hosts`.
+    pub legacy_sunset: Option<DateTime<Utc>>,
     /// Browser origins accepted on requests to `/mcp` that carry `Origin`.
     /// Empty disables the check, which is right for a surface reached by CLI
     /// agents rather than by pages.
@@ -137,6 +147,8 @@ impl std::fmt::Debug for Config {
             .field("console_client_id", &self.console_client_id)
             .field("upgrade_url", &self.upgrade_url)
             .field("retired_set", &self.retired_set)
+            .field("legacy_hosts", &self.legacy_hosts)
+            .field("legacy_sunset", &self.legacy_sunset)
             .field("static_dir", &self.static_dir)
             .field("run_migrations", &self.run_migrations)
             .field("log_format", &self.log_format)
@@ -172,6 +184,12 @@ impl Config {
         if parsed.host_str().is_none() {
             return Err(anyhow!("OF_PUBLIC_URL has no host: {public_url:?}"));
         }
+
+        let (legacy_hosts, legacy_sunset) = legacy(
+            optional("OF_LEGACY_HOSTS").as_deref(),
+            optional("OF_LEGACY_SUNSET").as_deref(),
+            parsed.host_str().unwrap_or_default(),
+        )?;
 
         let platform_url = required("OF_PLATFORM_URL")?
             .trim_end_matches('/')
@@ -226,6 +244,8 @@ impl Config {
             retired_set: retired_set(|name| std::env::var_os(name).is_some()),
 
             extra_allowed_hosts: list("OF_ALLOWED_HOSTS"),
+            legacy_hosts,
+            legacy_sunset,
             allowed_origins: list("OF_ALLOWED_ORIGINS"),
 
             static_dir: optional("OF_STATIC_DIR")
@@ -257,7 +277,8 @@ impl Config {
     /// The public URL's host is always in the list, because that is the name
     /// this deployment tells clients to use. `rmcp` treats an entry with no
     /// port as matching any port, so the bare host covers `example.com:8080`
-    /// as well as `example.com`.
+    /// as well as `example.com`. The legacy hosts are accepted too: a client
+    /// still configured with the old URL must keep working until the sunset.
     pub fn allowed_hosts(&self) -> Vec<String> {
         let mut hosts: Vec<String> = url::Url::parse(&self.public_url)
             .ok()
@@ -265,6 +286,7 @@ impl Config {
             .into_iter()
             .collect();
         hosts.extend(self.extra_allowed_hosts.iter().cloned());
+        hosts.extend(self.legacy_hosts.iter().cloned());
         hosts
     }
 }
@@ -343,6 +365,96 @@ fn list(name: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// `OF_LEGACY_HOSTS` and `OF_LEGACY_SUNSET`, together.
+///
+/// A sunset with no legacy host announces the end of nothing; it is refused
+/// rather than ignored, because whoever set it believes something is being
+/// announced.
+fn legacy(
+    hosts: Option<&str>,
+    sunset: Option<&str>,
+    public_host: &str,
+) -> Result<(Vec<String>, Option<DateTime<Utc>>)> {
+    let hosts = legacy_hosts(hosts, public_host)?;
+    let sunset = legacy_sunset(sunset)?;
+    if sunset.is_some() && hosts.is_empty() {
+        return Err(anyhow!(
+            "OF_LEGACY_SUNSET is set but OF_LEGACY_HOSTS is not; a sunset date \
+             announces when the legacy hosts stop working, so name them in \
+             OF_LEGACY_HOSTS or unset OF_LEGACY_SUNSET"
+        ));
+    }
+    Ok((hosts, sunset))
+}
+
+/// `OF_LEGACY_HOSTS`: comma-separated bare hostnames.
+///
+/// Strict, because the failure of a loose parse is silent: an entry written as
+/// a URL (`https://old.example.com`) or with a port would never equal a request's
+/// host, so the old address would answer without its deprecation notice and
+/// nobody would be told to move before the sunset. The public URL's own host
+/// is refused too — the canonical host cannot also be the deprecated one.
+fn legacy_hosts(raw: Option<&str>, public_host: &str) -> Result<Vec<String>> {
+    let Some(raw) = raw else {
+        return Ok(vec![]);
+    };
+    let invalid = |why: String| {
+        anyhow!(
+            "OF_LEGACY_HOSTS={raw:?} is not valid: {why}. Expected comma-separated \
+             bare hostnames, e.g. old.example.com"
+        )
+    };
+    let mut hosts = Vec::new();
+    for entry in raw.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+        let host = entry.to_ascii_lowercase();
+        // Letters, digits, dots and hyphens (an internationalized name in its
+        // `xn--` form), and a parse that leaves it unchanged as a URL's host.
+        let bare = host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+            && url::Url::parse(&format!("https://{host}/"))
+                .is_ok_and(|u| u.host_str() == Some(host.as_str()));
+        if !bare {
+            return Err(invalid(format!(
+                "{entry:?} is not a bare hostname (no scheme, port, or path)"
+            )));
+        }
+        if host == public_host.to_ascii_lowercase() {
+            return Err(invalid(format!(
+                "{entry:?} is OF_PUBLIC_URL's own host, which is canonical and cannot \
+                 also be deprecated"
+            )));
+        }
+        if !hosts.contains(&host) {
+            hosts.push(host);
+        }
+    }
+    if hosts.is_empty() {
+        return Err(invalid("it names no host".into()));
+    }
+    Ok(hosts)
+}
+
+/// `OF_LEGACY_SUNSET`: an RFC 3339 date-time, or a bare RFC 3339 full-date
+/// (taken as midnight UTC, the start of that day).
+fn legacy_sunset(raw: Option<&str>) -> Result<Option<DateTime<Utc>>> {
+    let Some(raw) = raw.map(str::trim) else {
+        return Ok(None);
+    };
+    if let Ok(at) = DateTime::parse_from_rfc3339(raw) {
+        return Ok(Some(at.with_timezone(&Utc)));
+    }
+    if let Ok(day) = NaiveDate::parse_from_str(raw, "%Y-%m-%d") {
+        if let Some(midnight) = day.and_hms_opt(0, 0, 0) {
+            return Ok(Some(midnight.and_utc()));
+        }
+    }
+    Err(anyhow!(
+        "OF_LEGACY_SUNSET={raw:?} is not valid; expected an RFC 3339 date-time such as \
+         2027-01-31T00:00:00Z, or a date such as 2027-01-31"
+    ))
+}
+
 /// Normalize a PEM value that arrived as a literal `\n`-escaped single line —
 /// the common shape for a multi-line secret stored in a `.env` file or a CI
 /// secret store that doesn't preserve real newlines.
@@ -379,6 +491,8 @@ impl Config {
             upgrade_url: "https://otto.example.com".into(),
             retired_set: vec![],
             extra_allowed_hosts: vec![],
+            legacy_hosts: vec![],
+            legacy_sunset: None,
             allowed_origins: vec![],
             static_dir: "web/build".into(),
             run_migrations: true,
@@ -513,6 +627,106 @@ mod tests {
     fn a_pem_with_real_newlines_already_is_left_unchanged() {
         let pem = "-----BEGIN RSA PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY-----";
         assert_eq!(normalize_pem_newlines(pem.into()), pem);
+    }
+
+    #[test]
+    fn legacy_hosts_are_bare_lowercase_hostnames() {
+        assert!(legacy_hosts(None, "tower.example.com").unwrap().is_empty());
+        assert_eq!(
+            legacy_hosts(
+                Some(" Factory.Example.com , old.example.com,factory.example.com"),
+                "tower.example.com"
+            )
+            .unwrap(),
+            vec!["factory.example.com", "old.example.com"]
+        );
+    }
+
+    /// Set but unparseable is a startup error, never "no legacy hosts": a host
+    /// that silently never matches answers without the notice until the sunset.
+    #[test]
+    fn a_legacy_host_that_could_never_match_is_an_error() {
+        for bad in [
+            "https://factory.example.com",
+            "factory.example.com:443",
+            "factory.example.com/mcp",
+            "user@factory.example.com",
+            "factory example.com",
+            ",",
+            " , ",
+        ] {
+            let err = legacy_hosts(Some(bad), "tower.example.com")
+                .expect_err(bad)
+                .to_string();
+            assert!(err.contains("OF_LEGACY_HOSTS"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn the_canonical_host_cannot_also_be_legacy() {
+        let err = legacy_hosts(Some("TOWER.example.com"), "tower.example.com")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("canonical"), "{err}");
+    }
+
+    #[test]
+    fn a_sunset_is_an_rfc_3339_date_or_date_time() {
+        use chrono::TimeZone;
+        let midnight = Utc.with_ymd_and_hms(2027, 1, 31, 0, 0, 0).unwrap();
+        assert_eq!(legacy_sunset(None).unwrap(), None);
+        assert_eq!(
+            legacy_sunset(Some("2027-01-31T00:00:00Z")).unwrap(),
+            Some(midnight)
+        );
+        assert_eq!(
+            legacy_sunset(Some("2027-01-31T01:00:00+01:00")).unwrap(),
+            Some(midnight)
+        );
+        assert_eq!(legacy_sunset(Some("2027-01-31")).unwrap(), Some(midnight));
+    }
+
+    #[test]
+    fn an_unparseable_sunset_is_an_error_and_not_a_default() {
+        for bad in [
+            "soon",
+            "31/01/2027",
+            "2027-02-30",
+            "Sun, 31 Jan 2027 00:00:00 GMT",
+        ] {
+            let err = legacy_sunset(Some(bad)).expect_err(bad).to_string();
+            assert!(err.contains("OF_LEGACY_SUNSET"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_sunset_without_a_legacy_host_is_an_error() {
+        let err = legacy(None, Some("2027-01-31"), "tower.example.com")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("OF_LEGACY_HOSTS"), "{err}");
+
+        // Both unset is the normal state outside a rename, and changes nothing.
+        let (hosts, sunset) = legacy(None, None, "tower.example.com").unwrap();
+        assert!(hosts.is_empty() && sunset.is_none());
+
+        let (hosts, sunset) = legacy(
+            Some("old.example.com"),
+            Some("2027-01-31"),
+            "tower.example.com",
+        )
+        .unwrap();
+        assert_eq!(hosts, vec!["old.example.com"]);
+        assert!(sunset.is_some());
+    }
+
+    #[test]
+    fn the_legacy_hosts_are_accepted_by_the_mcp_endpoint() {
+        let mut config = Config::for_test();
+        config.legacy_hosts = vec!["old.example.com".into()];
+        assert!(config
+            .allowed_hosts()
+            .contains(&"old.example.com".to_string()));
     }
 
     #[test]

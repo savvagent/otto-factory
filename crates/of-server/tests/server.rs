@@ -44,6 +44,8 @@ fn config(static_dir: &str) -> Config {
         upgrade_url: PLATFORM.into(),
         retired_set: vec![],
         extra_allowed_hosts: vec![],
+        legacy_hosts: vec![],
+        legacy_sunset: None,
         allowed_origins: vec![],
         static_dir: static_dir.into(),
         run_migrations: false,
@@ -397,6 +399,347 @@ async fn the_console_fallback_stops_at_the_api(pool: PgPool) {
         assert!(body_text(lookalike)
             .await
             .contains("<title>console</title>"));
+    }
+
+    watcher.shutdown().await;
+}
+
+// ------------------------------------------------------------- legacy hosts
+
+/// The deprecated host of the legacy tests. `PUBLIC` stays canonical.
+const LEGACY: &str = "old.factory.test";
+/// Where the Worker's subrequest lands: the origin's own name, in `Host`.
+const ORIGIN: &str = "origin.factory.test";
+
+fn legacy_config(static_dir: &str, sunset: Option<&str>) -> Config {
+    let mut config = config(static_dir);
+    config.legacy_hosts = vec![LEGACY.into()];
+    config.extra_allowed_hosts = vec![ORIGIN.into()];
+    config.legacy_sunset = sunset.map(|s| chrono::DateTime::parse_from_rfc3339(s).unwrap().into());
+    config
+}
+
+/// A request as the Worker forwards it: `Host` is the origin, and the public
+/// host the caller used survives only in `X-Forwarded-Host`.
+fn via(method: &str, uri: &str, public_host: &str) -> http::request::Builder {
+    http::Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("host", ORIGIN)
+        .header("x-forwarded-host", public_host)
+}
+
+async fn send(app: &axum::Router, req: http::Request<Body>) -> http::Response<Body> {
+    app.clone().oneshot(req).await.unwrap()
+}
+
+fn header<'a>(response: &'a http::Response<Body>, name: &str) -> Option<&'a str> {
+    response
+        .headers()
+        .get(name)
+        .map(|v| v.to_str().expect("ascii header"))
+}
+
+fn initialize_body() -> Body {
+    Body::from(
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": { "name": "legacy-test", "version": "1" },
+            },
+        })
+        .to_string(),
+    )
+}
+
+fn mcp_post(public_host: &str, token: &str, body: Body) -> http::Request<Body> {
+    via("POST", "/mcp", public_host)
+        .header("authorization", format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .header("accept", "application/json, text/event-stream")
+        .body(body)
+        .unwrap()
+}
+
+/// Every surface answers a legacy-host request with the notice — the agent
+/// surface's `401`, discovery, the console API, a webhook receiver, health, and
+/// the SPA fallback — and the same requests on the canonical host carry none
+/// of it.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn every_response_through_a_legacy_host_carries_the_deprecation_notice(pool: PgPool) {
+    let bundle = Bundle::new("legacy-notice");
+    let db = Db::from_pool(pool.clone());
+    let platform = MockPlatform::start().await;
+    let watcher = Watcher::spawn(pool).await.unwrap();
+    let app = of_server::router(
+        db,
+        watcher.clone(),
+        platform.client(),
+        &legacy_config(bundle.path(), Some("2027-01-31T00:00:00Z")),
+    )
+    .expect("router");
+
+    for (method, path) in [
+        ("POST", "/mcp"),
+        ("GET", "/.well-known/oauth-protected-resource"),
+        ("GET", "/api/orgs/acme/repos"),
+        ("POST", "/platform/webhooks"),
+        ("GET", "/healthz"),
+        ("GET", "/o/acme/queue"),
+    ] {
+        let legacy = send(&app, via(method, path, LEGACY).body(Body::empty()).unwrap()).await;
+        assert_eq!(header(&legacy, "deprecation"), Some("true"), "{path}");
+        assert_eq!(
+            header(&legacy, "link"),
+            Some(format!(r#"<{PUBLIC}{path}>; rel="successor-version""#).as_str()),
+            "{path}"
+        );
+        assert_eq!(
+            header(&legacy, "sunset"),
+            Some("Sun, 31 Jan 2027 00:00:00 GMT"),
+            "{path}"
+        );
+
+        let canonical = send(
+            &app,
+            via(method, path, "factory.test")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(canonical.status(), legacy.status(), "{path}");
+        for name in ["deprecation", "link", "sunset"] {
+            assert_eq!(header(&canonical, name), None, "{path} {name}");
+        }
+    }
+
+    // With no proxy in front there is no X-Forwarded-Host, and Host is the
+    // public host itself.
+    let direct = send(
+        &app,
+        http::Request::builder()
+            .uri("/healthz")
+            .header("host", LEGACY)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(header(&direct, "deprecation"), Some("true"));
+
+    // And X-Forwarded-Host wins over Host: a legacy Host forwarded for the
+    // canonical name is canonical.
+    let forwarded_canonical = send(
+        &app,
+        http::Request::builder()
+            .uri("/healthz")
+            .header("host", LEGACY)
+            .header("x-forwarded-host", "factory.test")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(header(&forwarded_canonical, "deprecation"), None);
+
+    watcher.shutdown().await;
+}
+
+/// `Sunset` is announced only when a date was configured; the rest of the
+/// notice does not depend on it.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn the_sunset_header_appears_only_when_a_date_is_configured(pool: PgPool) {
+    let db = Db::from_pool(pool.clone());
+    let platform = MockPlatform::start().await;
+    let watcher = Watcher::spawn(pool).await.unwrap();
+    let app = of_server::router(
+        db,
+        watcher.clone(),
+        platform.client(),
+        &legacy_config("web/build", None),
+    )
+    .expect("router");
+
+    let response = send(
+        &app,
+        via("GET", "/healthz", LEGACY).body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(header(&response, "deprecation"), Some("true"));
+    assert!(header(&response, "link").is_some());
+    assert_eq!(header(&response, "sunset"), None);
+
+    watcher.shutdown().await;
+}
+
+/// Before the cutover `OF_LEGACY_HOSTS` is unset, and nothing changes: not even
+/// a request that names the would-be legacy host gets a notice.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn without_legacy_hosts_nothing_is_deprecated(pool: PgPool) {
+    let db = Db::from_pool(pool.clone());
+    let platform = MockPlatform::start().await;
+    let watcher = Watcher::spawn(pool).await.unwrap();
+    let app = of_server::router(db, watcher.clone(), platform.client(), &config("web/build"))
+        .expect("router");
+
+    let response = send(
+        &app,
+        via("GET", "/healthz", LEGACY).body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(response.status(), http::StatusCode::OK);
+    for name in ["deprecation", "link", "sunset"] {
+        assert_eq!(header(&response, name), None, "{name}");
+    }
+
+    watcher.shutdown().await;
+}
+
+/// RFC 9728 §3.3: a client checks that the metadata's `resource` is the URL it
+/// started from. On the legacy host both the document and the `401` pointing
+/// at it therefore name the legacy host, or a fresh sign-in on the old URL
+/// fails until the sunset. The canonical host is unchanged.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn legacy_discovery_advertises_the_legacy_resource(pool: PgPool) {
+    let db = Db::from_pool(pool.clone());
+    let platform = MockPlatform::start().await;
+    let watcher = Watcher::spawn(pool).await.unwrap();
+    let app = of_server::router(
+        db,
+        watcher.clone(),
+        platform.client(),
+        &legacy_config("web/build", None),
+    )
+    .expect("router");
+
+    let prm = |host: &'static str| {
+        via("GET", "/.well-known/oauth-protected-resource", host)
+            .body(Body::empty())
+            .unwrap()
+    };
+    let legacy_doc = body_json(send(&app, prm(LEGACY)).await).await;
+    assert_eq!(legacy_doc["resource"], format!("https://{LEGACY}/mcp"));
+    assert_eq!(legacy_doc["authorization_servers"][0], PLATFORM);
+    let canonical_doc = body_json(send(&app, prm("factory.test")).await).await;
+    assert_eq!(canonical_doc["resource"], RESOURCE);
+
+    let challenge = |response: &http::Response<Body>| {
+        header(response, "www-authenticate")
+            .expect("no WWW-Authenticate")
+            .to_string()
+    };
+    let legacy_401 = send(
+        &app,
+        via("POST", "/mcp", LEGACY).body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(legacy_401.status(), http::StatusCode::UNAUTHORIZED);
+    assert!(
+        challenge(&legacy_401).contains(&format!(
+            r#"resource_metadata="https://{LEGACY}/.well-known/oauth-protected-resource""#
+        )),
+        "{}",
+        challenge(&legacy_401)
+    );
+    let canonical_401 = send(
+        &app,
+        via("POST", "/mcp", "factory.test")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert!(
+        challenge(&canonical_401).contains(&format!(
+            r#"resource_metadata="{PUBLIC}/.well-known/oauth-protected-resource""#
+        )),
+        "{}",
+        challenge(&canonical_401)
+    );
+
+    watcher.shutdown().await;
+}
+
+/// `initialize` through the legacy host opens its instructions with the
+/// deprecation paragraph — the new URL and the sunset date — and through the
+/// canonical host it does not.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn initialize_over_a_legacy_host_opens_with_the_deprecation_paragraph(pool: PgPool) {
+    let db = Db::from_pool(pool.clone());
+    let platform = MockPlatform::start().await;
+    let watcher = Watcher::spawn(pool).await.unwrap();
+    let app = of_server::router(
+        db,
+        watcher.clone(),
+        platform.client(),
+        &legacy_config("web/build", Some("2027-01-31T00:00:00Z")),
+    )
+    .expect("router");
+    let (org, user) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+    let token = platform.issue(org, user, Role::Owner, of_core::scopes::KNOWN);
+
+    let instructions = |response: serde_json::Value| {
+        response["result"]["instructions"]
+            .as_str()
+            .unwrap_or_else(|| panic!("no instructions: {response}"))
+            .to_string()
+    };
+
+    let legacy = send(&app, mcp_post(LEGACY, &token, initialize_body())).await;
+    assert_eq!(legacy.status(), http::StatusCode::OK);
+    assert_eq!(header(&legacy, "deprecation"), Some("true"));
+    let text = instructions(body_json(legacy).await);
+    let notice = text.split("\n\n").next().unwrap();
+    assert!(notice.starts_with("DEPRECATED"), "{text}");
+    assert!(notice.contains(RESOURCE), "names the new URL: {notice}");
+    assert!(
+        notice.contains("2027-01-31T00:00:00Z"),
+        "names the sunset: {notice}"
+    );
+    assert!(text.contains("Call whoami"), "the guidance follows: {text}");
+
+    let canonical = send(&app, mcp_post("factory.test", &token, initialize_body())).await;
+    assert_eq!(canonical.status(), http::StatusCode::OK);
+    let text = instructions(body_json(canonical).await);
+    assert!(!text.contains("DEPRECATED"), "{text}");
+    assert!(text.starts_with("otto-tower coordinates"), "{text}");
+
+    watcher.shutdown().await;
+}
+
+/// The invariant the whole feature rests on: the host selects what is
+/// *advertised*, never what is *accepted*. Over the legacy host a token minted
+/// for `OF_RESOURCE_URI` works, and a token minted for the legacy host's own
+/// URI does not — this service asks the platform about every token as
+/// `OF_RESOURCE_URI` and nothing else, so no header a caller sends can choose
+/// the audience. (In production the platform's alias makes a token requested
+/// for the old URI introspect as this resource; that is the platform's to do,
+/// not something this binary infers from a Host.)
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_legacy_host_never_chooses_the_audience(pool: PgPool) {
+    let db = Db::from_pool(pool.clone());
+    let platform = MockPlatform::start().await;
+    let watcher = Watcher::spawn(pool).await.unwrap();
+    let app = of_server::router(
+        db,
+        watcher.clone(),
+        platform.client(),
+        &legacy_config("web/build", None),
+    )
+    .expect("router");
+    let (org, user) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+
+    let canonical_token = platform.issue(org, user, Role::Owner, of_core::scopes::KNOWN);
+    let ok = send(&app, mcp_post(LEGACY, &canonical_token, initialize_body())).await;
+    assert_eq!(ok.status(), http::StatusCode::OK);
+
+    let legacy_uri = format!("https://{LEGACY}/mcp");
+    let legacy_token =
+        platform.issue_for(&legacy_uri, org, user, Role::Owner, of_core::scopes::KNOWN);
+    for host in [LEGACY, "factory.test"] {
+        let refused = send(&app, mcp_post(host, &legacy_token, initialize_body())).await;
+        assert_eq!(refused.status(), http::StatusCode::UNAUTHORIZED, "{host}");
     }
 
     watcher.shutdown().await;
