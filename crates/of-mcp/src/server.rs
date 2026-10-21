@@ -201,6 +201,23 @@ impl Factory {
             .map_err(|e| error::from_billing(&e))
     }
 
+    /// [`Self::charge`] for a call that is metered: the row carries `metered`'s
+    /// meter and quantity and is billable. Same placement rule as `charge`: in
+    /// the tool's own transaction, before the work, so a failed call rolls it
+    /// back.
+    pub async fn charge_metered(
+        &self,
+        tx: &mut Tx<'_>,
+        caller: &Principal,
+        tool: &str,
+        metered: &of_billing::Metered,
+    ) -> Result<of_billing::Charge, ErrorData> {
+        self.meter
+            .charge_metered(tx, caller.user_id, tool, metered)
+            .await
+            .map_err(|e| error::from_billing(&e))
+    }
+
     /// Record an idempotent replay of `tool` as `Free`, never billed and
     /// never refused — see [`Self::charge`]'s doc comment for why this has
     /// to run instead of, not before, `charge` on a replay. Called by

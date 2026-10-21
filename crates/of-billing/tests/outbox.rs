@@ -30,6 +30,16 @@ async fn record(db: &Db, org: OrgId, user: UserId, meter: &Meter, tool: &str) {
     tx.commit().await.unwrap();
 }
 
+/// The billable twin of [`record`]: a completed job, the one metered call.
+async fn record_metered(db: &Db, org: OrgId, user: UserId, meter: &Meter) {
+    let mut tx = db.begin(org).await.unwrap();
+    meter
+        .charge_metered(&mut tx, user, "complete_job", &Metered::jobs_completed())
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+}
+
 #[sqlx::test(migrator = "of_core::MIGRATOR")]
 async fn a_failed_call_is_not_recorded(pool: PgPool) {
     let platform = MockPlatform::start().await;
@@ -38,7 +48,10 @@ async fn a_failed_call_is_not_recorded(pool: PgPool) {
     let (org, user) = (OrgId::new(), UserId::new());
 
     let mut tx = db.begin(org).await.unwrap();
-    meter.charge(&mut tx, user, "add_job").await.unwrap();
+    meter
+        .charge_metered(&mut tx, user, "complete_job", &Metered::jobs_completed())
+        .await
+        .unwrap();
     // The tool fails after charging: its transaction rolls back, meter and all.
     tx.rollback().await.unwrap();
 
@@ -52,7 +65,7 @@ async fn a_recorded_call_ships_once_and_leaves_the_outbox(pool: PgPool) {
     let meter = Meter::new(platform.client(), false, "https://x.test/billing");
     let (org, user) = (OrgId::new(), UserId::new());
 
-    record(&db, org, user, &meter, "add_job").await;
+    record_metered(&db, org, user, &meter).await;
     record(&db, org, user, &meter, "list_jobs").await;
     assert_eq!(outbox::pending(&db).await.unwrap(), 2);
 
@@ -68,7 +81,7 @@ async fn a_recorded_call_ships_once_and_leaves_the_outbox(pool: PgPool) {
         .iter()
         .map(|e| (e.tool.as_str(), e.billable))
         .collect();
-    assert!(billable.contains(&("add_job", true)));
+    assert!(billable.contains(&("complete_job", true)));
     assert!(
         billable.contains(&("list_jobs", false)),
         "free calls are recorded too"
@@ -96,7 +109,7 @@ async fn an_outage_loses_nothing_and_the_backlog_ships_later_exactly_once(pool: 
     platform.set_down(true);
     // The tools keep working and keep recording while the platform is away.
     for _ in 0..5 {
-        record(&db, org, user, &meter, "add_job").await;
+        record_metered(&db, org, user, &meter).await;
     }
     for _ in 0..3 {
         assert!(outbox::ship_once(&db, &client, &cfg()).await.is_err());
@@ -178,7 +191,7 @@ async fn concurrent_shippers_never_double_count(pool: PgPool) {
     let meter = Meter::new(client.clone(), false, "https://x.test/billing");
     let (org, user) = (OrgId::new(), UserId::new());
     for _ in 0..40 {
-        record(&db, org, user, &meter, "add_job").await;
+        record_metered(&db, org, user, &meter).await;
     }
 
     let slow = ShipperConfig {
@@ -212,7 +225,7 @@ async fn a_rejected_event_is_kept_in_a_dead_letter_table_not_dropped(pool: PgPoo
     let meter = Meter::new(client.clone(), false, "https://x.test/billing");
     let (gone, user) = (OrgId::new(), UserId::new());
     platform.reject_usage_for(gone.as_uuid());
-    record(&db, gone, user, &meter, "add_job").await;
+    record_metered(&db, gone, user, &meter).await;
 
     let report = outbox::ship_once(&db, &client, &cfg()).await.unwrap();
     assert_eq!(report.rejected, 1);
@@ -227,7 +240,7 @@ async fn a_rejected_event_is_kept_in_a_dead_letter_table_not_dropped(pool: PgPoo
             .fetch_one(db.pool())
             .await
             .unwrap();
-    assert_eq!((tool.as_str(), billable), ("add_job", true));
+    assert_eq!((tool.as_str(), billable), ("complete_job", true));
     assert!(
         reason.contains("does not exist"),
         "the platform's reason is kept: {reason}"
@@ -244,7 +257,7 @@ async fn a_receipt_that_does_not_add_up_deletes_nothing(pool: PgPool) {
     let meter = Meter::new(client.clone(), false, "https://x.test/billing");
     let (org, user) = (OrgId::new(), UserId::new());
     for _ in 0..3 {
-        record(&db, org, user, &meter, "add_job").await;
+        record_metered(&db, org, user, &meter).await;
     }
 
     platform.short_receipts(1);
@@ -279,7 +292,7 @@ async fn the_background_task_drains_the_outbox_and_stops_on_shutdown(pool: PgPoo
     let (org, user) = (OrgId::new(), UserId::new());
     platform.set_down(true);
     for _ in 0..3 {
-        record(&db, org, user, &meter, "add_job").await;
+        record_metered(&db, org, user, &meter).await;
     }
 
     let (tx, rx) = tokio::sync::watch::channel(false);
@@ -317,7 +330,10 @@ async fn a_spent_hard_stop_bucket_refuses_billable_calls_and_records_nothing(poo
     platform.set_usage(org.as_uuid(), 500, 500, true);
 
     let mut tx = db.begin(org).await.unwrap();
-    let err = meter.charge(&mut tx, user, "add_job").await.unwrap_err();
+    let err = meter
+        .charge_metered(&mut tx, user, "complete_job", &Metered::jobs_completed())
+        .await
+        .unwrap_err();
     assert!(
         matches!(err, BillingError::QuotaExceeded { included: 500, .. }),
         "{err:?}"
@@ -342,7 +358,7 @@ async fn the_call_that_lands_on_the_limit_is_allowed(pool: PgPool) {
     let (org, user) = (OrgId::new(), UserId::new());
     platform.add_org(org.as_uuid(), "acme", "Acme");
     platform.set_usage(org.as_uuid(), 499, 500, true);
-    record(&db, org, user, &meter, "add_job").await;
+    record_metered(&db, org, user, &meter).await;
 }
 
 #[sqlx::test(migrator = "of_core::MIGRATOR")]
@@ -353,7 +369,7 @@ async fn an_overage_plan_is_never_refused(pool: PgPool) {
     let (org, user) = (OrgId::new(), UserId::new());
     platform.add_org(org.as_uuid(), "acme", "Acme");
     platform.set_usage(org.as_uuid(), 9_999, 500, false);
-    record(&db, org, user, &meter, "add_job").await;
+    record_metered(&db, org, user, &meter).await;
 }
 
 #[sqlx::test(migrator = "of_core::MIGRATOR")]
@@ -364,7 +380,7 @@ async fn with_enforcement_off_the_platform_is_never_asked(pool: PgPool) {
     let (org, user) = (OrgId::new(), UserId::new());
     platform.add_org(org.as_uuid(), "acme", "Acme");
     platform.set_usage(org.as_uuid(), 9_999, 500, true);
-    record(&db, org, user, &meter, "add_job").await;
+    record_metered(&db, org, user, &meter).await;
     assert_eq!(platform.lookup_calls(), 0);
 }
 
@@ -377,7 +393,7 @@ async fn a_platform_outage_does_not_block_work_it_only_defers_the_bill(pool: PgP
     let meter = Meter::new(platform.client(), true, "https://x.test/billing");
     let (org, user) = (OrgId::new(), UserId::new());
     platform.set_down(true);
-    record(&db, org, user, &meter, "add_job").await;
+    record_metered(&db, org, user, &meter).await;
     assert_eq!(outbox::pending(&db).await.unwrap(), 1);
 }
 
@@ -433,12 +449,15 @@ async fn unshipped_usage_counts_against_the_bucket(pool: PgPool) {
     platform.set_usage(org.as_uuid(), 498, 500, true);
 
     // Two calls fit (498 -> 500), and nothing has been shipped.
-    record(&db, org, user, &meter, "add_job").await;
-    record(&db, org, user, &meter, "add_job").await;
+    record_metered(&db, org, user, &meter).await;
+    record_metered(&db, org, user, &meter).await;
 
     // The platform still says 498, but the outbox holds two more.
     let mut tx = db.begin(org).await.unwrap();
-    let err = meter.charge(&mut tx, user, "add_job").await.unwrap_err();
+    let err = meter
+        .charge_metered(&mut tx, user, "complete_job", &Metered::jobs_completed())
+        .await
+        .unwrap_err();
     assert!(
         matches!(err, BillingError::QuotaExceeded { used: 500, .. }),
         "{err:?}"
@@ -465,7 +484,7 @@ async fn an_outage_is_remembered_so_it_does_not_slow_every_call(pool: PgPool) {
     platform.set_down(true);
 
     for _ in 0..5 {
-        record(&db, org, user, &meter, "add_job").await;
+        record_metered(&db, org, user, &meter).await;
     }
     assert_eq!(
         platform.lookup_calls(),
@@ -476,7 +495,7 @@ async fn an_outage_is_remembered_so_it_does_not_slow_every_call(pool: PgPool) {
     platform.set_down(false);
     platform.set_usage(org.as_uuid(), 500, 500, true);
     // Still inside the remembered window: allowed without asking.
-    record(&db, org, user, &meter, "add_job").await;
+    record_metered(&db, org, user, &meter).await;
     assert_eq!(
         platform.lookup_calls(),
         0,
@@ -495,7 +514,7 @@ async fn warm_looks_the_org_up_before_any_transaction(pool: PgPool) {
 
     meter.warm(org).await;
     assert_eq!(platform.lookup_calls(), 1);
-    record(&db, org, user, &meter, "add_job").await;
+    record_metered(&db, org, user, &meter).await;
     assert_eq!(
         platform.lookup_calls(),
         1,

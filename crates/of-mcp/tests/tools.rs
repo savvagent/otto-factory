@@ -396,11 +396,11 @@ async fn add_job_with_an_idempotency_key_replays_instead_of_duplicating(pool: Pg
     let after = env.usage(&caller).await;
     assert_eq!(
         after["billableUsed"].as_i64().unwrap() - billable_before,
-        1,
-        "a replay must not be billed a second time"
+        0,
+        "add_job is free, replayed or not; only a completed job is billed"
     );
-    // 2 add_job calls (one billable, one recorded-but-free) + this `usage`
-    // read itself, which is also Free-but-recorded (of_billing::classify).
+    // 2 add_job calls (both free, the second a replay) + this `usage` read
+    // itself, which is also recorded (of_billing::classify).
     assert_eq!(
         after["totalCalls"].as_i64().unwrap() - total_before,
         3,
@@ -1689,11 +1689,11 @@ async fn send_message_with_an_idempotency_key_replays_instead_of_duplicating(poo
     let after = env.usage(&caller).await;
     assert_eq!(
         after["billableUsed"].as_i64().unwrap() - billable_before,
-        1,
-        "a replay must not be billed a second time"
+        0,
+        "send_message is free, replayed or not; only a completed job is billed"
     );
-    // 2 send_message calls (one billable, one recorded-but-free) + this
-    // `usage` read itself, which is also Free-but-recorded.
+    // 2 send_message calls (both free, the second a replay) + this `usage`
+    // read itself, which is also recorded.
     assert_eq!(
         after["totalCalls"].as_i64().unwrap() - total_before,
         3,
@@ -2183,6 +2183,189 @@ fn every_tool_has_a_price() {
     assert!(problems.is_empty(), "{problems:#?}");
 }
 
+/// What a tool call left in the usage outbox: `(billable, meter, quantity)` for
+/// every row recorded for `tool`.
+async fn outbox_rows(env: &Env, tool: &str) -> Vec<(bool, Option<String>, Option<i64>)> {
+    sqlx::query_as("SELECT billable, meter, quantity FROM usage_outbox WHERE tool = $1")
+        .bind(tool)
+        .fetch_all(env.db.pool())
+        .await
+        .unwrap()
+}
+
+impl Env {
+    async fn claim(&self, caller: &Principal, id: &str, agent: &str) -> serde_json::Value {
+        ok(self
+            .factory
+            .claim_jobs(
+                Extension(parts(caller)),
+                Parameters(tools::jobs::ClaimJobsArgs {
+                    jobs: vec![id.to_string()],
+                    agent: Some(agent.into()),
+                    ttl: None,
+                }),
+            )
+            .await)
+    }
+
+    /// Queue, claim and complete one job: the one billable thing a caller does.
+    async fn complete_one(&self, caller: &Principal, title: &str) {
+        let id = self.add_job(caller, title).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        self.claim(caller, &id, "agent-one").await;
+        self.complete(caller, &id, None).await.unwrap();
+    }
+
+    /// Queue and claim a job, returning its id: ready to be completed.
+    async fn claimed_job(&self, caller: &Principal, title: &str) -> String {
+        let id = self.add_job(caller, title).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        self.claim(caller, &id, "agent-one").await;
+        id
+    }
+
+    async fn complete(
+        &self,
+        caller: &Principal,
+        id: &str,
+        expected_attempts: Option<i32>,
+    ) -> Result<serde_json::Value, ErrorData> {
+        self.factory
+            .complete_job(
+                Extension(parts(caller)),
+                Parameters(tools::jobs::CompleteJobArgs {
+                    job: id.to_string(),
+                    result: Some("done".into()),
+                    expected_attempts,
+                }),
+            )
+            .await
+            .map(|j| serde_json::to_value(j.0).unwrap())
+    }
+}
+
+/// A completed job is the only metered call: one row carrying the meter, a
+/// quantity of one, and `billable = true`.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_completed_job_writes_one_metered_row(pool: PgPool) {
+    let (env, caller) = env(pool).await;
+    env.register(&caller).await;
+    let id = env.add_job(&caller, "work").await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    env.claim(&caller, &id, "agent-one").await;
+
+    env.complete(&caller, &id, None).await.unwrap();
+
+    assert_eq!(
+        outbox_rows(&env, "complete_job").await,
+        vec![(
+            true,
+            Some("otto-factory/jobs_completed".to_string()),
+            Some(1)
+        )]
+    );
+}
+
+/// Completing a completed job fails, and the failure rolls its row back: a job
+/// is billed once however many times an agent retries.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn completing_a_job_twice_bills_it_once(pool: PgPool) {
+    let (env, caller) = env(pool).await;
+    env.register(&caller).await;
+    let id = env.add_job(&caller, "work").await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    env.claim(&caller, &id, "agent-one").await;
+    env.complete(&caller, &id, None).await.unwrap();
+
+    assert!(env.complete(&caller, &id, None).await.is_err());
+
+    assert_eq!(outbox_rows(&env, "complete_job").await.len(), 1);
+}
+
+/// A refused completion (a stale claim generation, or someone who does not
+/// hold the claim) is not work performed and writes no row.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_refused_completion_writes_no_row(pool: PgPool) {
+    let (env, caller) = env(pool).await;
+    env.register(&caller).await;
+    let intruder = env.teammate(caller.org_id, "mallory@acme.test").await;
+    let id = env.add_job(&caller, "work").await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let claimed = env.claim(&caller, &id, "agent-one").await;
+    let attempts = claimed["jobs"][0]["attempts"].as_i64().unwrap() as i32;
+
+    let stale = env.complete(&caller, &id, Some(attempts + 1)).await;
+    assert!(stale.is_err(), "a stale expectedAttempts must be refused");
+    let non_holder = env.complete(&intruder, &id, None).await;
+    assert!(non_holder.is_err(), "a non-holder must be refused");
+
+    assert!(outbox_rows(&env, "complete_job").await.is_empty());
+}
+
+/// Everything except a completed job is free: recorded, never billable, and
+/// carrying no meter.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn coordination_calls_are_recorded_as_free(pool: PgPool) {
+    let (env, caller) = env(pool).await;
+    env.register(&caller).await;
+    let id = env.add_job(&caller, "work").await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    env.claim(&caller, &id, "agent-one").await;
+    ok(env
+        .factory
+        .send_message(
+            Extension(parts(&caller)),
+            Parameters(tools::coord::SendMessageArgs {
+                body: "hello".into(),
+                to: None,
+                kind: None,
+                repo: Some("api".into()),
+                remote: None,
+                job: None,
+                in_reply_to: None,
+                agent: None,
+                idempotency_key: None,
+            }),
+        )
+        .await);
+    ok(env
+        .factory
+        .acquire_lease(
+            Extension(parts(&caller)),
+            Parameters(tools::coord::AcquireLeaseArgs {
+                resource: None,
+                branch: Some("main".into()),
+                repo: Some("api".into()),
+                remote: None,
+                agent: Some("agent-one".into()),
+                job: None,
+                ttl_seconds: Some(300),
+            }),
+        )
+        .await);
+
+    for tool in ["add_job", "claim_jobs", "send_message", "acquire_lease"] {
+        let rows = outbox_rows(&env, tool).await;
+        assert!(!rows.is_empty(), "{tool} was not recorded");
+        assert!(
+            rows.iter().all(|r| *r == (false, None, None)),
+            "{tool} must be free and unmetered: {rows:?}"
+        );
+    }
+}
+
 /// The rule as customers are told it: you pay for work performed, not for
 /// looking. Both kinds are recorded either way, so the split can be repriced
 /// later against real history.
@@ -2195,8 +2378,8 @@ async fn work_is_billed_and_looking_is_not(pool: PgPool) {
     let billable_before = before["billableUsed"].as_i64().unwrap();
     let total_before = before["totalCalls"].as_i64().unwrap();
 
-    // One billable call.
-    env.add_job(&caller, "work").await;
+    // One billable call: a completed job. Queueing and claiming it are free.
+    env.complete_one(&caller, "work").await;
 
     // Three free ones.
     for _ in 0..3 {
@@ -2213,12 +2396,13 @@ async fn work_is_billed_and_looking_is_not(pool: PgPool) {
     assert_eq!(
         after["billableUsed"].as_i64().unwrap() - billable_before,
         1,
-        "only the add_job should have consumed the bucket"
+        "only the complete_job should have consumed the bucket"
     );
     assert_eq!(
         after["totalCalls"].as_i64().unwrap() - total_before,
-        // add_job + 3 reads + the `usage` call that produced `after`.
-        5,
+        // add_job + claim_jobs + complete_job + 3 reads + the `usage` call
+        // that produced `after`.
+        7,
         "every call is recorded, billable or not"
     );
     assert!(after["remaining"].as_i64().unwrap() < after["includedOps"].as_i64().unwrap());
@@ -2233,25 +2417,17 @@ async fn a_failed_call_is_not_billed(pool: PgPool) {
 
     let before = env.usage(&caller).await;
 
-    // Billable, well-formed, and doomed: the remote resolves to nothing.
-    let e = err(env
-        .factory
-        .add_job(
-            Extension(parts(&caller)),
-            Parameters(tools::jobs::AddJobArgs {
-                title: "work".into(),
-                repo: None,
-                remote: Some("git@github.com:someone/else.git".into()),
-                description: None,
-                ticket_ref: None,
-                agent_type: None,
-                metadata: None,
-                depends_on: vec![],
-                idempotency_key: None,
-            }),
-        )
-        .await);
-    assert_eq!(code_of(&e), "repo_unresolved");
+    // Billable, well-formed, and doomed: nobody has claimed the job, so it has
+    // no holder to complete it.
+    let id = env.add_job(&caller, "work").await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let e = env.complete(&caller, &id, None).await.unwrap_err();
+    assert!(
+        matches!(code_of(&e).as_str(), "wrong_status" | "already_claimed"),
+        "{e:?}"
+    );
 
     let after = env.usage(&caller).await;
     assert_eq!(
@@ -2260,8 +2436,8 @@ async fn a_failed_call_is_not_billed(pool: PgPool) {
     );
     assert_eq!(
         after["totalCalls"].as_i64().unwrap() - before["totalCalls"].as_i64().unwrap(),
-        1,
-        "the failed call left no trace at all — only the second usage call counted"
+        2,
+        "the failed complete_job left no trace at all — only the add_job and the usage call counted"
     );
 }
 
@@ -2293,27 +2469,12 @@ async fn whoami_reports_the_allowance(pool: PgPool) {
 async fn enforcement_stops_work_but_never_reads(pool: PgPool) {
     let (env, caller) = env_metered(pool, true).await;
     env.register(&caller).await;
+    let id = env.claimed_job(&caller, "one job too many").await;
 
     // Spend the Free plan's entire bucket.
     env.set_standing(caller.org_id, 500, 500).await;
 
-    let e = err(env
-        .factory
-        .add_job(
-            Extension(parts(&caller)),
-            Parameters(tools::jobs::AddJobArgs {
-                title: "one job too many".into(),
-                repo: Some("api".into()),
-                description: None,
-                remote: None,
-                ticket_ref: None,
-                agent_type: None,
-                metadata: None,
-                depends_on: vec![],
-                idempotency_key: None,
-            }),
-        )
-        .await);
+    let e = env.complete(&caller, &id, None).await.unwrap_err();
 
     assert_eq!(code_of(&e), "quota_exceeded");
     assert_eq!(
@@ -2348,7 +2509,7 @@ async fn the_last_included_operation_is_allowed(pool: PgPool) {
 
     env.set_standing(caller.org_id, 499, 500).await;
 
-    env.add_job(&caller, "the five hundredth").await;
+    env.complete_one(&caller, "the five hundredth").await;
 
     let usage = env.usage(&caller).await;
     assert_eq!(usage["billableUsed"], 500);
@@ -2364,7 +2525,7 @@ async fn with_enforcement_off_an_over_budget_org_keeps_working(pool: PgPool) {
 
     env.set_standing(caller.org_id, 9000, 500).await;
 
-    env.add_job(&caller, "well past the bucket").await;
+    env.complete_one(&caller, "well past the bucket").await;
 
     let usage = env.usage(&caller).await;
     assert_eq!(usage["billableUsed"], 9001);
@@ -2379,8 +2540,8 @@ async fn with_enforcement_off_an_over_budget_org_keeps_working(pool: PgPool) {
 async fn usage_is_counted_per_org(pool: PgPool) {
     let (env, acme) = env(pool).await;
     env.register(&acme).await;
-    env.add_job(&acme, "acme work").await;
-    env.add_job(&acme, "more acme work").await;
+    env.complete_one(&acme, "acme work").await;
+    env.complete_one(&acme, "more acme work").await;
 
     let globex = env.org("globex", "Globex");
     let eve = env.member(globex.id, "eve@globex.test", Role::Owner);
@@ -2394,8 +2555,8 @@ async fn usage_is_counted_per_org(pool: PgPool) {
 
     let ours = env.usage(&acme).await;
     assert_eq!(
-        ours["billableUsed"], 3,
-        "register_repo plus two add_jobs; reading usage itself is free"
+        ours["billableUsed"], 2,
+        "two completed jobs; everything else, usage included, is free"
     );
 }
 
@@ -2694,16 +2855,14 @@ async fn sync_ticket_reports_an_outbound_failure_as_retriable(pool: PgPool) {
     assert_eq!(e.data.as_ref().unwrap()["retriable"], true);
 }
 
-/// The whole point of this issue: an org on a hard-stop plan already over its
-/// bucket must be refused *before* `sync_ticket` posts anything to the
-/// tracker, not after. The setup mirrors
-/// `sync_ticket_reports_an_outbound_failure_as_retriable` exactly (a binding
-/// is present, but the server has no GitHub App configured, so an outbound
-/// call — if one were attempted — would fail with `tracker_sync_failed`).
-/// Seeing `quota_exceeded` instead proves the pre-check ran first; if it
-/// didn't, this would return `tracker_sync_failed` just like that test does.
+/// `sync_ticket` is free, so an org on a hard-stop plan already over its bucket
+/// is never refused for quota: the outbound call is attempted. The setup is
+/// the one the earlier outbound-failure test uses (a binding is present, but
+/// the server has no GitHub App configured), so `tracker_sync_failed` proves
+/// the call went ahead, where a quota refusal would have been
+/// `quota_exceeded`.
 #[sqlx::test(migrations = "../of-core/migrations")]
-async fn sync_ticket_refuses_before_the_outbound_call_when_over_budget(pool: PgPool) {
+async fn sync_ticket_is_never_refused_for_quota_when_over_budget(pool: PgPool) {
     let (env, caller) = env_metered(pool, true).await;
     let repo = env.register(&caller).await;
     let repo_id: RepoId = repo["id"].as_str().unwrap().parse().unwrap();
@@ -2724,9 +2883,7 @@ async fn sync_ticket_refuses_before_the_outbound_call_when_over_budget(pool: PgP
     .unwrap();
     tx.commit().await.unwrap();
 
-    // Link and claim the job while the bucket still has room — these are
-    // themselves billable calls, and the point of this test is the refusal
-    // on `sync_ticket` specifically, not on getting the job into position.
+    // Link and claim the job into position.
     let job = env
         .add_job(&caller, "linked and bound, but the org is over budget")
         .await;
@@ -2756,13 +2913,8 @@ async fn sync_ticket_refuses_before_the_outbound_call_when_over_budget(pool: PgP
         )
         .await);
 
-    // Now spend the rest of the Free plan's bucket, so the org is exactly at
-    // its limit by the time `sync_ticket` is called. This test has already
-    // made a few real billable calls (add_job, link_ticket, claim_jobs), so
-    // both billable_count and total_count are updated together here — an
-    // update that only touched billable_count would leave total_count below
-    // billable_count, an impossible state for this table since every
-    // billable call is also a total one.
+    // Spend the Free plan's whole bucket, so the org is at its limit by the
+    // time `sync_ticket` is called.
     env.set_standing(caller.org_id, 500, 500).await;
 
     let e = err(env
@@ -2775,22 +2927,17 @@ async fn sync_ticket_refuses_before_the_outbound_call_when_over_budget(pool: PgP
 
     assert_eq!(
         code_of(&e),
-        "quota_exceeded",
-        "a quota_exceeded refusal proves the pre-check ran before the outbound call; \
-         tracker_sync_failed would mean the tracker was contacted anyway: {}",
+        "tracker_sync_failed",
+        "sync_ticket is free and must reach the tracker even over budget: {}",
         e.message
     );
-    assert_eq!(e.data.as_ref().unwrap()["retriable"], false);
 }
 
-/// The pre-check must judge the same total `charge` does: the platform's count
-/// *plus* this org's unshipped billable outbox rows. With the platform at 498 of
-/// 500 and two billable calls not yet shipped, the bucket is spent; a check that
-/// looked at the platform alone would let the tracker write through and leave
-/// the following `charge` to refuse a sync that had already happened. As in the
-/// test above, `tracker_sync_failed` here would mean the tracker was contacted.
+/// Unshipped usage cannot push `sync_ticket` over a bucket either: it is free,
+/// so with the platform at 498 of 500 and calls not yet shipped, the outbound
+/// call is still made (`tracker_sync_failed`, not `quota_exceeded`).
 #[sqlx::test(migrations = "../of-core/migrations")]
-async fn sync_ticket_counts_unshipped_usage_before_the_outbound_call(pool: PgPool) {
+async fn sync_ticket_ignores_unshipped_usage_and_reaches_the_tracker(pool: PgPool) {
     let (env, caller) = env_metered(pool, true).await;
     let repo = env.register(&caller).await;
     let repo_id: RepoId = repo["id"].as_str().unwrap().parse().unwrap();
@@ -2817,7 +2964,7 @@ async fn sync_ticket_counts_unshipped_usage_before_the_outbound_call(pool: PgPoo
     // Ships everything so far: the platform's figure is now the whole story.
     env.set_standing(caller.org_id, 498, 500).await;
 
-    // Two billable calls, recorded but deliberately left unshipped.
+    // Two calls, recorded but deliberately left unshipped.
     ok(env
         .factory
         .link_ticket(
@@ -2850,8 +2997,8 @@ async fn sync_ticket_counts_unshipped_usage_before_the_outbound_call(pool: PgPoo
         .await);
     assert_eq!(
         code_of(&e),
-        "quota_exceeded",
-        "unshipped usage must count before the tracker is contacted: {}",
+        "tracker_sync_failed",
+        "sync_ticket is free and must reach the tracker: {}",
         e.message
     );
 }
@@ -3120,7 +3267,7 @@ async fn a_token_opens_exactly_its_own_org_over_the_wire(pool: PgPool) {
     assert!(shipped
         .iter()
         .filter(|e| e.tool == "register_repo")
-        .all(|e| e.billable && e.user_id == Some(rob)));
+        .all(|e| !e.billable && e.user_id == Some(rob)));
 }
 
 /// A name the platform cannot resolve because the platform is down must be an

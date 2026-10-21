@@ -65,7 +65,7 @@ use serde::Serialize;
 
 use crate::classify;
 use crate::error::{BillingError, Result};
-use crate::outbox;
+use crate::outbox::{self, Metered};
 
 /// How long the quota check waits on the platform before allowing the call.
 ///
@@ -147,6 +147,31 @@ impl Meter {
         Ok(Charge {
             billable: class.is_billable(),
         })
+    }
+
+    /// Charge one metered tool call, or refuse it.
+    ///
+    /// Records the call with `metered`'s meter and quantity and `billable =
+    /// true`. For now it keeps the per-call enforcement path `charge` used for
+    /// a billable class (the quota lookup, the unshipped count, the
+    /// hard-stop comparison), so a spent bucket still refuses it and nothing
+    /// is written. That enforcement is replaced when the quota moves onto the
+    /// meter.
+    pub async fn charge_metered(
+        &self,
+        tx: &mut Tx<'_>,
+        user: UserId,
+        tool: &str,
+        metered: &Metered,
+    ) -> Result<Charge> {
+        if self.enforce {
+            if let Some(status) = self.status_for(tx.org()).await {
+                let unshipped = unshipped_billable(tx).await?;
+                self.refuse_if_spent(status, unshipped, tool)?;
+            }
+        }
+        outbox::enqueue(tx, Some(user), tool, true, Some(metered)).await?;
+        Ok(Charge { billable: true })
     }
 
     /// Record an idempotent replay of `tool` — always as `Free`, regardless

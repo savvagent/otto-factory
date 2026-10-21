@@ -1023,7 +1023,13 @@ impl Factory {
 
         let team = self.team_scope(&caller).await?;
         let mut tx = self.tx(&caller).await?;
-        self.charge(&mut tx, &caller, "complete_job").await?;
+        self.charge_metered(
+            &mut tx,
+            &caller,
+            "complete_job",
+            &of_billing::Metered::jobs_completed(),
+        )
+        .await?;
         ensure_job_visible(&mut tx, &team, &JobId::from(args.job.clone())).await?;
         let job = tx
             .complete_job(
