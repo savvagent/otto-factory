@@ -377,17 +377,37 @@ OF_LEGACY_HOSTS      = "otto-factory.savvagent.com"
 OF_LEGACY_SUNSET     = "<the same RFC 3339 $SUNSET>"
 ```
 
-`OF_LEGACY_HOSTS` is a comma-separated list of extra, deprecated hosts; `OF_LEGACY_SUNSET` is
-optional but you should set it. Both fail the boot when set but unparseable.
+`OF_LEGACY_HOSTS` is a comma-separated list of extra, deprecated bare hostnames; `OF_LEGACY_SUNSET` is
+optional but you should set it (an RFC 3339 date-time, or a date meaning midnight UTC). Both fail the
+boot when set but unparseable, as does a sunset with no legacy host or a legacy host equal to
+`OF_PUBLIC_URL`'s. Past the sunset the app keeps serving the old host until step 11, says in its
+notice that the host was retired, and logs a warning at every startup.
+
+Once that deploy is live, give the production Worker the same two facts, in `web/wrangler.jsonc`'s
+`env.production.vars`, and redeploy it (`npm run deploy` in `web/`):
+
+```jsonc
+"OF_PUBLIC_URL": "https://otto-tower.savvagent.com",
+"OF_LEGACY_HOSTS": "otto-factory.savvagent.com"
+```
+
+The Worker uses them only to send the old host's console pages and `/auth/login` to the new host
+with a `308`; it already sets `X-Forwarded-Host` on everything it proxies, which is how the origin
+knows which host a request used. Set them before the Fly flip and browsers are redirected to a
+console that cannot sign them in yet.
 
 **Verify:**
 - `GET https://otto-tower.savvagent.com/.well-known/oauth-protected-resource` names the new
   resource; an MCP client added with the new URL signs in and `whoami` says otto-tower.
 - A request through the old host still works and carries `Deprecation: true`, a
   `Link: <https://otto-tower.savvagent.com/…>; rel="successor-version"` and, with a sunset
-  configured, a `Sunset:` header. The browser console on the old host answers `308` to the new host
-  (the Worker); `/mcp`, `/.well-known`, `/api`, `/oauth`, `/platform/webhooks` and `/webhooks` are
-  proxied, never redirected.
+  configured, a `Sunset:` header. The browser console on the old host (its pages and `/auth/login`)
+  answers `308` to the new host (the Worker); `/mcp`, `/.well-known`, `/api`, the rest of `/auth`,
+  `/oauth`, `/platform/webhooks` and `/webhooks` are proxied, never redirected.
+- `GET https://otto-factory.savvagent.com/.well-known/oauth-protected-resource` names
+  `https://otto-factory.savvagent.com/mcp` as `resource` (so a fresh sign-in on the old URL still
+  passes the client's resource check), and an MCP client still configured with the old URL sees
+  instructions that open with a deprecation paragraph naming the new URL and the sunset.
 - `https://otto-tower.savvagent.com/` signs in (the new console client) and the header reads otto-tower.
 
 **Stop if:** the app answers 503, fails to boot (an unparseable `OF_LEGACY_*` value), or any check
@@ -441,7 +461,8 @@ otto-platform-server resource drop-alias https://otto-factory.savvagent.com/mcp
 ```
 
 The alias row is kept as a tombstone, so the old URI can never be registered to a different server.
-Then clear `OF_LEGACY_HOSTS` and `OF_LEGACY_SUNSET` from `fly.toml`, redeploy, and remove the old
+Then clear `OF_LEGACY_HOSTS` and `OF_LEGACY_SUNSET` from `fly.toml`, redeploy, remove
+`OF_PUBLIC_URL` and `OF_LEGACY_HOSTS` from the Worker's `env.production.vars` and redeploy it, and remove the old
 hostname's custom domain, DNS records and certificate (`fly certs remove otto-factory.savvagent.com -a otto-factory-mcp`).
 
 ### Rollback
@@ -456,8 +477,9 @@ hostname's custom domain, DNS records and certificate (`fly certs remove otto-fa
   console client is harmless.
 - **After step 8**: first restore `OF_PUBLIC_URL`, `OF_RESOURCE_URI` and `OF_CONSOLE_CLIENT_ID` in
   `fly.toml` to the old values (the old `OF_CONSOLE_CLIENT_ID` is in `fly.toml`'s git history),
-  remove `OF_LEGACY_*`, and deploy. The app keeps working meanwhile because the old URI is still a
-  live alias. Then swap the URIs back as above. If the URL-flip PRs (8a) were merged, revert them too.
+  remove `OF_LEGACY_*`, and deploy; remove the Worker's `OF_PUBLIC_URL` and `OF_LEGACY_HOSTS` vars
+  and redeploy it, or it keeps sending the old host's browsers to the new one. The app keeps working
+  meanwhile because the old URI is still a live alias. Then swap the URIs back as above. If the URL-flip PRs (8a) were merged, revert them too.
 - **If step 9 had run**, also point the webhook back with
   `resource set-webhook $OLD https://otto-factory.savvagent.com/platform/webhooks` and set the secret
   it prints as `OF_PLATFORM_WEBHOOK_SECRET`. If it had not, leave the webhook alone.

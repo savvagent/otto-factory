@@ -35,6 +35,7 @@
 
 pub mod auth;
 pub mod error;
+pub mod legacy;
 pub mod server;
 pub mod tools;
 
@@ -49,6 +50,7 @@ use rmcp::transport::streamable_http_server::session::local::LocalSessionManager
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 
 pub use auth::ResourceServer;
+pub use legacy::{Deprecation, Legacy};
 pub use server::Factory;
 
 /// Deployment-dependent settings the MCP surface cannot infer for itself.

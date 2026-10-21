@@ -14,6 +14,9 @@
 //!   everything else           web/build   the console SPA, index.html fallback
 //! ```
 //!
+//! Around all of it, `of_mcp::legacy::mark` stamps a deprecation notice on
+//! every response to a request that came through an `OF_LEGACY_HOSTS` host.
+//!
 //! otto-tower is a resource server of the otto platform, which is the OAuth
 //! authorization server and the system of record for identity and billing. There
 //! is no `/oauth/*` or account surface here; the console signs in *through* the
@@ -113,7 +116,38 @@ pub fn router(
         // Request spans, without headers. `DefaultMakeSpan::include_headers`
         // would put `Authorization` in the logs — every bearer token, in
         // plaintext, in whatever the log aggregator retains. Do not turn it on.
-        .layer(TraceLayer::new_for_http()))
+        .layer(TraceLayer::new_for_http())
+        // Outermost, so every response through a legacy host carries the
+        // deprecation notice whichever surface — or the console fallback, or a
+        // `401` — answered it, and so the marker it leaves in the request is
+        // there for `/mcp` and discovery to read. With no `OF_LEGACY_HOSTS` it
+        // passes every request through untouched.
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::new(deprecation(config)?),
+            of_mcp::legacy::mark,
+        )))
+}
+
+/// The legacy hosts and what their callers are told: the canonical public
+/// origin and MCP URI as successors, and the sunset date if one is set.
+///
+/// Fallible for the same reason as [`router`]: a hand-built `Config` need not
+/// have come through `from_env`'s checks, and a legacy URL built from a value
+/// that does not parse would be a discovery document nobody can follow.
+fn deprecation(config: &Config) -> Result<of_mcp::Deprecation> {
+    if config.legacy_hosts.is_empty() {
+        return Ok(of_mcp::Deprecation::default());
+    }
+    let public_url = url::Url::parse(&config.public_url)
+        .with_context(|| format!("OF_PUBLIC_URL is not a URL: {:?}", config.public_url))?;
+    let resource_uri = url::Url::parse(&config.resource_uri)
+        .with_context(|| format!("OF_RESOURCE_URI is not a URL: {:?}", config.resource_uri))?;
+    Ok(of_mcp::Deprecation::new(
+        &public_url,
+        &resource_uri,
+        config.legacy_hosts.iter().cloned(),
+        config.legacy_sunset,
+    ))
 }
 
 /// `of-web`'s state, with the settings that are this deployment's to decide.
