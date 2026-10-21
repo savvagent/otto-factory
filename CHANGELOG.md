@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.1](https://github.com/savvagent/otto-factory/compare/v0.14.0...v0.14.1) (2026-10-21)
+
+
+### Bug Fixes
+
+* **deploy:** serve otto-tower.savvagent.com as the canonical host ([#238](https://github.com/savvagent/otto-factory/issues/238)) ([8b334c1](https://github.com/savvagent/otto-factory/commit/8b334c1beb487c83a6f5c20dba3c1e3d0a818c36))
+
 ## [0.14.0](https://github.com/savvagent/otto-factory/compare/v0.13.0...v0.14.0) (2026-10-21)
 
 
