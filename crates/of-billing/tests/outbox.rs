@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use of_billing::outbox::{self, ShipperConfig};
 use of_billing::{BillingError, Meter, Metered, METER_JOBS_COMPLETED};
-use of_testkit::{tripped_budget, MockPlatform};
+use of_testkit::{tripped_budget, MeterMode, MockPlatform};
 use otto_tenant::ids::{OrgId, UserId};
 use otto_tenant::Db;
 use sqlx::PgPool;
@@ -19,6 +19,7 @@ fn cfg() -> ShipperConfig {
         claim_lease: Duration::from_millis(50),
         base_backoff: Duration::from_millis(20),
         max_backoff: Duration::from_millis(200),
+        declare_max_backoff: Duration::from_millis(200),
         poll: Duration::from_millis(10),
         ..ShipperConfig::default()
     }
@@ -732,4 +733,144 @@ async fn the_schema_refuses_a_half_metered_or_non_positive_row(pool: PgPool) {
             assert!(res.is_err(), "{table} accepted {meter:?}/{quantity:?}");
         }
     }
+}
+
+// ------------------------------------------------------------------ declaration
+
+/// Poll `f` until it holds or five seconds pass.
+async fn eventually(what: &str, mut f: impl FnMut() -> bool) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !f() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for {what}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+fn spawn_shipper(
+    db: &Db,
+    platform: &MockPlatform,
+    cfg: ShipperConfig,
+) -> (
+    tokio::sync::watch::Sender<bool>,
+    tokio::task::JoinHandle<()>,
+) {
+    let (stop, rx) = tokio::sync::watch::channel(false);
+    let task = tokio::spawn(outbox::run(db.clone(), platform.client(), cfg, rx));
+    (stop, task)
+}
+
+#[sqlx::test(migrator = "of_core::MIGRATOR")]
+async fn the_shipper_declares_the_meter_before_its_first_usage_post(pool: PgPool) {
+    let platform = MockPlatform::start().await;
+    let db = Db::from_pool(pool);
+    let meter = Meter::new(platform.client(), "https://x.test/billing");
+    let (org, user) = (OrgId::new(), UserId::new());
+    record_metered(&db, org, user, &meter).await;
+
+    let (stop, task) = spawn_shipper(&db, &platform, cfg());
+    eventually("the row to ship", || !platform.counted_usage().is_empty()).await;
+
+    let declared = platform.declared_meters();
+    assert_eq!(declared.len(), 1, "{declared:?}");
+    assert_eq!(declared[0].key, "otto-factory/jobs_completed");
+    assert_eq!(declared[0].display_name, "Jobs completed");
+    assert_eq!(declared[0].unit, "job");
+    assert_eq!(
+        platform.usage_posts_before_declaration(),
+        0,
+        "usage was posted before the meter was declared"
+    );
+
+    stop.send(true).unwrap();
+    task.await.unwrap();
+}
+
+/// In `mode` nothing ships and the row stays queued; once the platform
+/// recovers the shipper declares and drains.
+async fn a_failed_declaration_holds_shipping_back(pool: PgPool, mode: MeterMode) {
+    let platform = MockPlatform::start().await;
+    let db = Db::from_pool(pool);
+    let meter = Meter::new(platform.client(), "https://x.test/billing");
+    let (org, user) = (OrgId::new(), UserId::new());
+    record_metered(&db, org, user, &meter).await;
+    record(&db, org, user, &meter, "list_jobs").await;
+    platform.set_meter_mode(mode);
+
+    let (stop, task) = spawn_shipper(&db, &platform, cfg());
+    eventually("a second declaration attempt", || {
+        platform.meter_calls() >= 2
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    assert_eq!(platform.usage_calls(), 0, "{mode:?}: usage was posted");
+    assert!(platform.declared_meters().is_empty(), "{mode:?}");
+    assert_eq!(outbox::pending(&db).await.unwrap(), 2, "{mode:?}");
+
+    platform.set_meter_mode(MeterMode::Accept);
+    eventually("the outbox to drain", || {
+        platform.counted_usage().len() == 2
+    })
+    .await;
+    assert_eq!(platform.declared_meters().len(), 1);
+    assert_eq!(platform.usage_posts_before_declaration(), 0);
+    // The shipper deletes after the platform counts; wait for the delete.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while outbox::pending(&db).await.unwrap() != 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{mode:?}: rows linger"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    stop.send(true).unwrap();
+    task.await.unwrap();
+}
+
+#[sqlx::test(migrator = "of_core::MIGRATOR")]
+async fn service_not_set_holds_shipping_back(pool: PgPool) {
+    a_failed_declaration_holds_shipping_back(pool, MeterMode::ServiceNotSet).await;
+}
+
+#[sqlx::test(migrator = "of_core::MIGRATOR")]
+async fn an_outage_holds_shipping_back(pool: PgPool) {
+    a_failed_declaration_holds_shipping_back(pool, MeterMode::Outage).await;
+}
+
+#[sqlx::test(migrator = "of_core::MIGRATOR")]
+async fn a_rejected_meter_holds_shipping_back(pool: PgPool) {
+    a_failed_declaration_holds_shipping_back(pool, MeterMode::Reject).await;
+}
+
+#[sqlx::test(migrator = "of_core::MIGRATOR")]
+async fn shutdown_while_waiting_to_declare_returns_promptly(pool: PgPool) {
+    let platform = MockPlatform::start().await;
+    let db = Db::from_pool(pool);
+    let meter = Meter::new(platform.client(), "https://x.test/billing");
+    let (org, user) = (OrgId::new(), UserId::new());
+    record_metered(&db, org, user, &meter).await;
+    platform.set_meter_mode(MeterMode::Outage);
+
+    // A retry delay far longer than the test: only shutdown can end the wait.
+    let slow = ShipperConfig {
+        base_backoff: Duration::from_secs(300),
+        ..cfg()
+    };
+    let (stop, task) = spawn_shipper(&db, &platform, slow);
+    eventually("the first declaration attempt", || {
+        platform.meter_calls() >= 1
+    })
+    .await;
+
+    stop.send(true).unwrap();
+    tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .expect("the shipper did not stop during the declaration wait")
+        .unwrap();
+    assert_eq!(platform.usage_calls(), 0);
+    assert_eq!(outbox::pending(&db).await.unwrap(), 1);
 }

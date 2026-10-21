@@ -32,7 +32,7 @@
 
 use std::time::Duration;
 
-use otto_resource::{PlatformClient, UsageEvent};
+use otto_resource::{MeterDeclaration, MeterDeclarationReceipt, PlatformClient, UsageEvent};
 use otto_tenant::ids::UserId;
 use otto_tenant::{Db, Tx};
 use sqlx::FromRow;
@@ -43,6 +43,20 @@ use crate::error::Result;
 
 /// The platform meter key for a completed job.
 pub const METER_JOBS_COMPLETED: &str = "otto-factory/jobs_completed";
+
+/// The meters this server declares to the platform before it ships usage, as
+/// `(key, display name, unit)`.
+///
+/// The platform rejects a metered event for an undeclared meter as
+/// `unknown_meter`, which moves the row to the dead letter, so [`run`] declares
+/// these first. Every `Metered::meter` this crate records must be listed here.
+///
+/// ```
+/// let (key, display, unit) = of_billing::METER_DECLARATIONS[0];
+/// assert_eq!((key, display, unit), (of_billing::METER_JOBS_COMPLETED, "Jobs completed", "job"));
+/// ```
+pub const METER_DECLARATIONS: &[(&str, &str, &str)] =
+    &[(METER_JOBS_COMPLETED, "Jobs completed", "job")];
 
 /// A value meter and quantity carried on a usage row, beside the per-call record.
 ///
@@ -110,6 +124,9 @@ pub struct ShipperConfig {
     pub base_backoff: Duration,
     /// Ceiling for the per-row retry delay.
     pub max_backoff: Duration,
+    /// Ceiling for the delay between meter declaration attempts, which start at
+    /// `base_backoff` and double.
+    pub declare_max_backoff: Duration,
 }
 
 impl Default for ShipperConfig {
@@ -120,6 +137,7 @@ impl Default for ShipperConfig {
             claim_lease: Duration::from_secs(120),
             base_backoff: Duration::from_secs(5),
             max_backoff: Duration::from_secs(15 * 60),
+            declare_max_backoff: Duration::from_secs(60),
         }
     }
 }
@@ -318,9 +336,92 @@ pub async fn pending(db: &Db) -> std::result::Result<i64, sqlx::Error> {
         .await
 }
 
-/// Drain the outbox until `shutdown` flips to `true`.
+/// How often a stuck declaration is logged.
+const DECLARE_LOG_EVERY: Duration = Duration::from_secs(60);
+
+/// Why a declaration attempt did not finish the job, for the log.
+fn declaration_failure(
+    result: std::result::Result<MeterDeclarationReceipt, otto_resource::Error>,
+) -> Option<String> {
+    match result {
+        Ok(receipt) if receipt.is_complete() => None,
+        Ok(receipt) => Some(
+            receipt
+                .rejected
+                .iter()
+                .map(|r| format!("{} refused: {}", r.key, r.reason))
+                .collect::<Vec<_>>()
+                .join("; "),
+        ),
+        Err(e) => Some(e.to_string()),
+    }
+}
+
+/// Declare [`METER_DECLARATIONS`] with the platform, retrying with exponential
+/// backoff until it is complete. Returns `false` if `shutdown` came first.
 ///
-/// A final pass runs on the way out so a clean shutdown does not strand rows
+/// Done means `Ok` with a receipt that [`is_complete`](MeterDeclarationReceipt::is_complete);
+/// a transport error, a 5xx, a `409 service_not_set`, or a meter in `rejected`
+/// all retry. Nothing ships meanwhile and the outbox keeps every row, so a
+/// platform that cannot take the declaration delays billing and loses none. Once
+/// a minute, and on the first failure, it logs at `error` with the platform's
+/// reason and the number of rows waiting.
+async fn declare_meters(
+    db: &Db,
+    platform: &PlatformClient,
+    cfg: &ShipperConfig,
+    shutdown: &mut watch::Receiver<bool>,
+) -> bool {
+    let declarations: Vec<MeterDeclaration> = METER_DECLARATIONS
+        .iter()
+        .map(|(key, display, unit)| MeterDeclaration::new(*key, *display, *unit))
+        .collect();
+    let mut attempt: u32 = 0;
+    let mut last_logged: Option<tokio::time::Instant> = None;
+    loop {
+        if *shutdown.borrow() {
+            return false;
+        }
+        let result = tokio::select! {
+            r = platform.declare_meters(&declarations) => r,
+            _ = shutdown.changed() => return false,
+        };
+        let Some(reason) = declaration_failure(result) else {
+            tracing::info!(meters = declarations.len(), "declared usage meters");
+            return true;
+        };
+
+        if last_logged.is_none_or(|t| t.elapsed() >= DECLARE_LOG_EVERY) {
+            last_logged = Some(tokio::time::Instant::now());
+            let waiting = pending(db).await.ok();
+            tracing::error!(
+                %reason,
+                rows_waiting = ?waiting,
+                "could not declare the usage meters; no usage ships until they are declared \
+                 (rows stay queued and nothing is lost). Retrying"
+            );
+        }
+        let wait = cfg
+            .base_backoff
+            .saturating_mul(1u32 << attempt.min(20))
+            .min(cfg.declare_max_backoff);
+        attempt = attempt.saturating_add(1);
+        tokio::select! {
+            _ = tokio::time::sleep(wait) => {}
+            _ = shutdown.changed() => return false,
+        }
+    }
+}
+
+/// Declare the meters, then drain the outbox until `shutdown` flips to `true`.
+///
+/// Nothing ships until [`METER_DECLARATIONS`] are declared (see
+/// [`declare_meters`]): a metered event for an undeclared meter would be
+/// rejected and dead-lettered. If shutdown arrives while declaring, the task
+/// returns at once without a final pass, for the same reason; the rows stay
+/// queued for the next process.
+///
+/// Once shipping, a final pass runs on the way out so a clean shutdown does not strand rows
 /// that were one request from delivered.
 pub async fn run(
     db: Db,
@@ -329,6 +430,10 @@ pub async fn run(
     mut shutdown: watch::Receiver<bool>,
 ) {
     tracing::info!("usage shipper started");
+    if !declare_meters(&db, &platform, &cfg, &mut shutdown).await {
+        tracing::warn!("usage shipper stopped before the meters were declared; rows stay queued");
+        return;
+    }
     let mut failures: u32 = 0;
     loop {
         let wait = match ship_once(&db, &platform, &cfg).await {
