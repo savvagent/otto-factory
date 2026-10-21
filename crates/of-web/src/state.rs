@@ -218,6 +218,11 @@ pub struct AppState {
     /// The platform's token endpoints (code exchange, refresh, revoke), for the
     /// console's own login. Server-to-server only: the platform serves no CORS.
     pub oauth: Arc<PlatformOAuth>,
+    /// Reads the org's billing standing before a tracker webhook opens its
+    /// transaction, so a blocked org's ticket close is recorded unbilled
+    /// (`routes::webhooks`). Never refuses anything here, so its fix URL is
+    /// only the default.
+    pub meter: of_billing::Meter,
 }
 
 impl AppState {
@@ -226,6 +231,10 @@ impl AppState {
             db,
             cipher: Arc::new(cipher),
             oauth: Arc::new(PlatformOAuth::new(&config.platform_url)),
+            meter: of_billing::Meter::new(
+                platform.clone(),
+                of_billing::default_fix_url(&config.platform_url),
+            ),
             config: Arc::new(config),
             platform,
         }

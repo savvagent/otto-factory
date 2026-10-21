@@ -40,7 +40,11 @@ pub async fn receive(
     // verifying the shared secret — through that one transaction. Never split
     // this into a bootstrap `Tx` plus a second one for the rest; the two
     // reads must observe the same connection row.
-    let (mut tx, connection, parsed) = match provider {
+    // `warmed` is the org's billing standing, read before the transaction
+    // opens (a slow platform never holds a pooled connection) and failing
+    // open like `complete_job`'s. It decides only whether a ticket close is
+    // billed, never whether it applies.
+    let (mut tx, connection, parsed, warmed) = match provider {
         Provider::Github => {
             let secret = state
                 .config
@@ -80,6 +84,7 @@ pub async fn receive(
                     webhook_not_found()
                 })?;
 
+            let warmed = state.meter.warm(org_id).await;
             let mut tx = of_core::platform_events::begin_live(&state.db, org_id, None)
                 .await
                 .map_err(ApiError::from)?;
@@ -101,7 +106,7 @@ pub async fn receive(
                     );
                     webhook_not_found()
                 })?;
-            (tx, connection, parsed)
+            (tx, connection, parsed, warmed)
         }
         Provider::Jira => {
             let site_id = jira_site_id(query.as_deref()).map_err(|error| {
@@ -116,6 +121,11 @@ pub async fn receive(
                     webhook_not_found()
                 })?;
 
+            // Before the secret is checked, because that check reads the
+            // connection inside the transaction. Bounded and cached per org
+            // (see `of_billing::Meter::warm`), so an unverified request naming
+            // a known site costs at most one cached status lookup.
+            let warmed = state.meter.warm(org_id).await;
             let mut tx = of_core::platform_events::begin_live(&state.db, org_id, None)
                 .await
                 .map_err(ApiError::from)?;
@@ -156,7 +166,7 @@ pub async fn receive(
                 );
                 webhook_not_found()
             })?;
-            (tx, connection, parsed)
+            (tx, connection, parsed, warmed)
         }
     };
 
@@ -245,37 +255,21 @@ pub async fn receive(
                                 remote_revision,
                             } => {
                                 if let Some(existing) = existing.as_ref() {
-                                    tx.close_from_ticket(
-                                        &existing.id,
-                                        to,
-                                        result.as_deref(),
-                                        error.as_deref(),
-                                        remote_revision.as_deref(),
-                                    )
-                                    .await
-                                    .map_err(ApiError::from)?;
-                                    if to == Status::Completed {
-                                        // Closing the linked ticket completes the job
-                                        // without `complete_job`, so meter it here, in
-                                        // the same transaction as the transition. No
-                                        // enforcement: a webhook cannot be meaningfully
-                                        // refused (the tracker already closed the
-                                        // ticket), and the platform's block applies to
-                                        // the agent's `complete_job`. A redelivery is
-                                        // dropped before this point (stale revision or
-                                        // terminal job), so the row is written once.
-                                        of_billing::outbox::enqueue(
-                                            &mut tx,
-                                            None,
-                                            "inbound_ticket_close",
-                                            true,
-                                            Some(&of_billing::Metered::jobs_completed()),
+                                    let closed = tx
+                                        .close_from_ticket(
+                                            &existing.id,
+                                            to,
+                                            result.as_deref(),
+                                            error.as_deref(),
+                                            remote_revision.as_deref(),
                                         )
                                         .await
-                                        // Fail the delivery (rolling the close back) so
-                                        // the delivery can be retried or redelivered,
-                                        // rather than complete an unmetered job.
-                                        .map_err(|e| ApiError::internal("usage metering", e))?;
+                                        .map_err(ApiError::from)?;
+                                    if to == Status::Completed {
+                                        record_inbound_completion(
+                                            &mut tx, &closed, &warmed, org_id,
+                                        )
+                                        .await?;
                                     }
                                 }
                             }
@@ -298,4 +292,47 @@ pub async fn receive(
 
     tx.commit().await.map_err(ApiError::from)?;
     Ok(Json(json!({ "ok": true })))
+}
+
+/// Record a job completed by its ticket closing, in the transaction that
+/// completed it: exactly one completion row (`of_billing::record_job_completed`).
+///
+/// Billed only when an agent ever claimed the job (`attempts > 0`) **and** the
+/// org is not blocked. Claim history, not the status at the close: `attempts`
+/// is incremented by every claim and never reset (`repend_job` and an expired
+/// claim keep it), so an agent cannot hand a worked job back to `pending` and
+/// close its ticket to complete it unbilled. A job never claimed is not
+/// billable work, whoever closed its ticket. A blocked org's close is applied
+/// (the tracker already closed the ticket, so refusing it would only
+/// desynchronise the two) but recorded unbilled, so the budget's hard stop
+/// holds on this path as it does for `complete_job`; for a `payment_required`
+/// org that makes tracker closes free. A redelivery never reaches here (stale
+/// revision or terminal job), so the row is written once.
+async fn record_inbound_completion(
+    tx: &mut otto_tenant::Tx<'_>,
+    closed: &of_core::jobs::Job,
+    warmed: &of_billing::Warmed,
+    org_id: otto_tenant::ids::OrgId,
+) -> ApiResult<()> {
+    let claimed = closed.attempts > 0;
+    let blocked = warmed.billable_blocked();
+    if claimed && blocked {
+        tracing::info!(
+            org_id = %org_id,
+            job_id = %closed.id,
+            reason = warmed.blocked_reason().unwrap_or("blocked"),
+            "ticket close completed a job for an org whose billable work is blocked; recorded unbilled"
+        );
+    }
+    of_billing::record_job_completed(
+        tx,
+        None,
+        of_billing::CompletionSource::InboundTicketClose,
+        claimed && !blocked,
+    )
+    .await
+    // Fail the delivery (rolling the close back) so it can be retried or
+    // redelivered, rather than complete a job with no completion row.
+    .map_err(|e| ApiError::internal("usage metering", e))?;
+    Ok(())
 }
