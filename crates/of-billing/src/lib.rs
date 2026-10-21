@@ -27,5 +27,5 @@ pub mod outbox;
 
 pub use classify::{classify, Class};
 pub use error::{BillingError, Result};
-pub use meter::{Charge, Meter, Status};
+pub use meter::{BudgetReport, Charge, Meter, MeterStatus, Status};
 pub use outbox::{Metered, METER_DECLARATIONS, METER_JOBS_COMPLETED};

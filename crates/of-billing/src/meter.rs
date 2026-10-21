@@ -254,33 +254,99 @@ fn plan_name(plan: &str) -> String {
     }
 }
 
-/// Where an org stands against its bucket.
+/// Where an org stands: this month's metered usage, its budget, and any block.
+///
+/// `meters`, `budget` and `blocked_reason` are the current picture. The older
+/// bucket fields (`included_ops` through `enforced`) are kept so existing
+/// readers keep working.
 #[derive(Debug, Clone, PartialEq, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Status {
     pub plan: String,
-    /// Billable operations included this month, after any negotiated override.
+    /// This month's quantity for each meter this server bills on, such as
+    /// `otto-factory/jobs_completed`. A meter with no usage yet shows zero.
+    pub meters: Vec<MeterStatus>,
+    /// The monthly budget the org set for this service and where its spend
+    /// stands, or null when it has set none.
+    pub budget: Option<BudgetReport>,
+    /// Why billable calls (`complete_job`) are being refused right now, such
+    /// as `budget_exceeded` or `payment_required`, or null when they are not.
+    pub blocked_reason: Option<String>,
+    /// Deprecated: the legacy bucket. Billable operations included this month,
+    /// after any negotiated override.
     pub included_ops: i64,
+    /// Deprecated: see `meters`.
     pub billable_used: i64,
-    /// Never negative: an org past its bucket has none left, not a debt.
+    /// Deprecated. Never negative: an org past its bucket has none left, not a
+    /// debt.
     pub remaining: i64,
-    /// Every recorded call this month, billable or not.
+    /// Deprecated. Every recorded call this month, billable or not.
     pub total_calls: i64,
     pub period_start: chrono::NaiveDate,
-    /// True past [`WARN_AT`] of the bucket. Worth surfacing to a human.
+    /// Deprecated. True past [`WARN_AT`] of the bucket.
     pub warning: bool,
-    /// Whether exceeding the bucket stops billable work rather than metering
-    /// overage.
+    /// Deprecated. Whether exceeding the legacy bucket stops billable work
+    /// rather than metering overage.
     pub hard_stop: bool,
-    /// Whether the server refuses billable calls when the platform says the
-    /// org is blocked. Always `true`: that is no longer switchable.
+    /// Deprecated. Now always `true`: the platform's blocked reason is always
+    /// enforced, and is no longer switchable.
     pub enforced: bool,
+}
+
+/// One meter's usage this month.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MeterStatus {
+    /// The meter's key, `<service>/<meter>`.
+    pub meter: String,
+    pub display_name: String,
+    pub unit: String,
+    /// The sum of the quantities billed on this meter this month.
+    pub quantity: u64,
+}
+
+/// The org's monthly budget for this service, in US cents.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct BudgetReport {
+    pub monthly_budget_cents: i64,
+    /// Spend so far this month, or null when the platform could not compute it.
+    pub spend_cents: Option<i64>,
+    /// Whole percent of the budget spent (can exceed 100), or null when spend
+    /// is unknown.
+    pub percent_used: Option<i64>,
+    /// The alert thresholds (50, 80, 100 percent) reached this month.
+    pub thresholds_reached: Vec<u8>,
+    /// Whether the org opted in to refusing billable calls once spend reaches
+    /// the budget.
+    pub hard_stop: bool,
+    /// Whether billable calls are being refused now because of the budget.
+    pub blocked: bool,
 }
 
 impl Status {
     fn new(usage: UsageStatus) -> Self {
         Self {
             plan: plan_name(&usage.plan),
+            meters: usage
+                .meters
+                .into_iter()
+                .map(|m| MeterStatus {
+                    meter: m.meter,
+                    display_name: m.display_name,
+                    unit: m.unit,
+                    quantity: m.quantity,
+                })
+                .collect(),
+            budget: usage.budget.map(|b| BudgetReport {
+                monthly_budget_cents: b.monthly_budget_cents,
+                spend_cents: b.spend_cents,
+                percent_used: b.percent_used,
+                thresholds_reached: b.thresholds_reached,
+                hard_stop: b.hard_stop,
+                blocked: b.blocked,
+            }),
+            blocked_reason: usage.blocked_reason,
             included_ops: usage.included_ops,
             billable_used: usage.billable_count,
             remaining: remaining(usage.billable_count, usage.included_ops),

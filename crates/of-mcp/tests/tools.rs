@@ -2464,6 +2464,93 @@ async fn whoami_reports_the_allowance(pool: PgPool) {
     assert_eq!(out["usage"]["warning"], false);
 }
 
+impl Env {
+    /// Declare the server's meters with the platform, as the shipper does
+    /// before it ships, so the mock attributes display names and units.
+    async fn declare_meters(&self) {
+        let declarations: Vec<_> = of_billing::METER_DECLARATIONS
+            .iter()
+            .map(|(k, d, u)| otto_resource::MeterDeclaration::new(*k, *d, *u))
+            .collect();
+        self.client
+            .declare_meters(&declarations)
+            .await
+            .expect("declare meters");
+    }
+
+    /// `whoami`'s view of the org's standing.
+    async fn whoami_usage(&self, caller: &Principal) -> serde_json::Value {
+        ok(self
+            .factory
+            .whoami(Extension(parts(caller)), Parameters(tools::org::NoArgs {}))
+            .await)["usage"]
+            .clone()
+    }
+}
+
+/// A shipped completion shows on both `whoami` and `usage` as the month's
+/// completed-jobs meter, beside every legacy field.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn whoami_and_usage_report_the_completed_jobs_meter(pool: PgPool) {
+    let (env, caller) = env(pool).await;
+    env.register(&caller).await;
+    env.declare_meters().await;
+    env.complete_one(&caller, "work").await;
+
+    for status in [env.usage(&caller).await, {
+        env.ship().await;
+        env.whoami_usage(&caller).await
+    }] {
+        assert_eq!(
+            status["meters"],
+            serde_json::json!([{
+                "meter": "otto-factory/jobs_completed",
+                "displayName": "Jobs completed",
+                "unit": "job",
+                "quantity": 1
+            }])
+        );
+        assert!(status["budget"].is_null(), "no budget set: {status}");
+        assert!(status["blockedReason"].is_null(), "{status}");
+        for legacy in [
+            "plan",
+            "includedOps",
+            "billableUsed",
+            "remaining",
+            "totalCalls",
+            "periodStart",
+            "warning",
+            "hardStop",
+            "enforced",
+        ] {
+            assert!(status.get(legacy).is_some(), "legacy field {legacy} kept");
+        }
+    }
+}
+
+/// The budget and the block are reported, and reading them is never refused
+/// even though the org is blocked.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn whoami_and_usage_report_the_budget_and_the_block(pool: PgPool) {
+    let (env, caller) = env(pool).await;
+    let org = caller.org_id;
+    env.platform
+        .set_budget(org.as_uuid(), Some(of_testkit::tripped_budget()));
+    env.platform
+        .set_blocked_reason(org.as_uuid(), Some("budget_exceeded"));
+
+    for status in [env.usage(&caller).await, env.whoami_usage(&caller).await] {
+        assert_eq!(status["blockedReason"], "budget_exceeded");
+        let b = &status["budget"];
+        assert_eq!(b["monthlyBudgetCents"], 1000);
+        assert_eq!(b["spendCents"], 1250);
+        assert_eq!(b["percentUsed"], 125);
+        assert_eq!(b["thresholdsReached"], serde_json::json!([50, 80, 100]));
+        assert_eq!(b["hardStop"], true);
+        assert_eq!(b["blocked"], true);
+    }
+}
+
 /// Complete `id`, expecting the platform's block to refuse it: the refusal
 /// is not retriable, names where a human fixes it, says free tools keep
 /// working and what to do with the held job, leaves no `complete_job` row

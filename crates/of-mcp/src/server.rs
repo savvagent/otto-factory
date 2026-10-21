@@ -79,9 +79,9 @@ messages never wake you.
 Jobs carry a free-form `metadata` object that this server never reads or \
 interprets. Put whatever your own workflow needs in it.
 
-You are billed for work performed, not for looking: reads, watch, and lease \
-renewals cost nothing, while queueing, claiming, completing and messaging \
-consume the plan's monthly allowance. Call usage to see where you stand.";
+Coordination calls are free. Each completed job is billed on the \
+organization's otto-factory meter. Call usage to see this month's completed \
+jobs, the budget and any block.";
 
 #[derive(Debug, Clone, Default)]
 pub struct TrackerSyncConfig {
