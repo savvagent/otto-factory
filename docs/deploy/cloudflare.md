@@ -80,8 +80,12 @@ cutover*), which also gives the platform commands that must run before and after
 3. On a legacy host the Worker answers the console's SPA paths and `/auth/login` with a `308` to
    the canonical host, and proxies every origin prefix (`/mcp`, `/.well-known`, `/api`, `/auth/*`
    except login, `/platform/webhooks`, `/webhooks`, `/oauth`) unchanged. Webhook deliveries are
-   never redirected, so customers' tracker webhooks keep landing until they move them.
-4. After the sunset (runbook step 11), remove the old custom domain.
+   never redirected, so customers' tracker webhooks keep landing until they move them. The Worker
+   learns which hosts are legacy and where to send them from two vars in `env.production.vars`,
+   `OF_LEGACY_HOSTS` and `OF_PUBLIC_URL`, with the same values as `of-server`'s; they are added in
+   runbook step 8, after the Fly flip, and with them unset nothing is redirected. `OF_LEGACY_HOSTS`
+   set with no usable `OF_PUBLIC_URL` answers every request `500 misconfigured` rather than guess.
+4. After the sunset (runbook step 11), remove the old custom domain and the two vars.
 
 Nothing here is deployed by merging the code: it is account-side, and ordered after the platform
 alias exists, so a request on the new host is never answered before the platform can authenticate
