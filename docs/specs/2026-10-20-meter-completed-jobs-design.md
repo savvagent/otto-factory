@@ -1,6 +1,6 @@
 # Meter completed jobs instead of charging management tools
 
-> **Status:** DRAFT
+> **Status:** IMPLEMENTED (#223)
 > **Issue:** savvagent/otto-factory#222 (part of savvagent/otto-platform#55)
 
 ## Brief
