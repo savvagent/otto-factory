@@ -220,7 +220,7 @@ compile-time layering discipline, not separate services.
 | `of-core` | Domain + **all** SQL. No HTTP, no auth. Every tenant fn takes an `OrgId`. |
 | (otto-platform) | Two crates from `savvagent/otto-platform`, pinned by one rev in the workspace `Cargo.toml`: `otto-tenant` (the pinned-transaction/RLS substrate, `Cipher`, the audit-trail pattern) and `otto-resource` (the resource-server client: introspection, usage shipping, member/team lookups, webhook verification). Nothing else — no `otto-core`/`otto-auth`/`otto-billing`, and no identity tables. Never call `otto_tenant::Db::migrate` on this database; use `of_core::migrate`. |
 | `of-mcp` | `rmcp` Streamable HTTP server, tool surface, bearer middleware (introspects at the platform). |
-| `of-billing` | The price list (`classify`), quota policy, and the usage outbox + shipper. |
+| `of-billing` | The price list (`classify`), what a completed job records (`completion`), enforcement of the platform's billing block (`meter`), and the usage outbox + shipper. |
 | `of-trackers` | GitHub App + JIRA clients, webhook ingest, two-way sync. |
 | `of-web` | Console REST API (console session cookie or platform bearer token), console sign-in (`/auth/*`), tracker webhooks, the platform's lifecycle webhook. |
 | `of-server` | Config, migrations, router assembly, the usage shipper task, graceful shutdown. |
@@ -230,7 +230,10 @@ compile-time layering discipline, not separate services.
 built to static files that `of-server` serves beside `/api`. See `web/README.md`.
 
 **Every SQL statement lives in `of-core`.** A query in `of-mcp` or `of-web` is a bug — it
-bypasses the `Tx` pinning that guard 2 depends on.
+bypasses the `Tx` pinning that guard 2 depends on. The one exception is the usage outbox:
+its SQL lives in `of-billing` (`outbox.rs`), because the outbox row must be written in the
+tool's own `Tx` by the crate that owns metering, and the shipper drains it across all orgs.
+It still writes through the caller's pinned `Tx`; nothing else in `of-billing` touches SQL.
 
 ## The MCP surface
 
@@ -548,9 +551,11 @@ means in this repository:
 
 The billed unit is a completed job, not a tool call. Every MCP tool is free, but each call is
 still recorded and classified in `of-billing::classify`, so a price can be reintroduced without
-losing history. A successful `complete_job`, and an inbound ticket close that moves a job to
-Completed, each write one `otto-factory/jobs_completed` event (quantity 1) in the same
-transaction as the state change. `watch` is a continuous long poll, which is why per-call
+losing history. Every completed job, through `complete_job` or an inbound ticket close, writes
+exactly one completion row through `of_billing::record_job_completed`, in the same transaction
+as the state change: billed (`otto-factory/jobs_completed`, quantity 1) or an unmetered,
+unbilled row. Nothing else writes a completion row, so `org_counters.jobs_completed_total`
+equals the number of completion rows (a parity test in `of-web/tests/webhooks_http.rs`). `watch` is a continuous long poll, which is why per-call
 pricing was never viable.
 
 The platform owns plans, standing, and monthly totals; this service owns the *record*. Four
@@ -558,11 +563,16 @@ rules hold, and the first is what makes the others true:
 
 1. **The record is written inside the work's own transaction.** `Factory::charge` is the first
    thing after `self.tx(...)` and inserts a `usage_outbox` row (with a fresh `event_id`) in that
-   transaction; `complete_job` and the ticket-close path add the `jobs_completed` meter to it. A
-   failed call rolls the row back with everything else, so it is never billed; a successful one
-   has no second transaction to retry, so it is never lost. A close on a job already Completed
-   (a later event, or a job completed through `complete_job`) is a no-op and writes no second
-   row. `watch` is the one exception — it meters in a short transaction of its own, because
+   transaction. `complete_job` instead records its completion, billed, through
+   `Meter::charge_completion`. The ticket-close path (`of-web/src/routes/webhooks.rs`) records
+   one completion row after `close_from_ticket` moves the job to Completed, in the webhook's
+   transaction, billed only when the job was ever claimed (`attempts > 0`: claim history, not
+   the status at the close, since `repend_job` and an expired claim return a worked job to
+   `pending` but keep `attempts`) and the org is not blocked (rule 4); a never-claimed job's
+   close is recorded unbilled. A failed call rolls the row back with everything
+   else, so it is never billed; a successful one has no second transaction to retry, so it is
+   never lost. A close on a job already Completed (a later event, or a job completed through
+   `complete_job`) is a no-op and writes no second row. `watch` is the one exception — it meters in a short transaction of its own, because
    holding one open across a thirty-second poll would pin a connection per idle agent.
 2. **Delivery is a background task, and it is idempotent.** `of_billing::outbox::run` first
    declares the meters in `METER_DECLARATIONS` with the platform (retrying until it succeeds;
@@ -578,15 +588,23 @@ rules hold, and the first is what makes the others true:
 3. **A new tool must be classified.** Every tool is free, and `exhaustive_over` compares the
    router against the price list; `every_tool_has_a_price` fails when they disagree. An
    unclassified tool is treated as free and logged.
-4. **Only `complete_job` can be refused, and a lookup failure never blocks work.** It is refused
-   (`retriable: false`) when the platform's usage status says billable work is blocked
+4. **The hard stop applies to both completion paths, and a lookup failure never blocks work.**
+   When the platform's usage status says billable work is blocked
    (`UsageStatus::billable_blocked()`: a `blocked_reason` of `budget_exceeded` |
-   `payment_required`, or a tripped budget hard stop with no reason, refused as
-   `budget_exceeded`); the error names `OF_UPGRADE_URL`, else the bare
-   platform URL. Free tools are never refused, so a blocked org can still read and find out why.
+   `payment_required`, or a tripped budget hard stop with no reason, treated as
+   `budget_exceeded`):
+   - `complete_job` is **refused** (`retriable: false`); the error names `OF_UPGRADE_URL`, else
+     the bare platform URL.
+   - A tracker close is **applied but recorded unbilled** (the tracker already closed the
+     ticket). For a `payment_required` org that means **tracker closes are free**: an org with
+     no card in good standing can still complete jobs by closing their tickets, unbilled.
+
+   Free tools are never refused, so a blocked org can still read and find out why.
    The status lookup happens before the transaction: `complete_job` calls `Meter::warm` itself
-   before `Factory::tx` and hands the result to `charge_metered`, which never looks anything up
-   (`Factory::tx` does not warm, so free tools never wait on the platform). It is cached
+   before `Factory::tx` and hands the result, a `Warmed` (only `warm` can make one), to
+   `charge_completion`, which never looks anything up; the webhook warms before opening its
+   transaction the same way (`Factory::tx` does not warm, so free tools never wait on the
+   platform). It is cached
    for 60 s (a failed lookup for 5 s), and a failed lookup lets the call through. A change made
    in the console therefore takes up to a minute to apply. `OF_ENFORCE_QUOTAS` is retired: it
    has no effect and the server warns if it is set.

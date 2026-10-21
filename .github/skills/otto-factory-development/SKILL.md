@@ -212,7 +212,11 @@ explains the reasoning behind each at length — read it, and treat the list her
    privilege granted to or revoked from `otto_app` is not a protection — express the rule as a policy.
 3. **Every SQL statement lives in `of-core`.** A query in `of-mcp`, `of-web`, `of-auth`, or
    `of-billing` is a bug: it bypasses the `Tx` pinning that guard 2 depends on. `of-core` has no
-   HTTP and no auth; every tenant-scoped function takes an `OrgId`.
+   HTTP and no auth; every tenant-scoped function takes an `OrgId`. **One exception:** the usage
+   outbox's SQL lives in `of-billing/src/outbox.rs`, because the row must be written in the
+   tool's own pinned `Tx` by the crate that owns metering, and the shipper drains it across all
+   orgs. It writes only through the caller's `Tx`; nothing else in `of-billing` touches SQL, and
+   the exception does not extend to any other table.
 4. **Auth is passwordless and mail-less.** Passkeys (WebAuthn) for individuals, enterprise OIDC
    federation for orgs. **No password is ever accepted or stored, and no email is ever sent** —
    `users.email` is a unique key and an audit label, never a destination. A `Mailer` trait
@@ -258,14 +262,17 @@ explains the reasoning behind each at length — read it, and treat the list her
     no Svelte 4 stores, no `export let`. Every coding agent gets the same shape from
     `src/lib/clients.ts`; a bespoke wizard for one client is where agent-agnosticism breaks first.
 11. **Metering bills completed jobs, inside the work's own transaction.** Every tool is free;
-    a successful `complete_job` and an inbound ticket close to Completed each write one
-    `otto-factory/jobs_completed` usage row in the same transaction, so a failed call is never
-    billed and a successful one never double-billed (a repeat close is a no-op). The shipper
+    every completed job (`complete_job` or an inbound ticket close) writes exactly one completion
+    row through `of_billing::record_job_completed`, in the same transaction, so a failed call is
+    never billed and a successful one never double-billed (a repeat close is a no-op). A ticket
+    close is billed only when the job was ever claimed (`attempts > 0`) and the org is not
+    blocked; otherwise its row is unbilled. The shipper
     declares every meter in `METER_DECLARATIONS` before it ships. **A new tool must be classified
     in `of-billing::classify`** — `exhaustive_over` and `every_tool_has_a_price` fail when the
     router and the price list disagree. Only `complete_job` can be refused, on the platform's
-    `blocked_reason` (`budget_exceeded` | `payment_required`); the status is looked up before the
-    transaction, and a failed lookup lets the call through. `OF_ENFORCE_QUOTAS` is retired.
+    `blocked_reason` (`budget_exceeded` | `payment_required`); a blocked org's tracker close is
+    applied but unbilled. The status is looked up before the transaction (`Meter::warm`, on both
+    paths), and a failed lookup lets the call through. `OF_ENFORCE_QUOTAS` is retired.
 12. **Migrations are append-only, one file per concern, in `crates/of-core/migrations/`.** Never
     edit a migration that has been applied anywhere — add a new one. (`0001_baseline.sql` is a
     one-time squash, done at the platform cutover; the schema is domain-only and holds no foreign
