@@ -262,15 +262,18 @@ Do not leave this state longer than needed, because the backlog only grows.
 
 `rename-service` is itself the authoritative guard: it refuses if any metered usage or Stripe
 object exists under the old slug. This read-only check tells you beforehand, so you are not
-surprised mid-sequence. Open a console on the platform database and paste the query
-(`fly postgres connect` takes no command flag; its flags are `-a`, `-d`, `-u`, `-p`, `-c` for a
-config file):
+surprised mid-sequence. It runs against the **platform's** database, `otto_platform`. Open a
+console on it and paste the block as a whole (`fly postgres connect` takes no command flag; its
+flags are `-a`, `-d`, `-u`, `-p`, `-c` for a config file). The connecting role is a superuser on
+the whole instance, so the paste is wrapped in a read-only transaction that is rolled back: a
+stray edit in the paste cannot write anything.
 
 ```bash
 fly postgres connect -a otto-db -d otto_platform
 ```
 
 ```sql
+BEGIN READ ONLY;
 SELECT
   (SELECT count(*) FROM usage_events           WHERE meter LIKE 'otto-factory/%')       AS usage_events,
   (SELECT count(*) FROM org_meter_period_usage WHERE meter LIKE 'otto-factory/%')       AS org_meter_period_usage,
@@ -278,6 +281,7 @@ SELECT
   (SELECT count(*) FROM stripe_prices          WHERE meter LIKE 'otto-factory/%')       AS stripe_prices,
   (SELECT count(*) FROM stripe_meter_outbox    WHERE event_name LIKE 'otto\_factory\_\_%'
                                                 OR event_name LIKE 'otto\_hfactory\_\_\_%') AS stripe_meter_outbox;
+ROLLBACK;
 ```
 
 (`event_name` is `otto_factory__<meter>`: the meter key with `-` turned into `_` and `/` into `__`.
@@ -304,14 +308,21 @@ Do this straight after step 3 and before anything else, and only while usage shi
 (it is, from step 2 until this step: the new binary's meter declaration is refused until the
 slug changes). A batch the platform accepted mid-rename could otherwise land under the old slug. The shipper's next retry declares
 `otto-tower/jobs_completed`, logs `declared usage meters`, and drains the queued rows (oldest
-first). Watch the backlog and the logs (`fly logs -a otto-factory-mcp`):
+first). Watch the logs (`fly logs -a otto-factory-mcp`) and the backlog. The backlog lives in
+**this service's** database, `otto_factory`, not in `otto_platform` where step 3 ran:
+
+```bash
+fly postgres connect -a otto-db -d otto_factory
+```
 
 ```sql
+BEGIN READ ONLY;
 SELECT count(*), min(occurred_at), max(attempts), max(last_error) FROM usage_outbox;
+ROLLBACK;
 ```
 
 **Verify:** the command succeeded; `declared usage meters` appears in the log; the count falls to 0;
-re-running the step 3 query on the platform database still gives five zeros.
+re-running the step 3 query on the platform database (`otto_platform`) still gives five zeros.
 **Stop if:** `rename-service` errors (do not continue; the platform changed nothing, so the old name
 stays in force: find out why and retry), or the backlog does not drain / `last_error` stays
 non-empty after a few minutes.
@@ -451,12 +462,30 @@ ships. The otto-factory flip PR also changes `.github/workflows/ci.yml`'s `envir
 ```bash
 otto-platform-server resource set-webhook $NEW https://otto-tower.savvagent.com/platform/webhooks
 #   -> prints a NEW signing secret ONCE
-fly secrets set -a otto-factory-mcp OF_PLATFORM_WEBHOOK_SECRET='otto_whsec_…'
 ```
+
+Set it **immediately**, without putting it on a command line (where it would land in shell
+history and be visible in the process list). `read -rs` takes it without echoing it, and
+`fly secrets import` reads `NAME=VALUE` from stdin and redeploys the app with it:
+
+```bash
+read -rs SECRET          # paste the otto_whsec_… value, then Enter
+printf 'OF_PLATFORM_WEBHOOK_SECRET=%s\n' "$SECRET" | fly secrets import -a otto-factory-mcp
+unset SECRET
+fly secrets list -a otto-factory-mcp     # OF_PLATFORM_WEBHOOK_SECRET shows as Deployed
+```
+
+Between `set-webhook` and the end of that redeploy the platform signs with the new secret while
+the running app still verifies with the old one, so **a short window of rejected webhook
+deliveries is expected**. The platform retries them, so nothing is lost provided the window stays
+short: that is why the secret step follows straight on. Confirm the redeploy finished (`fly secrets
+list` says Deployed, and `fly status -a otto-factory-mcp` shows the machine started on the new
+release) before you Verify.
 
 **Verify:** delete a throwaway team at the platform and check for a `platform.team.deleted` row
 (`GET /api/orgs/{org}/audit?actionPrefix=platform.`).
-**Stop if:** no such row appears: the secret was not set, or the URL is wrong. The old host keeps
+**Stop if:** no such row appears: the secret was not set, the redeploy has not finished, or the URL
+is wrong. The old host keeps
 receiving nothing new, so fix this before telling customers anything.
 
 ### 10. Tell customers
@@ -510,7 +539,15 @@ fronted by the Worker: also remove `OF_PUBLIC_URL` and `OF_LEGACY_HOSTS` from th
   meanwhile because the old URI is still a live alias. Then swap the URIs back as above. If the URL-flip PRs (8a) were merged, revert them too.
 - **If step 9 had run**, also point the webhook back with
   `resource set-webhook $OLD https://otto-factory.savvagent.com/platform/webhooks` and set the secret
-  it prints as `OF_PLATFORM_WEBHOOK_SECRET`. If it had not, leave the webhook alone.
+  it prints as `OF_PLATFORM_WEBHOOK_SECRET` the same way as in step 9, straight away and never on
+  the command line:
+  ```bash
+  read -rs SECRET
+  printf 'OF_PLATFORM_WEBHOOK_SECRET=%s\n' "$SECRET" | fly secrets import -a otto-factory-mcp
+  unset SECRET
+  ```
+  Expect the same short window of rejected (and retried) deliveries until that redeploy finishes.
+  If step 9 had not run, leave the webhook alone.
 - **`rename-service` (step 4) is not rolled back.** Once metering is declared under `otto-tower/`,
   keep it: the binary that is deployed declares only that key. Rolling the *image* back to a pre-rename
   release would declare `otto-factory/jobs_completed`, which the platform then refuses; its shipper pauses
