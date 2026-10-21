@@ -147,7 +147,7 @@ export interface Job {
   ticketRef: string | null;
   tracker: 'jira' | 'github' | null;
   agentType: string | null;
-  /** Opaque to otto-factory. A customer's own skill owns the shape. */
+  /** Opaque to otto-tower. A customer's own skill owns the shape. */
   metadata: Record<string, unknown>;
   createdAt: string;
   startedAt: string | null;
