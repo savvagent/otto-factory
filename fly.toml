@@ -40,17 +40,17 @@ primary_region = "iad"
   # still answers, but nothing advertises it: the discovery pointer in a 401 and
   # the tracker OAuth callbacks are built from OF_PUBLIC_URL.
   #
-  # The canonical host is otto-tower.savvagent.com, but the values below are
-  # still the pre-rename host until the operator cutover (docs/deploy/fly.md,
-  # step 8) flips OF_PUBLIC_URL, OF_RESOURCE_URI and OF_CONSOLE_CLIENT_ID and
-  # adds OF_LEGACY_HOSTS / OF_LEGACY_SUNSET. Flipping any of them earlier makes
-  # the platform reject this app's credential.
-  OF_PUBLIC_URL = "https://otto-factory.savvagent.com"
+  # The canonical host since the rename cutover (docs/deploy/fly.md, step 8).
+  OF_PUBLIC_URL = "https://otto-tower.savvagent.com"
   # The token audience: exactly the resource_uri registered at the platform
   # (`otto-platform-server resource register <this>`), and the HTTP Basic user on
   # every call this app makes to it. Passkeys are NOT bound to this hostname any
   # more -- they belong to the platform's.
-  OF_RESOURCE_URI = "https://otto-factory.savvagent.com/mcp"
+  OF_RESOURCE_URI = "https://otto-tower.savvagent.com/mcp"
+  # The pre-rename host, still served with deprecation notices until the sunset.
+  # Clear both after `resource drop-alias` (docs/deploy/fly.md, step 11).
+  OF_LEGACY_HOSTS = "otto-factory.savvagent.com"
+  OF_LEGACY_SUNSET = "2026-10-22T00:00:00Z"
   # The OAuth authorization server, identity directory, and billing system of
   # record. Advertised to MCP clients as this resource's authorization server.
   OF_PLATFORM_URL = "https://otto.savvagent.com"
@@ -58,11 +58,9 @@ primary_region = "iad"
   # (a public client; PKCE is what binds a code to its browser). Printed by
   # `otto-platform-server client register --name "otto-tower console"
   # --redirect-uri https://otto-tower.savvagent.com/auth/callback --first-party`
-  # (this id is for the pre-rename host's redirect URI; the cutover registers a
-  # new one for the new host).
   # (docs/deploy/fly.md). Unset, `/auth/login` answers 503
   # console_login_disabled and everything else runs.
-  OF_CONSOLE_CLIENT_ID = "otto_client_BY6fncRMJV2hDPnDv8n9R1LYE004vJJi4GJDvhJPuTQ"
+  OF_CONSOLE_CLIENT_ID = "otto_client_8ClmY61CJPC5BJHULc1Kug15hbSvw0vAy6CxUuXMZUY"
   OF_STATIC_DIR = "/srv/console"
   OF_LOG_FORMAT = "json"
   RUST_LOG = "info,of_server=info,of_mcp=info,of_web=info"
