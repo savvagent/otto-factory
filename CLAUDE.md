@@ -510,6 +510,11 @@ the decisions no single crate could make.
   backoff. It stops on shutdown after a final flush, except while it is still waiting for the
   meter declaration: then it stops without one (shipping metered rows for an undeclared meter
   would dead-letter them). Anything undelivered stays in the table for the next process.
+  Before it starts, `main` runs `of_core::retired_meters::rewrite`, which moves queued rows still on
+  a renamed meter key (`RENAMED`) to its successor, per org with both guards: an image rolled back
+  past `0006_meter_otto_tower.sql` keeps enqueuing the old key, and on the roll forward those rows
+  would otherwise ship under an undeclared meter and be dead-lettered as `unknown_meter`. A rename
+  of a meter adds its pair to `RENAMED` as well as writing its migration.
 - **Startup checks the platform credential but never requires the platform.** One harmless
   `usage_status` call logs whether the credential was accepted (a `REJECTED` line is a
   deployment fault), and a transport failure only warns: a platform outage must not stop a

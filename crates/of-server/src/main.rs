@@ -51,6 +51,23 @@ async fn main() -> Result<()> {
         tracing::warn!("OF_RUN_MIGRATIONS is off; assuming the schema is already current");
     }
 
+    // Before the shipper declares the meters and starts draining: rows an older
+    // image enqueued under a meter key that has since been renamed (a rollback
+    // past `0006_meter_otto_tower.sql`, then this roll forward) would otherwise
+    // ship under an undeclared meter and be dead-lettered as `unknown_meter`.
+    // Idempotent, and a no-op on every ordinary start. Run whether or not this
+    // process applied the migrations, since the rows are not a schema matter.
+    let moved = of_core::retired_meters::rewrite(&db)
+        .await
+        .context("could not move queued usage off a retired meter key")?;
+    if moved > 0 {
+        tracing::warn!(
+            rows = moved,
+            "moved queued usage rows from a retired meter key to its successor \
+             (an older image ran since the rename)"
+        );
+    }
+
     // Prove tenant isolation before binding a port, never after. Row-level
     // security is the one guard the *environment* can switch off — the same
     // migrations isolate perfectly under one database role and not at all under

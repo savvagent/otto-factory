@@ -716,6 +716,23 @@ fn every_recordable_meter_is_declared() {
     }
 }
 
+/// The startup rewrite (`of_core::retired_meters`) moves queued rows from a
+/// retired key to its successor. A successor the shipper does not declare would
+/// only move them from one dead letter to another, and a retired key that is
+/// still declared was never retired.
+#[test]
+fn every_renamed_meter_moves_to_a_declared_one() {
+    let declared = |key: &str| {
+        of_billing::METER_DECLARATIONS
+            .iter()
+            .any(|(declared, _, _)| *declared == key)
+    };
+    for (old, new) in of_core::retired_meters::RENAMED {
+        assert!(declared(new), "{old} is rewritten to undeclared {new}");
+        assert!(!declared(old), "{old} is retired but still declared");
+    }
+}
+
 /// Poll `f` until it holds or five seconds pass.
 async fn eventually(what: &str, mut f: impl FnMut() -> bool) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);

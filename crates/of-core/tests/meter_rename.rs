@@ -1,3 +1,8 @@
+//! The same rewrite also runs at every startup (`of_core::retired_meters`), so
+//! rows an older image enqueued under the old key after a rollback are not
+//! dead-lettered on the roll forward; the tests at the end of this file run it
+//! under both shapes too.
+//!
 //! `0006_meter_otto_tower.sql` rewrites queued `usage_outbox` rows from the old
 //! meter key to the new one, for every org, under both shapes a migration can
 //! run in: a role that bypasses RLS (this deployment's superuser) and a role
@@ -108,6 +113,91 @@ async fn leaves_rejected_history_and_is_idempotent(pool: PgPool) {
 
     sqlx::raw_sql(MIGRATION).execute(&pool).await.unwrap();
     sqlx::raw_sql(MIGRATION).execute(&pool).await.unwrap();
+
+    assert_eq!(counts(&pool, org).await, (0, 3, 1));
+    let kept: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM usage_outbox_rejected WHERE org_id = $1 AND meter = $2",
+    )
+    .bind(org)
+    .bind(OLD)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(kept, 1);
+}
+
+// ------------------------------------------------- the startup rewrite
+
+#[test]
+fn the_startup_rewrite_covers_the_migrations_rename() {
+    assert!(of_core::retired_meters::RENAMED.contains(&(OLD, NEW)));
+}
+
+/// A rollback to an image that predates the rename enqueues completions under
+/// the old key after `0006` has already run; the next startup moves them.
+#[sqlx::test]
+async fn the_startup_rewrite_moves_rows_enqueued_after_0006_when_rls_is_bypassed(pool: PgPool) {
+    let orgs = [Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
+    seed(&pool, &orgs).await;
+
+    let moved = of_core::retired_meters::rewrite(&db(pool.clone()))
+        .await
+        .unwrap();
+
+    assert_eq!(moved, 6);
+    for org in orgs {
+        assert_eq!(counts(&pool, org).await, (0, 3, 1), "org {org}");
+    }
+}
+
+#[sqlx::test]
+async fn the_startup_rewrite_moves_every_orgs_rows_when_rls_applies(pool: PgPool) {
+    let orgs = [Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
+    seed(&pool, &orgs).await;
+
+    // As the non-owner role RLS binds, with no app.org_id: the discovery read
+    // goes through the policy's org-less branch, and each UPDATE through the
+    // org the loop pins.
+    let db = db(pool.clone());
+    let mut tx = db.begin_unpinned().await.unwrap();
+    sqlx::query("SET LOCAL ROLE otto_app")
+        .execute(tx.conn())
+        .await
+        .unwrap();
+    let moved = of_core::retired_meters::rewrite_in(tx.conn())
+        .await
+        .unwrap();
+    // Nothing later in the same transaction inherits the last org pinned.
+    let left: String = sqlx::query_scalar("SELECT current_setting('app.org_id', true)")
+        .fetch_one(tx.conn())
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    assert_eq!(moved, 6);
+    assert_eq!(left, "");
+    for org in orgs {
+        assert_eq!(counts(&pool, org).await, (0, 3, 1), "org {org}");
+    }
+}
+
+#[sqlx::test]
+async fn the_startup_rewrite_is_idempotent_and_leaves_rejected_history(pool: PgPool) {
+    let org = Uuid::new_v4();
+    seed(&pool, &[org]).await;
+    sqlx::query(
+        "INSERT INTO usage_outbox_rejected (event_id, org_id, tool, billable, occurred_at, reason, meter, quantity) \
+         VALUES (gen_random_uuid(), $1, 'complete_job', true, now(), 'x', $2, 1)",
+    )
+    .bind(org)
+    .bind(OLD)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let db = db(pool.clone());
+    assert_eq!(of_core::retired_meters::rewrite(&db).await.unwrap(), 2);
+    assert_eq!(of_core::retired_meters::rewrite(&db).await.unwrap(), 0);
 
     assert_eq!(counts(&pool, org).await, (0, 3, 1));
     let kept: i64 = sqlx::query_scalar(

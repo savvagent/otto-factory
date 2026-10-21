@@ -487,6 +487,20 @@ hostname's custom domain, DNS records and certificate (`fly certs remove otto-fa
   keep it: the binary that is deployed declares only that key. Rolling the *image* back to a pre-rename
   release would declare `otto-factory/jobs_completed`, which the platform then refuses; its shipper pauses
   safely, but do not stay there.
+- **Rolling the image forward again is safe for billing.** While an older image runs it enqueues
+  completed jobs under `otto-factory/jobs_completed`, after `0006_meter_otto_tower.sql` has already
+  been applied, so that migration never rewrites them. Every `of-server` start therefore runs
+  `of_core::retired_meters::rewrite` before the usage shipper declares its meters: it moves every
+  queued `usage_outbox` row still on a retired key to its successor (per org, safe under either RLS
+  shape), logs `moved queued usage rows from a retired meter key` with the count when there were
+  any, and is a no-op otherwise. Without it those rows would ship under an undeclared meter and be
+  dead-lettered as `unknown_meter`. It does not touch `usage_outbox_rejected`; a row an older image
+  already had refused stays there as history. To check after the roll forward (on `otto_factory`):
+  ```sql
+  BEGIN READ ONLY;
+  SELECT meter, count(*) FROM usage_outbox GROUP BY meter;   -- no otto-factory/ rows
+  ROLLBACK;
+  ```
 
 ## Historical: the platform-split reset (one-time, already done)
 
