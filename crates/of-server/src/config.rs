@@ -780,13 +780,13 @@ mod tests {
     #[test]
     fn allowed_hosts_always_contain_the_public_origins_host() {
         let mut config = Config::for_test();
-        config.extra_allowed_hosts = vec!["otto-factory.fly.dev".into()];
+        config.extra_allowed_hosts = vec!["otto-factory-mcp.fly.dev".into()];
 
         assert_eq!(
             config.allowed_hosts(),
             vec![
                 "factory.example.com".to_string(),
-                "otto-factory.fly.dev".to_string()
+                "otto-factory-mcp.fly.dev".to_string()
             ]
         );
     }

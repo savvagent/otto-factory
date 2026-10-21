@@ -32,9 +32,10 @@ kept identifiers, and a new hit outside the list is a bug:
 - The Rust type `Factory`.
 - `savvagent/otto-factory#NNN` issue references, and the repo slug `savvagent/otto-factory` itself
   until the GitHub repo is renamed (a separate human step).
-- The GitHub App slug `otto-factory` (`savvagent/otto-factory#232`).
+- The GitHub App slug `otto-factory` (`savvagent/otto-factory#232`), including the test fixtures
+  that configure it and the `github.com/apps/otto-factory/…` install URL a test expects.
 - The tracker trigger-label default `otto-factory` (stored data and a behaviour;
-  `savvagent/otto-factory#233`).
+  `savvagent/otto-factory#233`), with the tests, OpenAPI descriptions and examples that exercise it.
 - The Cloudflare Worker script names (`otto-factory-console`, `otto-factory-console-dev`).
 - `CHANGELOG.md`, and the dated historical `docs/specs/*` and `docs/plans/*` (including the design
   of record's filename `2026-09-01-otto-factory-design.md`, which links depend on).
@@ -52,13 +53,21 @@ kept identifiers, and a new hit outside the list is a bug:
 - The `x-otto-factory-auth` OpenAPI extension key, emitted by the server and read by the console.
 - The applied migration `0001_baseline.sql` (its comments and the `trigger_label` default): an
   applied migration is never edited.
-- The old meter key `otto-factory/jobs_completed` where it names what is being renamed away from:
-  `0006_meter_otto_tower.sql`, `crates/of-core/tests/meter_rename.rs`, the startup rewrite's
-  `of_billing::RETIRED_METERS`, and the runbook's preflight and rollback in `docs/deploy/fly.md`.
+- The old meter key `otto-factory/jobs_completed` (and its `otto-factory/` prefix) where it names
+  what is being renamed away from: `0006_meter_otto_tower.sql`, `crates/of-core/tests/meter_rename.rs`,
+  `of_billing::RETIRED_METERS` with its doc example and `crates/of-billing/tests/outbox.rs`, and the
+  runbook's preflight and rollback in `docs/deploy/fly.md`.
 - The old `otto-factory-worker:trio-cleared:` marker named in `.github/skills/otto-tower-worker/SKILL.md`'s
   transition note (it says that marker no longer counts).
 - The GitHub App's display name in the `trackers_not_connected_github` message (every locale): it is
   what the App is called on GitHub until a human renames it (`savvagent/otto-factory#232`).
+- In the cutover runbook (`docs/deploy/fly.md`): the platform's service slug `otto-factory` that
+  `rename-service` changes (step 2, the preflight in step 3, and the resource registration notes),
+  this repository named by its current name in the runbook's prose ("Release and deploy
+  otto-factory", "the otto-factory flip PR"), and the customer instruction
+  `claude mcp remove otto-factory`, which names what customers registered the server as.
+- Sentences recording the rename itself ("renamed from otto-factory"), here, in `docs/deploy/fly.md`
+  and in `docs/deploy/cloudflare.md`, and this list.
 
 ## The three constraints
 
