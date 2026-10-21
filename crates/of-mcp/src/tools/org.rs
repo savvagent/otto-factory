@@ -27,7 +27,7 @@ impl Factory {
         name = "whoami",
         description = "Who this token says you are: your user, the one organization it opens, \
                        your role in it, the scopes it carries, and this month's usage: completed \
-                       jobs billed on the organization's otto-factory meter, its budget and any \
+                       jobs billed on the organization's otto-tower meter, its budget and any \
                        block (coordination calls are free). Call this first in a session — it \
                        is the only way to know which organization your work will land in, and \
                        which tools you are allowed to use."
@@ -91,7 +91,7 @@ impl Factory {
     #[tool(
         name = "usage",
         description = "This organization's usage this month: `meters` lists the completed jobs \
-                       billed on its otto-factory meter, `budget` shows its spend limit (null \
+                       billed on its otto-tower meter, `budget` shows its spend limit (null \
                        if none is set) and `blockedReason` says why completing jobs is being \
                        refused, if it is. Coordination calls are free; only each completed job \
                        is billed, including one completed by closing its linked ticket. \

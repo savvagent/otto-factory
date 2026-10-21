@@ -14,7 +14,7 @@
 //!   everything else           web/build   the console SPA, index.html fallback
 //! ```
 //!
-//! otto-factory is a resource server of the otto platform, which is the OAuth
+//! otto-tower is a resource server of the otto platform, which is the OAuth
 //! authorization server and the system of record for identity and billing. There
 //! is no `/oauth/*` or account surface here; the console signs in *through* the
 //! platform (`/auth/*`, an OAuth client), and both HTTP surfaces validate the

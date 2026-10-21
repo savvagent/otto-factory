@@ -638,7 +638,7 @@ async fn a_metered_row_ships_its_meter_and_quantity(pool: PgPool) {
     assert_eq!(metered.len(), 1);
     assert_eq!(
         metered[0].meter.as_deref(),
-        Some("otto-factory/jobs_completed")
+        Some("otto-tower/jobs_completed")
     );
     assert_eq!(metered[0].quantity, Some(1));
     let plain = counted.iter().find(|e| e.meter.is_none()).unwrap();
@@ -672,10 +672,10 @@ async fn a_rejected_metered_row_keeps_its_meter_and_quantity(pool: PgPool) {
 #[sqlx::test(migrator = "of_core::MIGRATOR")]
 async fn the_schema_refuses_a_half_metered_or_non_positive_row(pool: PgPool) {
     for (meter, quantity) in [
-        (Some("otto-factory/jobs_completed"), None),
+        (Some("otto-tower/jobs_completed"), None),
         (None, Some(1_i64)),
-        (Some("otto-factory/jobs_completed"), Some(0)),
-        (Some("otto-factory/jobs_completed"), Some(-1)),
+        (Some("otto-tower/jobs_completed"), Some(0)),
+        (Some("otto-tower/jobs_completed"), Some(-1)),
     ] {
         for table in ["usage_outbox", "usage_outbox_rejected"] {
             let sql = if table == "usage_outbox" {
@@ -754,7 +754,7 @@ async fn the_shipper_declares_the_meter_before_its_first_usage_post(pool: PgPool
 
     let declared = platform.declared_meters();
     assert_eq!(declared.len(), 1, "{declared:?}");
-    assert_eq!(declared[0].key, "otto-factory/jobs_completed");
+    assert_eq!(declared[0].key, "otto-tower/jobs_completed");
     assert_eq!(declared[0].display_name, "Jobs completed");
     assert_eq!(declared[0].unit, "job");
     assert_eq!(

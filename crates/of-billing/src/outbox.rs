@@ -42,7 +42,7 @@ use uuid::Uuid;
 use crate::error::Result;
 
 /// The platform meter key for a completed job.
-pub const METER_JOBS_COMPLETED: &str = "otto-factory/jobs_completed";
+pub const METER_JOBS_COMPLETED: &str = "otto-tower/jobs_completed";
 
 /// The meters this server declares to the platform before it ships usage, as
 /// `(key, display name, unit)`.

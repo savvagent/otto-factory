@@ -1,4 +1,4 @@
-//! otto-factory server binary. Assembles every HTTP surface on one port.
+//! otto-tower server binary. Assembles every HTTP surface on one port.
 
 use anyhow::{Context, Result};
 use of_billing::outbox::ShipperConfig;

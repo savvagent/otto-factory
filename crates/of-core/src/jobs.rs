@@ -133,7 +133,7 @@ pub struct Job {
     pub tracker: Option<Tracker>,
     pub remote_revision: Option<String>,
     pub agent_type: Option<String>,
-    /// Opaque to otto-factory. Customers' own skills own the shape.
+    /// Opaque to otto-tower. Customers' own skills own the shape.
     pub metadata: serde_json::Value,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub started_at: Option<chrono::DateTime<chrono::Utc>>,
