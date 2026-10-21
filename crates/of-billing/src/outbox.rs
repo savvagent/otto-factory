@@ -393,10 +393,13 @@ async fn declare_meters(
 
         if last_logged.is_none_or(|t| t.elapsed() >= DECLARE_LOG_EVERY) {
             last_logged = Some(tokio::time::Instant::now());
-            let waiting = pending(db).await.ok();
+            let waiting = match pending(db).await {
+                Ok(n) => n.to_string(),
+                Err(e) => format!("unknown ({e})"),
+            };
             tracing::error!(
                 %reason,
-                rows_waiting = ?waiting,
+                rows_waiting = %waiting,
                 "could not declare the usage meters; no usage ships until they are declared \
                  (rows stay queued and nothing is lost). Retrying"
             );
@@ -421,8 +424,8 @@ async fn declare_meters(
 /// returns at once without a final pass, for the same reason; the rows stay
 /// queued for the next process.
 ///
-/// Once shipping, a final pass runs on the way out so a clean shutdown does not strand rows
-/// that were one request from delivered.
+/// Once shipping, a final pass runs on the way out so a clean shutdown does
+/// not strand rows that were one request from delivered.
 pub async fn run(
     db: Db,
     platform: std::sync::Arc<PlatformClient>,

@@ -1130,8 +1130,9 @@ fn usage_entry(d: &mut Data, org: Uuid) -> &mut UsageStatus {
 
 /// The quantity of each meter `org` shipped in `now`'s UTC month, summed the
 /// way the platform sums it (a metered event with no quantity counts one),
-/// ordered by key. A declared meter shows its declared display name and unit;
-/// one never declared shows its key and an empty unit.
+/// ordered by key. A declared meter shows its declared display name and unit,
+/// and zero when nothing was shipped; one never declared shows its key and an
+/// empty unit.
 fn shipped_meters(
     counted: &[UsageEvent],
     declared: &[MeterDeclaration],
@@ -1147,6 +1148,10 @@ fn shipped_meters(
         if let Some(meter) = ev.meter.as_deref() {
             *sums.entry(meter).or_default() += ev.quantity.unwrap_or(1);
         }
+    }
+    // A declared meter with no usage this month shows zero, as the platform does.
+    for decl in declared {
+        sums.entry(decl.key.as_str()).or_default();
     }
     sums.into_iter()
         .map(|(meter, quantity)| {

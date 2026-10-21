@@ -273,8 +273,8 @@ pub async fn receive(
                                         )
                                         .await
                                         // Fail the delivery (rolling the close back) so
-                                        // the tracker retries, rather than complete an
-                                        // unmetered job.
+                                        // the delivery can be retried or redelivered,
+                                        // rather than complete an unmetered job.
                                         .map_err(|e| ApiError::internal("usage metering", e))?;
                                     }
                                 }

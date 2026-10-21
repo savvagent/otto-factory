@@ -2528,6 +2528,26 @@ async fn whoami_and_usage_report_the_completed_jobs_meter(pool: PgPool) {
     }
 }
 
+/// A declared meter with no usage yet is reported at zero, not omitted.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_declared_meter_with_no_usage_reports_quantity_zero(pool: PgPool) {
+    let (env, caller) = env(pool).await;
+    env.register(&caller).await;
+    env.declare_meters().await;
+
+    for status in [env.usage(&caller).await, env.whoami_usage(&caller).await] {
+        assert_eq!(
+            status["meters"],
+            serde_json::json!([{
+                "meter": "otto-factory/jobs_completed",
+                "displayName": "Jobs completed",
+                "unit": "job",
+                "quantity": 0
+            }])
+        );
+    }
+}
+
 /// The budget and the block are reported, and reading them is never refused
 /// even though the org is blocked.
 #[sqlx::test(migrations = "../of-core/migrations")]

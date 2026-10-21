@@ -737,6 +737,23 @@ async fn the_schema_refuses_a_half_metered_or_non_positive_row(pool: PgPool) {
 
 // ------------------------------------------------------------------ declaration
 
+/// Every meter this crate can record must be declared before shipping, or the
+/// platform dead-letters its rows as `unknown_meter`. Add each new `Metered`
+/// constructor here.
+#[test]
+fn every_recordable_meter_is_declared() {
+    let recordable = [Metered::jobs_completed()];
+    for m in recordable {
+        assert!(
+            of_billing::METER_DECLARATIONS
+                .iter()
+                .any(|(key, _, _)| *key == m.meter),
+            "{} is recorded but not in METER_DECLARATIONS",
+            m.meter
+        );
+    }
+}
+
 /// Poll `f` until it holds or five seconds pass.
 async fn eventually(what: &str, mut f: impl FnMut() -> bool) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -783,6 +800,14 @@ async fn the_shipper_declares_the_meter_before_its_first_usage_post(pool: PgPool
         0,
         "usage was posted before the meter was declared"
     );
+
+    // A second batch ships without declaring again: once per process.
+    record_metered(&db, org, user, &meter).await;
+    eventually("the second row to ship", || {
+        platform.counted_usage().len() == 2
+    })
+    .await;
+    assert_eq!(platform.meter_calls(), 1, "declared more than once");
 
     stop.send(true).unwrap();
     task.await.unwrap();

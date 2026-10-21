@@ -28,9 +28,9 @@ impl Factory {
         description = "Who this token says you are: your user, the one organization it opens, \
                        your role in it, the scopes it carries, and this month's usage: completed \
                        jobs billed on the organization's otto-factory meter, its budget and any \
-                       block (coordination calls are free). Call this first in a session — it is the only way to \
-                       know which organization your work will land in, and which tools you are \
-                       allowed to use."
+                       block (coordination calls are free). Call this first in a session — it \
+                       is the only way to know which organization your work will land in, and \
+                       which tools you are allowed to use."
     )]
     pub async fn whoami(
         &self,
@@ -94,7 +94,8 @@ impl Factory {
                        billed on its otto-factory meter, `budget` shows its spend limit (null \
                        if none is set) and `blockedReason` says why completing jobs is being \
                        refused, if it is. Coordination calls are free; only each completed job \
-                       is billed. This tool is free and works even while blocked. If `budget` \
+                       is billed, including one completed by closing its linked ticket. \
+                       This tool is free and works even while blocked. If `budget` \
                        is nearly spent or `blockedReason` is set, tell the person you are \
                        working for — someone with billing access may need to act."
     )]

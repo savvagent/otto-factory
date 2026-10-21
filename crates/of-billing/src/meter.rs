@@ -315,7 +315,7 @@ pub struct BudgetReport {
     /// Whole percent of the budget spent (can exceed 100), or null when spend
     /// is unknown.
     pub percent_used: Option<i64>,
-    /// The alert thresholds (50, 80, 100 percent) reached this month.
+    /// The alert thresholds the platform reports as reached this month.
     pub thresholds_reached: Vec<u8>,
     /// Whether the org opted in to refusing billable calls once spend reaches
     /// the budget.

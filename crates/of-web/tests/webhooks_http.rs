@@ -319,6 +319,50 @@ async fn an_inbound_close_as_done_completes_the_job_and_meters_it_exactly_once(p
     );
 }
 
+/// A job already completed through `complete_job` has been metered by that
+/// call. A later close event (newer `updated_at`, so not stale) finds a
+/// terminal job, is a no-op, and must not write a second row.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_later_close_of_a_job_completed_by_complete_job_meters_nothing_more(pool: PgPool) {
+    let h = harness(pool.clone()).await;
+    let org = otto_tenant::ids::OrgId::new();
+    github_bound_repo_with_synced_job(&h, org).await;
+
+    // Complete the job as `complete_job` does, including its metered row.
+    let agent = otto_tenant::ids::UserId::new();
+    let mut tx = h.db.begin(org).await.unwrap();
+    let repo = tx.get_repo_by_slug("api").await.unwrap().expect("repo");
+    let job = tx
+        .get_job_by_ticket_for_repo(repo.id, Tracker::Github, "acme/api#17")
+        .await
+        .unwrap()
+        .expect("job");
+    tx.claim_jobs(std::slice::from_ref(&job.id), agent, None, None)
+        .await
+        .unwrap();
+    tx.complete_job(&job.id, agent, None, None).await.unwrap();
+    of_billing::outbox::enqueue(
+        &mut tx,
+        Some(agent),
+        "complete_job",
+        true,
+        Some(&of_billing::Metered::jobs_completed()),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    let later = String::from_utf8(github_close_payload("completed"))
+        .unwrap()
+        .replace("2026-09-04T09:00:00Z", "2026-09-05T09:00:00Z");
+    let reply = post_github_issue(&h, later.as_bytes()).await;
+    assert_eq!(reply.status(), StatusCode::OK);
+
+    let rows = metered_rows(&pool).await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].4, "complete_job");
+}
+
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn an_inbound_close_as_not_planned_fails_the_job_and_meters_nothing(pool: PgPool) {
     let h = harness(pool.clone()).await;

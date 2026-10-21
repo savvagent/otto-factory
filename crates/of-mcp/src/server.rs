@@ -80,7 +80,8 @@ Jobs carry a free-form `metadata` object that this server never reads or \
 interprets. Put whatever your own workflow needs in it.
 
 Coordination calls are free. Each completed job is billed on the \
-organization's otto-factory meter. Call usage to see this month's completed \
+organization's otto-factory meter, including one completed by closing its \
+linked ticket. Call usage to see this month's completed \
 jobs, the budget and any block.";
 
 #[derive(Debug, Clone, Default)]
