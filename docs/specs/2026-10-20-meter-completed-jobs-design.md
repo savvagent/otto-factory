@@ -80,7 +80,8 @@ stop and payment gate.
 `of-core` migration for meter columns, `of-server` startup (declaration, retired flag),
 `of-testkit` `MockPlatform` (meters endpoint, meter-aware status, budget/blocked helpers), the
 dependency bump, docs (`CLAUDE.md` Metering, `README.md`, `docs/deploy/fly.md`,
-`client-skills/claude-code/README.md`, `.env.example`), the web test fixture that mentions the old
+`client-skills/claude-code/README.md`, `.env.example`,
+`.github/skills/otto-factory-development/SKILL.md`), the web test fixture that mentions the old
 fields.
 
 **Out:** prices and the platform side (#55); metering `fail_job`; any console UI change (the
