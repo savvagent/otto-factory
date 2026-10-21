@@ -22,7 +22,7 @@ before any non-trivial change. The build order is in
 The product was renamed from otto-factory to **otto-tower** (epic `savvagent/otto-platform#81`;
 design of record `docs/specs/2026-10-21-otto-tower-rename-design.md` in otto-platform). Everything a
 person or agent reads says otto-tower: the MCP server name (`mcp__otto-tower__*`), the canonical
-endpoint `https://otto-tower.savvagent.com/mcp` once the operator cutover has run (until then the live host is `https://otto-factory.savvagent.com/mcp`), the console, the docs, the skills and the meter
+endpoint `https://otto-tower.savvagent.com/mcp`, the console, the docs, the skills and the meter
 (`otto-tower/jobs_completed`). `git grep -i otto-factory` is expected to find only these deliberately
 kept identifiers, and a new hit outside the list is a bug:
 
@@ -40,9 +40,8 @@ kept identifiers, and a new hit outside the list is a bug:
 - `CHANGELOG.md`, and the dated historical `docs/specs/*` and `docs/plans/*` (including the design
   of record's filename `2026-09-01-otto-factory-design.md`, which links depend on).
 - The legacy host `otto-factory.savvagent.com` where it appears as deprecation config or in the
-  cutover runbook (`docs/deploy/fly.md`). Until the cutover it is also the live
-  host that user-facing docs and `ci.yml`'s `environment.url` link to; the prepared URL-flip PRs
-  (runbook step 8a) move them to `otto-tower.savvagent.com`.
+  cutover runbook (`docs/deploy/fly.md`). It is the legacy/deprecation path only; user-facing
+  docs and `ci.yml`'s `environment.url` link to `otto-tower.savvagent.com`.
 - The `otto-factory release` GitHub App named in `.github/workflows/ci.yml` (an App, renamed by a
   human like the one above).
 - The legacy file name `~/.claude/otto-factory-repos`, still read as a fallback by
@@ -351,7 +350,7 @@ members, invites, teams, SSO, tokens, or usage. Those are the platform's, and
   deletes the session (`401`); a platform that cannot answer is `503` and the session is
   untouched.
 - **Cookie-authenticated writes are CSRF-checked; bearer requests are exempt.** SameSite does
-  not cover same-site siblings (`otto.savvagent.com` and `otto-factory.savvagent.com`), so a
+  not cover same-site siblings (`otto.savvagent.com` and `otto-tower.savvagent.com`), so a
   non-safe request carrying the session cookie and no bearer must have `Origin` equal to
   `OF_PUBLIC_URL`'s origin (else `Sec-Fetch-Site: same-origin`, else a same-origin `Referer`),
   or it is `403 cross_site_request` (`csrf.rs`, a port of the platform's). `/auth/logout` is

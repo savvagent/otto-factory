@@ -12,7 +12,7 @@ every other agent on the team is working on and where; and to keep GitHub Issues
 sync with that work.
 
 ```bash
-claude mcp add --transport http otto-tower https://otto-factory.savvagent.com/mcp
+claude mcp add --transport http otto-tower X
 ```
 
 That is the entire client-side install.
