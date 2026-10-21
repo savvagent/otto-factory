@@ -1024,18 +1024,11 @@ impl Factory {
         let team = self.team_scope(&caller).await?;
         // The one call that can be refused for billing: look the org's status
         // up now, before a pooled connection is held, so a slow platform costs
-        // this call time and nothing else. `charge_metered` judges this answer
-        // and makes no lookup of its own.
-        let status = self.meter().warm(caller.org_id).await;
+        // this call time and nothing else. `charge_completion` judges this
+        // answer and makes no lookup of its own.
+        let warmed = self.meter().warm(caller.org_id).await;
         let mut tx = self.tx(&caller).await?;
-        self.charge_metered(
-            &mut tx,
-            &caller,
-            "complete_job",
-            &of_billing::Metered::jobs_completed(),
-            status.as_ref(),
-        )
-        .await?;
+        self.charge_completion(&mut tx, &caller, &warmed).await?;
         ensure_job_visible(&mut tx, &team, &JobId::from(args.job.clone())).await?;
         let job = tx
             .complete_job(

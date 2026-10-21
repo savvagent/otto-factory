@@ -298,7 +298,7 @@ fn retired_warning(name: &str) -> String {
 
 /// `OF_UPGRADE_URL` when set, else the platform console's home.
 fn upgrade_url(explicit: Option<String>, platform_url: &str) -> String {
-    explicit.unwrap_or_else(|| platform_url.trim_end_matches('/').to_string())
+    explicit.unwrap_or_else(|| of_billing::default_fix_url(platform_url))
 }
 
 fn optional(name: &str) -> Option<String> {

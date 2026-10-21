@@ -49,7 +49,7 @@ pub const METER_JOBS_COMPLETED: &str = "otto-factory/jobs_completed";
 ///
 /// The platform rejects a metered event for an undeclared meter as
 /// `unknown_meter`, which moves the row to the dead letter, so [`run`] declares
-/// these first. Every `Metered::meter` this crate records must be listed here.
+/// these first. Every `Metered::meter()` this crate records must be listed here.
 ///
 /// ```
 /// let (key, display, unit) = of_billing::METER_DECLARATIONS[0];
@@ -60,17 +60,18 @@ pub const METER_DECLARATIONS: &[(&str, &str, &str)] =
 
 /// A value meter and quantity carried on a usage row, beside the per-call record.
 ///
-/// `quantity` must be positive; the schema refuses anything else.
+/// Built only by its constructors, so a row can carry only a meter this crate
+/// declares ([`METER_DECLARATIONS`]) and a positive quantity (the schema also
+/// refuses anything else).
 ///
 /// ```
 /// let m = of_billing::Metered::jobs_completed();
-/// assert_eq!((m.meter, m.quantity), (of_billing::METER_JOBS_COMPLETED, 1));
+/// assert_eq!((m.meter(), m.quantity()), (of_billing::METER_JOBS_COMPLETED, 1));
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Metered {
-    /// The meter's key, `<service>/<meter>`.
-    pub meter: &'static str,
-    pub quantity: i64,
+    meter: &'static str,
+    quantity: i64,
 }
 
 impl Metered {
@@ -81,6 +82,16 @@ impl Metered {
             quantity: 1,
         }
     }
+
+    /// The meter's key, `<service>/<meter>`.
+    pub const fn meter(&self) -> &'static str {
+        self.meter
+    }
+
+    /// The quantity, always positive.
+    pub const fn quantity(&self) -> i64 {
+        self.quantity
+    }
 }
 
 /// Record one metered call in the caller's transaction.
@@ -88,6 +99,10 @@ impl Metered {
 /// Returns the call's `event_id`. The row commits or rolls back with `tx`, which
 /// is what makes "a failed call is not billed" true. `metered` adds a value
 /// meter and quantity to the row; `None` records a plain call.
+///
+/// A completed job is never recorded with this directly: it goes through
+/// [`crate::completion::record_job_completed`], which owns what a completion
+/// writes.
 pub async fn enqueue(
     tx: &mut Tx<'_>,
     user: Option<UserId>,

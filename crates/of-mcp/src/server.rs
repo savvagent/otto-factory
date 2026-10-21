@@ -150,7 +150,7 @@ impl Factory {
     /// Record this free call inside the tool's own transaction. Never refuses
     /// and never asks the platform anything: every tool is free, and the one
     /// billable outcome, a completed job, goes through
-    /// [`Self::charge_metered`] instead.
+    /// [`Self::charge_completion`] instead.
     ///
     /// Called immediately after the transaction opens and **before** the tool
     /// does anything. That ordering is what makes "every call is recorded,
@@ -200,27 +200,27 @@ impl Factory {
             .map_err(|e| error::from_billing(&e))
     }
 
-    /// [`Self::charge`] for the one metered call, `complete_job`: the row
-    /// carries `metered`'s meter and quantity and is billable, and the call is
-    /// refused (`budget_exceeded` or `payment_required`, nothing written) when
-    /// the platform says the org's billable calls are blocked.
+    /// [`Self::charge`] for the one billed outcome, a job `complete_job` is
+    /// about to complete: records the completion, billed, through
+    /// `of_billing::record_job_completed` (the one place that decides what a
+    /// completion writes), or refuses it (`budget_exceeded` or
+    /// `payment_required`, nothing written) when the platform says the org's
+    /// billable calls are blocked.
     ///
     /// Same placement rule as `charge`: in the tool's own transaction, before
-    /// the work, so a failed call rolls it back. `status` is what
+    /// the work, so a failed call rolls it back. `warmed` is what
     /// [`Meter::warm`] returned *before* that transaction was opened, so the
     /// platform round trip never holds a pooled connection and this makes no
-    /// network call. A lookup that failed (`None`) allows the call (it is still
+    /// network call. A lookup that failed allows the call (it is still
     /// recorded): a platform outage never blocks work.
-    pub async fn charge_metered(
+    pub async fn charge_completion(
         &self,
         tx: &mut Tx<'_>,
         caller: &Principal,
-        tool: &str,
-        metered: &of_billing::Metered,
-        status: Option<&otto_resource::UsageStatus>,
+        warmed: &of_billing::Warmed,
     ) -> Result<of_billing::Charge, ErrorData> {
         self.meter
-            .charge_metered(tx, caller.user_id, tool, metered, status)
+            .charge_completion(tx, caller.user_id, warmed)
             .await
             .map_err(|e| error::from_billing(&e))
     }

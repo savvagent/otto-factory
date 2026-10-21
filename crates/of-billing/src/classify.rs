@@ -7,7 +7,7 @@
 //! impossible to predict.
 //!
 //! What is billed is an outcome, not a call: a completed job, recorded as a
-//! value meter on the usage row by `Meter::charge_metered`. That is a property
+//! value meter on the usage row by `completion::record_job_completed`. That is a property
 //! of the row, not of the tool's class, so [`BILLABLE`] is empty. It is kept,
 //! with [`exhaustive_over`], so a tool that is ever priced per call again has
 //! one place to go and one test that notices when it is missing.

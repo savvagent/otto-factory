@@ -9,7 +9,7 @@
 //! `usage_outbox`:
 //!
 //! - **Recording** is local and atomic. [`Meter::charge`] and
-//!   [`Meter::charge_metered`] insert the outbox row in the tool's own
+//!   [`Meter::charge_completion`] insert the outbox row in the tool's own
 //!   transaction, so a failed call rolls its record back with everything else
 //!   (never billed) and a successful one is recorded even if the platform is
 //!   down at that instant (never lost). A background shipper
@@ -43,7 +43,7 @@
 //! ## What enforcement means
 //!
 //! Every tool call is free except a completed job ([`crate::classify`]), so
-//! only [`Meter::charge_metered`] can refuse, and only when the platform's
+//! only [`Meter::charge_completion`] can refuse, and only when the platform's
 //! status for the org says `billable_blocked()`: its budget's hard stop has
 //! tripped (`budget_exceeded`) or it is not in good standing to be billed
 //! (`payment_required`). The refusal is [`BillingError::Blocked`]. Free calls
@@ -59,11 +59,18 @@
 //! per few seconds, not one per call.
 //!
 //! **The lookup happens before the transaction opens.** `complete_job` calls
-//! [`Meter::warm`] before it opens its transaction and hands the answer to
-//! [`Meter::charge_metered`], which never makes a network call itself. A slow
-//! platform therefore never holds a pooled database connection, and the
-//! answer the charge judges cannot expire between the two. No other tool
-//! calls `warm`: they have nothing to ask.
+//! [`Meter::warm`] before it opens its transaction and hands the answer, a
+//! [`Warmed`], to [`Meter::charge_completion`], which never makes a network
+//! call itself. A slow platform therefore never holds a pooled database
+//! connection, and the answer the charge judges cannot expire between the two.
+//! The tracker webhook does the same before its transaction, to decide whether
+//! a ticket close is billed (a blocked org's close is applied but recorded
+//! unbilled; see [`crate::completion`]). No other path calls `warm`: the free
+//! tools have nothing to ask.
+//!
+//! [`Warmed`] can only be made by [`Meter::warm`], so a charge cannot be handed
+//! a made-up "no answer" by accident: the only way to get an allowing status
+//! without asking is for the platform to fail to answer.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -75,8 +82,9 @@ use otto_tenant::Tx;
 use serde::Serialize;
 
 use crate::classify;
+use crate::completion::{self, CompletionSource};
 use crate::error::{BillingError, Result};
-use crate::outbox::{self, Metered};
+use crate::outbox;
 
 /// How long the status lookup waits on the platform before allowing the call.
 ///
@@ -95,6 +103,47 @@ const FAIL_OPEN_FOR: std::time::Duration = std::time::Duration::from_secs(5);
 /// Eighty percent is early enough that a team has time to do something about it
 /// before work starts being refused, and late enough that it is not noise.
 pub const WARN_AT: f64 = 0.8;
+
+/// Where an owner fixes a budget or payment block when the deployment names
+/// none (`OF_UPGRADE_URL` unset): the platform console's home, which lists the
+/// user's orgs (billing lives under each org there).
+///
+/// ```
+/// assert_eq!(of_billing::default_fix_url("https://otto.example/"), "https://otto.example");
+/// ```
+pub fn default_fix_url(platform_url: &str) -> String {
+    platform_url.trim_end_matches('/').to_string()
+}
+
+/// The org's standing as [`Meter::warm`] read it, for
+/// [`Meter::charge_completion`] or a tracker close to judge.
+///
+/// Only [`Meter::warm`] makes one. A lookup that failed is a `Warmed` that
+/// allows (fail open); there is no other way to get one that allows without
+/// asking.
+#[derive(Debug, Clone)]
+pub struct Warmed(Option<UsageStatus>);
+
+impl Warmed {
+    /// Whether billable work must be refused (or, for a tracker close, left
+    /// unbilled) now. `false` when the platform could not answer.
+    pub fn billable_blocked(&self) -> bool {
+        self.0.as_ref().is_some_and(UsageStatus::billable_blocked)
+    }
+
+    /// The platform's reason for a block, when it gave one.
+    pub fn blocked_reason(&self) -> Option<&str> {
+        self.0
+            .as_ref()
+            .filter(|s| s.billable_blocked())
+            .and_then(|s| s.blocked_reason.as_deref())
+    }
+
+    /// Whether the platform answered at all.
+    pub fn answered(&self) -> bool {
+        self.0.is_some()
+    }
+}
 
 /// Configuration for the meter.
 #[derive(Clone)]
@@ -128,17 +177,18 @@ impl Meter {
         }
     }
 
-    /// Look the org's standing up now, before the metered tool opens its
-    /// transaction, and return it for [`Self::charge_metered`] to judge.
-    /// `None` when the platform could not answer in time, which allows the
-    /// call (fail open). Never fails: see the module docs.
-    pub async fn warm(&self, org: OrgId) -> Option<UsageStatus> {
-        self.status_for(org).await
+    /// Look the org's standing up now, before the transaction that completes
+    /// a job opens, and return it for [`Self::charge_completion`] (or a
+    /// tracker close) to judge. When the platform could not answer in time the
+    /// result allows the completion (fail open). Never fails: see the module
+    /// docs.
+    pub async fn warm(&self, org: OrgId) -> Warmed {
+        Warmed(self.status_for(org).await)
     }
 
     /// Record one free tool call. Never refuses and never asks the platform:
     /// every tool is free ([`crate::classify`]), and a completed job is
-    /// charged through [`Self::charge_metered`] instead.
+    /// charged through [`Self::charge_completion`] instead.
     ///
     /// The call is recorded in the outbox inside `tx`, so it commits or rolls
     /// back with the tool's own work.
@@ -150,31 +200,29 @@ impl Meter {
         })
     }
 
-    /// Charge one metered tool call, or refuse it.
+    /// Charge the job `complete_job` is about to complete, or refuse it.
     ///
-    /// `status` is what [`Self::warm`] returned for this org before `tx` was
+    /// `warmed` is what [`Self::warm`] returned for this org before `tx` was
     /// opened; this never asks the platform itself, so nothing here waits on
     /// the network while a connection is held. Refused with
-    /// [`BillingError::Blocked`] when `status` is `billable_blocked()`, and
-    /// then nothing is written. Allowed when `status` is `None`, the lookup
-    /// having failed (fail open; see the module docs). Otherwise the call is
-    /// recorded with `metered`'s meter and quantity and `billable = true`,
-    /// inside `tx`.
-    pub async fn charge_metered(
+    /// [`BillingError::Blocked`] when `warmed` is `billable_blocked()`, and
+    /// then nothing is written. Otherwise the completion is recorded, billed,
+    /// through [`crate::completion::record_job_completed`], inside `tx` (a
+    /// lookup that failed allows it: fail open, see the module docs).
+    pub async fn charge_completion(
         &self,
         tx: &mut Tx<'_>,
         user: UserId,
-        tool: &str,
-        metered: &Metered,
-        status: Option<&UsageStatus>,
+        warmed: &Warmed,
     ) -> Result<Charge> {
-        if let Some(status) = status.filter(|s| s.billable_blocked()) {
+        if warmed.billable_blocked() {
             return Err(BillingError::Blocked {
-                reason: status.blocked_reason.clone(),
+                reason: warmed.blocked_reason().map(str::to_string),
                 fix_url: self.fix_url.clone(),
             });
         }
-        outbox::enqueue(tx, Some(user), tool, true, Some(metered)).await?;
+        completion::record_job_completed(tx, Some(user), CompletionSource::CompleteJob, true)
+            .await?;
         Ok(Charge { billable: true })
     }
 
@@ -322,6 +370,9 @@ pub struct BudgetReport {
     pub hard_stop: bool,
     /// Whether billable calls are being refused now because of the budget.
     pub blocked: bool,
+    /// Why `blocked` is true (`budget_exceeded`), or why spend is unknown
+    /// (`spend_unavailable`, never blocked); null otherwise.
+    pub reason: Option<String>,
 }
 
 impl Status {
@@ -345,6 +396,7 @@ impl Status {
                 thresholds_reached: b.thresholds_reached,
                 hard_stop: b.hard_stop,
                 blocked: b.blocked,
+                reason: b.reason,
             }),
             blocked_reason: usage.blocked_reason,
             included_ops: usage.included_ops,

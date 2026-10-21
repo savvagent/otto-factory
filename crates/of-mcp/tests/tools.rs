@@ -2568,6 +2568,32 @@ async fn whoami_and_usage_report_the_budget_and_the_block(pool: PgPool) {
         assert_eq!(b["thresholdsReached"], serde_json::json!([50, 80, 100]));
         assert_eq!(b["hardStop"], true);
         assert_eq!(b["blocked"], true);
+        assert_eq!(b["reason"], "budget_exceeded");
+    }
+}
+
+/// Spend the platform could not compute is reported as unknown, with the
+/// platform's reason, rather than as a silent null an agent reads as zero.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn usage_says_why_spend_is_unknown(pool: PgPool) {
+    let (env, caller) = env(pool).await;
+    env.platform.set_budget(
+        caller.org_id.as_uuid(),
+        Some(otto_resource::BudgetStatus {
+            spend_cents: None,
+            percent_used: None,
+            thresholds_reached: vec![],
+            blocked: false,
+            reason: Some(otto_resource::SPEND_UNAVAILABLE.into()),
+            ..tripped_budget()
+        }),
+    );
+
+    for status in [env.usage(&caller).await, env.whoami_usage(&caller).await] {
+        let b = &status["budget"];
+        assert!(b["spendCents"].is_null(), "{status}");
+        assert_eq!(b["reason"], "spend_unavailable", "{status}");
+        assert_eq!(b["blocked"], false, "{status}");
     }
 }
 

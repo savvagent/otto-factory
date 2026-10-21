@@ -118,7 +118,7 @@ impl Config {
             allowed_hosts: if host.is_empty() { vec![] } else { vec![host] },
             allowed_origins: vec![],
             // The platform owns billing, so its console is where a human goes.
-            upgrade_url: platform_url.trim_end_matches('/').to_string(),
+            upgrade_url: of_billing::default_fix_url(&platform_url),
             github_app_id: None,
             github_app_private_key: None,
             jira_client_id: None,

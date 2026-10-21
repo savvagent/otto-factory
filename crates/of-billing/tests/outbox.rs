@@ -36,13 +36,7 @@ async fn record_metered(db: &Db, org: OrgId, user: UserId, meter: &Meter) {
     let status = meter.warm(org).await;
     let mut tx = db.begin(org).await.unwrap();
     meter
-        .charge_metered(
-            &mut tx,
-            user,
-            "complete_job",
-            &Metered::jobs_completed(),
-            status.as_ref(),
-        )
+        .charge_completion(&mut tx, user, &status)
         .await
         .unwrap();
     tx.commit().await.unwrap();
@@ -58,13 +52,7 @@ async fn a_failed_call_is_not_recorded(pool: PgPool) {
     let status = meter.warm(org).await;
     let mut tx = db.begin(org).await.unwrap();
     meter
-        .charge_metered(
-            &mut tx,
-            user,
-            "complete_job",
-            &Metered::jobs_completed(),
-            status.as_ref(),
-        )
+        .charge_completion(&mut tx, user, &status)
         .await
         .unwrap();
     // The tool fails after charging: its transaction rolls back, meter and all.
@@ -355,15 +343,7 @@ async fn recorded_tools(db: &Db) -> Vec<String> {
 async fn try_complete(db: &Db, org: OrgId, user: UserId, meter: &Meter) -> Option<BillingError> {
     let status = meter.warm(org).await;
     let mut tx = db.begin(org).await.unwrap();
-    let res = meter
-        .charge_metered(
-            &mut tx,
-            user,
-            "complete_job",
-            &Metered::jobs_completed(),
-            status.as_ref(),
-        )
-        .await;
+    let res = meter.charge_completion(&mut tx, user, &status).await;
     tx.commit().await.unwrap();
     res.err()
 }
@@ -383,13 +363,7 @@ async fn a_budget_block_refuses_a_completed_job_and_records_nothing(pool: PgPool
     let status = meter.warm(org).await;
     let mut tx = db.begin(org).await.unwrap();
     let err = meter
-        .charge_metered(
-            &mut tx,
-            user,
-            "complete_job",
-            &Metered::jobs_completed(),
-            status.as_ref(),
-        )
+        .charge_completion(&mut tx, user, &status)
         .await
         .unwrap_err();
     assert!(matches!(err, BillingError::Blocked { .. }), "{err:?}");
@@ -607,7 +581,7 @@ async fn the_charge_judges_the_warmed_status_and_never_asks_itself(pool: PgPool)
     platform.add_org(org.as_uuid(), "acme", "Acme");
 
     let status = meter.warm(org).await;
-    assert!(status.is_some());
+    assert!(status.answered());
     assert_eq!(platform.status_calls(), 1);
     tokio::time::sleep(Duration::from_millis(5)).await;
     // Blocked after the warm: the charge judges the answer it was handed.
@@ -615,13 +589,7 @@ async fn the_charge_judges_the_warmed_status_and_never_asks_itself(pool: PgPool)
 
     let mut tx = db.begin(org).await.unwrap();
     meter
-        .charge_metered(
-            &mut tx,
-            user,
-            "complete_job",
-            &Metered::jobs_completed(),
-            status.as_ref(),
-        )
+        .charge_completion(&mut tx, user, &status)
         .await
         .unwrap();
     tx.commit().await.unwrap();
@@ -635,13 +603,7 @@ async fn the_charge_judges_the_warmed_status_and_never_asks_itself(pool: PgPool)
     let blocked = meter.warm(org).await;
     let mut tx = db.begin(org).await.unwrap();
     let err = meter
-        .charge_metered(
-            &mut tx,
-            user,
-            "complete_job",
-            &Metered::jobs_completed(),
-            blocked.as_ref(),
-        )
+        .charge_completion(&mut tx, user, &blocked)
         .await
         .unwrap_err();
     assert_eq!(err.code(), "budget_exceeded");
@@ -747,9 +709,9 @@ fn every_recordable_meter_is_declared() {
         assert!(
             of_billing::METER_DECLARATIONS
                 .iter()
-                .any(|(key, _, _)| *key == m.meter),
+                .any(|(key, _, _)| *key == m.meter()),
             "{} is recorded but not in METER_DECLARATIONS",
-            m.meter
+            m.meter()
         );
     }
 }
