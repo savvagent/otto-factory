@@ -294,7 +294,7 @@ consent-screen scope descriptions.
 
 ```bash
 otto-platform-server resource show $OLD                                  # service slug is otto-factory; blockers all 0
-otto-platform-server resource rename-service $OLD otto-tower --dry-run   # reports it would rename, changes nothing
+otto-platform-server resource rename-service $OLD otto-tower --dry-run   # reports it would rename, changes nothing; exits non-zero if refused or busy
 otto-platform-server resource list                                       # $NEW is not registered or aliased yet
 ```
 
