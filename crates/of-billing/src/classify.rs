@@ -31,7 +31,10 @@ impl Class {
     }
 }
 
-/// Every tool.
+/// Every tool. All of them are free: coordination is the product, and a price
+/// on any of it would punish the behaviour the server asks for (see the module
+/// docs). What is billed is a completed job, carried as a meter on its usage
+/// row, which does not depend on this table.
 pub const FREE: &[&str] = &[
     // Reads. Looking is free, and an agent that checks before acting is an
     // agent doing the right thing.
@@ -60,8 +63,9 @@ pub const FREE: &[&str] = &[
     // Advancing your own read cursor. Bookkeeping on a read, and billing it
     // would penalise the agents that keep their inbox tidy.
     "ack_messages",
-    // Work. Free to call; a completed job is metered separately (see the
-    // module docs), which does not depend on this table.
+    // Changing the queue, messaging, leasing and repo setup. Free like the
+    // rest: queueing and claiming are coordination, not the outcome a
+    // customer pays for.
     "add_job",
     "update_job",
     "delete_job",

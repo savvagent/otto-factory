@@ -1,58 +1,60 @@
-//! Charging a tool call against an org's bucket.
+//! Recording tool calls, and refusing the one billable call when the platform
+//! says to.
 //!
 //! ## Two halves, two systems
 //!
-//! The org's *standing* (plan, included operations, this month's count) lives in
-//! the platform, which is the system of record for billing. A call's *record*
-//! lives here, in the factory's own database, as a row in `usage_outbox`:
+//! The org's *standing* (its budget, its payment standing, this month's meter
+//! totals) lives in the platform, which is the system of record for billing. A
+//! call's *record* lives here, in the factory's own database, as a row in
+//! `usage_outbox`:
 //!
-//! - **Recording** is local and atomic. [`Meter::charge`] inserts the outbox row
-//!   in the tool's own transaction, so a failed call rolls its record back with
-//!   everything else (never billed) and a successful one is recorded even if the
-//!   platform is down at that instant (never lost). A background shipper
+//! - **Recording** is local and atomic. [`Meter::charge`] and
+//!   [`Meter::charge_metered`] insert the outbox row in the tool's own
+//!   transaction, so a failed call rolls its record back with everything else
+//!   (never billed) and a successful one is recorded even if the platform is
+//!   down at that instant (never lost). A background shipper
 //!   ([`crate::outbox`]) delivers the rows later, exactly once from the
 //!   platform's point of view because it dedupes on the row's `event_id`.
-//! - **Enforcing** reads the platform's last answer to "how much has this org
-//!   used", cached for a minute by `PlatformClient::usage_status`. The cross-
-//!   database atomicity the old in-transaction counter gave is gone, so a
-//!   hard-stop org can overrun its bucket by whatever it does inside that window
-//!   plus whatever is still in the outbox. That bound is the price of the split
-//!   and is deliberately accepted for a usage bucket (savvagent/otto-factory#192,
-//!   workstream 3).
+//! - **Enforcing** reads the platform's answer to "must this service refuse
+//!   billable calls for this org now" ([`UsageStatus::billable_blocked`]),
+//!   cached by `PlatformClient::usage_status`. The platform decides; this
+//!   crate only obeys, and the platform's spend lags by whatever is still in
+//!   the outbox plus one cache window. That bound is the price of the split and
+//!   is deliberately accepted.
 //!
 //! ## Why charging happens *before* the work
 //!
-//! [`Meter::charge`] is called immediately after the tool opens its
-//! transaction, before it does anything. That looks wrong for the rule "a
-//! failed call is not billed" — and it is exactly what makes the rule true: the
-//! outbox row is in the tool's own transaction, so a tool that fails rolls the
-//! meter back with it. Charging afterwards would need a second transaction,
-//! which can fail on its own, be retried, or be forgotten. Doing it first also
-//! puts the quota check where a refusal costs nothing.
+//! A charge is made immediately after the tool opens its transaction, before
+//! it does anything. That looks wrong for the rule "a failed call is not
+//! billed" — and it is exactly what makes the rule true: the outbox row is in
+//! the tool's own transaction, so a tool that fails rolls the meter back with
+//! it. Charging afterwards would need a second transaction, which can fail on
+//! its own, be retried, or be forgotten. Doing it first also puts the refusal
+//! where it costs nothing.
 //!
 //! ## What enforcement means
 //!
-//! Enforcement is off by default behind a flag. When it is on, only **billable**
-//! tools on a **hard-stop** plan are refused, and only past the bucket. Reads keep
-//! working in every case, so an org that hits its limit mid-task can still see
-//! the state of its queue and go and upgrade.
+//! Every tool call is free except a completed job ([`crate::classify`]), so
+//! only [`Meter::charge_metered`] can refuse, and only when the platform's
+//! status for the org says `billable_blocked()`: its budget's hard stop has
+//! tripped (`budget_exceeded`) or it is not in good standing to be billed
+//! (`payment_required`). The refusal is [`BillingError::Blocked`]. Free calls
+//! are never refused and never look anything up, so a blocked org can still
+//! queue, claim, read, and wait — and find out why it is blocked.
 //!
-//! **If the platform cannot answer the quota question, the call is allowed**
-//! (and logged). The alternative is refusing paying customers' work because a
-//! lookup failed; the call is still recorded in the outbox, so nothing is
-//! under-billed. Authentication already requires the platform, so this only
-//! matters in the window where a cached token outlives an outage. The decision
-//! is remembered per org for [`FAIL_OPEN_FOR`], so an outage costs one bounded
-//! lookup per org per few seconds, not one per call.
+//! **If the platform cannot answer, the call is allowed** (and logged). The
+//! alternative is refusing paying customers' work because a lookup failed;
+//! the call is still recorded in the outbox, so nothing is under-billed.
+//! Authentication already requires the platform, so this only matters in the
+//! window where a cached token outlives an outage. The decision is remembered
+//! per org for [`FAIL_OPEN_FOR`], so an outage costs one bounded lookup per org
+//! per few seconds, not one per call.
 //!
-//! **The lookup happens before the transaction opens.** [`Meter::warm`] (called
-//! by `Factory::tx`) makes the platform call first, so a slow platform never
+//! **The lookup happens before the transaction opens.** `complete_job` calls
+//! [`Meter::warm`] before it opens its transaction, so a slow platform never
 //! holds a pooled database connection; the check inside the transaction then
-//! reads the client's cache.
-//!
-//! **Unshipped usage counts.** The platform's total lags by whatever is still in
-//! the outbox, so the check adds this org's unshipped billable rows to the
-//! platform's count before comparing it to the limit.
+//! reads the client's cache. No other tool calls `warm`: they have nothing to
+//! ask.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -67,16 +69,18 @@ use crate::classify;
 use crate::error::{BillingError, Result};
 use crate::outbox::{self, Metered};
 
-/// How long the quota check waits on the platform before allowing the call.
+/// How long the status lookup waits on the platform before allowing the call.
 ///
-/// The check runs inside the tool's transaction, so a slow platform would hold a
-/// pooled database connection for as long as it dawdles; the client's own 10 s
-/// timeout is far too long for that. A cache hit (the normal case) costs nothing
-/// and a miss gets this long, after which the call goes ahead and is recorded
-/// like any other — the same outcome as the platform being down.
+/// [`Meter::warm`] makes the lookup before the transaction opens, but the
+/// check inside the transaction looks again if that answer has already left
+/// the cache, and there a slow platform would hold a pooled database
+/// connection for as long as it dawdles; the client's own 10 s timeout is far
+/// too long for that. A cache hit (the normal case) costs nothing and a miss
+/// gets this long, after which the call goes ahead and is recorded like any
+/// other — the same outcome as the platform being down.
 const QUOTA_LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// How long a failed quota lookup is remembered, per org, as "allow".
+/// How long a failed status lookup is remembered, per org, as "allow".
 const FAIL_OPEN_FOR: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Fraction of the bucket at which a caller starts being warned.
@@ -89,60 +93,49 @@ pub const WARN_AT: f64 = 0.8;
 #[derive(Clone)]
 pub struct Meter {
     platform: Arc<PlatformClient>,
-    /// Orgs whose last quota lookup failed, and until when to skip looking.
+    /// Orgs whose last status lookup failed, and until when to skip looking.
     fail_open: Arc<Mutex<HashMap<OrgId, Instant>>>,
-    /// Refuse billable calls past a hard-stop bucket. Off by default.
-    pub enforce: bool,
-    /// Where a caller who has run out is told to go. Named in the refusal,
-    /// because an error that says "upgrade" without saying where is a dead end
-    /// for an agent and an annoyance for a human.
+    /// Where an owner fixes a block: `OF_UPGRADE_URL`, else the platform
+    /// console's home, which lists the user's orgs. Named in the refusal,
+    /// because an error that says "raise the budget" without saying where is a
+    /// dead end for an agent and an annoyance for a human. Not a per-org link:
+    /// the charge knows only the org id, and resolving its slug would put a
+    /// platform call inside the transaction.
     pub upgrade_url: String,
 }
 
 impl std::fmt::Debug for Meter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Meter")
-            .field("enforce", &self.enforce)
             .field("upgrade_url", &self.upgrade_url)
             .finish_non_exhaustive()
     }
 }
 
 impl Meter {
-    pub fn new(
-        platform: Arc<PlatformClient>,
-        enforce: bool,
-        upgrade_url: impl Into<String>,
-    ) -> Self {
+    pub fn new(platform: Arc<PlatformClient>, upgrade_url: impl Into<String>) -> Self {
         Self {
             platform,
             fail_open: Arc::default(),
-            enforce,
             upgrade_url: upgrade_url.into(),
         }
     }
 
-    /// Look the org's quota standing up now, so the check inside the tool's
-    /// transaction finds it cached. Called before the transaction opens; a
-    /// no-op when enforcement is off. Never fails: see the module docs.
+    /// Look the org's standing up now, so the check inside the tool's
+    /// transaction finds it cached. Called by the metered tool before its
+    /// transaction opens. Never fails: see the module docs.
     pub async fn warm(&self, org: OrgId) {
-        if self.enforce {
-            let _ = self.status_for(org).await;
-        }
+        let _ = self.status_for(org).await;
     }
 
-    /// Charge one tool call, or refuse it.
+    /// Record one free tool call. Never refuses and never asks the platform:
+    /// every tool is free ([`crate::classify`]), and a completed job is
+    /// charged through [`Self::charge_metered`] instead.
     ///
-    /// On success the call is recorded in the outbox inside `tx`; on refusal
-    /// nothing is written.
+    /// The call is recorded in the outbox inside `tx`, so it commits or rolls
+    /// back with the tool's own work.
     pub async fn charge(&self, tx: &mut Tx<'_>, user: UserId, tool: &str) -> Result<Charge> {
         let class = classify::classify(tool);
-        if self.enforce && class.is_billable() {
-            if let Some(status) = self.status_for(tx.org()).await {
-                let unshipped = unshipped_billable(tx).await?;
-                self.refuse_if_spent(status, unshipped, tool)?;
-            }
-        }
         outbox::enqueue(tx, Some(user), tool, class.is_billable(), None).await?;
         Ok(Charge {
             billable: class.is_billable(),
@@ -151,12 +144,11 @@ impl Meter {
 
     /// Charge one metered tool call, or refuse it.
     ///
-    /// Records the call with `metered`'s meter and quantity and `billable =
-    /// true`. For now it keeps the per-call enforcement path `charge` used for
-    /// a billable class (the quota lookup, the unshipped count, the
-    /// hard-stop comparison), so a spent bucket still refuses it and nothing
-    /// is written. That enforcement is replaced when the quota moves onto the
-    /// meter.
+    /// Refused with [`BillingError::Blocked`] when the platform's status for
+    /// the org is `billable_blocked()`, and then nothing is written. Allowed
+    /// when the status cannot be read (fail open; see the module docs).
+    /// Otherwise the call is recorded with `metered`'s meter and quantity and
+    /// `billable = true`, inside `tx`.
     pub async fn charge_metered(
         &self,
         tx: &mut Tx<'_>,
@@ -164,10 +156,12 @@ impl Meter {
         tool: &str,
         metered: &Metered,
     ) -> Result<Charge> {
-        if self.enforce {
-            if let Some(status) = self.status_for(tx.org()).await {
-                let unshipped = unshipped_billable(tx).await?;
-                self.refuse_if_spent(status, unshipped, tool)?;
+        if let Some(status) = self.status_for(tx.org()).await {
+            if status.billable_blocked() {
+                return Err(BillingError::Blocked {
+                    reason: status.blocked_reason,
+                    fix_url: self.upgrade_url.clone(),
+                });
             }
         }
         outbox::enqueue(tx, Some(user), tool, true, Some(metered)).await?;
@@ -175,66 +169,16 @@ impl Meter {
     }
 
     /// Record an idempotent replay of `tool` — always as `Free`, regardless
-    /// of `tool`'s own classification, and with no quota check.
+    /// of `tool`'s own classification, and with no status lookup.
     ///
     /// "Both classes are recorded regardless" still has to hold for a replay: it
     /// is a real call that reached the server and was served, just not new work.
     /// Charging it again would double-bill the caller for one logical
     /// job/message; not recording it at all would leave a gap in the history a
-    /// future repricing decision needs. Never enforced — a replay creates
-    /// nothing, so refusing it on a hard-stop plan would refuse a call that is,
-    /// from the bucket's perspective, free to serve.
+    /// future repricing decision needs. Never refused — a replay creates
+    /// nothing, so refusing it would refuse a call that is free to serve.
     pub async fn record_replay(&self, tx: &mut Tx<'_>, user: UserId, tool: &str) -> Result<()> {
         outbox::enqueue(tx, Some(user), tool, false, None).await?;
-        Ok(())
-    }
-
-    /// Check whether a call would be refused, without recording any usage.
-    ///
-    /// Used by `sync_ticket`, whose "work" is an outbound tracker write that has
-    /// already happened by the time `charge` runs — without this, an org on a
-    /// hard-stop plan already over its bucket gets that write posted anyway, only
-    /// to be told afterwards that it wasn't billed. Short-circuits when
-    /// enforcement is off or the tool isn't billable, so it costs nothing in the
-    /// default configuration.
-    ///
-    /// Takes the caller's `tx` so it counts unshipped usage exactly as `charge`
-    /// does. Judged against the platform's figure alone, an org whose bucket is
-    /// only spent once the outbox is added would pass here, have its tracker
-    /// write posted, and then be refused by the `charge` that follows — the
-    /// very outcome this check exists to prevent.
-    pub async fn would_refuse(&self, tx: &mut Tx<'_>, tool: &str) -> Result<()> {
-        let class = classify::classify(tool);
-        if !self.enforce || !class.is_billable() {
-            return Ok(());
-        }
-        match self.status_for(tx.org()).await {
-            Some(status) => {
-                let unshipped = unshipped_billable(tx).await?;
-                self.refuse_if_spent(status, unshipped, tool)
-            }
-            None => Ok(()),
-        }
-    }
-
-    /// The enforcement/hard-stop/bucket comparison shared by [`Self::charge`]
-    /// and [`Self::would_refuse`].
-    ///
-    /// It compares the count *before* this call is added, so the call that
-    /// lands exactly on the limit is allowed and the next one is not. An
-    /// off-by-one here is the difference between a plan advertised as 500
-    /// operations delivering 500 or 499.
-    fn refuse_if_spent(&self, mut status: UsageStatus, unshipped: i64, tool: &str) -> Result<()> {
-        status.billable_count += unshipped;
-        if status.is_blocked() {
-            return Err(BillingError::QuotaExceeded {
-                tool: tool.to_string(),
-                used: status.billable_count,
-                included: status.included_ops,
-                plan: plan_name(&status.plan),
-                upgrade_url: self.upgrade_url.clone(),
-            });
-        }
         Ok(())
     }
 
@@ -283,24 +227,12 @@ impl Meter {
     ///
     /// Used by the `usage` and `whoami` tools, which are themselves free — a
     /// caller must never have to spend an operation to find out how many it has
-    /// left. Unlike the quota check this surfaces a platform failure, since an
+    /// left. Unlike the status check this surfaces a platform failure, since an
     /// answer was asked for and a made-up one would be worse than an error.
     pub async fn report(&self, org: OrgId) -> Result<Status> {
         let usage = self.platform.usage_status(org.as_uuid()).await?;
-        Ok(Status::new(usage, self.enforce))
+        Ok(Status::new(usage))
     }
-}
-
-/// Billable calls this org has recorded that the platform has not been told
-/// about yet.
-async fn unshipped_billable(tx: &mut Tx<'_>) -> Result<i64> {
-    let org = tx.org();
-    Ok(
-        sqlx::query_scalar("SELECT count(*) FROM usage_outbox WHERE org_id = $1 AND billable")
-            .bind(org)
-            .fetch_one(tx.conn())
-            .await?,
-    )
 }
 
 /// `free` -> `Free`.
@@ -330,12 +262,13 @@ pub struct Status {
     /// Whether exceeding the bucket stops billable work rather than metering
     /// overage.
     pub hard_stop: bool,
-    /// Whether the server is currently refusing calls over the bucket at all.
+    /// Whether the server refuses billable calls when the platform says the
+    /// org is blocked. Always `true`: that is no longer switchable.
     pub enforced: bool,
 }
 
 impl Status {
-    fn new(usage: UsageStatus, enforced: bool) -> Self {
+    fn new(usage: UsageStatus) -> Self {
         Self {
             plan: plan_name(&usage.plan),
             included_ops: usage.included_ops,
@@ -345,7 +278,7 @@ impl Status {
             period_start: usage.period_start,
             warning: warning(usage.billable_count, usage.included_ops),
             hard_stop: usage.hard_stop,
-            enforced,
+            enforced: true,
         }
     }
 }

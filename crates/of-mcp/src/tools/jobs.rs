@@ -1022,6 +1022,11 @@ impl Factory {
         caller.require_scope(scope::JOBS_WRITE).mcp()?;
 
         let team = self.team_scope(&caller).await?;
+        // The one call that can be refused for billing: look the org's status
+        // up now, before a pooled connection is held, so a slow platform costs
+        // this call time and nothing else. The check in `charge_metered` then
+        // reads the cache.
+        self.meter().warm(caller.org_id).await;
         let mut tx = self.tx(&caller).await?;
         self.charge_metered(
             &mut tx,
@@ -1469,22 +1474,14 @@ impl Factory {
         let caller = self.caller(&parts)?;
         caller.require_scope(scope::TRACKERS).mcp()?;
 
-        // Reading the job costs nothing to bill for: the outbound call is the
-        // entire point of this tool, and whether it succeeds is not known
-        // until after it returns. Charging here, before that call, would bill
-        // a request whose tracker round trip then fails — charging happens
-        // later, only on success, alongside the write-back (see below).
-        //
-        // The quota *check*, unlike the charge, does belong here: it is
-        // read-only, and running it ahead of both tracker arms' outbound
-        // calls means an org on a hard-stop plan already over its bucket is
-        // refused before this tool posts anything to GitHub or JIRA, rather
-        // than only finding out afterwards via the eventual `charge` call
-        // below (see `Factory::would_refuse`'s doc comment).
+        // Reading the job records nothing: the outbound call is the entire
+        // point of this tool, and whether it succeeds is not known until
+        // after it returns. The call is recorded later, only on success,
+        // after the write-back (see below). It is free, so nothing here can
+        // refuse it for billing.
         let team = self.team_scope(&caller).await?;
         let mut tx = self.tx(&caller).await?;
         let job = visible_job(&mut tx, &team, &JobId::from(args.job)).await?;
-        self.would_refuse(&mut tx, "sync_ticket").await?;
         tx.commit().await.mcp()?;
 
         let Some(tracker) = job.tracker else {
@@ -1588,14 +1585,14 @@ impl Factory {
                     .sync_github_job(&job, &ticket_ref, &connection.external_id, &plan)
                     .await
                     .map_err(|error| tracker_sync_error(error, true))?;
-                // The write-back commits on its own, before charging is even
-                // attempted: this is loop-safety state for a call to the
+                // The write-back commits on its own, before the call is even
+                // recorded: this is loop-safety state for a call to the
                 // tracker that has already happened, and it must survive
-                // regardless of whether billing this call succeeds. Charging
-                // in the same Tx as the write-back would roll the write-back
-                // back on a quota refusal, leaving remote_revision stale and
-                // making a caller's retry re-post to the tracker a second
-                // time for a sync that already went through.
+                // regardless of whether recording this call succeeds.
+                // Recording in the same Tx as the write-back would roll the
+                // write-back back on a failed record, leaving remote_revision
+                // stale and making a caller's retry re-post to the tracker a
+                // second time for a sync that already went through.
                 let mut tx = self.tx(&caller).await?;
                 if let Some(remote_revision) = outcome {
                     tx.set_remote_revision(&job.id, &remote_revision)
@@ -1637,7 +1634,7 @@ impl Factory {
                     .map_err(|error| tracker_sync_error(error, true))?;
                 // Same reasoning as the GitHub arm above: the write-back (the
                 // revision and any rotated JIRA credentials) commits before
-                // charging is attempted, so a quota refusal never erases
+                // the call is recorded, so a failed record never erases
                 // loop-safety state for a tracker call that already happened.
                 let mut tx = self.tx(&caller).await?;
                 if let Some(remote_revision) = outcome.remote_revision.as_deref() {

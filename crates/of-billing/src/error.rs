@@ -4,29 +4,32 @@ pub type Result<T> = std::result::Result<T, BillingError>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum BillingError {
-    /// The org has spent its included operations and its plan stops rather than
-    /// metering overage.
+    /// The platform says this org's billable calls must be refused now: its
+    /// budget's hard stop has tripped, or it is not in good standing to be
+    /// billed. Only a completed job is billable, so only `complete_job` sees
+    /// this.
     ///
     /// Written for an LLM caller that has to decide what to do next, so it says
-    /// what ran out, how much was included, and where a human can fix it. An
-    /// agent that reads only "quota exceeded" will retry; one that reads this
-    /// will stop and say something useful to the person it is working for.
+    /// what happened, what still works, and where a human fixes it. An agent
+    /// that reads only "blocked" will retry; one that reads this will stop and
+    /// say something useful to the person it is working for. `reason` is the
+    /// platform's own word for it, kept raw; [`BillingError::code`] maps it to
+    /// a stable code.
     #[error(
-        "this organization has used all {included} operations included in its {plan} plan \
-         this month, so {tool} was refused. Reads still work — you can still inspect the \
-         queue. To queue or claim more work, someone with billing access needs to upgrade \
-         at {upgrade_url}."
+        "{what}, so this job was not marked completed. Every other otto-factory tool \
+         is free and keeps working: you can still queue, claim, and inspect jobs. To \
+         complete jobs again, an owner of this organization needs to {fix} in the otto \
+         console at {fix_url}.",
+        what = blocked_what(reason.as_deref()),
+        fix = blocked_fix(reason.as_deref()),
     )]
-    QuotaExceeded {
-        tool: String,
-        used: i64,
-        included: i64,
-        plan: String,
-        upgrade_url: String,
+    Blocked {
+        reason: Option<String>,
+        fix_url: String,
     },
 
     /// The platform could not report the org's standing (`whoami`, `usage`).
-    /// Never raised by the quota check itself, which fails open — see
+    /// Never raised by the status check itself, which fails open — see
     /// [`crate::Meter`].
     #[error("the otto platform could not be reached to read this organization's usage ({0})")]
     Platform(#[from] otto_resource::Error),
@@ -43,22 +46,99 @@ impl BillingError {
     /// one: agents branch on this, humans read the message.
     pub fn code(&self) -> &'static str {
         match self {
-            BillingError::QuotaExceeded { .. } => "quota_exceeded",
+            BillingError::Blocked { reason, .. } => blocked_code(reason.as_deref()),
             BillingError::Platform(_) => "platform_unavailable",
             BillingError::Tenant(e) => e.code(),
             BillingError::Db(_) => "internal_error",
         }
     }
 
-    /// Retrying an exhausted quota does not help until somebody upgrades or the
-    /// month rolls over, and an agent that backs off and retries is an agent
-    /// burning its own time.
+    /// Retrying a blocked org does not help until an owner raises the budget,
+    /// fixes the payment method, or the month rolls over, and an agent that
+    /// backs off and retries is an agent burning its own time.
     pub fn retriable(&self) -> bool {
         match self {
-            BillingError::QuotaExceeded { .. } => false,
+            BillingError::Blocked { .. } => false,
             BillingError::Platform(e) => e.is_retriable(),
             BillingError::Tenant(e) => matches!(e, otto_tenant::Error::Db(_)),
             BillingError::Db(_) => true,
         }
+    }
+}
+
+/// The stable code for a block. Only the platform's two known reasons are
+/// passed through; anything else — no reason at all (a tripped budget from a
+/// platform that predates `blocked_reason`) or one this build does not know —
+/// is `budget_exceeded`, so an agent always gets a code it can branch on
+/// rather than a string nobody documented.
+fn blocked_code(reason: Option<&str>) -> &'static str {
+    match reason {
+        Some(otto_resource::PAYMENT_REQUIRED) => otto_resource::PAYMENT_REQUIRED,
+        _ => otto_resource::BUDGET_EXCEEDED,
+    }
+}
+
+fn blocked_what(reason: Option<&str>) -> &'static str {
+    match blocked_code(reason) {
+        otto_resource::PAYMENT_REQUIRED => {
+            "this organization has no payment method in good standing and has used \
+             past what its plan includes this month"
+        }
+        _ => "this organization has reached its otto-factory budget for this month",
+    }
+}
+
+fn blocked_fix(reason: Option<&str>) -> &'static str {
+    match blocked_code(reason) {
+        otto_resource::PAYMENT_REQUIRED => "add or fix a card",
+        _ => "raise the budget",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn blocked(reason: Option<&str>) -> BillingError {
+        BillingError::Blocked {
+            reason: reason.map(str::to_string),
+            fix_url: "https://otto.example".into(),
+        }
+    }
+
+    /// Agents branch on the code, so it is one of exactly two values whatever
+    /// the platform sends.
+    #[test]
+    fn a_block_is_coded_by_the_platforms_reason() {
+        assert_eq!(blocked(Some("budget_exceeded")).code(), "budget_exceeded");
+        assert_eq!(blocked(Some("payment_required")).code(), "payment_required");
+        assert_eq!(blocked(None).code(), "budget_exceeded");
+        assert_eq!(
+            blocked(Some("a_reason_from_the_future")).code(),
+            "budget_exceeded"
+        );
+    }
+
+    #[test]
+    fn a_block_is_never_retriable() {
+        assert!(!blocked(Some("budget_exceeded")).retriable());
+        assert!(!blocked(Some("payment_required")).retriable());
+        assert!(!blocked(None).retriable());
+    }
+
+    /// The message says what happened, what still works, who fixes it, and
+    /// where.
+    #[test]
+    fn a_block_says_what_to_do_about_it() {
+        let budget = blocked(Some("budget_exceeded")).to_string();
+        assert!(budget.contains("budget"), "{budget}");
+        assert!(budget.contains("raise the budget"), "{budget}");
+        assert!(budget.contains("free"), "{budget}");
+        assert!(budget.contains("owner"), "{budget}");
+        assert!(budget.contains("https://otto.example"), "{budget}");
+
+        let payment = blocked(Some("payment_required")).to_string();
+        assert!(payment.contains("add or fix a card"), "{payment}");
+        assert!(payment.contains("https://otto.example"), "{payment}");
     }
 }

@@ -23,6 +23,7 @@ async fn main() -> Result<()> {
     )?;
 
     init_tracing(config.log_format)?;
+    config.warn_retired();
     match dotenv {
         Ok(path) => tracing::debug!(path = %path.display(), "loaded .env"),
         Err(_) => tracing::debug!("no .env file; using the process environment"),
@@ -112,7 +113,6 @@ async fn main() -> Result<()> {
         public_url = %config.public_url,
         resource_uri = %config.resource_uri,
         platform_url = %config.platform_url,
-        enforce_quotas = config.enforce_quotas,
         "of-server listening"
     );
 

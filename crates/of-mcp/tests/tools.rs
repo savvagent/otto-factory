@@ -33,7 +33,6 @@ const RESOURCE: &str = of_testkit::RESOURCE_URI;
 const PUBLIC: &str = "https://mcp.otto-factory.test";
 const PLATFORM: &str = "https://otto.test";
 const REMOTE: &str = "git@github.com:acme/api.git";
-const UPGRADE_URL: &str = "https://mcp.otto-factory.test/settings/billing";
 
 /// Everything a token can carry, for the tests that are not about scopes.
 fn all_scopes() -> Vec<String> {
@@ -124,12 +123,6 @@ struct User {
 }
 
 async fn env(pool: PgPool) -> (Env, Principal) {
-    // Enforcement off, matching the milestone-1 default: recording is on,
-    // refusing is not.
-    env_metered(pool, false).await
-}
-
-async fn env_metered(pool: PgPool, enforce: bool) -> (Env, Principal) {
     let db = Db::from_pool(pool.clone());
     let watcher = Watcher::spawn(pool).await.expect("watcher");
 
@@ -148,7 +141,7 @@ async fn env_metered(pool: PgPool, enforce: bool) -> (Env, Principal) {
             db.clone(),
             watcher,
             client.clone(),
-            Meter::new(client.clone(), enforce, UPGRADE_URL),
+            Meter::new(client.clone(), PLATFORM),
         ),
         db,
         platform,
@@ -2285,7 +2278,8 @@ async fn completing_a_job_twice_bills_it_once(pool: PgPool) {
     env.claim(&caller, &id, "agent-one").await;
     env.complete(&caller, &id, None).await.unwrap();
 
-    assert!(env.complete(&caller, &id, None).await.is_err());
+    let e = env.complete(&caller, &id, None).await.unwrap_err();
+    assert_eq!(code_of(&e), "wrong_status", "{}", e.message);
 
     assert_eq!(outbox_rows(&env, "complete_job").await.len(), 1);
 }
@@ -2304,10 +2298,21 @@ async fn a_refused_completion_writes_no_row(pool: PgPool) {
     let claimed = env.claim(&caller, &id, "agent-one").await;
     let attempts = claimed["jobs"][0]["attempts"].as_i64().unwrap() as i32;
 
-    let stale = env.complete(&caller, &id, Some(attempts + 1)).await;
-    assert!(stale.is_err(), "a stale expectedAttempts must be refused");
-    let non_holder = env.complete(&intruder, &id, None).await;
-    assert!(non_holder.is_err(), "a non-holder must be refused");
+    let stale = env
+        .complete(&caller, &id, Some(attempts + 1))
+        .await
+        .expect_err("a stale expectedAttempts must be refused");
+    assert_eq!(code_of(&stale), "already_claimed", "{}", stale.message);
+    let non_holder = env
+        .complete(&intruder, &id, None)
+        .await
+        .expect_err("a non-holder must be refused");
+    assert_eq!(
+        code_of(&non_holder),
+        "already_claimed",
+        "{}",
+        non_holder.message
+    );
 
     assert!(outbox_rows(&env, "complete_job").await.is_empty());
 }
@@ -2424,10 +2429,7 @@ async fn a_failed_call_is_not_billed(pool: PgPool) {
         .unwrap()
         .to_string();
     let e = env.complete(&caller, &id, None).await.unwrap_err();
-    assert!(
-        matches!(code_of(&e).as_str(), "wrong_status" | "already_claimed"),
-        "{e:?}"
-    );
+    assert_eq!(code_of(&e), "wrong_status", "{}", e.message);
 
     let after = env.usage(&caller).await;
     assert_eq!(
@@ -2456,36 +2458,79 @@ async fn whoami_reports_the_allowance(pool: PgPool) {
     assert_eq!(out["usage"]["includedOps"], 500);
     assert_eq!(out["usage"]["hardStop"], true);
     assert_eq!(
-        out["usage"]["enforced"], false,
-        "enforcement is off by default for milestone 1"
+        out["usage"]["enforced"], true,
+        "the platform's blocked reason is always enforced"
     );
     assert_eq!(out["usage"]["warning"], false);
 }
 
-/// Past the bucket on a hard-stop plan, work is refused and reading is not —
-/// so an org that runs out mid-task can still see its own queue, understand
-/// what happened, and go and upgrade.
-#[sqlx::test(migrations = "../of-core/migrations")]
-async fn enforcement_stops_work_but_never_reads(pool: PgPool) {
-    let (env, caller) = env_metered(pool, true).await;
-    env.register(&caller).await;
-    let id = env.claimed_job(&caller, "one job too many").await;
+/// A budget this service's hard stop has tripped, as the platform reports it.
+fn tripped_budget() -> otto_resource::BudgetStatus {
+    otto_resource::BudgetStatus {
+        monthly_budget_cents: 1000,
+        spend_cents: Some(1250),
+        percent_used: Some(125),
+        thresholds_reached: vec![50, 80, 100],
+        hard_stop: true,
+        blocked: true,
+        reason: Some(otto_resource::BUDGET_EXCEEDED.into()),
+    }
+}
 
-    // Spend the Free plan's entire bucket.
-    env.set_standing(caller.org_id, 500, 500).await;
+/// Complete `id`, expecting the platform's block to refuse it: the refusal
+/// is not retriable, names where a human fixes it, says free tools keep
+/// working, and leaves no `complete_job` row behind.
+async fn assert_completion_blocked(env: &Env, caller: &Principal, id: &str, code: &str) {
+    let e = env.complete(caller, id, None).await.unwrap_err();
 
-    let e = env.complete(&caller, &id, None).await.unwrap_err();
-
-    assert_eq!(code_of(&e), "quota_exceeded");
+    assert_eq!(code_of(&e), code, "{}", e.message);
     assert_eq!(
         e.data.as_ref().unwrap()["retriable"],
         false,
-        "retrying an exhausted bucket only burns the agent's time"
+        "retrying a blocked org only burns the agent's time"
     );
-    assert!(e.message.contains("500"), "{}", e.message);
-    assert!(e.message.contains(UPGRADE_URL), "{}", e.message);
+    assert!(e.message.contains(PLATFORM), "{}", e.message);
+    assert!(e.message.contains("free"), "{}", e.message);
+    assert!(
+        outbox_rows(env, "complete_job").await.is_empty(),
+        "a refused completion is not work performed"
+    );
+}
 
-    // Reads keep working, which is the point.
+/// The platform's blocked reason stops the one billable call and nothing
+/// else: an org whose budget has run out can still queue, claim, look, wait,
+/// and find out why — which is what it needs to go and fix it.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_budget_block_refuses_completion_and_free_tools_keep_working(pool: PgPool) {
+    let (env, caller) = env(pool).await;
+    env.register(&caller).await;
+    let id = env.claimed_job(&caller, "one job too many").await;
+    env.platform.set_blocked_reason(
+        caller.org_id.as_uuid(),
+        Some(otto_resource::BUDGET_EXCEEDED),
+    );
+
+    assert_completion_blocked(&env, &caller, &id, "budget_exceeded").await;
+
+    // Every free tool keeps working while the org is blocked.
+    let other = env.add_job(&caller, "still queueable").await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    env.claim(&caller, &other, "agent-two").await;
+    ok(env
+        .factory
+        .whoami(Extension(parts(&caller)), Parameters(tools::org::NoArgs {}))
+        .await);
+    ok(env
+        .factory
+        .watch(
+            Extension(parts(&caller)),
+            Parameters(tools::coord::WatchArgs {
+                timeout_seconds: Some(1),
+            }),
+        )
+        .await);
     ok(env
         .factory
         .ready(
@@ -2493,33 +2538,110 @@ async fn enforcement_stops_work_but_never_reads(pool: PgPool) {
             Parameters(tools::jobs::ReadyArgs::default()),
         )
         .await);
-
     let usage = env.usage(&caller).await;
-    assert_eq!(usage["remaining"], 0);
-    assert_eq!(usage["warning"], true);
     assert_eq!(usage["enforced"], true);
 }
 
-/// The same org, one operation short of the limit, must be allowed the call
-/// that lands exactly on it. A plan sold as 500 operations has to deliver 500.
 #[sqlx::test(migrations = "../of-core/migrations")]
-async fn the_last_included_operation_is_allowed(pool: PgPool) {
-    let (env, caller) = env_metered(pool, true).await;
+async fn a_payment_block_refuses_completion_as_payment_required(pool: PgPool) {
+    let (env, caller) = env(pool).await;
     env.register(&caller).await;
+    let id = env.claimed_job(&caller, "no card on file").await;
+    env.platform.set_blocked_reason(
+        caller.org_id.as_uuid(),
+        Some(otto_resource::PAYMENT_REQUIRED),
+    );
 
-    env.set_standing(caller.org_id, 499, 500).await;
+    assert_completion_blocked(&env, &caller, &id, "payment_required").await;
 
-    env.complete_one(&caller, "the five hundredth").await;
-
-    let usage = env.usage(&caller).await;
-    assert_eq!(usage["billableUsed"], 500);
-    assert_eq!(usage["remaining"], 0);
+    // The free half of the product is untouched.
+    env.add_job(&caller, "still queueable").await;
 }
 
-/// Enforcement off is the milestone-1 default, and it must mean *recorded but
-/// not refused* rather than "not counted".
+/// `billable_blocked()` with no `blocked_reason` (the budget's hard stop, from
+/// a platform that predates the field) refuses as `budget_exceeded`.
 #[sqlx::test(migrations = "../of-core/migrations")]
-async fn with_enforcement_off_an_over_budget_org_keeps_working(pool: PgPool) {
+async fn a_tripped_budget_without_a_reason_refuses_as_budget_exceeded(pool: PgPool) {
+    let (env, caller) = env(pool).await;
+    env.register(&caller).await;
+    let id = env.claimed_job(&caller, "over budget").await;
+    env.platform
+        .set_budget(caller.org_id.as_uuid(), Some(tripped_budget()));
+
+    assert_completion_blocked(&env, &caller, &id, "budget_exceeded").await;
+}
+
+/// The platform failing to answer the status lookup is not a reason to refuse
+/// work: the completion goes through, and it is still metered, so the bill
+/// only arrives later.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_status_outage_lets_a_completion_through_and_still_meters_it(pool: PgPool) {
+    let (env, caller) = env(pool).await;
+    env.register(&caller).await;
+    let id = env.claimed_job(&caller, "done during an outage").await;
+    env.platform.set_blocked_reason(
+        caller.org_id.as_uuid(),
+        Some(otto_resource::BUDGET_EXCEEDED),
+    );
+    env.platform.set_status_down(true);
+
+    env.complete(&caller, &id, None)
+        .await
+        .expect("a failed lookup must never block work");
+
+    assert_eq!(
+        outbox_rows(&env, "complete_job").await,
+        vec![(
+            true,
+            Some("otto-factory/jobs_completed".to_string()),
+            Some(1)
+        )]
+    );
+}
+
+/// Free tools never wait on the platform for a status they would ignore.
+/// Only `complete_job` asks, which also proves the counter counts.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn free_tools_make_no_status_lookup(pool: PgPool) {
+    let (env, caller) = env(pool).await;
+    env.register(&caller).await;
+    let before = env.platform.status_calls();
+
+    let id = env.claimed_job(&caller, "work").await;
+    ok(env
+        .factory
+        .watch(
+            Extension(parts(&caller)),
+            Parameters(tools::coord::WatchArgs {
+                timeout_seconds: Some(1),
+            }),
+        )
+        .await);
+    ok(env
+        .factory
+        .ready(
+            Extension(parts(&caller)),
+            Parameters(tools::jobs::ReadyArgs::default()),
+        )
+        .await);
+    assert_eq!(
+        env.platform.status_calls(),
+        before,
+        "add_job, claim_jobs, watch and ready must not look the org up"
+    );
+
+    env.complete(&caller, &id, None).await.unwrap();
+    assert!(
+        env.platform.status_calls() > before,
+        "complete_job is the one call that asks"
+    );
+}
+
+/// The legacy family-wide bucket no longer refuses anything: an org far past
+/// it on a hard-stop plan, with no blocked reason, completes jobs, and the
+/// call is recorded and counted.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_spent_legacy_bucket_never_refuses_a_completion(pool: PgPool) {
     let (env, caller) = env(pool).await;
     env.register(&caller).await;
 
@@ -2531,7 +2653,22 @@ async fn with_enforcement_off_an_over_budget_org_keeps_working(pool: PgPool) {
     assert_eq!(usage["billableUsed"], 9001);
     assert_eq!(usage["remaining"], 0);
     assert_eq!(usage["warning"], true);
-    assert_eq!(usage["enforced"], false);
+}
+
+/// The same org, one operation short of the limit, must be allowed the call
+/// that lands exactly on it. A plan sold as 500 operations has to deliver 500.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn the_last_included_operation_is_allowed(pool: PgPool) {
+    let (env, caller) = env(pool).await;
+    env.register(&caller).await;
+
+    env.set_standing(caller.org_id, 499, 500).await;
+
+    env.complete_one(&caller, "the five hundredth").await;
+
+    let usage = env.usage(&caller).await;
+    assert_eq!(usage["billableUsed"], 500);
+    assert_eq!(usage["remaining"], 0);
 }
 
 /// A tenant's meter is its own. Two orgs sharing a counter would be a billing
@@ -2855,15 +2992,14 @@ async fn sync_ticket_reports_an_outbound_failure_as_retriable(pool: PgPool) {
     assert_eq!(e.data.as_ref().unwrap()["retriable"], true);
 }
 
-/// `sync_ticket` is free, so an org on a hard-stop plan already over its bucket
-/// is never refused for quota: the outbound call is attempted. The setup is
-/// the one the earlier outbound-failure test uses (a binding is present, but
-/// the server has no GitHub App configured), so `tracker_sync_failed` proves
-/// the call went ahead, where a quota refusal would have been
-/// `quota_exceeded`.
+/// `sync_ticket` is free, so an org the platform has blocked is never refused
+/// for it: the outbound call is attempted. The setup is the one the earlier
+/// outbound-failure test uses (a binding is present, but the server has no
+/// GitHub App configured), so `tracker_sync_failed` proves the call went
+/// ahead, where a refusal would have been `budget_exceeded`.
 #[sqlx::test(migrations = "../of-core/migrations")]
-async fn sync_ticket_is_never_refused_for_quota_when_over_budget(pool: PgPool) {
-    let (env, caller) = env_metered(pool, true).await;
+async fn sync_ticket_is_never_refused_while_the_org_is_blocked(pool: PgPool) {
+    let (env, caller) = env(pool).await;
     let repo = env.register(&caller).await;
     let repo_id: RepoId = repo["id"].as_str().unwrap().parse().unwrap();
 
@@ -2913,9 +3049,11 @@ async fn sync_ticket_is_never_refused_for_quota_when_over_budget(pool: PgPool) {
         )
         .await);
 
-    // Spend the Free plan's whole bucket, so the org is at its limit by the
-    // time `sync_ticket` is called.
-    env.set_standing(caller.org_id, 500, 500).await;
+    // Block the org by the time `sync_ticket` is called.
+    env.platform.set_blocked_reason(
+        caller.org_id.as_uuid(),
+        Some(otto_resource::BUDGET_EXCEEDED),
+    );
 
     let e = err(env
         .factory
@@ -2928,17 +3066,22 @@ async fn sync_ticket_is_never_refused_for_quota_when_over_budget(pool: PgPool) {
     assert_eq!(
         code_of(&e),
         "tracker_sync_failed",
-        "sync_ticket is free and must reach the tracker even over budget: {}",
+        "sync_ticket is free and must reach the tracker even while blocked: {}",
         e.message
+    );
+    assert_eq!(
+        e.data.as_ref().unwrap()["retriable"],
+        true,
+        "a failed outbound call is worth retrying; a block would not be"
     );
 }
 
-/// Unshipped usage cannot push `sync_ticket` over a bucket either: it is free,
-/// so with the platform at 498 of 500 and calls not yet shipped, the outbound
-/// call is still made (`tracker_sync_failed`, not `quota_exceeded`).
+/// `sync_ticket` is free, so it never looks the org's status up: its old
+/// pre-check made a platform round trip before every tracker call, for a
+/// refusal that can no longer happen.
 #[sqlx::test(migrations = "../of-core/migrations")]
-async fn sync_ticket_ignores_unshipped_usage_and_reaches_the_tracker(pool: PgPool) {
-    let (env, caller) = env_metered(pool, true).await;
+async fn sync_ticket_makes_no_status_lookup(pool: PgPool) {
+    let (env, caller) = env(pool).await;
     let repo = env.register(&caller).await;
     let repo_id: RepoId = repo["id"].as_str().unwrap().parse().unwrap();
 
@@ -2958,13 +3101,9 @@ async fn sync_ticket_ignores_unshipped_usage_and_reaches_the_tracker(pool: PgPoo
     .unwrap();
     tx.commit().await.unwrap();
 
-    let job = env.add_job(&caller, "two calls short of the limit").await;
+    let job = env.add_job(&caller, "synced without asking").await;
     let id = job["id"].as_str().unwrap().to_string();
 
-    // Ships everything so far: the platform's figure is now the whole story.
-    env.set_standing(caller.org_id, 498, 500).await;
-
-    // Two calls, recorded but deliberately left unshipped.
     ok(env
         .factory
         .link_ticket(
@@ -2988,6 +3127,7 @@ async fn sync_ticket_ignores_unshipped_usage_and_reaches_the_tracker(pool: PgPoo
         )
         .await);
 
+    let before = env.platform.status_calls();
     let e = err(env
         .factory
         .sync_ticket(
@@ -3000,6 +3140,12 @@ async fn sync_ticket_ignores_unshipped_usage_and_reaches_the_tracker(pool: PgPoo
         "tracker_sync_failed",
         "sync_ticket is free and must reach the tracker: {}",
         e.message
+    );
+    assert_eq!(e.data.as_ref().unwrap()["retriable"], true);
+    assert_eq!(
+        env.platform.status_calls(),
+        before,
+        "sync_ticket must not look the org's status up"
     );
 }
 
