@@ -1,7 +1,11 @@
 //! `0006_meter_otto_tower.sql` rewrites queued `usage_outbox` rows from the old
 //! meter key to the new one, for every org, under both shapes a migration can
-//! run in: a role that bypasses RLS (this deployment's superuser) and a role RLS
-//! binds with no `app.org_id` set (`otto_app`, standing in for the fallback).
+//! run in: a role that bypasses RLS (this deployment's superuser) and a role
+//! subject to RLS with no `app.org_id` set (`otto_app`, standing in for the
+//! fallback). `usage_outbox`'s policy lets an org-less session see every org,
+//! so a bare UPDATE would also pass the second test; the per-org loop is the
+//! repo's rule for any rewrite of tenant data, kept so the migration does not
+//! depend on that policy branch surviving.
 
 mod common;
 
@@ -67,13 +71,13 @@ async fn rewrites_every_orgs_queued_rows_when_rls_is_bypassed(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn rewrites_every_orgs_queued_rows_when_rls_binds_the_migrating_role(pool: PgPool) {
+async fn rewrites_every_orgs_queued_rows_when_rls_applies_with_no_org_set(pool: PgPool) {
     let orgs = [Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
     seed(&pool, &orgs).await;
 
-    // Drop to the non-owner role RLS binds, with no app.org_id, exactly as a
-    // migration on a non-bypassing deployment would run. A bare UPDATE would
-    // match zero rows here (see isolation.rs); the per-org loop must not.
+    // Drop to the non-owner role RLS applies to, with no app.org_id, exactly as a
+    // migration on a non-bypassing deployment would run. Each org's rows must
+    // still be rewritten while the loop pins app.org_id to that org.
     let db = db(pool.clone());
     let mut tx = db.begin_unpinned().await.unwrap();
     sqlx::query("SET LOCAL ROLE otto_app")
