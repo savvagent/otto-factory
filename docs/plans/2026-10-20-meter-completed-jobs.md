@@ -90,10 +90,14 @@ Model: sonnet
 - [ ] `crates/of-billing/src/classify.rs`: move every `BILLABLE` entry (:65-85) to `FREE`; keep
   `BILLABLE` (now empty) and `exhaustive_over`; rewrite the module doc and the unit test
   `work_is_billable_and_looking_is_not` to assert every tool is free.
-- [ ] `crates/of-billing/src/meter.rs` + `crates/of-mcp/src/server.rs`: add a metered charge
-  (`Factory::charge_metered(tx, caller, "complete_job", &Metered::jobs_completed())`) that records
-  the row with the meter and `billable = true`; `complete_job` (`tools/jobs.rs:1013-1043`) uses it
-  in place of `charge`. Every other tool keeps `charge` (now always free).
+- [ ] `crates/of-billing/src/meter.rs`: add `Meter::charge_metered(tx, user, tool, &Metered)` that,
+  **for this task only**, keeps the existing enforcement path (`enforce` → `status_for` →
+  `unshipped_billable` → `refuse_if_spent`, as `charge` does today for a billable class) and then
+  enqueues the row with the meter, quantity and `billable = true`. `unshipped_billable` counts
+  `billable` rows, which are now exactly the metered ones. Task 4 replaces this enforcement.
+  `crates/of-mcp/src/server.rs`: `Factory::charge_metered(...)` delegates to it, and
+  `complete_job` (`tools/jobs.rs:1013-1043`) uses it in place of `charge`. Every other tool keeps
+  `charge` (now always free).
 - [ ] Retarget every existing test that uses a formerly billable tool as its billable example to
   `complete_job` (still billable, and still under the old quota enforcement until Task 4), so the
   gates stay green at the end of this task:
@@ -105,7 +109,10 @@ Model: sonnet
   (:311), `unshipped_usage_counts_against_the_bucket` (:427),
   `an_outage_is_remembered_so_it_does_not_slow_every_call` (:453),
   `warm_looks_the_org_up_before_any_transaction` (:489), and any other `charge(.., "add_job")`
-  there. Name each changed test and why in the commit body.
+  there. In `outbox.rs` the retargeted tests call `meter.charge_metered(.., "complete_job",
+  &Metered::jobs_completed())` (add a metered twin of the `record` helper), not
+  `charge(.., "complete_job")`, which is free now. Name each changed test and why in the commit
+  body.
 - [ ] Gates green; commit `feat(of-mcp): bill completed jobs, make coordination calls free`.
 
 ## Task 4 — Enforce the platform's blocked reason ⬜
@@ -118,7 +125,8 @@ Model: opus
   `payment_required`; `billable_blocked()` true with no reason → `budget_exceeded`; free tools
   (`add_job`, `claim_jobs`, `whoami`, `usage`, `watch`) keep working while blocked; a platform
   outage lets `complete_job` through (fail open) and still meters it; free tools make no status
-  lookup at all (assert via `MockPlatform::usage_calls()` or the status-call counter).
+  lookup at all (assert with the new `status_calls()` counter). The red run is expected to be a
+  compile failure until the testkit helpers below exist; write those first if you prefer.
 - [ ] `crates/of-testkit/src/lib.rs`: helpers to set an org's `blocked_reason` and `budget`; a
   dedicated counter of `GET /internal/orgs/{org}/usage-status` calls (`status_calls()`), separate
   from `lookup_calls()` (which also counts member/team lookups); and make `usage_status` compute
@@ -135,7 +143,10 @@ Model: opus
   `fix_url` is `OF_UPGRADE_URL` when set, else `OF_PLATFORM_URL` (the platform console home, which
   lists the user's orgs). No org-slug lookup: the charge path has only the org id, and a lookup
   inside the transaction would break Metering rule 4. Plumb the URL into `Meter::new` (it already
-  takes `upgrade_url`).
+  takes `upgrade_url`) and change both existing defaults from `{platform_url}/settings/billing` to
+  the bare platform URL: `crates/of-server/src/config.rs:220-221` and `crates/of-mcp/src/lib.rs:126`
+  (the v0.10.0 console has no `/settings/billing`; billing lives under `/o/<org>/billing`). Update
+  `.env.example`'s `OF_UPGRADE_URL` comment and the config test.
 - [ ] `crates/of-mcp/src/server.rs`: `Factory::tx` (:267-271) stops calling `warm`; `complete_job`
   calls `self.meter().warm(org)` before `self.tx(...)`; delete `would_refuse` and rewrite the
   doc comments on `charge` (:150-195) to the new model.
@@ -177,13 +188,16 @@ Model: sonnet
 
 Model: sonnet
 
-- [ ] Failing tests first (`crates/of-mcp/tests/tools.rs`): after a `complete_job` has shipped,
+- [ ] Failing tests first (`crates/of-mcp/tests/tools.rs`): after a `complete_job` has shipped
+  (call `of_billing::outbox::ship_once` in the test so the mock has received it),
   `whoami` and `usage` include `meters: [{meter: "otto-factory/jobs_completed", displayName, unit,
   quantity: 1}]` (the mock computes it, Task 4), `budget` (null without one; populated with
   `monthlyBudgetCents`, `spendCents`, `percentUsed`, `thresholdsReached`, `hardStop`, `blocked`),
   and `blockedReason`; every existing field is still present.
 - [ ] `crates/of-billing/src/meter.rs` `Status` (:292): add `meters`, `budget`, `blockedReason`
-  (camelCase, JsonSchema) — no per-org usage-page URL (no slug on this path; see Task 4);
+  (camelCase, JsonSchema) — no per-org usage-page URL (no slug on this path; see Task 4). If
+  `otto_resource::MeterUsage`/`BudgetStatus` don't derive `schemars::JsonSchema` (they likely
+  don't), define camelCase mirror structs in `of-billing` and map into them;
   keep the legacy fields with deprecated doc comments, and say in `enforced`'s that it now always
   reports `true` because the platform's blocked reason is always enforced.
 - [ ] `crates/of-mcp/src/tools/org.rs:92-97` descriptions and `crates/of-mcp/src/server.rs:82-84`
@@ -216,4 +230,5 @@ Model: haiku
 
 ## Known plan gaps
 
-None yet.
+None open. Two critique rounds ran; the round-2 findings (Task 3's interim enforcement path, the
+fallback URL default) are folded in above without a third critique.

@@ -169,7 +169,8 @@ minute with the number of rows waiting.
   `payment_required`; any other value, or `billable_blocked()` true with no `blocked_reason` →
   `budget_exceeded`), `retriable() = false`. The message
   says what happened, that free tools keep working, and that an owner raises the budget or adds a
-  card in the otto console at `OF_UPGRADE_URL` when set, else `OF_PLATFORM_URL` (the console home).
+  card in the otto console at `OF_UPGRADE_URL` when set, else `OF_PLATFORM_URL` (the console home;
+  the old default `{platform}/settings/billing` no longer exists on the v0.10.0 console).
   No per-org link: the charge path knows only the org id, and resolving the slug would put a
   platform call inside the transaction.
 - `of-mcp/src/error.rs` `from_billing`: the new variant maps like `QuotaExceeded` did (envelope
