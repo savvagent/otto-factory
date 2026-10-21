@@ -140,11 +140,19 @@ function canonicalOrigin(env: Env): string | null {
  * the canonical host, a refusal because the configuration cannot say, or
  * `null` to handle it as on any other day.
  *
- * A broken configuration is refused only where it matters — a request that
- * might have been redirected and whose host cannot be vouched for. Every origin
- * prefix (agents, discovery, webhooks) is proxied whatever the vars say, and so
- * is the canonical host's console when `OF_PUBLIC_URL` names it, so a typo in
- * these two vars cannot take the service down.
+ * A broken configuration is refused only where it matters — a console request
+ * that might have been redirected and whose host cannot be vouched for. Every
+ * origin prefix (agents, discovery, webhooks) is proxied whatever the vars say,
+ * so a typo in these two vars cannot take agents or webhooks down. How much of
+ * the console is refused depends on the mistake:
+ *
+ * - `OF_LEGACY_HOSTS` malformed: every host's console except the canonical
+ *   one, which is still served when `OF_PUBLIC_URL` names it.
+ * - `OF_LEGACY_HOSTS` names `OF_PUBLIC_URL`'s own host (refused by of-server at
+ *   boot): every host's console, the canonical one included, since serving it
+ *   would mean redirecting it to itself.
+ * - `OF_PUBLIC_URL` unusable: only a legacy host's console, which has nowhere
+ *   to be sent.
  */
 function legacyDecision(url: URL, env: Env): Response | null {
   if (!env.OF_LEGACY_HOSTS || env.OF_LEGACY_HOSTS.trim() === '') {
