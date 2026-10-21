@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.13.0](https://github.com/savvagent/otto-factory/compare/v0.12.0...v0.13.0) (2026-10-21)
+
+
+### ⚠ BREAKING CHANGES
+
+* **of-billing:** OF_ENFORCE_QUOTAS is retired. The platform's budget and payment block is now always enforced on complete_job, which gains a refusal (budget_exceeded or payment_required, not retriable). The quota_exceeded code is no longer produced, and whoami/usage `enforced` now always reports true.
+
+### Features
+
+* **of-billing:** bill completed jobs instead of coordination calls ([#223](https://github.com/savvagent/otto-factory/issues/223)) ([f4a0ce6](https://github.com/savvagent/otto-factory/commit/f4a0ce627e3587590411a6ea2700952c61b4bdfe)), closes [#222](https://github.com/savvagent/otto-factory/issues/222)
+
 ## [0.12.0](https://github.com/savvagent/otto-factory/compare/v0.11.0...v0.12.0) (2026-10-09)
 
 
