@@ -332,8 +332,11 @@ impl ServerHandler for Factory {
 /// legacy host: on one, the instructions open with the deprecation paragraph.
 fn info_for(mut info: InitializeResult, legacy: Option<&Legacy>) -> InitializeResult {
     if let Some(legacy) = legacy {
-        let rest = info.instructions.take().unwrap_or_default();
-        info.instructions = Some(format!("{}\n\n{rest}", legacy.notice()));
+        let notice = legacy.notice();
+        info.instructions = Some(match info.instructions.take() {
+            Some(rest) => format!("{notice}\n\n{rest}"),
+            None => notice,
+        });
     }
     info
 }
@@ -422,8 +425,8 @@ mod tests {
         assert_eq!(canonical.instructions.as_deref(), Some(INSTRUCTIONS));
 
         let deprecation = crate::legacy::Deprecation::new(
-            "https://tower.example.com",
-            "https://tower.example.com/mcp",
+            &url::Url::parse("https://tower.example.com").unwrap(),
+            &url::Url::parse("https://tower.example.com/mcp").unwrap(),
             ["factory.example.com"],
             None,
         );
@@ -438,6 +441,15 @@ mod tests {
             .expect("instructions");
         assert!(instructions.starts_with(&legacy.notice()), "{instructions}");
         assert!(instructions.ends_with(INSTRUCTIONS), "{instructions}");
+
+        // With nothing to follow it, the notice stands alone: no dangling blank
+        // lines.
+        let mut bare = base();
+        bare.instructions = None;
+        assert_eq!(
+            info_for(bare, Some(&legacy)).instructions,
+            Some(legacy.notice())
+        );
     }
 
     /// Constraint 3: coding-agent agnostic. The instructions must not name a

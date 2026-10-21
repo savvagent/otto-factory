@@ -264,6 +264,25 @@ impl Config {
         })
     }
 
+    /// Warn when `OF_LEGACY_SUNSET` has already passed. The legacy hosts keep
+    /// answering (removing them is the operator's step 11), and their notice
+    /// says they were retired; an operator restarting past the date has most
+    /// likely forgotten that step, and the log is where they will see it.
+    pub fn warn_past_sunset(&self, now: DateTime<Utc>) {
+        if let Some(sunset) = self.past_sunset(now) {
+            tracing::warn!(
+                sunset = %sunset.to_rfc3339(),
+                hosts = ?self.legacy_hosts,
+                "OF_LEGACY_SUNSET has passed but OF_LEGACY_HOSTS still serves the old \
+                 host(s); finish the rename (docs/deploy/fly.md, step 11) or move the date"
+            );
+        }
+    }
+
+    fn past_sunset(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        self.legacy_sunset.filter(|sunset| *sunset <= now)
+    }
+
     /// Log a warning for each retired variable that is set. Called once
     /// tracing is initialised, which is after `from_env` has run.
     pub fn warn_retired(&self) {
@@ -405,18 +424,29 @@ fn legacy_hosts(raw: Option<&str>, public_host: &str) -> Result<Vec<String>> {
         )
     };
     let mut hosts = Vec::new();
-    for entry in raw.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+    for entry in raw.split(',').map(str::trim) {
+        // An empty entry (`a,,b`, a trailing comma) is refused rather than
+        // skipped, so the Worker, which reads the same value, can apply exactly
+        // the same rule.
+        if entry.is_empty() {
+            return Err(invalid("it has an empty entry".into()));
+        }
         let host = entry.to_ascii_lowercase();
-        // Letters, digits, dots and hyphens (an internationalized name in its
-        // `xn--` form), and a parse that leaves it unchanged as a URL's host.
-        let bare = host
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
-            && url::Url::parse(&format!("https://{host}/"))
-                .is_ok_and(|u| u.host_str() == Some(host.as_str()));
+        // Dot-separated labels of letters, digits and hyphens (an
+        // internationalized name in its `xn--` form), and a parse that leaves
+        // it unchanged as a URL's host. A trailing dot is refused: it is a
+        // legal DNS spelling, but no client sends it in `Host`, so an entry
+        // carrying one would never match.
+        let bare = host.split('.').all(|label| {
+            !label.is_empty()
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        }) && url::Url::parse(&format!("https://{host}/"))
+            .is_ok_and(|u| u.host_str() == Some(host.as_str()));
         if !bare {
             return Err(invalid(format!(
-                "{entry:?} is not a bare hostname (no scheme, port, or path)"
+                "{entry:?} is not a bare hostname (no scheme, port, path, or trailing dot)"
             )));
         }
         if host == public_host.to_ascii_lowercase() {
@@ -428,9 +458,6 @@ fn legacy_hosts(raw: Option<&str>, public_host: &str) -> Result<Vec<String>> {
         if !hosts.contains(&host) {
             hosts.push(host);
         }
-    }
-    if hosts.is_empty() {
-        return Err(invalid("it names no host".into()));
     }
     Ok(hosts)
 }
@@ -652,8 +679,13 @@ mod tests {
             "factory.example.com/mcp",
             "user@factory.example.com",
             "factory example.com",
+            "factory.example.com.",
+            ".factory.example.com",
+            "factory..example.com",
             ",",
             " , ",
+            "factory.example.com,",
+            "factory.example.com,,old.example.com",
         ] {
             let err = legacy_hosts(Some(bad), "tower.example.com")
                 .expect_err(bad)
@@ -718,6 +750,22 @@ mod tests {
         .unwrap();
         assert_eq!(hosts, vec!["old.example.com"]);
         assert!(sunset.is_some());
+    }
+
+    #[test]
+    fn a_sunset_already_past_is_noticed() {
+        use chrono::TimeZone;
+        let mut config = Config::for_test();
+        config.legacy_hosts = vec!["old.example.com".into()];
+        config.legacy_sunset = Some(Utc.with_ymd_and_hms(2027, 1, 31, 0, 0, 0).unwrap());
+
+        let before = Utc.with_ymd_and_hms(2027, 1, 30, 0, 0, 0).unwrap();
+        let after = Utc.with_ymd_and_hms(2027, 2, 1, 0, 0, 0).unwrap();
+        assert_eq!(config.past_sunset(before), None);
+        assert_eq!(config.past_sunset(after), config.legacy_sunset);
+
+        config.legacy_sunset = None;
+        assert_eq!(config.past_sunset(after), None);
     }
 
     #[test]

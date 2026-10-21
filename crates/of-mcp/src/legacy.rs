@@ -49,46 +49,52 @@ use http::{HeaderMap, HeaderValue, Uri};
 
 /// The deprecated hosts and what to tell their callers. Built once from
 /// configuration; empty (no legacy host) is the normal state outside a rename.
+///
+/// Everything a legacy-host response needs is worked out here, once per host,
+/// so marking a request is a lookup and an `Arc` clone rather than a round of
+/// string formatting.
 #[derive(Debug, Clone, Default)]
 pub struct Deprecation {
-    /// Bare hostnames, lowercase, as configured (`OF_LEGACY_HOSTS`).
-    hosts: Vec<String>,
-    /// The scheme the legacy hosts are served on: the public URL's.
-    scheme: String,
-    /// The canonical public origin (`OF_PUBLIC_URL`), no trailing slash.
-    successor_origin: String,
-    /// The canonical MCP endpoint (`OF_RESOURCE_URI`).
-    successor_mcp: String,
-    sunset: Option<DateTime<Utc>>,
+    hosts: Vec<Legacy>,
 }
 
 impl Deprecation {
     /// `hosts` must already be validated bare hostnames; `of-server`'s config
     /// refuses to start otherwise. They are lowercased here so that matching
     /// cannot depend on how an operator typed them.
+    ///
+    /// Each legacy host is served the way the canonical one is: the public
+    /// URL's scheme and port, and the resource URI's path. A deployment whose
+    /// MCP endpoint is not at `/mcp` therefore advertises the same path on the
+    /// old host as on the new.
     pub fn new(
-        public_url: &str,
-        resource_uri: &str,
+        public_url: &url::Url,
+        resource_uri: &url::Url,
         hosts: impl IntoIterator<Item = impl Into<String>>,
         sunset: Option<DateTime<Utc>>,
     ) -> Self {
-        let successor_origin = public_url.trim_end_matches('/').to_string();
-        // `OF_PUBLIC_URL` is parsed and refused at startup when it is not an
-        // http(s) URL, so the fallback is unreachable from `of-server`; it is
-        // here only so a hand-built `Deprecation` cannot panic.
-        let scheme = url::Url::parse(&successor_origin)
-            .map(|u| u.scheme().to_string())
-            .unwrap_or_else(|_| "https".to_string());
-        Self {
-            hosts: hosts
-                .into_iter()
-                .map(|h| h.into().to_ascii_lowercase())
-                .collect(),
-            scheme,
-            successor_origin,
-            successor_mcp: resource_uri.to_string(),
-            sunset,
-        }
+        let successor_origin = public_url.as_str().trim_end_matches('/').to_string();
+        let port = public_url
+            .port()
+            .map(|p| format!(":{p}"))
+            .unwrap_or_default();
+        let resource_path = resource_uri.path().trim_end_matches('/');
+        let hosts = hosts
+            .into_iter()
+            .map(|h| {
+                let host = h.into().to_ascii_lowercase();
+                let origin = format!("{}://{host}{port}", public_url.scheme());
+                Legacy(Arc::new(LegacyHost {
+                    resource_uri: format!("{origin}{resource_path}"),
+                    metadata_url: format!("{origin}/.well-known/oauth-protected-resource"),
+                    host,
+                    successor_origin: successor_origin.clone(),
+                    successor_mcp: resource_uri.to_string(),
+                    sunset,
+                }))
+            })
+            .collect();
+        Self { hosts }
     }
 
     /// Whether this request's origin host is one of the deprecated ones, and if
@@ -99,32 +105,32 @@ impl Deprecation {
             return None;
         }
         let origin = origin_host(headers, uri)?;
-        let host = self.hosts.iter().find(|h| **h == origin)?;
-        Some(Legacy {
-            host: host.clone(),
-            origin: format!("{}://{host}", self.scheme),
-            successor_origin: self.successor_origin.clone(),
-            successor_mcp: self.successor_mcp.clone(),
-            sunset: self.sunset,
-        })
+        self.hosts.iter().find(|l| l.0.host == origin).cloned()
     }
 }
 
 /// A request that arrived through a deprecated host. Placed in the request's
 /// extensions by [`mark`]; the MCP transport carries it into `initialize` as
-/// part of `http::request::Parts`.
+/// part of `http::request::Parts`. Cheap to clone.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Legacy {
-    /// The configured legacy hostname the request came through.
-    pub host: String,
-    /// `scheme://host` for that hostname.
-    origin: String,
+pub struct Legacy(Arc<LegacyHost>);
+
+#[derive(Debug, PartialEq, Eq)]
+struct LegacyHost {
+    host: String,
+    resource_uri: String,
+    metadata_url: String,
     successor_origin: String,
     successor_mcp: String,
     sunset: Option<DateTime<Utc>>,
 }
 
 impl Legacy {
+    /// The configured legacy hostname the request came through.
+    pub fn host(&self) -> &str {
+        &self.0.host
+    }
+
     /// The resource URI a client that started on this host is talking to.
     ///
     /// RFC 9728 §3.3 makes a client check that the metadata's `resource` is the
@@ -133,19 +139,30 @@ impl Legacy {
     /// this URI as an alias of the canonical resource until the sunset, so a
     /// token requested for it is minted for, and introspects as, this service.
     pub fn resource_uri(&self) -> String {
-        format!("{}/mcp", self.origin)
+        self.0.resource_uri.clone()
     }
 
     /// The discovery pointer a `401` on this host carries.
     pub fn metadata_url(&self) -> String {
-        format!("{}/.well-known/oauth-protected-resource", self.origin)
+        self.0.metadata_url.clone()
     }
 
     /// The paragraph `initialize` instructions open with on this host. Agents
     /// read instructions, not response headers, so this is how the notice
     /// reaches the reader who can act on it.
     pub fn notice(&self) -> String {
-        let when = match self.sunset {
+        self.notice_at(Utc::now())
+    }
+
+    /// [`Self::notice`] as of `now`. Past the sunset the old address is still
+    /// answering (the operator has not removed it yet), and saying it "keeps
+    /// working until" a date already gone would be false.
+    pub fn notice_at(&self, now: DateTime<Utc>) -> String {
+        let when = match self.0.sunset {
+            Some(sunset) if sunset <= now => format!(
+                "It was retired on {} and may stop answering at any moment.",
+                sunset.to_rfc3339_opts(SecondsFormat::Secs, true)
+            ),
             Some(sunset) => format!(
                 "It keeps working until {}, and stops working after that.",
                 sunset.to_rfc3339_opts(SecondsFormat::Secs, true)
@@ -160,8 +177,8 @@ impl Legacy {
              and sign in again if your client asks; your jobs, repos and leases are the \
              same on both addresses. Tell the person you are working for, because \
              changing the configuration may be theirs to do.",
-            old = self.resource_uri(),
-            new = self.successor_mcp,
+            old = self.0.resource_uri,
+            new = self.0.successor_mcp,
         )
     }
 
@@ -170,25 +187,21 @@ impl Legacy {
     /// `@<timestamp>`: the host was deprecated by an operator's cutover, not on
     /// a date this binary knows. The successor link keeps the request's path so
     /// a client following it lands on the same resource on the canonical host.
+    /// It is appended, so a `Link` a handler already set is kept beside it.
     fn stamp(&self, path: &str, headers: &mut HeaderMap) {
         headers.insert("deprecation", HeaderValue::from_static("true"));
 
-        let link = format!(
-            "<{}{}>; rel=\"successor-version\"",
-            self.successor_origin,
+        let origin = &self.0.successor_origin;
+        let link = HeaderValue::from_str(&format!(
+            "<{origin}{}>; rel=\"successor-version\"",
             escape_for_link(path)
-        );
-        let link = HeaderValue::from_str(&link).or_else(|_| {
-            HeaderValue::from_str(&format!(
-                "<{}/>; rel=\"successor-version\"",
-                self.successor_origin
-            ))
-        });
+        ))
+        .or_else(|_| HeaderValue::from_str(&format!("<{origin}/>; rel=\"successor-version\"")));
         if let Ok(link) = link {
-            headers.insert(http::header::LINK, link);
+            headers.append(http::header::LINK, link);
         }
 
-        if let Some(sunset) = self.sunset {
+        if let Some(sunset) = self.0.sunset {
             if let Ok(value) = HeaderValue::from_str(&http_date(sunset)) {
                 headers.insert("sunset", value);
             }
@@ -213,11 +226,17 @@ pub async fn mark(
     response
 }
 
+/// The value of `Vary` for a response that depends on which host was used:
+/// discovery and the `401` challenge name a different URL on a legacy host.
+pub const VARY_BY_HOST: &str = "X-Forwarded-Host, Host";
+
 /// The public host a request was addressed to: `X-Forwarded-Host`, else
 /// `Host`, else the request target's authority. Lowercase, without a port.
 ///
 /// `X-Forwarded-Host` may be a list when several proxies append to it; the
-/// first entry is the one the client used.
+/// first entry is the one the client used. One that is not valid text falls
+/// through to `Host` rather than failing: the result only ever selects among
+/// configured hosts, so the worst outcome is a request treated as canonical.
 pub fn origin_host(headers: &HeaderMap, uri: &Uri) -> Option<String> {
     let from_header = |name| {
         headers
@@ -262,10 +281,14 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
 
+    fn url(s: &str) -> url::Url {
+        url::Url::parse(s).unwrap()
+    }
+
     fn deprecation(sunset: Option<DateTime<Utc>>) -> Deprecation {
         Deprecation::new(
-            "https://tower.example.com",
-            "https://tower.example.com/mcp",
+            &url("https://tower.example.com"),
+            &url("https://tower.example.com/mcp"),
             ["Factory.Example.com"],
             sunset,
         )
@@ -352,8 +375,8 @@ mod tests {
     #[test]
     fn no_configured_host_means_nothing_is_legacy() {
         let none = Deprecation::new(
-            "https://tower.example.com",
-            "https://tower.example.com/mcp",
+            &url("https://tower.example.com"),
+            &url("https://tower.example.com/mcp"),
             Vec::<String>::new(),
             None,
         );
@@ -367,12 +390,18 @@ mod tests {
         let h = headers(&[("x-forwarded-host", "factory.example.com")]);
 
         let mut out = HeaderMap::new();
+        out.insert(http::header::LINK, "</next>; rel=\"next\"".parse().unwrap());
         let legacy = deprecation(Some(sunset)).classify(&h, &uri()).unwrap();
         legacy.stamp("/api/orgs/<x>", &mut out);
         assert_eq!(out["deprecation"], "true");
+        let links: Vec<_> = out.get_all(http::header::LINK).iter().collect();
         assert_eq!(
-            out[http::header::LINK],
-            r#"<https://tower.example.com/api/orgs/%3Cx%3E>; rel="successor-version""#
+            links,
+            [
+                "</next>; rel=\"next\"",
+                r#"<https://tower.example.com/api/orgs/%3Cx%3E>; rel="successor-version""#
+            ],
+            "a Link a handler set is kept beside the successor"
         );
         assert_eq!(out["sunset"], "Sun, 31 Jan 2027 00:00:00 GMT");
 
@@ -389,10 +418,9 @@ mod tests {
     fn the_notice_names_both_addresses_and_the_date() {
         let sunset = Utc.with_ymd_and_hms(2027, 1, 31, 0, 0, 0).unwrap();
         let h = headers(&[("x-forwarded-host", "factory.example.com")]);
-        let notice = deprecation(Some(sunset))
-            .classify(&h, &uri())
-            .unwrap()
-            .notice();
+        let before = Utc.with_ymd_and_hms(2026, 10, 21, 0, 0, 0).unwrap();
+        let legacy = deprecation(Some(sunset)).classify(&h, &uri()).unwrap();
+        let notice = legacy.notice_at(before);
         assert!(notice.starts_with("DEPRECATED"), "{notice}");
         assert!(
             notice.contains("https://factory.example.com/mcp"),
@@ -400,6 +428,18 @@ mod tests {
         );
         assert!(notice.contains("https://tower.example.com/mcp"), "{notice}");
         assert!(notice.contains("2027-01-31T00:00:00Z"), "{notice}");
+
+        assert!(notice.contains("keeps working until"), "{notice}");
+
+        // Past the sunset the old address may still answer, but must not claim
+        // to keep working.
+        let after = Utc.with_ymd_and_hms(2027, 2, 1, 0, 0, 0).unwrap();
+        let retired = legacy.notice_at(after);
+        assert!(
+            retired.contains("was retired on 2027-01-31T00:00:00Z"),
+            "{retired}"
+        );
+        assert!(!retired.contains("keeps working until"), "{retired}");
 
         let undated = deprecation(None).classify(&h, &uri()).unwrap().notice();
         assert!(undated.contains("not been published"), "{undated}");
@@ -409,5 +449,28 @@ mod tests {
         for client in ["claude", "copilot", "cursor", "codex", "gemini"] {
             assert!(!lowered.contains(client), "{client}");
         }
+    }
+
+    /// The legacy resource takes its path from `OF_RESOURCE_URI` and its
+    /// scheme and port from `OF_PUBLIC_URL`, like the canonical one.
+    #[test]
+    fn the_legacy_resource_mirrors_the_canonical_paths_and_port() {
+        let d = Deprecation::new(
+            &url("http://tower.localhost:8080"),
+            &url("http://tower.localhost:8080/agents/mcp"),
+            ["factory.localhost"],
+            None,
+        );
+        let h = headers(&[("host", "factory.localhost:8080")]);
+        let legacy = d.classify(&h, &uri()).expect("legacy");
+        assert_eq!(legacy.host(), "factory.localhost");
+        assert_eq!(
+            legacy.resource_uri(),
+            "http://factory.localhost:8080/agents/mcp"
+        );
+        assert_eq!(
+            legacy.metadata_url(),
+            "http://factory.localhost:8080/.well-known/oauth-protected-resource"
+        );
     }
 }

@@ -222,6 +222,12 @@ fn challenge(metadata_url: &str, reason: &str) -> Response {
     response
         .headers_mut()
         .insert(http::header::WWW_AUTHENTICATE, value);
+    // The pointer differs on a legacy host, so a cache must not hand one
+    // host's challenge to a caller of the other.
+    response.headers_mut().insert(
+        http::header::VARY,
+        http::HeaderValue::from_static(crate::legacy::VARY_BY_HOST),
+    );
 
     response
 }
@@ -333,14 +339,18 @@ pub async fn protected_resource_metadata(
     legacy: Option<Extension<Legacy>>,
 ) -> Response {
     let resource = rs.advertised_resource(legacy.as_ref().map(|Extension(l)| l));
-    Json(serde_json::json!({
-        "resource": resource,
-        "resource_name": of_core::scopes::RESOURCE_NAME,
-        "authorization_servers": [rs.authorization_server.trim_end_matches('/')],
-        "scopes_supported": of_core::scopes::KNOWN,
-        "bearer_methods_supported": ["header"],
-    }))
-    .into_response()
+    let vary = [(http::header::VARY, crate::legacy::VARY_BY_HOST)];
+    (
+        vary,
+        Json(serde_json::json!({
+            "resource": resource,
+            "resource_name": of_core::scopes::RESOURCE_NAME,
+            "authorization_servers": [rs.authorization_server.trim_end_matches('/')],
+            "scopes_supported": of_core::scopes::KNOWN,
+            "bearer_methods_supported": ["header"],
+        })),
+    )
+        .into_response()
 }
 
 /// The authenticated caller of a tool call.
@@ -409,6 +419,10 @@ mod tests {
         assert!(header.contains(
             r#"resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource""#
         ));
+        assert_eq!(
+            response.headers()[http::header::VARY],
+            "X-Forwarded-Host, Host"
+        );
     }
 
     /// A trailing slash on the configured public URL must not produce a

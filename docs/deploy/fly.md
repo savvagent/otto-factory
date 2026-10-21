@@ -380,7 +380,8 @@ OF_LEGACY_SUNSET     = "<the same RFC 3339 $SUNSET>"
 `OF_LEGACY_HOSTS` is a comma-separated list of extra, deprecated bare hostnames; `OF_LEGACY_SUNSET` is
 optional but you should set it (an RFC 3339 date-time, or a date meaning midnight UTC). Both fail the
 boot when set but unparseable, as does a sunset with no legacy host or a legacy host equal to
-`OF_PUBLIC_URL`'s.
+`OF_PUBLIC_URL`'s. Past the sunset the app keeps serving the old host until step 11, says in its
+notice that the host was retired, and logs a warning at every startup.
 
 Once that deploy is live, give the production Worker the same two facts, in `web/wrangler.jsonc`'s
 `env.production.vars`, and redeploy it (`npm run deploy` in `web/`):

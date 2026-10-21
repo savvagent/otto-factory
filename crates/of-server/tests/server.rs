@@ -619,7 +619,13 @@ async fn legacy_discovery_advertises_the_legacy_resource(pool: PgPool) {
             .body(Body::empty())
             .unwrap()
     };
-    let legacy_doc = body_json(send(&app, prm(LEGACY)).await).await;
+    // Both answers depend on the host, and say so to any cache in between.
+    let legacy_response = send(&app, prm(LEGACY)).await;
+    assert_eq!(
+        header(&legacy_response, "vary"),
+        Some("X-Forwarded-Host, Host")
+    );
+    let legacy_doc = body_json(legacy_response).await;
     assert_eq!(legacy_doc["resource"], format!("https://{LEGACY}/mcp"));
     assert_eq!(legacy_doc["authorization_servers"][0], PLATFORM);
     let canonical_doc = body_json(send(&app, prm("factory.test")).await).await;
@@ -636,6 +642,7 @@ async fn legacy_discovery_advertises_the_legacy_resource(pool: PgPool) {
     )
     .await;
     assert_eq!(legacy_401.status(), http::StatusCode::UNAUTHORIZED);
+    assert_eq!(header(&legacy_401, "vary"), Some("X-Forwarded-Host, Host"));
     assert!(
         challenge(&legacy_401).contains(&format!(
             r#"resource_metadata="https://{LEGACY}/.well-known/oauth-protected-resource""#

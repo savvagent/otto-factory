@@ -24,6 +24,7 @@ async fn main() -> Result<()> {
 
     init_tracing(config.log_format)?;
     config.warn_retired();
+    config.warn_past_sunset(chrono::Utc::now());
     match dotenv {
         Ok(path) => tracing::debug!(path = %path.display(), "loaded .env"),
         Err(_) => tracing::debug!("no .env file; using the process environment"),

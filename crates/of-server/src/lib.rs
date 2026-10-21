@@ -123,20 +123,31 @@ pub fn router(
         // there for `/mcp` and discovery to read. With no `OF_LEGACY_HOSTS` it
         // passes every request through untouched.
         .layer(axum::middleware::from_fn_with_state(
-            Arc::new(deprecation(config)),
+            Arc::new(deprecation(config)?),
             of_mcp::legacy::mark,
         )))
 }
 
 /// The legacy hosts and what their callers are told: the canonical public
 /// origin and MCP URI as successors, and the sunset date if one is set.
-fn deprecation(config: &Config) -> of_mcp::Deprecation {
-    of_mcp::Deprecation::new(
-        &config.public_url,
-        &config.resource_uri,
+///
+/// Fallible for the same reason as [`router`]: a hand-built `Config` need not
+/// have come through `from_env`'s checks, and a legacy URL built from a value
+/// that does not parse would be a discovery document nobody can follow.
+fn deprecation(config: &Config) -> Result<of_mcp::Deprecation> {
+    if config.legacy_hosts.is_empty() {
+        return Ok(of_mcp::Deprecation::default());
+    }
+    let public_url = url::Url::parse(&config.public_url)
+        .with_context(|| format!("OF_PUBLIC_URL is not a URL: {:?}", config.public_url))?;
+    let resource_uri = url::Url::parse(&config.resource_uri)
+        .with_context(|| format!("OF_RESOURCE_URI is not a URL: {:?}", config.resource_uri))?;
+    Ok(of_mcp::Deprecation::new(
+        &public_url,
+        &resource_uri,
         config.legacy_hosts.iter().cloned(),
         config.legacy_sunset,
-    )
+    ))
 }
 
 /// `of-web`'s state, with the settings that are this deployment's to decide.
