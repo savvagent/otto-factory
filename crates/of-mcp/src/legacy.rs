@@ -73,7 +73,7 @@ impl Deprecation {
         hosts: impl IntoIterator<Item = impl Into<String>>,
         sunset: Option<DateTime<Utc>>,
     ) -> Self {
-        let successor_origin = public_url.as_str().trim_end_matches('/').to_string();
+        let successor_origin = public_url.origin().ascii_serialization();
         let port = public_url
             .port()
             .map(|p| format!(":{p}"))
@@ -147,6 +147,14 @@ impl Legacy {
         self.0.metadata_url.clone()
     }
 
+    /// The same resource on the canonical host: `OF_PUBLIC_URL`'s origin
+    /// followed by `path_and_query` exactly as the request carried it. This is
+    /// both the `successor-version` link and where `of-server` redirects a
+    /// legacy-host console request, so the two can never disagree.
+    pub fn successor_url(&self, path_and_query: &str) -> String {
+        format!("{}{path_and_query}", self.0.successor_origin)
+    }
+
     /// The paragraph `initialize` instructions open with on this host. Agents
     /// read instructions, not response headers, so this is how the notice
     /// reaches the reader who can act on it.
@@ -185,16 +193,17 @@ impl Legacy {
     /// `Deprecation: true`, a `successor-version` `Link` (RFC 8288) and, with a
     /// sunset date, `Sunset` (RFC 8594). `true` rather than RFC 9745's
     /// `@<timestamp>`: the host was deprecated by an operator's cutover, not on
-    /// a date this binary knows. The successor link keeps the request's path so
-    /// a client following it lands on the same resource on the canonical host.
-    /// It is appended, so a `Link` a handler already set is kept beside it.
-    fn stamp(&self, path: &str, headers: &mut HeaderMap) {
+    /// a date this binary knows. The successor link keeps the request's path
+    /// and query so a client following it lands on the same resource on the
+    /// canonical host. It is appended, so a `Link` a handler already set is
+    /// kept beside it.
+    fn stamp(&self, path_and_query: &str, headers: &mut HeaderMap) {
         headers.insert("deprecation", HeaderValue::from_static("true"));
 
         let origin = &self.0.successor_origin;
         let link = HeaderValue::from_str(&format!(
-            "<{origin}{}>; rel=\"successor-version\"",
-            escape_for_link(path)
+            "<{}>; rel=\"successor-version\"",
+            escape_for_link(&self.successor_url(path_and_query))
         ))
         .or_else(|_| HeaderValue::from_str(&format!("<{origin}/>; rel=\"successor-version\"")));
         if let Ok(link) = link {
@@ -219,10 +228,14 @@ pub async fn mark(
     let Some(legacy) = deprecation.classify(req.headers(), req.uri()) else {
         return next.run(req).await;
     };
-    let path = req.uri().path().to_string();
+    let path_and_query = req
+        .uri()
+        .path_and_query()
+        .map_or("/", |pq| pq.as_str())
+        .to_string();
     req.extensions_mut().insert(legacy.clone());
     let mut response = next.run(req).await;
-    legacy.stamp(&path, response.headers_mut());
+    legacy.stamp(&path_and_query, response.headers_mut());
     response
 }
 
@@ -265,8 +278,8 @@ fn strip_port(authority: &str) -> &str {
     }
 }
 
-/// `<` and `>` would end the link target early; nothing else a request path can
-/// legally hold is a problem inside one.
+/// `<` and `>` would end the link target early; nothing else a request path or
+/// query can legally hold is a problem inside one.
 fn escape_for_link(path: &str) -> String {
     path.replace('<', "%3C").replace('>', "%3E")
 }
@@ -412,6 +425,39 @@ mod tests {
             .stamp("/mcp", &mut out);
         assert_eq!(out["deprecation"], "true");
         assert!(out.get("sunset").is_none());
+    }
+
+    /// The successor keeps the query too: `/auth/login?org=acme` on the old
+    /// host is `/auth/login?org=acme` on the new one, not a bare sign-in.
+    #[test]
+    fn the_successor_link_keeps_the_query() {
+        let h = headers(&[("x-forwarded-host", "factory.example.com")]);
+        let legacy = deprecation(None).classify(&h, &uri()).unwrap();
+        assert_eq!(
+            legacy.successor_url("/auth/login?org=acme&next=%2Fo%2Facme"),
+            "https://tower.example.com/auth/login?org=acme&next=%2Fo%2Facme"
+        );
+        let mut out = HeaderMap::new();
+        legacy.stamp("/o/acme/queue?status=pending", &mut out);
+        assert_eq!(
+            out[http::header::LINK],
+            r#"<https://tower.example.com/o/acme/queue?status=pending>; rel="successor-version""#
+        );
+    }
+
+    /// The successor is `OF_PUBLIC_URL`'s origin, whatever trailing slash or
+    /// default port it was written with.
+    #[test]
+    fn the_successor_is_the_public_origin() {
+        let d = Deprecation::new(
+            &url("https://tower.example.com:443/"),
+            &url("https://tower.example.com/mcp"),
+            ["factory.example.com"],
+            None,
+        );
+        let h = headers(&[("x-forwarded-host", "factory.example.com")]);
+        let legacy = d.classify(&h, &uri()).unwrap();
+        assert_eq!(legacy.successor_url("/x"), "https://tower.example.com/x");
     }
 
     #[test]
