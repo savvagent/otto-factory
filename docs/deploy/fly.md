@@ -330,7 +330,12 @@ Do this straight after step 3 and before anything else, and only while usage shi
 (it is, from step 2 until this step: the new binary's meter declaration is refused until the
 slug changes). A batch the platform accepted mid-rename could otherwise land under the old slug. The shipper's next retry declares
 `otto-tower/jobs_completed`, logs `declared usage meters`, and drains the queued rows (oldest
-first). Watch the logs (`fly logs -a otto-factory-mcp`) and the backlog. The backlog lives in
+first). If the platform later forgets the meter and refuses events as `unknown_meter`, the
+shipper never dead-letters them: it keeps those rows in `usage_outbox` with capped backoff,
+declares the meters again on every pass that sees the refusal, and logs
+`the platform refused usage events as unknown_meter` at error level each time (no row text). A
+persistent refusal therefore grows the queue instead of losing billed usage; the repeating error
+(and `/readyz`) is how you notice. Watch the logs (`fly logs -a otto-factory-mcp`) and the backlog. The backlog lives in
 **this service's** database, `otto_factory`, not in `otto_platform` where step 3 ran:
 
 ```bash
@@ -589,8 +594,9 @@ fronted by the Worker: also remove `OF_PUBLIC_URL` and `OF_LEGACY_HOSTS` from th
   queued `usage_outbox` row still on a retired key to its successor (per org, safe under either RLS
   shape), logs `moved queued usage rows from a retired meter key` with the count when there were
   any, and is a no-op otherwise. Without these those rows would ship under an undeclared meter and
-  be dead-lettered as `unknown_meter`. It does not touch `usage_outbox_rejected`; a row an older image
-  already had refused stays there as history. To check after the roll forward (on `otto_factory`):
+  be refused as `unknown_meter` (and, since the shipper keeps such rows queued, retried
+  indefinitely). It does not touch `usage_outbox_rejected`; a row an older image already had
+  refused stays there as history. To check after the roll forward (on `otto_factory`):
   ```sql
   BEGIN READ ONLY;
   SELECT meter, count(*) FROM usage_outbox GROUP BY meter;   -- no otto-factory/ rows

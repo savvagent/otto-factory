@@ -1053,10 +1053,13 @@ async fn an_unknown_meter_makes_the_shipper_redeclare_and_ship_the_rows(pool: Pg
     assert_eq!(outbox::pending(&db).await.unwrap(), 0);
 }
 
-/// A platform that keeps refusing a meter it was just told about cannot hold
-/// the shipper in a loop: after the bound the rows dead-letter as before.
+/// A platform that keeps refusing a meter it was just told about never costs
+/// billed usage: the shipper keeps re-declaring, and the rows are neither
+/// dead-lettered nor dropped. They stay queued for when the platform recovers.
 #[sqlx::test(migrator = "of_core::MIGRATOR")]
-async fn redeclaring_is_bounded_and_then_the_rows_are_dead_lettered(pool: PgPool) {
+async fn a_platform_that_always_refuses_is_redeclared_forever_and_the_rows_stay_queued(
+    pool: PgPool,
+) {
     let platform = MockPlatform::start().await;
     let db = Db::from_pool(pool);
     let meter = Meter::new(platform.client(), "https://x.test/billing");
@@ -1065,25 +1068,18 @@ async fn redeclaring_is_bounded_and_then_the_rows_are_dead_lettered(pool: PgPool
     record_metered(&db, org, user, &meter).await;
 
     let (stop, task) = spawn_shipper(&db, &platform, cfg());
-    eventually("the row to be dead-lettered", || {
-        platform.usage_calls() > outbox::MAX_REDECLARES as usize
-    })
-    .await;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    while outbox::pending(&db).await.unwrap() != 0 {
-        assert!(tokio::time::Instant::now() < deadline, "row lingers");
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    // Well past the old bound of three re-declares.
+    eventually("many re-declarations", || platform.meter_calls() >= 7).await;
 
-    let reasons: Vec<String> = sqlx::query_scalar("SELECT reason FROM usage_outbox_rejected")
-        .fetch_all(db.pool())
+    let rejected: i64 = sqlx::query_scalar("SELECT count(*) FROM usage_outbox_rejected")
+        .fetch_one(db.pool())
         .await
         .unwrap();
-    assert_eq!(reasons.len(), 1);
-    assert!(reasons[0].starts_with("unknown_meter"), "{reasons:?}");
-    // The first declaration plus one per allowed retry, and no more.
-    assert_eq!(platform.meter_calls(), 1 + outbox::MAX_REDECLARES as usize);
+    assert_eq!(rejected, 0, "an unknown_meter row was dead-lettered");
+    assert_eq!(outbox::pending(&db).await.unwrap(), 1, "the row was lost");
+    assert!(platform.counted_usage().is_empty());
 
     stop.send(true).unwrap();
     task.await.unwrap();
+    assert_eq!(outbox::pending(&db).await.unwrap(), 1);
 }
