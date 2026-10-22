@@ -917,7 +917,7 @@ async fn a_legacy_host_never_chooses_the_audience(pool: PgPool) {
 /// A shipper stalled on its meter declaration is visible on `/readyz`, without
 /// failing readiness: the replica still serves, and nothing is lost.
 #[sqlx::test(migrations = "../of-core/migrations")]
-async fn readiness_reports_a_stalled_meter_declaration_and_the_rows_waiting(pool: PgPool) {
+async fn readiness_reports_a_stalled_meter_declaration(pool: PgPool) {
     use of_billing::outbox::{self, ShipperConfig, ShipperStatus};
     use of_testkit::MeterMode;
     use std::time::Duration;
@@ -956,13 +956,14 @@ async fn readiness_reports_a_stalled_meter_declaration_and_the_rows_waiting(pool
     let doc = body_json(stalled).await;
     assert_eq!(doc["status"], "ready", "{doc}");
     assert_eq!(doc["usage"]["meters_declared"], false, "{doc}");
-    assert_eq!(doc["usage"]["rows_waiting"], 1, "{doc}");
+    // The queue depth is a cross-tenant figure and this route is unauthenticated.
+    assert!(doc["usage"].get("rows_waiting").is_none(), "{doc}");
 
     platform.set_meter_mode(MeterMode::Accept);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         let doc = body_json(get(app.clone(), "/readyz").await).await;
-        if doc["usage"]["meters_declared"] == true && doc["usage"]["rows_waiting"] == 0 {
+        if doc["usage"]["meters_declared"] == true {
             break;
         }
         assert!(

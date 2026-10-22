@@ -157,13 +157,14 @@ SELECT count(*), min(occurred_at), max(attempts), max(last_error) FROM usage_out
 **Checking for a stalled declaration without the logs.** `GET /readyz` carries a `usage` object:
 
 ```json
-{"status":"ready","usage":{"meters_declared":false,"rows_waiting":42}}
+{"status":"ready","usage":{"meters_declared":false}}
 ```
 
 `meters_declared: false` means this process has not declared its meters, so it is shipping
-nothing, free rows included; `rows_waiting` is the depth of `usage_outbox` (`null` if it could
-not be counted). It is `false` for a moment after every start and is expected to flip to `true`
-within seconds; `false` with `rows_waiting` growing is the stall. Readiness stays `200` on
+nothing, free rows included. It is `false` for a moment after every start and is expected to flip
+to `true` within seconds; `false` that persists is the stall. The backlog's depth is deliberately
+not in this body (the route is unauthenticated and the figure spans every tenant): read it with the
+`SELECT count(*) … FROM usage_outbox` above, or from the shipper's `rows_waiting=N` log line. Readiness stays `200` on
 purpose: every replica shares the platform's answer, so failing the probe would take the API out
 of rotation over a billing delay that loses nothing. Alert on the body (for example
 `curl -s https://otto-tower.savvagent.com/readyz | jq -e '.usage.meters_declared'` exits non-zero

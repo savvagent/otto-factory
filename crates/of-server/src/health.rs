@@ -20,7 +20,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
-use of_billing::outbox::{self, ShipperStatus};
+use of_billing::outbox::ShipperStatus;
 use otto_tenant::Db;
 
 #[derive(Clone)]
@@ -66,13 +66,16 @@ async fn healthz() -> Response {
 
 /// `GET /readyz` — this replica can serve a request that needs the database.
 ///
-/// With a usage shipper attached the body also carries a `usage` object:
-/// `meters_declared` and `rows_waiting` (the usage outbox's depth, `null` if it
-/// could not be counted). `meters_declared: false` with rows waiting is the
-/// stall of `docs/deploy/fly.md`: the platform refused the meter declaration, so
-/// no usage ships. It never changes the status code. Every replica shares the
-/// platform's answer, so failing readiness would take the whole API out of
-/// rotation over a billing delay that loses nothing.
+/// With a usage shipper attached the body also carries `usage.meters_declared`.
+/// `false` that persists is the stall of `docs/deploy/fly.md`: the platform
+/// refused the meter declaration, so no usage ships. It never changes the
+/// status code. Every replica shares the platform's answer, so failing
+/// readiness would take the whole API out of rotation over a billing delay that
+/// loses nothing.
+///
+/// Only that boolean is public. This route is unauthenticated, and the outbox
+/// depth is a platform-wide figure across every tenant, so it stays in the
+/// shipper's logs, never in a response body.
 async fn readyz(State(HealthState { db, shipper }): State<HealthState>) -> Response {
     // Deliberately *not* `Db::begin`: that needs an `OrgId`, and there is no
     // org here. This is the one place a bare pool query is the right thing,
@@ -85,7 +88,9 @@ async fn readyz(State(HealthState { db, shipper }): State<HealthState>) -> Respo
         Ok(Ok(_)) => {
             let mut body = serde_json::json!({ "status": "ready" });
             if let Some(shipper) = &shipper {
-                body["usage"] = usage_detail(&db, shipper).await;
+                body["usage"] = serde_json::json!({
+                    "meters_declared": shipper.meters_declared(),
+                });
             }
             (StatusCode::OK, Json(body)).into_response()
         }
@@ -103,17 +108,6 @@ async fn readyz(State(HealthState { db, shipper }): State<HealthState>) -> Respo
             unready("the database did not answer a probe query in time")
         }
     }
-}
-
-async fn usage_detail(db: &Db, shipper: &ShipperStatus) -> serde_json::Value {
-    let waiting = tokio::time::timeout(READY_TIMEOUT, outbox::pending(db))
-        .await
-        .ok()
-        .and_then(Result::ok);
-    serde_json::json!({
-        "meters_declared": shipper.meters_declared(),
-        "rows_waiting": waiting,
-    })
 }
 
 fn unready(reason: &str) -> Response {
