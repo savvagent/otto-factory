@@ -1014,3 +1014,76 @@ async fn shutdown_while_waiting_to_declare_returns_promptly(pool: PgPool) {
     assert_eq!(platform.usage_calls(), 0);
     assert_eq!(outbox::pending(&db).await.unwrap(), 1);
 }
+
+/// The platform losing the declaration mid-run must not dead-letter billed
+/// work: the shipper declares again and the rows ship.
+#[sqlx::test(migrator = "of_core::MIGRATOR")]
+async fn an_unknown_meter_makes_the_shipper_redeclare_and_ship_the_rows(pool: PgPool) {
+    let platform = MockPlatform::start().await;
+    let db = Db::from_pool(pool);
+    let meter = Meter::new(platform.client(), "https://x.test/billing");
+    let (org, user) = (OrgId::new(), UserId::new());
+    record_metered(&db, org, user, &meter).await;
+
+    let (stop, task) = spawn_shipper(&db, &platform, cfg());
+    eventually("the first row to ship", || {
+        platform.counted_usage().len() == 1
+    })
+    .await;
+    assert_eq!(platform.meter_calls(), 1);
+
+    platform.forget_meters();
+    record_metered(&db, org, user, &meter).await;
+    record_metered(&db, org, user, &meter).await;
+    eventually("the rows to ship after re-declaring", || {
+        platform.counted_usage().len() == 3
+    })
+    .await;
+
+    assert_eq!(platform.declared_meters().len(), 1);
+    assert!(platform.meter_calls() >= 2, "never declared again");
+    let rejected: i64 = sqlx::query_scalar("SELECT count(*) FROM usage_outbox_rejected")
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(rejected, 0, "an unknown_meter row was dead-lettered");
+
+    stop.send(true).unwrap();
+    task.await.unwrap();
+    assert_eq!(outbox::pending(&db).await.unwrap(), 0);
+}
+
+/// A platform that keeps refusing a meter it was just told about cannot hold
+/// the shipper in a loop: after the bound the rows dead-letter as before.
+#[sqlx::test(migrator = "of_core::MIGRATOR")]
+async fn redeclaring_is_bounded_and_then_the_rows_are_dead_lettered(pool: PgPool) {
+    let platform = MockPlatform::start().await;
+    let db = Db::from_pool(pool);
+    let meter = Meter::new(platform.client(), "https://x.test/billing");
+    let (org, user) = (OrgId::new(), UserId::new());
+    platform.refuse_every_meter();
+    record_metered(&db, org, user, &meter).await;
+
+    let (stop, task) = spawn_shipper(&db, &platform, cfg());
+    eventually("the row to be dead-lettered", || {
+        platform.usage_calls() > outbox::MAX_REDECLARES as usize
+    })
+    .await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while outbox::pending(&db).await.unwrap() != 0 {
+        assert!(tokio::time::Instant::now() < deadline, "row lingers");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let reasons: Vec<String> = sqlx::query_scalar("SELECT reason FROM usage_outbox_rejected")
+        .fetch_all(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(reasons.len(), 1);
+    assert!(reasons[0].starts_with("unknown_meter"), "{reasons:?}");
+    // The first declaration plus one per allowed retry, and no more.
+    assert_eq!(platform.meter_calls(), 1 + outbox::MAX_REDECLARES as usize);
+
+    stop.send(true).unwrap();
+    task.await.unwrap();
+}

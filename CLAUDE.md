@@ -648,7 +648,9 @@ rules hold, and the first is what makes the others true:
    declares the meters in `METER_DECLARATIONS` with the platform (retrying until it succeeds;
    nothing ships meanwhile, since the platform rejects an undeclared meter as `unknown_meter`),
    then claims due rows (`FOR UPDATE SKIP LOCKED`, `next_attempt_at` as claim lease and retry
-   backoff), posts them with `PlatformClient::ship_usage`, and deletes what the platform answered
+   backoff), posts them with `PlatformClient::ship_usage` (a batch refused as `unknown_meter`, say
+   because the platform lost the declaration, is kept queued and the meters are declared again,
+   at most `MAX_REDECLARES` times in a row before such rows dead-letter like any refusal), and deletes what the platform answered
    for (accepted, duplicate, or rejected — all final; a rejected event is moved to
    `usage_outbox_rejected` with the platform's reason, meter and quantity and an error log, never
    dropped, and a receipt whose counts do not add up to the batch deletes nothing). The platform

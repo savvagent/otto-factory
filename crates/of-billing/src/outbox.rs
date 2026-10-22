@@ -222,7 +222,24 @@ pub struct ShipReport {
     pub claimed: usize,
     pub accepted: u32,
     pub duplicates: u32,
+    /// Events the platform refused for good and that moved to the dead letter.
     pub rejected: usize,
+    /// Events refused as `unknown_meter` and kept queued, because the caller
+    /// asked to re-declare and retry rather than dead-letter them.
+    pub unknown_meter: usize,
+}
+
+/// How many times in a row the shipper re-declares its meters after the
+/// platform answered `unknown_meter`, before it gives up and dead-letters
+/// the rows like any other refusal. The declaration is idempotent, so the
+/// bound only exists to stop a platform that keeps refusing a meter it was
+/// just told about from looping forever.
+pub const MAX_REDECLARES: u32 = 3;
+
+/// Whether a rejection reason is the platform's `unknown_meter` code. Reasons
+/// read code first, then a colon and detail (`unknown_meter: x`).
+fn is_unknown_meter(reason: &str) -> bool {
+    reason.split(':').next().map(str::trim) == Some("unknown_meter")
 }
 
 #[derive(Debug, FromRow)]
@@ -243,10 +260,27 @@ struct Row {
 ///
 /// On any shipping error nothing is deleted: the rows are rescheduled with
 /// backoff and the error is returned for the caller's loop to pace itself on.
+///
+/// An `unknown_meter` refusal is final here, like any other: the row is
+/// dead-lettered. [`run`] uses [`ship_batch`] to hold such rows instead.
 pub async fn ship_once(
     db: &Db,
     platform: &PlatformClient,
     cfg: &ShipperConfig,
+) -> std::result::Result<ShipReport, ShipError> {
+    ship_batch(db, platform, cfg, false).await
+}
+
+/// [`ship_once`], optionally keeping `unknown_meter` refusals queued.
+///
+/// With `hold_unknown_meter`, those rows are neither deleted nor dead-lettered:
+/// they become due immediately and are counted in [`ShipReport::unknown_meter`],
+/// so the caller can declare the meters again and ship them on the next pass.
+async fn ship_batch(
+    db: &Db,
+    platform: &PlatformClient,
+    cfg: &ShipperConfig,
+    hold_unknown_meter: bool,
 ) -> std::result::Result<ShipReport, ShipError> {
     // Claim, on the pool, unpinned: the shipper serves every org. The table's
     // policy lets an unpinned statement see all orgs' rows and no pinned one see
@@ -330,8 +364,13 @@ pub async fn ship_once(
             // money nobody was told about, so it is kept in a dead-letter table
             // with the platform's reason, in the same transaction that removes it
             // from the outbox -- never dropped silently.
+            let (held, rejected): (Vec<_>, Vec<_>) = receipt
+                .rejected
+                .iter()
+                .partition(|r| hold_unknown_meter && is_unknown_meter(&r.reason));
+            let held_events: Vec<Uuid> = held.iter().map(|r| r.event_id).collect();
             let mut tx = db.pool().begin().await?;
-            for r in &receipt.rejected {
+            for r in &rejected {
                 tracing::error!(
                     event_id = %r.event_id,
                     reason = %r.reason,
@@ -350,16 +389,28 @@ pub async fn ship_once(
                 .execute(&mut *tx)
                 .await?;
             }
-            sqlx::query("DELETE FROM usage_outbox WHERE id = ANY($1)")
+            sqlx::query("DELETE FROM usage_outbox WHERE id = ANY($1) AND NOT event_id = ANY($2)")
                 .bind(&ids)
+                .bind(&held_events)
                 .execute(&mut *tx)
                 .await?;
+            if !held_events.is_empty() {
+                sqlx::query(
+                    "UPDATE usage_outbox SET last_error = $2, next_attempt_at = now() \
+                     WHERE event_id = ANY($1)",
+                )
+                .bind(&held_events)
+                .bind("unknown_meter: the platform has no declaration for this meter")
+                .execute(&mut *tx)
+                .await?;
+            }
             tx.commit().await?;
             Ok(ShipReport {
                 claimed: ids.len(),
                 accepted: receipt.accepted,
                 duplicates: receipt.duplicates,
-                rejected: receipt.rejected.len(),
+                rejected: rejected.len(),
+                unknown_meter: held_events.len(),
             })
         }
         Err(e) => {
@@ -596,13 +647,34 @@ pub async fn run_with_status(
         return;
     }
     let mut failures: u32 = 0;
+    let mut redeclares: u32 = 0;
     loop {
-        let wait = match ship_once(&db, &platform, &cfg).await {
+        // Past the bound, an `unknown_meter` refusal dead-letters like any other.
+        let hold = redeclares < MAX_REDECLARES;
+        let wait = match ship_batch(&db, &platform, &cfg, hold).await {
             Ok(report) => {
                 failures = 0;
                 if report.claimed > 0 {
                     tracing::debug!(?report, "shipped usage");
                 }
+                if report.unknown_meter > 0 {
+                    // The platform lost or never kept the declaration. Declare
+                    // again and ship those rows on the next pass; they are
+                    // still queued, so a shutdown here loses nothing.
+                    redeclares += 1;
+                    tracing::warn!(
+                        rows = report.unknown_meter,
+                        attempt = redeclares,
+                        max = MAX_REDECLARES,
+                        "the platform answered unknown_meter; declaring the usage meters again"
+                    );
+                    if !declare_meters(&db, &platform, &cfg, &mut shutdown).await {
+                        tracing::warn!("usage shipper stopped while re-declaring the meters");
+                        return;
+                    }
+                    continue;
+                }
+                redeclares = 0;
                 // A full batch means there is probably more waiting.
                 if report.claimed >= cfg.batch {
                     Duration::ZERO
@@ -632,7 +704,9 @@ pub async fn run_with_status(
         tokio::select! {
             _ = tokio::time::sleep(wait) => {}
             _ = shutdown.changed() => {
-                if let Err(e) = ship_once(&db, &platform, &cfg).await {
+                // Hold `unknown_meter` rows even here: a flush must not
+                // dead-letter what the next process could still ship.
+                if let Err(e) = ship_batch(&db, &platform, &cfg, true).await {
                     tracing::warn!(error = %e, "final usage flush failed; rows stay in the outbox");
                 }
                 tracing::info!("usage shipper stopped");

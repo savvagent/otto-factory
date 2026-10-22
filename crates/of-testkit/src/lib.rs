@@ -102,6 +102,13 @@ struct Data {
     meters: Vec<MeterDeclaration>,
     /// Usage POSTs that arrived while no meter had been declared.
     usage_before_declaration: usize,
+    /// Once set (by [`MockPlatform::forget_meters`]), a metered event whose
+    /// meter is not declared is refused as `unknown_meter`, as the real platform
+    /// does. Off by default so tests that ship without declaring are unaffected.
+    enforce_declared_meters: bool,
+    /// Set by [`MockPlatform::refuse_every_meter`]: every metered event is
+    /// `unknown_meter`, declared or not.
+    refuse_every_meter: bool,
     seen: HashSet<Uuid>,
     /// Org ids whose usage the mock refuses, like a deleted org.
     unknown_orgs_for_usage: HashSet<Uuid>,
@@ -638,6 +645,21 @@ impl MockPlatform {
         self.inner.data.lock().unwrap().meters.clone()
     }
 
+    /// Drop every declared meter and, from now on, refuse a metered event whose
+    /// meter is not declared with `unknown_meter`: the platform losing a
+    /// declaration mid-run.
+    pub fn forget_meters(&self) {
+        let mut d = self.inner.data.lock().unwrap();
+        d.meters.clear();
+        d.enforce_declared_meters = true;
+    }
+
+    /// Refuse every metered event as `unknown_meter` even after the meter is
+    /// declared: a platform that keeps refusing what it was just told about.
+    pub fn refuse_every_meter(&self) {
+        self.inner.data.lock().unwrap().refuse_every_meter = true;
+    }
+
     /// Calls to `PUT /internal/meters`, including refused ones.
     pub fn meter_calls(&self) -> usize {
         self.inner.meter_calls.load(Ordering::SeqCst)
@@ -1007,7 +1029,16 @@ async fn ingest_usage(
     }
     let mut receipt = UsageReceipt::default();
     for ev in batch.events {
-        if d.unknown_orgs_for_usage.contains(&ev.org_id) {
+        let undeclared = ev.meter.as_ref().is_some_and(|m| {
+            d.refuse_every_meter
+                || (d.enforce_declared_meters && !d.meters.iter().any(|x| &x.key == m))
+        });
+        if undeclared {
+            receipt.rejected.push(RejectedEvent {
+                event_id: ev.event_id,
+                reason: "unknown_meter: the meter is not declared".into(),
+            });
+        } else if d.unknown_orgs_for_usage.contains(&ev.org_id) {
             receipt.rejected.push(RejectedEvent {
                 event_id: ev.event_id,
                 reason: format!("org {} does not exist", ev.org_id),
