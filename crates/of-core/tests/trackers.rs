@@ -264,6 +264,21 @@ async fn trigger_label_round_trips_through_bindings(pool: PgPool) {
     assert_eq!(fetched.trigger_label, "ship-it");
 }
 
+/// The schema default is what a binding gets when nothing names a label
+/// (savvagent/otto-factory#233). Migrations never rewrite stored rows, so this
+/// reads the column's default, not any existing binding.
+#[sqlx::test]
+async fn a_new_binding_defaults_to_the_otto_tower_label(pool: PgPool) {
+    let default: String = sqlx::query_scalar(
+        "SELECT column_default FROM information_schema.columns \
+         WHERE table_name = 'tracker_bindings' AND column_name = 'trigger_label'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(default.contains("'otto-tower'"), "{default}");
+}
+
 /// This is deliberately not an `rls_scopes_*` test: `tracker_connection_index`
 /// is outside RLS by design so a webhook can resolve which org owns a provider
 /// id before any `app.org_id` exists. What matters here is guard 1 — the only
