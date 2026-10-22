@@ -520,7 +520,9 @@ the decisions no single crate could make.
 - **`/healthz` never touches the database and `/readyz` always does.** They answer different
   questions — "should this process be killed?" and "should traffic come here?" — and wiring
   liveness to the database turns a brief database blip into a simultaneous cold start of
-  every replica.
+  every replica. `/readyz` also reports the usage shipper (`usage.meters_declared`,
+  `usage.rows_waiting`) as detail only: a stalled meter declaration never changes its status code,
+  because every replica shares the platform's answer.
 - **One `PlatformClient`, built once in `main` and shared.** It holds the introspection and
   usage-status caches, so a second client would be a second, colder cache. `of-mcp`, `of-web`,
   and the usage shipper all take the same `Arc`.

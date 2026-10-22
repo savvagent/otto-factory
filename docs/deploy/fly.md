@@ -154,6 +154,22 @@ nothing user-visible breaks; they drain, oldest first, when it returns. To watch
 SELECT count(*), min(occurred_at), max(attempts), max(last_error) FROM usage_outbox;
 ```
 
+**Checking for a stalled declaration without the logs.** `GET /readyz` carries a `usage` object:
+
+```json
+{"status":"ready","usage":{"meters_declared":false,"rows_waiting":42}}
+```
+
+`meters_declared: false` means this process has not declared its meters, so it is shipping
+nothing, free rows included; `rows_waiting` is the depth of `usage_outbox` (`null` if it could
+not be counted). It is `false` for a moment after every start and is expected to flip to `true`
+within seconds; `false` with `rows_waiting` growing is the stall. Readiness stays `200` on
+purpose: every replica shares the platform's answer, so failing the probe would take the API out
+of rotation over a billing delay that loses nothing. Alert on the body (for example
+`curl -s https://otto-tower.savvagent.com/readyz | jq -e '.usage.meters_declared'` exits non-zero
+when it is `false`), not the status code. Fly's check on `/readyz` is unaffected. The reason
+(`service_not_set`, a refused meter) is in the logs.
+
 A backlog that keeps growing with `last_error` mentioning `credential` means
 `OF_INTROSPECTION_SECRET` is wrong. A declaration error `service_not_set` means the platform side
 is not prepared: the operator prerequisite is the platform's `resource set-service` for this

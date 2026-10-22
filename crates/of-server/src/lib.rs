@@ -150,12 +150,38 @@ pub fn router(
     platform: Arc<PlatformClient>,
     config: &Config,
 ) -> Result<Router> {
+    assemble(db, watcher, platform, config, None)
+}
+
+/// [`router`], for a process that runs the usage shipper: `/readyz` also reports
+/// `shipper`'s state (see [`health`]).
+pub fn router_with_shipper(
+    db: Db,
+    watcher: Arc<Watcher>,
+    platform: Arc<PlatformClient>,
+    config: &Config,
+    shipper: of_billing::outbox::ShipperStatus,
+) -> Result<Router> {
+    assemble(db, watcher, platform, config, Some(shipper))
+}
+
+fn assemble(
+    db: Db,
+    watcher: Arc<Watcher>,
+    platform: Arc<PlatformClient>,
+    config: &Config,
+    shipper: Option<of_billing::outbox::ShipperStatus>,
+) -> Result<Router> {
     let web = of_web::router(web_state(db.clone(), platform.clone(), config)?);
 
     // The agent surface, plus `/.well-known/oauth-protected-resource`.
     let mcp = of_mcp::router(db.clone(), watcher, mcp_config(platform, config));
 
-    Ok(health::router(db)
+    let health = match shipper {
+        Some(shipper) => health::router_with_shipper(db, shipper),
+        None => health::router(db),
+    };
+    Ok(health
         .merge(web)
         .merge(mcp)
         .fallback_service(console(config))

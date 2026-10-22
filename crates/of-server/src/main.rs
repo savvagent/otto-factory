@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use of_billing::outbox::ShipperConfig;
 use of_core::watch::Watcher;
-use of_server::{platform_client, router, Config, LogFormat};
+use of_server::{platform_client, router_with_shipper, Config, LogFormat};
 use otto_tenant::Db;
 use tokio::net::TcpListener;
 use tracing_subscriber::layer::SubscriberExt;
@@ -111,18 +111,20 @@ async fn main() -> Result<()> {
     // are written in the tools' own transactions and shipped here, so the
     // platform being down delays billing and never loses it.
     let (stop_shipper, shipper_shutdown) = tokio::sync::watch::channel(false);
-    let shipper = tokio::spawn(of_billing::outbox::run(
+    let shipper_status = of_billing::outbox::ShipperStatus::default();
+    let shipper = tokio::spawn(of_billing::outbox::run_with_status(
         db.clone(),
         platform.clone(),
         ShipperConfig::default(),
         shipper_shutdown,
+        shipper_status.clone(),
     ));
 
     // Hourly housekeeping: forget old platform-event dedupe markers (30 days)
     // and expired removed-member tombstones.
     let sweeper = tokio::spawn(sweep_loop(db.clone(), stop_shipper.subscribe()));
 
-    let app = router(db, watcher.clone(), platform, &config)?;
+    let app = router_with_shipper(db, watcher.clone(), platform, &config, shipper_status)?;
 
     let listener = TcpListener::bind(config.bind)
         .await

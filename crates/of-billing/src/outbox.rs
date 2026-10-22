@@ -194,6 +194,28 @@ impl Default for ShipperConfig {
     }
 }
 
+/// Whether the shipper has declared its meters, readable from outside the task.
+///
+/// The shipper holds back all usage while the declaration is refused, and its
+/// only other signal is a log line. Clone one into [`run_with_status`] and read
+/// it from wherever the deployment looks (`/readyz`). Cloning shares the state.
+#[derive(Debug, Clone, Default)]
+pub struct ShipperStatus {
+    declared: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl ShipperStatus {
+    /// `false` until the first successful declaration of this process.
+    pub fn meters_declared(&self) -> bool {
+        self.declared.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn set_declared(&self, declared: bool) {
+        self.declared
+            .store(declared, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// What one pass did.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ShipReport {
@@ -493,7 +515,9 @@ async fn declare_meters(
     platform: &PlatformClient,
     cfg: &ShipperConfig,
     shutdown: &mut watch::Receiver<bool>,
+    status: &ShipperStatus,
 ) -> bool {
+    status.set_declared(false);
     let declarations: Vec<MeterDeclaration> = METER_DECLARATIONS
         .iter()
         .map(|(key, display, unit)| MeterDeclaration::new(*key, *display, *unit))
@@ -510,6 +534,7 @@ async fn declare_meters(
         };
         let Some(reason) = declaration_failure(result) else {
             tracing::info!(meters = declarations.len(), "declared usage meters");
+            status.set_declared(true);
             return true;
         };
 
@@ -552,10 +577,21 @@ pub async fn run(
     db: Db,
     platform: std::sync::Arc<PlatformClient>,
     cfg: ShipperConfig,
+    shutdown: watch::Receiver<bool>,
+) {
+    run_with_status(db, platform, cfg, shutdown, ShipperStatus::default()).await
+}
+
+/// [`run`], reporting whether the meters are declared through `status`.
+pub async fn run_with_status(
+    db: Db,
+    platform: std::sync::Arc<PlatformClient>,
+    cfg: ShipperConfig,
     mut shutdown: watch::Receiver<bool>,
+    status: ShipperStatus,
 ) {
     tracing::info!("usage shipper started");
-    if !declare_meters(&db, &platform, &cfg, &mut shutdown).await {
+    if !declare_meters(&db, &platform, &cfg, &mut shutdown, &status).await {
         tracing::warn!("usage shipper stopped before the meters were declared; rows stay queued");
         return;
     }
