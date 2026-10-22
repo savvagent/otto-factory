@@ -207,7 +207,7 @@
   "trackers_connected_with_credentials": "Collegato {when} · credenziali salvate",
   "trackers_disconnect": "Scollega",
   "trackers_disconnect_note": "Scollegare lascia intatto il collegamento di ogni repository, ma inerte: nulla si sincronizza finché {provider} non viene ricollegato.",
-  "trackers_not_connected_github": "Non collegato. Installerai la GitHub App di otto-factory sull'organizzazione dalle cui issue lavora questa organizzazione, poi tornerai qui.",
+  "trackers_not_connected_github": "Non collegato. Installerai la GitHub App di otto-tower sull'organizzazione dalle cui issue lavora questa organizzazione, poi tornerai qui.",
   "trackers_not_connected_jira": "Non collegato. Autorizzerai otto-tower su un sito Atlassian. Concedi l'accesso a un solo sito: qui viene memorizzato un unico sito JIRA per organizzazione.",
   "trackers_connect_button": "Collega {provider}",
   "trackers_not_configured": "Questa installazione non offre la sincronizzazione con {provider}. Un operatore la configura con le credenziali {credentials}.",

@@ -110,7 +110,7 @@ pub async fn harness_with_login(pool: PgPool) -> Harness {
 /// gap before the request itself is ever looked at. This one gets past that.
 pub async fn harness_with_trackers(pool: PgPool) -> Harness {
     harness_with(pool, |config| {
-        config.github_app_slug = Some("otto-factory".into());
+        config.github_app_slug = Some("otto-tower".into());
         config.github_app_client_id = Some("gh-client".into());
         config.github_app_client_secret = Some("gh-secret".into());
         config.jira_client_id = Some("jira-client".into());

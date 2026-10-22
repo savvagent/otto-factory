@@ -205,7 +205,7 @@
   "trackers_connected_with_credentials": "{when} जुड़ा · क्रेडेंशियल संग्रहीत",
   "trackers_disconnect": "हटाएँ",
   "trackers_disconnect_note": "हटाने पर हर रिपॉज़िटरी का बंधन बना रहता है पर निष्क्रिय — जब तक {provider} दोबारा नहीं जुड़ता, कुछ भी सिंक नहीं होता।",
-  "trackers_not_connected_github": "जुड़ा नहीं है। आप otto-factory GitHub App को उस संगठन पर इंस्टॉल करेंगे जिसके इशू पर यह संगठन काम करता है, और फिर यहाँ लौटेंगे।",
+  "trackers_not_connected_github": "जुड़ा नहीं है। आप otto-tower GitHub App को उस संगठन पर इंस्टॉल करेंगे जिसके इशू पर यह संगठन काम करता है, और फिर यहाँ लौटेंगे।",
   "trackers_not_connected_jira": "जुड़ा नहीं है। आप otto-tower को एक Atlassian साइट के लिए अधिकृत करेंगे। केवल एक साइट तक पहुँच दें — यहाँ प्रति संगठन एक ही JIRA साइट संग्रहीत होती है।",
   "trackers_connect_button": "{provider} जोड़ें",
   "trackers_not_configured": "यह परिनियोजन {provider} सिंक नहीं देता। कोई ऑपरेटर इसे {credentials} क्रेडेंशियल से कॉन्फ़िगर करता है।",

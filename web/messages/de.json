@@ -205,7 +205,7 @@
   "trackers_connected_with_credentials": "Verbunden {when} · Anmeldedaten gespeichert",
   "trackers_disconnect": "Trennen",
   "trackers_disconnect_note": "Beim Trennen bleibt die Zuordnung jedes Repositories bestehen, aber wirkungslos — es wird nichts synchronisiert, bis {provider} wieder verbunden ist.",
-  "trackers_not_connected_github": "Nicht verbunden. Du installierst die otto-factory GitHub App bei der Organisation, aus deren Issues diese Organisation arbeitet, und kommst dann hierher zurück.",
+  "trackers_not_connected_github": "Nicht verbunden. Du installierst die otto-tower GitHub App bei der Organisation, aus deren Issues diese Organisation arbeitet, und kommst dann hierher zurück.",
   "trackers_not_connected_jira": "Nicht verbunden. Du autorisierst otto-tower für eine Atlassian-Site. Gewähre Zugriff auf genau eine Site — gespeichert wird eine JIRA-Site pro Organisation.",
   "trackers_connect_button": "{provider} verbinden",
   "trackers_not_configured": "Diese Installation bietet keine {provider}-Synchronisierung. Ein Betreiber richtet sie mit den {credentials}-Anmeldedaten ein.",

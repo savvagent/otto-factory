@@ -309,7 +309,7 @@ mod tests {
     fn every_deployment_setting_reaches_of_web() {
         let mut config = Config::for_test();
         config.github_app_webhook_secret = Some("webhook-secret".into());
-        config.github_app_slug = Some("otto-factory".into());
+        config.github_app_slug = Some("otto-tower".into());
         config.github_app_client_id = Some("gh-client".into());
         config.github_app_client_secret = Some("gh-secret".into());
         config.jira_client_id = Some("jira-client".into());

@@ -32,8 +32,6 @@ kept identifiers, and a new hit outside the list is a bug:
 - The Rust type `Factory`.
 - `savvagent/otto-factory#NNN` issue references, and the repo slug `savvagent/otto-factory` itself
   until the GitHub repo is renamed (a separate human step).
-- The GitHub App slug `otto-factory` (`savvagent/otto-factory#232`), including the test fixtures
-  that configure it and the `github.com/apps/otto-factory/…` install URL a test expects.
 - The tracker trigger-label default `otto-factory` (stored data and a behaviour;
   `savvagent/otto-factory#233`), with the tests, OpenAPI descriptions and examples that exercise it.
 - The Cloudflare Worker script names (`otto-factory-console`, `otto-factory-console-dev`).
@@ -58,8 +56,6 @@ kept identifiers, and a new hit outside the list is a bug:
   runbook's preflight and rollback in `docs/deploy/fly.md`.
 - The old `otto-factory-worker:trio-cleared:` marker named in `.github/skills/otto-tower-worker/SKILL.md`'s
   transition note (it says that marker no longer counts).
-- The GitHub App's display name in the `trackers_not_connected_github` message (every locale): it is
-  what the App is called on GitHub until a human renames it (`savvagent/otto-factory#232`).
 - In the cutover runbook (`docs/deploy/fly.md`): the platform's service slug `otto-factory` that
   `rename-service` changes (step 2, the preflight in step 3, and the resource registration notes),
   this repository named by its current name in the runbook's prose ("Release and deploy
