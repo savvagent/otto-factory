@@ -42,8 +42,6 @@ kept identifiers, and a new hit outside the list is a bug:
 - The legacy host `otto-factory.savvagent.com` where it appears as deprecation config or in the
   cutover runbook (`docs/deploy/fly.md`). It is the legacy/deprecation path only; user-facing
   docs and `ci.yml`'s `environment.url` link to `otto-tower.savvagent.com`.
-- The `otto-factory release` GitHub App named in `.github/workflows/ci.yml` (an App, renamed by a
-  human like the one above).
 - The legacy file name `~/.claude/otto-factory-repos`, still read as a fallback by
   `client-skills/claude-code/session-start-hook.sh` and documented in `client-skills/claude-code/README.md`.
 - Historical session records in `client-skills/claude-code/README.md` (the verification notes keep the
