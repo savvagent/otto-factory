@@ -204,6 +204,34 @@ fn inbound_github_closed_event_completes_or_fails_by_state_reason() {
     ));
 }
 
+/// A close is billed work only when GitHub says the work was delivered. A
+/// duplicate, or a reason this code has never heard of, must not read as a
+/// completion.
+#[test]
+fn inbound_github_close_completes_only_for_completed() {
+    let binding = binding(Provider::Github, "otto-factory");
+    let existing = job(Status::InProgress, Tracker::Github, "acme/api#17", None);
+
+    for reason in ["not_planned", "duplicate", "something_new"] {
+        let event = github_issue_event(
+            "closed",
+            &["otto-factory"],
+            Some("2026-09-03T12:00:00Z"),
+            Some(reason),
+        );
+        assert!(
+            matches!(
+                of_trackers::sync::inbound_decision(&event, &binding, Some(&existing)),
+                of_trackers::sync::InboundDecision::Close {
+                    to: Status::Failed,
+                    ..
+                }
+            ),
+            "state_reason {reason:?} must fail the job"
+        );
+    }
+}
+
 #[test]
 fn inbound_jira_closed_vocabulary_completes_or_fails() {
     let binding = binding(Provider::Jira, "otto-factory");

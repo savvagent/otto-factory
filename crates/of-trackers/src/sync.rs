@@ -227,10 +227,13 @@ pub fn ticket_ref(event: &WebhookEvent) -> String {
 fn close_status(event: &WebhookEvent) -> Option<Status> {
     match event.provider {
         Provider::Github if event.action == "closed" => {
-            if event.issue.state_reason.as_deref() == Some("not_planned") {
-                Some(Status::Failed)
-            } else {
-                Some(Status::Completed)
+            // A completion is billed, so only GitHub's own "completed" counts.
+            // `not_planned`, `duplicate` (the work was not delivered under this
+            // issue) and any reason added later fail the job instead. A null
+            // reason is how GitHub reports closes that predate `state_reason`.
+            match event.issue.state_reason.as_deref() {
+                Some("completed") | None => Some(Status::Completed),
+                Some(_) => Some(Status::Failed),
             }
         }
         Provider::Jira => match normalized_jira_status(&event.issue.state).as_str() {

@@ -633,6 +633,25 @@ async fn an_inbound_close_as_not_planned_fails_the_job_and_records_no_completion
     assert!(completion_rows(&pool).await.is_empty());
 }
 
+/// A claimed job whose issue is closed as a duplicate was not delivered under
+/// that issue, so it must not be billed as a completion.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn an_inbound_close_as_duplicate_fails_the_job_and_records_no_completion(pool: PgPool) {
+    let h = harness(pool.clone()).await;
+    let org = OrgId::new();
+    bind_github_repo(&h, org, INSTALLATION, "acme/api").await;
+    let job = open_issue(&h, org, INSTALLATION, "acme/api", 17).await;
+    claim(&h, org, &job, UserId::new()).await;
+
+    close_issue(&h, INSTALLATION, "acme/api", 17, "duplicate").await;
+
+    assert_eq!(
+        job_for(&h, org, "acme/api", 17).await.status,
+        of_core::jobs::Status::Failed
+    );
+    assert!(completion_rows(&pool).await.is_empty());
+}
+
 /// Complete `job` the way `complete_job` does: warm the org's standing, then
 /// charge and complete in one transaction. `false` if it was refused (and so
 /// wrote nothing).
