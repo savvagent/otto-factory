@@ -38,7 +38,7 @@ pub enum Error {
     #[error("repo slug {0:?} is already registered in this org")]
     RepoSlugTaken(String),
 
-    #[error("remote {0:?} is already registered to repo {1:?}")]
+    #[error("remote {0:?} is already registered to {owner}", owner = crate::repo_slug::describe(.1))]
     RemoteTaken(String, String),
 
     #[error("job {job} is {actual}, not {expected}")]
@@ -94,6 +94,16 @@ pub enum Error {
         max = crate::agent_label::MAX_LEN
     )]
     InvalidAgentLabel { problem: String },
+
+    /// A repo slug failed [`crate::repo_slug::validate`]. `problem` never
+    /// contains the slug itself, for the same reason as `InvalidAgentLabel`.
+    #[error(
+        "the repo slug {problem}. Pass slug as 1 to {max} characters: it must start with an \
+         ASCII letter or digit and contain only ASCII letters, digits, '-', '_', '.' and '/' \
+         (for example \"acme/api-v2\"); nothing was changed.",
+        max = crate::repo_slug::MAX_LEN
+    )]
+    InvalidRepoSlug { problem: String },
 
     /// The platform does not know this team in this org (never existed, other
     /// tenant's, or deleted). Raised by `VerifiedTeam::verify`, and it is a
@@ -178,6 +188,7 @@ impl Error {
             Error::LeaseHeld { .. } => "lease_held",
             Error::LeaseNotHeld(_) => "lease_not_held",
             Error::InvalidAgentLabel { .. } => "invalid_agent_label",
+            Error::InvalidRepoSlug { .. } => "invalid_repo_slug",
             Error::TeamNotFound { .. } => "team_not_found",
             Error::Invalid(_) => "invalid_argument",
             Error::RaceLost(_) => "race_lost",
