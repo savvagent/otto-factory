@@ -70,7 +70,7 @@ render_known}` and `Error::InvalidRepoSlug { problem: String }` with code `inval
 - [ ] Map `InvalidRepoSlug { .. }` to `BAD_REQUEST` in `crates/of-web/src/error.rs`.
 - [ ] Run `cargo test -p of-core --lib` and `cargo clippy --all-targets -- -D warnings` → pass.
 - [ ] Format and commit: `cargo fmt --all` then
-      `git commit -m "of-core: add the repo slug rule and invalid_repo_slug"`.
+      `git commit -m "feat(of-core): add the repo slug rule and invalid_repo_slug"`.
 
 ## Task 2 — Validate at `register_repo` ⬜
 
@@ -86,6 +86,7 @@ existing repos HTTP test file; find it with `grep -ln "POST.*repos\|register_rep
       bad slug is `invalid_repo_slug`, and its description contains `invalid_repo_slug` and `128`.
       (web) `POST /api/orgs/{org}/repos` with a bad slug is `400` with `code: invalid_repo_slug`.
 - [ ] Run each → fail.
+- [ ] Grep for any test asserting `Invalid` for an empty slug and update it to `invalid_repo_slug`.
 - [ ] In `repos.rs`, replace the `trim().is_empty()` check with `repo_slug::validate(&new.slug)?`
       before anything else, and use the returned `&str` for the insert. Update the `register_repo`
       tool description and the `slug` arg doc (state the shape, the limit, that it is refused rather
@@ -93,12 +94,12 @@ existing repos HTTP test file; find it with `grep -ln "POST.*repos\|register_rep
 - [ ] Run `cargo test -p of-core --test queue`, `cargo test -p of-mcp --test tools`,
       `cargo test -p of-web` → pass. Grep for any existing test registering a slug that now fails
       (the spec found none) and fix the fixture if one appears.
-- [ ] Format and commit: `git commit -m "of-core: refuse a repo slug that is not a short identifier"`.
+- [ ] Format and commit: `git commit -m "fix(of-core): refuse a repo slug that is not a short identifier"`.
 
 ## Task 3 — Render the registered list and the owner safely ⬜
 
 **Files:** `crates/of-core/src/repos.rs`, `crates/of-core/tests/queue.rs`,
-`crates/of-mcp/src/error.rs`, `crates/of-web/tests/team_scoping.rs`.
+`crates/of-mcp/tests/tools.rs`, `crates/of-web/tests/team_scoping.rs`.
 **Interfaces:** consumes `repo_slug::{render_known, describe}`.
 
 - [ ] Write failing tests: (core) plant a legacy slug with raw SQL `UPDATE repos SET slug = $2
@@ -113,13 +114,14 @@ existing repos HTTP test file; find it with `grep -ln "POST.*repos\|register_rep
       `isolation.rs:1254` stay green).
 - [ ] Run → fail.
 - [ ] In `unresolved`, build `known` with `repo_slug::render_known(&slugs)`.
-- [ ] Update existing assertions to the quoted form: `team_scoping.rs:157,167`
-      (`Registered repos: "growth-repo", "shared".`) and the unit test in
-      `crates/of-mcp/src/error.rs` (`known: "\"api\", \"web\""`-style input is just a string there;
-      keep it passing and assert the message still contains `register_repo`).
+- [ ] Update the existing assertions that quoting breaks: `team_scoping.rs:157,167`
+      (`Registered repos: "growth-repo", "shared".`), `team_scoping.rs:170`
+      (`"growth-repo", "platform-repo", "shared"`), and `tools.rs:3929`
+      (`"growth-repo", "shared"`; its negative half becomes `!contains("\"platform-repo\"")`).
+      The `of-mcp/src/error.rs` unit test passes `known` as a raw string and needs no change.
 - [ ] Run `cargo test --workspace` against the Postgres service, then
       `cargo clippy --all-targets -- -D warnings` and `cargo fmt --all --check` → pass.
-- [ ] Format and commit: `git commit -m "of-core: quote and cap the registered repos an unresolved error lists"`.
+- [ ] Format and commit: `git commit -m "fix(of-core): quote and cap the registered repos an unresolved error lists"`.
 
 ## Out-of-band checks (Phase 5)
 
