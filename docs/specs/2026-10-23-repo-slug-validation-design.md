@@ -54,7 +54,15 @@ starts with an ASCII letter or digit, and otherwise contains only ASCII letters,
 `.` and `/`. It does **not** trim: a slug is an exact identifier, and a padded one is refused, not
 rewritten. `/` is allowed because `owner/repo` is a natural slug. Slugs are short caller-chosen
 handles, so a maximal GitHub `owner/repo` string (up to 39 + 1 + 100 = 140 characters) would be
-refused by the 128 cap; that is accepted. A refusal says what was wrong and what is valid, and never
+refused by the 128 cap; that is accepted.
+
+After the charset check, `/` is split out and no segment may be empty, `.` or `..` (so `a/`, `a//b`,
+`x/../y`, `a/./b` and `a/..` are refused; `a/b.c` and `a..b` stay valid, since a segment that merely
+contains dots is harmless). The reason: a slug is pasted into URL path segments (`/repos/{repo}`).
+The console encodes with `seg()`, but other clients may not, and an unencoded `..` or empty segment
+would climb or collapse the path. The OpenAPI schema carries the charset, start and length part
+(`repo_slug::PATTERN`, `minLength`, `maxLength`); the segment rule is enforced only in `validate`,
+since a regex cannot say it readably. A refusal says what was wrong and what is valid, and never
 repeats the slug.
 
 `is_displayable(slug: &str) -> bool` is `validate(slug).is_ok()`; it is how the read side decides
@@ -90,8 +98,9 @@ beyond `from_core` carrying the message and `code()`.
 
 `Error::RepoUnresolved { attempted, known }` keeps its shape, so no caller changes. **Quoting is a
 visible change to `known` even for conforming slugs** (`api, web` becomes `"api", "web"`), so
-existing assertions on that text (`isolation.rs`, `of-mcp`'s `error.rs` unit test, `tools.rs`) are
-updated in the plan; it is not a new error code.
+existing assertions on that text are updated (`team_scoping.rs` and `tools.rs`; `isolation.rs` and
+`of-mcp`'s `error.rs` unit test need no change) along with the `Registered repos:` example in
+`docs/clients/matrix.md`; it is not a new error code.
 
 ## 3a. `RemoteTaken`
 
@@ -156,5 +165,30 @@ No new tool. `register_repo` is already classified.
   a shorter slug and is still found by its remote.
 - A legacy slug still reaches peers as the structured `slug` field of `list_repos`. That is data an
   agent must be able to pass back, not server prose, so it is accepted here, as `Repo.slug` already
-  was before this change.
-- `docs/clients/matrix.md` records client wire behavior, not repo naming; no change is expected.
+  was before this change. The residual exposure of a withheld legacy slug is therefore any peer that
+  calls `list_repos`: the structured field lands in the same LLM context as error text. Withholding
+  stops unsolicited server-authored prose carrying it, nothing more.
+- A legacy nonconforming slug cannot be fixed in place: `RepoPatch` has no slug, and re-registering
+  is blocked because remotes are additive-only and a deactivated repo keeps its remotes
+  (`RemoteTaken`). If the production count (Assumption 4) is nonzero, the remedy is an operator step
+  (a per-org rewrite with both guards, as CLAUDE.md prescribes), tracked as a follow-up and not part
+  of this change.
+- `unresolved` fetches at most 1000 visible rows, so the "N more not shown" count is a floor above
+  1000 repos. A slugs-only or count query is a tracked follow-up.
+- `docs/clients/matrix.md` is changed only in its `Registered repos:` example, to the quoted form;
+  its client wire-behavior content is untouched.
+
+## Review round 1
+
+Changed: the path-segment rule (§1); the OpenAPI `RegisterRepoRequest.slug` now carries
+`description`, `minLength`, `maxLength` and `pattern`, with a unit test that `PATTERN` agrees with
+`validate`; a doc comment on `Error::RepoUnresolved` that `known` must come from
+`repo_slug::render_known`; the Risks text above.
+
+Considered and not done:
+- Lowering `MAX_LEN` or `MAX_LISTED`: the charset already excludes whitespace, quotes and newlines,
+  and label text is far wider and accepted.
+- Case-insensitive slug uniqueness: pre-existing, follow-up.
+- Bounding repo `name`: out of scope.
+- Redacting `RemoteTaken` in `of-web` for team-limited callers: pre-existing, follow-up.
+- The console's `slugPreview` mismatch and an `invalid_repo_slug` i18n entry: follow-up.

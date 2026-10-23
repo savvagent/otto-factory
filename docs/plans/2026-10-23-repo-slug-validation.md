@@ -10,7 +10,7 @@ implements it exactly.
 
 ## Status — 2026-10-23
 
-⬜ Not started.
+🚧 Implemented in PR #249, awaiting merge. Review-round additions: path-segment rule (no empty, `.` or `..` segment), OpenAPI slug constraints from `repo_slug::PATTERN`/`MAX_LEN`, `RepoUnresolved` doc comment, spec Risks and addendum.
 
 ## Global Constraints
 
