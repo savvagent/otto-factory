@@ -659,7 +659,7 @@ pub async fn run_with_status(
                         "the platform refused usage events as unknown_meter; declaring the usage \
                          meters again. The events stay queued and are retried"
                     );
-                    if !declare_meters(&db, &platform, &cfg, &mut shutdown).await {
+                    if !declare_meters(&db, &platform, &cfg, &mut shutdown, &status).await {
                         tracing::warn!("usage shipper stopped while re-declaring the meters");
                         return;
                     }
