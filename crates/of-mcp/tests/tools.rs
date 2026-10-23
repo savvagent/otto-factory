@@ -5353,7 +5353,7 @@ fn tools_that_take_an_agent_label_state_its_limit() {
 }
 
 #[sqlx::test(migrations = "../of-core/migrations")]
-async fn register_repo_refuses_a_bad_slug_and_the_description_says_so(pool: PgPool) {
+async fn register_repo_refuses_a_bad_slug_without_echoing_it(pool: PgPool) {
     let (env, rob) = env(pool).await;
     let e = err(env
         .factory
@@ -5370,13 +5370,26 @@ async fn register_repo_refuses_a_bad_slug_and_the_description_says_so(pool: PgPo
         .await);
     assert_eq!(code_of(&e), "invalid_repo_slug");
     assert!(!e.message.contains("has space"), "must not echo the slug");
+    assert_eq!(e.data.as_ref().unwrap()["retriable"], false);
+}
 
+/// The description and the `slug` arg doc are attribute/doc text that cannot
+/// name a constant, so this keeps them honest if `repo_slug::MAX_LEN` moves.
+#[test]
+fn register_repo_states_the_slug_limit_in_its_description_and_schema() {
+    let limit = format!("1 to {} characters", of_core::repo_slug::MAX_LEN);
     let tool = tools::router()
         .list_all()
         .into_iter()
         .find(|t| t.name == "register_repo")
-        .unwrap();
-    let d = tool.description.as_deref().unwrap_or_default();
-    assert!(d.contains("invalid_repo_slug"), "{d}");
-    assert!(d.contains("128"), "{d}");
+        .expect("register_repo is missing");
+    let description = tool.description.as_deref().unwrap_or_default();
+    assert!(description.contains(&limit), "{description}");
+    assert!(description.contains("invalid_repo_slug"), "{description}");
+
+    let slug_doc = tool.input_schema["properties"]["slug"]["description"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(slug_doc.contains(&limit), "{slug_doc}");
+    assert!(slug_doc.contains("invalid_repo_slug"), "{slug_doc}");
 }

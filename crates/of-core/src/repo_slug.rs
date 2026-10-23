@@ -20,9 +20,9 @@
 
 use crate::error::{Error, Result};
 
-/// The longest accepted slug, in characters. Slugs are short caller-chosen
-/// handles, so a maximal GitHub `owner/repo` string (up to 39 + 1 + 100 = 140
-/// characters) would be refused; that is accepted.
+/// The longest accepted slug, in characters. A maximal GitHub `owner/repo`
+/// (up to 39 + 1 + 100 = 140 characters) is deliberately refused: a slug is a
+/// short handle an agent passes back, not a copy of the remote string.
 pub const MAX_LEN: usize = 128;
 
 /// The most slugs `render_known` names; bounds the sentence to a few KB
@@ -193,8 +193,12 @@ mod tests {
     }
 
     #[test]
-    fn the_cap_counts_characters_not_bytes() {
-        assert!(validate(&"é".repeat(128)).is_err());
+    fn length_counts_characters_and_a_multibyte_tail_is_a_charset_refusal() {
+        let msg = refusal(&format!("a{}", "é".repeat(127)));
+        assert!(msg.contains("U+00E9"), "{msg}");
+        assert!(!msg.contains("characters long"), "{msg}");
+        assert!(refusal(&"a".repeat(129)).contains("is 129 characters long"));
+        assert!(validate(&"a".repeat(128)).is_ok());
     }
 
     #[test]
