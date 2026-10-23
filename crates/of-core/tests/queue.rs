@@ -3094,3 +3094,72 @@ async fn a_pre_policy_keyed_message_with_a_now_invalid_label_still_replays(pool:
     assert_eq!(json["senderLabel"], serde_json::Value::Null, "{json}");
     assert_eq!(fresh.code(), "invalid_agent_label");
 }
+
+// ------------------------------------------------------- repo slug at register
+
+fn slug_repo(slug: &str, remote: &str) -> NewRepo {
+    NewRepo {
+        slug: slug.into(),
+        remotes: vec![remote.into()],
+        ..Default::default()
+    }
+}
+
+#[sqlx::test]
+async fn register_repo_refuses_a_slug_that_is_not_a_short_identifier(pool: PgPool) {
+    use of_core::teams::TeamScope;
+    let db = db(pool);
+    let a = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+
+    let mut tx = db.begin(a.org).await.unwrap();
+    let before = tx
+        .list_repos_visible(true, None, &TeamScope::All)
+        .await
+        .unwrap()
+        .len();
+    for bad in ["has space", "", "  "] {
+        let e = tx
+            .register_repo(slug_repo(bad, "git@github.com:acme/other.git"))
+            .await
+            .unwrap_err();
+        assert_eq!(e.code(), "invalid_repo_slug", "slug {bad:?}");
+    }
+    let after = tx
+        .list_repos_visible(true, None, &TeamScope::All)
+        .await
+        .unwrap()
+        .len();
+    assert_eq!(before, after);
+}
+
+#[sqlx::test]
+async fn register_repo_stores_a_valid_slug_unchanged(pool: PgPool) {
+    let db = db(pool);
+    let a = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+
+    let mut tx = db.begin(a.org).await.unwrap();
+    let repo = tx
+        .register_repo(slug_repo("Acme/api-v2_x.y", "git@github.com:acme/two.git"))
+        .await
+        .unwrap();
+    assert_eq!(repo.slug, "Acme/api-v2_x.y");
+}
+
+#[sqlx::test]
+async fn a_nonconforming_duplicate_is_invalid_not_taken(pool: PgPool) {
+    let db = db(pool);
+    let a = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+
+    let mut tx = db.begin(a.org).await.unwrap();
+    // "api" exists; "api " is not the same slug and not a valid one.
+    let e = tx
+        .register_repo(slug_repo("api ", "git@github.com:acme/two.git"))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code(), "invalid_repo_slug");
+    let e = tx
+        .register_repo(slug_repo("api", "git@github.com:acme/three.git"))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code(), "repo_slug_taken");
+}

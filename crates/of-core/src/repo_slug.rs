@@ -20,8 +20,9 @@
 
 use crate::error::{Error, Result};
 
-/// The longest accepted slug, in characters. GitHub's own `owner/repo` limits
-/// (39 + 1 + 100) fit comfortably under a smaller cap.
+/// The longest accepted slug, in characters. Slugs are short caller-chosen
+/// handles, so a maximal GitHub `owner/repo` string (up to 39 + 1 + 100 = 140
+/// characters) would be refused; that is accepted.
 pub const MAX_LEN: usize = 128;
 
 /// The most slugs `render_known` names; bounds the sentence to a few KB
@@ -189,5 +190,32 @@ mod tests {
         let out = render_known(&many);
         assert_eq!(out.matches('"').count(), MAX_LISTED * 2);
         assert!(out.ends_with("(and 10 more not shown; call list_repos for the full list)"));
+    }
+
+    #[test]
+    fn the_cap_counts_characters_not_bytes() {
+        assert!(validate(&"é".repeat(128)).is_err());
+    }
+
+    #[test]
+    fn render_known_counts_cap_cut_and_shape_withheld_together() {
+        let mut many: Vec<String> = (0..60).map(|i| format!("r{i:02}")).collect();
+        many[3] = "bad slug".into();
+        many[7] = "bad\nslug".into();
+        let out = render_known(&many);
+        // 58 displayable, 50 shown; the 10 hidden are 8 cut by the cap and 2 withheld.
+        assert_eq!(out.matches('"').count(), MAX_LISTED * 2);
+        assert!(out.ends_with("(and 10 more not shown; call list_repos for the full list)"));
+        assert!(!out.contains("bad"));
+    }
+
+    #[test]
+    fn render_known_at_the_edge_of_the_cap() {
+        let fifty: Vec<String> = (0..50).map(|i| format!("r{i:02}")).collect();
+        assert!(!render_known(&fifty).contains("more not shown"));
+        let fifty_one: Vec<String> = (0..51).map(|i| format!("r{i:02}")).collect();
+        let out = render_known(&fifty_one);
+        assert_eq!(out.matches('"').count(), MAX_LISTED * 2);
+        assert!(out.ends_with("(and 1 more not shown; call list_repos for the full list)"));
     }
 }

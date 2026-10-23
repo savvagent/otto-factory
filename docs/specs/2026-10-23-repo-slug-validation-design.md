@@ -52,8 +52,9 @@ New module beside `agent_label`, same layering: pure functions, no SQL.
 `validate(slug: &str) -> Result<&str>` accepts a slug that is 1 to `MAX_LEN` (128) characters,
 starts with an ASCII letter or digit, and otherwise contains only ASCII letters, digits, `-`, `_`,
 `.` and `/`. It does **not** trim: a slug is an exact identifier, and a padded one is refused, not
-rewritten. `/` is allowed because `owner/repo` is a natural slug and GitHub's own limits
-(39 + 1 + 100) exceed a smaller cap. A refusal says what was wrong and what is valid, and never
+rewritten. `/` is allowed because `owner/repo` is a natural slug. Slugs are short caller-chosen
+handles, so a maximal GitHub `owner/repo` string (up to 39 + 1 + 100 = 140 characters) would be
+refused by the 128 cap; that is accepted. A refusal says what was wrong and what is valid, and never
 repeats the slug.
 
 `is_displayable(slug: &str) -> bool` is `validate(slug).is_ok()`; it is how the read side decides
@@ -150,6 +151,9 @@ No new tool. `register_repo` is already classified.
 
 - **Breaking:** a `register_repo` or `POST /repos` that used to succeed with a spaced, non-ASCII, or
   over-long slug now fails. Recorded in the PR body and CHANGELOG via the `!` marker.
+- **Accepted trade-off:** the 128-character cap refuses the longest possible GitHub `owner/repo`
+  strings (up to 140 characters). A slug is a handle, not a mirror of the remote; such a repo takes
+  a shorter slug and is still found by its remote.
 - A legacy slug still reaches peers as the structured `slug` field of `list_repos`. That is data an
   agent must be able to pass back, not server prose, so it is accepted here, as `Repo.slug` already
   was before this change.

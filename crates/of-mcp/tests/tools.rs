@@ -5351,3 +5351,32 @@ fn tools_that_take_an_agent_label_state_its_limit() {
         assert!(description.contains("invalid_agent_label"), "{name}");
     }
 }
+
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn register_repo_refuses_a_bad_slug_and_the_description_says_so(pool: PgPool) {
+    let (env, rob) = env(pool).await;
+    let e = err(env
+        .factory
+        .register_repo(
+            Extension(parts(&rob)),
+            Parameters(tools::repos::RegisterRepoArgs {
+                slug: "has space".into(),
+                name: None,
+                remotes: vec![REMOTE.into()],
+                default_branch: None,
+                default_agent_type: None,
+            }),
+        )
+        .await);
+    assert_eq!(code_of(&e), "invalid_repo_slug");
+    assert!(!e.message.contains("has space"), "must not echo the slug");
+
+    let tool = tools::router()
+        .list_all()
+        .into_iter()
+        .find(|t| t.name == "register_repo")
+        .unwrap();
+    let d = tool.description.as_deref().unwrap_or_default();
+    assert!(d.contains("invalid_repo_slug"), "{d}");
+    assert!(d.contains("128"), "{d}");
+}
