@@ -207,7 +207,7 @@
   "trackers_connected_with_credentials": "Connecté {when} · identifiants enregistrés",
   "trackers_disconnect": "Déconnecter",
   "trackers_disconnect_note": "La déconnexion laisse en place l'association de chaque dépôt, mais inerte : rien ne se synchronise tant que {provider} n'est pas reconnecté.",
-  "trackers_not_connected_github": "Non connecté. Vous installerez la GitHub App otto-factory sur l'organisation dont cette organisation traite les tickets, puis reviendrez ici.",
+  "trackers_not_connected_github": "Non connecté. Vous installerez la GitHub App otto-tower sur l'organisation dont cette organisation traite les tickets, puis reviendrez ici.",
   "trackers_not_connected_jira": "Non connecté. Vous autoriserez otto-tower sur un site Atlassian. N'accordez l'accès qu'à un seul site : un seul site JIRA par organisation est enregistré ici.",
   "trackers_connect_button": "Connecter {provider}",
   "trackers_not_configured": "Ce déploiement ne propose pas la synchronisation {provider}. Un opérateur la configure avec les identifiants {credentials}.",

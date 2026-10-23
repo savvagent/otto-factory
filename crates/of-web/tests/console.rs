@@ -881,7 +881,7 @@ async fn connecting_github_without_an_installation_id_is_refused(pool: PgPool) {
     assert!(
         listed
             .text
-            .contains("github.com/apps/otto-factory/installations/new"),
+            .contains("github.com/apps/otto-tower/installations/new"),
         "the install link is built from the configured slug: {}",
         listed.text
     );
