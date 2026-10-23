@@ -102,7 +102,8 @@ impl Factory {
                        messages can be anchored to it. Pass the output of `git remote get-url \
                        origin` as a remote; every spelling of the same repo resolves to one \
                        entry. The slug is a short identifier of 1 to 128 characters (ASCII letters, \
-                       digits, `-`, `_`, `.`, `/`; it must start with a letter or digit): \
+                       digits, `-`, `_`, `.`, `/`; it must start with a letter or digit, and no \
+                       `/`-separated part may be empty, `.` or `..`): \
                        anything else is refused with `invalid_repo_slug` rather than \
                        rewritten, so choose one that is stable. Returns the registered repo."
     )]

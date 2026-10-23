@@ -29,6 +29,9 @@ pub enum Error {
     /// The agent's working directory could not be resolved to a registered repo.
     /// Deliberately never falls back to a default repo: silently queueing work
     /// against the wrong repository is worse than failing.
+    ///
+    /// `known` must be built by `repo_slug::render_known`, so a stored slug never
+    /// reaches the sentence unchecked.
     #[error(
         "could not resolve a repo from {attempted}. Registered repos: {known}. \
          Register this one with register_repo, or pass an explicit repo slug."

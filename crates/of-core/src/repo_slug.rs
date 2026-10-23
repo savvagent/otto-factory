@@ -25,12 +25,19 @@ use crate::error::{Error, Result};
 /// short handle an agent passes back, not a copy of the remote string.
 pub const MAX_LEN: usize = 128;
 
+/// The charset, start and length part of the rule as a regex, for the OpenAPI
+/// schema. It is weaker than [`validate`]: the path-segment rule (no empty,
+/// `.` or `..` segment) is enforced only there, as a regex cannot say it
+/// readably.
+pub const PATTERN: &str = r"^[A-Za-z0-9][A-Za-z0-9._/-]*$";
+
 /// The most slugs `render_known` names; bounds the sentence to a few KB
 /// however many repos an org registers.
 pub const MAX_LISTED: usize = 50;
 
 /// Checks a caller-supplied slug: 1 to [`MAX_LEN`] characters, first an ASCII
-/// letter or digit, the rest ASCII letters, digits, `-`, `_`, `.` or `/`.
+/// letter or digit, the rest ASCII letters, digits, `-`, `_`, `.` or `/`. No `/`-separated segment may be empty, `.` or
+/// `..`.
 ///
 /// No trimming. The refusal describes the problem and never repeats the slug,
 /// since echoing it would hand the refused text straight back as tool output.
@@ -62,6 +69,12 @@ pub fn validate(slug: &str) -> Result<&str> {
             c as u32,
             i + 1
         )));
+    }
+    // A slug is pasted into URL path segments (`/repos/{repo}`); `/` is allowed
+    // for `owner/repo`, but an empty, `.` or `..` segment would let it climb or
+    // collapse a path in a client that does not encode.
+    if slug.split('/').any(|seg| matches!(seg, "" | "." | "..")) {
+        return Err(refuse("has an empty, '.' or '..' path segment".into()));
     }
     Ok(slug)
 }
@@ -141,6 +154,55 @@ mod tests {
         for s in ["api", "acme/api-v2", "a.b_c", "a..b", &"a".repeat(128)] {
             assert_eq!(validate(s).unwrap(), s);
         }
+    }
+
+    #[test]
+    fn refuses_empty_dot_and_dotdot_path_segments() {
+        for s in ["x/../y", "a//b", "a/", "./a", "a/./b", "a/..", "a/b/"] {
+            let msg = refusal(s);
+            assert!(!msg.contains(s), "{msg:?} repeats {s:?}");
+        }
+        assert!(refusal("a//b").contains("path segment"));
+        for s in ["a/b.c", "a..b", "a/.b", "a/b..", "a/..b"] {
+            assert_eq!(validate(s).unwrap(), s);
+        }
+    }
+
+    /// Hand-rolled match of `PATTERN` (of-core has no regex dependency).
+    fn matches_pattern(s: &str) -> bool {
+        assert_eq!(PATTERN, r"^[A-Za-z0-9][A-Za-z0-9._/-]*$");
+        let mut it = s.chars();
+        it.next().is_some_and(|c| c.is_ascii_alphanumeric())
+            && it.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '/' | '-'))
+    }
+
+    #[test]
+    fn pattern_agrees_with_validate_on_charset_start_and_length() {
+        // Inputs free of path-segment problems, so only what PATTERN can say differs.
+        let long = "a".repeat(129);
+        for s in [
+            "api",
+            "acme/api-v2",
+            "a.b_c",
+            "a..b",
+            "a/b.c",
+            "-zq",
+            ".zq",
+            "/zq",
+            "a b",
+            "a\nb",
+            "a\"b",
+            "aé",
+            "api ",
+            " api",
+            "",
+        ] {
+            assert_eq!(matches_pattern(s), validate(s).is_ok(), "{s:?}");
+        }
+        // Length is carried by maxLength, not the pattern.
+        assert!(matches_pattern(&long) && validate(&long).is_err());
+        // Path-segment rule is beyond the pattern, by design.
+        assert!(matches_pattern("a//b") && validate("a//b").is_err());
     }
 
     #[test]
