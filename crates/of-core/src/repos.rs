@@ -708,7 +708,10 @@ impl ReposInternal for Tx<'_> {
 
     async fn unresolved(&mut self, attempted: &str, scope: &TeamScope) -> Result<Error> {
         let known = self
-            .list_repos_visible(false, None, scope)
+            // The page ceiling, not the default of 200: render_known prints how
+            // many repos it left out, so the list must be as complete as the
+            // query allows. Above the ceiling that count is a floor (accepted).
+            .list_repos_visible(false, Some(1000), scope)
             .await?
             .into_iter()
             .map(|r| r.slug)
