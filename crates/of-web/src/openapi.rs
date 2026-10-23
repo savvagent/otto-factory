@@ -282,7 +282,7 @@ fn tracker_schemas() -> Value {
             },
             "triggerLabel": {
                 "type": "string",
-                "description": "The label inbound sync watches for. Defaults to otto-factory.",
+                "description": "The label inbound sync watches for. Defaults to otto-tower.",
             },
             "live": {
                 "type": "boolean",
@@ -351,7 +351,7 @@ fn tracker_schemas() -> Value {
                 },
                 "triggerLabel": {
                     "type": ["string", "null"],
-                    "description": "Defaults to otto-factory when absent or blank.",
+                    "description": "Defaults to otto-tower when absent or blank.",
                 },
             },
             "required": ["externalRef"],

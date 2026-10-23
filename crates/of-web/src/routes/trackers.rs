@@ -139,13 +139,14 @@ pub struct ConnectTrackerRequest {
 pub struct BindRepoRequest {
     /// GitHub: `owner/repo`. JIRA: a project key such as `ACME`.
     pub external_ref: String,
-    /// The label inbound sync watches for. Defaults to `otto-factory`, which is
+    /// The label inbound sync watches for. Defaults to `otto-tower`, which is
     /// what the schema defaults to and what the docs tell customers to add.
+    /// Bindings created before the default changed keep their stored label.
     #[serde(default)]
     pub trigger_label: Option<String>,
 }
 
-const DEFAULT_TRIGGER_LABEL: &str = "otto-factory";
+const DEFAULT_TRIGGER_LABEL: &str = "otto-tower";
 
 /// Parse the `{provider}` path segment.
 ///

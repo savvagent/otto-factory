@@ -32,8 +32,9 @@ kept identifiers, and a new hit outside the list is a bug:
 - The Rust type `Factory`.
 - `savvagent/otto-factory#NNN` issue references, and the repo slug `savvagent/otto-factory` itself
   until the GitHub repo is renamed (a separate human step).
-- The tracker trigger-label default `otto-factory` (stored data and a behaviour;
-  `savvagent/otto-factory#233`), with the tests, OpenAPI descriptions and examples that exercise it.
+- The tracker trigger label `otto-factory` as stored data on bindings created before
+  `savvagent/otto-factory#233` (new bindings default to `otto-tower`; no migration rewrites stored
+  rows), and in the tests that set it explicitly.
 - The Cloudflare Worker script names (`otto-factory-console`, `otto-factory-console-dev`).
 - `CHANGELOG.md`, and the dated historical `docs/specs/*` and `docs/plans/*` (including the design
   of record's filename `2026-09-01-otto-factory-design.md`, which links depend on).

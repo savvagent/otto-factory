@@ -768,6 +768,12 @@ async fn a_binding_that_could_never_match_an_event_is_refused(pool: PgPool) {
         "the trigger label is what inbound sync watches for: {}",
         listed.text
     );
+    // The JIRA binding named no label, so it gets the default for new bindings.
+    assert!(
+        listed.text.contains("otto-tower"),
+        "a binding with no label defaults to otto-tower: {}",
+        listed.text
+    );
 
     Call::delete("/api/orgs/acme/repos/api/tracker-bindings/jira")
         .with_session(&rob.session)
