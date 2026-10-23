@@ -1014,3 +1014,72 @@ async fn shutdown_while_waiting_to_declare_returns_promptly(pool: PgPool) {
     assert_eq!(platform.usage_calls(), 0);
     assert_eq!(outbox::pending(&db).await.unwrap(), 1);
 }
+
+/// The platform losing the declaration mid-run must not dead-letter billed
+/// work: the shipper declares again and the rows ship.
+#[sqlx::test(migrator = "of_core::MIGRATOR")]
+async fn an_unknown_meter_makes_the_shipper_redeclare_and_ship_the_rows(pool: PgPool) {
+    let platform = MockPlatform::start().await;
+    let db = Db::from_pool(pool);
+    let meter = Meter::new(platform.client(), "https://x.test/billing");
+    let (org, user) = (OrgId::new(), UserId::new());
+    record_metered(&db, org, user, &meter).await;
+
+    let (stop, task) = spawn_shipper(&db, &platform, cfg());
+    eventually("the first row to ship", || {
+        platform.counted_usage().len() == 1
+    })
+    .await;
+    assert_eq!(platform.meter_calls(), 1);
+
+    platform.forget_meters();
+    record_metered(&db, org, user, &meter).await;
+    record_metered(&db, org, user, &meter).await;
+    eventually("the rows to ship after re-declaring", || {
+        platform.counted_usage().len() == 3
+    })
+    .await;
+
+    assert_eq!(platform.declared_meters().len(), 1);
+    assert!(platform.meter_calls() >= 2, "never declared again");
+    let rejected: i64 = sqlx::query_scalar("SELECT count(*) FROM usage_outbox_rejected")
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(rejected, 0, "an unknown_meter row was dead-lettered");
+
+    stop.send(true).unwrap();
+    task.await.unwrap();
+    assert_eq!(outbox::pending(&db).await.unwrap(), 0);
+}
+
+/// A platform that keeps refusing a meter it was just told about never costs
+/// billed usage: the shipper keeps re-declaring, and the rows are neither
+/// dead-lettered nor dropped. They stay queued for when the platform recovers.
+#[sqlx::test(migrator = "of_core::MIGRATOR")]
+async fn a_platform_that_always_refuses_is_redeclared_forever_and_the_rows_stay_queued(
+    pool: PgPool,
+) {
+    let platform = MockPlatform::start().await;
+    let db = Db::from_pool(pool);
+    let meter = Meter::new(platform.client(), "https://x.test/billing");
+    let (org, user) = (OrgId::new(), UserId::new());
+    platform.refuse_every_meter();
+    record_metered(&db, org, user, &meter).await;
+
+    let (stop, task) = spawn_shipper(&db, &platform, cfg());
+    // Well past the old bound of three re-declares.
+    eventually("many re-declarations", || platform.meter_calls() >= 7).await;
+
+    let rejected: i64 = sqlx::query_scalar("SELECT count(*) FROM usage_outbox_rejected")
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(rejected, 0, "an unknown_meter row was dead-lettered");
+    assert_eq!(outbox::pending(&db).await.unwrap(), 1, "the row was lost");
+    assert!(platform.counted_usage().is_empty());
+
+    stop.send(true).unwrap();
+    task.await.unwrap();
+    assert_eq!(outbox::pending(&db).await.unwrap(), 1);
+}
