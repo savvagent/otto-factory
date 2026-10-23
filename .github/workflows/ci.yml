@@ -250,7 +250,7 @@ jobs:
     # gets below.
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     timeout-minutes: 10
-    # The writes (release PR, labels, tag, GitHub Release) go through the otto-factory release
+    # The writes (release PR, labels, tag, GitHub Release) go through the otto-tower-release
     # GitHub App's installation token, not GITHUB_TOKEN: the repo setting that would let
     # GITHUB_TOKEN open a pull request ("Allow GitHub Actions to create and approve pull
     # requests") is one switch with approving one, and it is off so a compromised workflow
