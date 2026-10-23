@@ -716,11 +716,9 @@ impl ReposInternal for Tx<'_> {
 
         Ok(Error::RepoUnresolved {
             attempted: attempted.to_string(),
-            known: if known.is_empty() {
-                "none registered yet".into()
-            } else {
-                known.join(", ")
-            },
+            // Stored slugs can predate the slug rule; render_known quotes the
+            // conforming ones, caps the list, and counts the rest unnamed.
+            known: crate::repo_slug::render_known(&known),
         })
     }
 }

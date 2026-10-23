@@ -3926,7 +3926,8 @@ async fn a_repo_of_another_team_resolves_like_one_that_does_not_exist(pool: PgPo
     let e = err(resolve(&t.bob, "platform-repo").await);
     assert_eq!(code_of(&e), "repo_unresolved");
     assert!(
-        e.message.contains("growth-repo, shared") && !e.message.contains("platform-repo,"),
+        e.message.contains("\"growth-repo\", \"shared\"")
+            && !e.message.contains("\"platform-repo\""),
         "the registered list must leave out what the caller cannot see: {}",
         e.message
     );

@@ -185,7 +185,7 @@ refuses an unrequested version would fail, and the fix belongs upstream in `rmcp
   client that has had its token revoked re-discovers instead of guessing.
 - `resources/list` and `prompts/list` return empty lists rather than "method not found".
 - Repo resolution failures name the registered slugs: `could not resolve a repo from
-  (nothing supplied). Registered repos: widget. Register this one with register_repo, or
+  (nothing supplied). Registered repos: "widget". Register this one with register_repo, or
   pass an explicit repo slug.`
 - The consent screen leads with the redirect host, renders the client's self-chosen name as
   the untrusted string it is, and explains every scope in a sentence.
