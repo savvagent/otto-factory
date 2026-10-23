@@ -913,3 +913,74 @@ async fn a_legacy_host_never_chooses_the_audience(pool: PgPool) {
 
     watcher.shutdown().await;
 }
+
+/// A shipper stalled on its meter declaration is visible on `/readyz`, without
+/// failing readiness: the replica still serves, and nothing is lost.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn readiness_reports_a_stalled_meter_declaration(pool: PgPool) {
+    use of_billing::outbox::{self, ShipperConfig, ShipperStatus};
+    use of_testkit::MeterMode;
+    use std::time::Duration;
+
+    let platform = MockPlatform::start().await;
+    platform.set_meter_mode(MeterMode::ServiceNotSet);
+    let db = Db::from_pool(pool.clone());
+    sqlx::query(
+        "INSERT INTO usage_outbox (org_id, tool, billable, meter, quantity) \
+         VALUES ($1, 'complete_job', true, 'otto-tower/jobs_completed', 1)",
+    )
+    .bind(uuid::Uuid::new_v4())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let status = ShipperStatus::default();
+    let (stop, rx) = tokio::sync::watch::channel(false);
+    let cfg = ShipperConfig {
+        base_backoff: Duration::from_millis(20),
+        declare_max_backoff: Duration::from_millis(100),
+        poll: Duration::from_millis(10),
+        ..ShipperConfig::default()
+    };
+    let task = tokio::spawn(outbox::run_with_status(
+        db.clone(),
+        platform.client(),
+        cfg,
+        rx,
+        status.clone(),
+    ));
+    let app = of_server::health::router_with_shipper(db, status);
+
+    let stalled = get(app.clone(), "/readyz").await;
+    assert_eq!(stalled.status(), http::StatusCode::OK);
+    let doc = body_json(stalled).await;
+    assert_eq!(doc["status"], "ready", "{doc}");
+    assert_eq!(doc["usage"]["meters_declared"], false, "{doc}");
+    // The queue depth is a cross-tenant figure and this route is unauthenticated.
+    assert!(doc["usage"].get("rows_waiting").is_none(), "{doc}");
+
+    platform.set_meter_mode(MeterMode::Accept);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let doc = body_json(get(app.clone(), "/readyz").await).await;
+        if doc["usage"]["meters_declared"] == true {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "never recovered: {doc}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    stop.send(true).unwrap();
+    task.await.unwrap();
+}
+
+/// Without a shipper beside it the probe says nothing about usage.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn readiness_without_a_shipper_has_no_usage_detail(pool: PgPool) {
+    let app = of_server::health::router(Db::from_pool(pool));
+    let doc = body_json(get(app, "/readyz").await).await;
+    assert!(doc.get("usage").is_none(), "{doc}");
+}

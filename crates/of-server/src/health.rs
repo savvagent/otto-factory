@@ -20,7 +20,16 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
+use of_billing::outbox::ShipperStatus;
 use otto_tenant::Db;
+
+#[derive(Clone)]
+struct HealthState {
+    db: Db,
+    /// `None` where no usage shipper runs beside the router (most tests), so
+    /// the probe does not report billing it has no view of.
+    shipper: Option<ShipperStatus>,
+}
 
 /// How long a readiness check waits on the database.
 ///
@@ -34,11 +43,20 @@ const READY_TIMEOUT: Duration = Duration::from_secs(2);
 pub const PATHS: [&str; 2] = ["/healthz", "/readyz"];
 
 pub fn router(db: Db) -> Router {
+    build(db, None)
+}
+
+/// [`router`], with `/readyz` also reporting the usage shipper's state.
+pub fn router_with_shipper(db: Db, shipper: ShipperStatus) -> Router {
+    build(db, Some(shipper))
+}
+
+fn build(db: Db, shipper: Option<ShipperStatus>) -> Router {
     let [live, ready] = PATHS;
     Router::new()
         .route(live, get(healthz))
         .route(ready, get(readyz))
-        .with_state(db)
+        .with_state(HealthState { db, shipper })
 }
 
 /// `GET /healthz` — the process is running and the runtime is scheduling.
@@ -47,7 +65,18 @@ async fn healthz() -> Response {
 }
 
 /// `GET /readyz` — this replica can serve a request that needs the database.
-async fn readyz(State(db): State<Db>) -> Response {
+///
+/// With a usage shipper attached the body also carries `usage.meters_declared`.
+/// `false` that persists is the stall of `docs/deploy/fly.md`: the platform
+/// refused the meter declaration, so no usage ships. It never changes the
+/// status code. Every replica shares the platform's answer, so failing
+/// readiness would take the whole API out of rotation over a billing delay that
+/// loses nothing.
+///
+/// Only that boolean is public. This route is unauthenticated, and the outbox
+/// depth is a platform-wide figure across every tenant, so it stays in the
+/// shipper's logs, never in a response body.
+async fn readyz(State(HealthState { db, shipper }): State<HealthState>) -> Response {
     // Deliberately *not* `Db::begin`: that needs an `OrgId`, and there is no
     // org here. This is the one place a bare pool query is the right thing,
     // because it touches no tenant table — it is asking about the connection,
@@ -56,11 +85,15 @@ async fn readyz(State(db): State<Db>) -> Response {
         tokio::time::timeout(READY_TIMEOUT, sqlx::query("SELECT 1").execute(db.pool())).await;
 
     match probe {
-        Ok(Ok(_)) => (
-            StatusCode::OK,
-            Json(serde_json::json!({ "status": "ready" })),
-        )
-            .into_response(),
+        Ok(Ok(_)) => {
+            let mut body = serde_json::json!({ "status": "ready" });
+            if let Some(shipper) = &shipper {
+                body["usage"] = serde_json::json!({
+                    "meters_declared": shipper.meters_declared(),
+                });
+            }
+            (StatusCode::OK, Json(body)).into_response()
+        }
 
         // The body says which of the two it was. "not ready" alone sends
         // whoever is paged to look at the wrong thing half the time: a refused
