@@ -163,7 +163,10 @@ without `repo`, so production can hold unscoped broadcasts with a `job_id` and n
 column. Deleting such a job after `0008` updates those rows twice: `delete_job`'s `scope_teams`
 widening and the FK's `ON DELETE SET NULL (job_id)`. Both would violate `messages_channel_ck`,
 so `delete_job` would fail. Those rows belong to no channel and are never served again, so the
-same per-org pass nulls their `job_id` before the constraint exists. After that nothing updates
+same per-org pass nulls their `job_id` before the constraint exists. The same applies to a row
+with **both** `repo_id` and `team_id` (only a direct `of-core` caller could write one; MCP never
+set `team_id`), so the update covers every row that fails the new CHECK, not just channel-less
+ones. After that nothing updates
 them: `delete_job` matches by `job_id`, no path deletes a repo, and replies to them are
 themselves legacy rows or carry a channel. A test deletes a job a legacy broadcast once named.
 
@@ -203,7 +206,8 @@ BEGIN
     DELETE FROM message_cursors WHERE org_id = o;
     -- See "Why legacy broadcasts lose their job link" above.
     UPDATE messages SET job_id = NULL
-      WHERE org_id = o AND repo_id IS NULL AND team_id IS NULL AND job_id IS NOT NULL;
+      WHERE org_id = o AND (repo_id IS NOT NULL) = (team_id IS NOT NULL)
+        AND job_id IS NOT NULL;
   END LOOP;
   PERFORM set_config('app.org_id', '', true);
 END $$;

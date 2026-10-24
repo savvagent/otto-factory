@@ -112,7 +112,7 @@ implements it exactly. Closes savvagent/otto-factory#177.
     the bypass test's to prove). The **control**, run first on its own fresh seed: the same
     `DO` block as `otto_app` with no temporary policies deletes and nulls nothing. That shows
     the policies, not luck, make the loop find the orgs. Split the migration text with a
-    helper that extracts the `DO $$ ... END $$;` block containing `FOR o IN`, and fail the
+    helper that extracts the `DO $$ ... END $$;` block containing `FOREACH o IN ARRAY`, and fail the
     test loudly if it is not found exactly once.
 - [ ] Gate: `cargo test -p of-core --test message_channels_migration --test guards`. The other
       message suites stay red until Task 3 (see Global constraints). The fresh-cluster apply
