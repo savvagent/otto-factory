@@ -35,8 +35,13 @@ implements it exactly. Closes savvagent/otto-factory#177.
 - Platform calls (team lookup, `team_scope`) happen **before** `Factory::tx` opens, never inside
   a transaction.
 - **This is not additive.** About 25 existing tests construct DMs or call the channel-less
-  signatures. Each task repairs its own crate's tests, and no task is green until its crate's
-  whole suite compiles and passes.
+  signatures. Each task repairs its own crate's tests.
+- **Intermediate commits are not all green, and that is accepted** (the PR squash-merges). Every
+  query in `messages.rs` is a runtime `sqlx::query*`, so after Task 1 the message suites in
+  `of-core` fail at runtime (`recipient_user_id` is gone, and `ack_messages_for`'s
+  `ON CONFLICT (org_id, user_id)` has no matching constraint) until Task 3. `of-mcp` does not
+  compile between Tasks 3 and 4. Each task's gate below names exactly what must pass at that
+  point; the whole-workspace gate is Task 4's.
 - PR title: `feat(of-mcp)!: scope messages to a repo or team channel` with a
   `BREAKING CHANGE:` footer saying that `send_message` no longer takes `to`, and that the four
   message tools require `repo`/`remote` or `team`. Reference the issue.
@@ -69,8 +74,10 @@ implements it exactly. Closes savvagent/otto-factory#177.
 ## Task 1 — migration `0008_message_channels.sql` ⬜
 
 - [ ] Create the file with the SQL from spec §1, verbatim apart from comments. Keep the
-      comment explaining why DMs are deleted and not orphaned (a DM could carry `repo_id`), and
-      the one explaining the temporary policies.
+      comment explaining why DMs are deleted and not orphaned (a DM could carry `repo_id`), the
+      one explaining the temporary policies, and the one explaining why a legacy broadcast's
+      `job_id` is nulled (a `NOT VALID` CHECK still binds later UPDATEs, so `delete_job` would
+      fail on it). Include the guarded `GRANT ... ON SEQUENCE message_cursors_id_seq`.
 - [ ] Check that the `DROP CONSTRAINT message_cursors_pkey, ADD COLUMN id bigserial PRIMARY KEY`
       combination applies cleanly on Postgres 16 with rows already deleted. Split it into
       separate `ALTER`s if the combined form complains.
@@ -82,23 +89,29 @@ implements it exactly. Closes savvagent/otto-factory#177.
       helper `undo_0008(pool)`, documented as standing in for a database at `0007`.
       Seed for **two** orgs:
       - one DM with a `repo_id`, one DM without a repo, and one reply to a DM (also a DM);
-      - one repo broadcast, one unscoped broadcast;
+      - one repo broadcast, one unscoped broadcast, and one unscoped broadcast carrying a
+        `job_id` (seed a job for it);
       - two legacy cursors.
       Then:
   - `deletes_every_orgs_dms_and_cursors_when_rls_is_bypassed`: run the migration on the pool
     (superuser). Assert zero DMs and zero cursors in both orgs, both broadcasts per org
-    survive, `recipient_user_id` no longer exists (`information_schema.columns`), and a new
-    insert with neither channel violates `messages_channel_ck`.
-  - `deletes_every_orgs_dms_and_cursors_when_rls_applies`: run the migration body inside a
-    transaction under `SET LOCAL ROLE otto_app`, as
-    `rls_scopes_a_migration_style_update_with_no_org_context` does. `otto_app` must be granted
-    what the DDL needs; if it cannot run `ALTER TABLE`, run only the policy-create, `DO`
-    block, and policy-drop part under the role, which is what this test exists to prove. Same
-    assertions for the delete. Then a control: the same `DO` block **without** the temporary
-    policies deletes nothing. That shows the policies, not luck, make the loop find the orgs.
-- [ ] `cargo test -p of-core --test message_channels_migration`. Then run the whole `of-core`
-      suite against a fresh cluster (`podman compose down -v && podman compose up -d`) to
-      prove the migration applies from empty.
+    survive, the job-carrying legacy broadcast's `job_id` is NULL, `recipient_user_id` no
+    longer exists (`information_schema.columns`), and a new insert with neither channel
+    violates `messages_channel_ck`. Then `DELETE FROM jobs` for the seeded job succeeds (the
+    FK's `SET NULL` has nothing left to update).
+  - `deletes_every_orgs_dms_and_cursors_when_rls_applies`: `otto_app` owns nothing, so it
+    can run neither `CREATE POLICY` nor `ALTER TABLE` (the `meter_rename.rs` precedent works
+    only because `0006` is a lone `DO` block). So: in one transaction, create the two
+    temporary policies as the pool's role, `SET LOCAL ROLE otto_app`, run the migration's `DO`
+    block alone, `RESET ROLE`, drop the policies. Same row assertions as above (the DDL is
+    the bypass test's to prove). The **control**, run first on its own fresh seed: the same
+    `DO` block as `otto_app` with no temporary policies deletes and nulls nothing. That shows
+    the policies, not luck, make the loop find the orgs. Split the migration text with a
+    helper that extracts the `DO $$ ... END $$;` block containing `FOR o IN`, and fail the
+    test loudly if it is not found exactly once.
+- [ ] Gate: `cargo test -p of-core --test message_channels_migration --test guards`. The other
+      message suites stay red until Task 3 (see Global constraints). The fresh-cluster apply
+      is checked at Task 3's gate.
 - [ ] Commit: `feat(of-core): migrate messages to repo and team channels`.
 
 ## Task 2 — `VerifiedTeam::by_slug` ⬜
@@ -112,7 +125,7 @@ implements it exactly. Closes savvagent/otto-factory#177.
       ```
 
       Call `platform.team_by_slug(org.as_uuid(), slug)`. `Some(info)` with
-      `info.org_id == org` gives `Self { org, team: info.id.into() }`. Anything else is
+      `info.org_id == org.as_uuid()` gives `Self { org, team: info.id.into() }`. Anything else is
       `Error::TeamNotFound { team: format!("{slug:?}") }`. A transport failure is
       `Error::Platform` through `?`. Include a `no_run` doc example as `verify` has.
 - [ ] `crates/of-core/src/error.rs`: reword `TeamNotFound` so it no longer assumes a repo:
@@ -192,15 +205,30 @@ implements it exactly. Closes savvagent/otto-factory#177.
     - `a_cross_channel_reply_keeps_its_parents_team_scope`: parent in a team-scoped repo's
       channel, reply in an org-wide repo's channel. The reply's `scope_teams` contains the
       parent's team, and a reader outside that team does not see the reply.
+  - Also: `a_legacy_label_is_withheld_from_structured_output`, and every other test the
+    compiler reports. In `a_pre_policy_keyed_message_with_a_now_invalid_label_still_replays`
+    the hand-built hash JSON has `"repoId": null`; once the message carries a repo channel that
+    literal must carry the same repo id, or the fingerprint regression test fails for the
+    wrong reason.
+  - Add `a_legacy_broadcast_does_not_block_deleting_a_job`: stand in for a migrated legacy
+    row (drop `messages_channel_ck` on the pool, insert a channel-less row with `job_id`
+    NULL, re-add the constraint `NOT VALID`); `delete_job` on another job still works.
 - [ ] Repair `crates/of-core/tests/isolation.rs`:
-      `message_idempotency_keys_do_not_cross_org_boundaries` and
-      `messages_are_invisible_across_orgs` need each org's repo as the channel.
+      `message_idempotency_keys_do_not_cross_org_boundaries`,
+      `messages_are_invisible_across_orgs`, and `team_scoped_helpers_do_not_cross_orgs` (calls
+      `unread_count_for` / `ack_messages_for`) need each org's repo as the channel.
 - [ ] Repair `crates/of-core/tests/platform_events.rs`:
       `a_message_takes_a_team_from_its_own_org_only_keyed_or_not` builds `NewMessage` with a
       team, so it may already satisfy "exactly one". Fix it to compile and keep its cross-org
-      assertion. Add `member_removed_drops_every_channel_cursor`: two cursors (repo and team)
+      assertion. **Runtime-only breakage the compiler will not flag:** `populate` sends a
+      `NewMessage` with only `job_id` plus `..Default::default()`; it compiles, but the
+      exactly-one-channel check refuses it, which breaks the `org.deleted` "every table" tests.
+      Give it a repo channel. Also repair `member_removed_releases_what_they_held` (calls
+      `ack_messages`). Add `member_removed_drops_every_channel_cursor`: two cursors (repo and team)
       for one user, `member.removed`, zero left.
-- [ ] `cargo test -p of-core`, `cargo clippy -p of-core --all-targets -- -D warnings`, commit
+- [ ] `cargo test -p of-core`, `cargo clippy -p of-core --all-targets -- -D warnings`. Also once
+      against a fresh cluster (`podman compose down -v && podman compose up -d`, then
+      `cargo test -p of-core`) to prove the migrations apply from empty. Commit
       `feat(of-core)!: scope messages to a repo or team channel`.
 
 ## Task 4 — `of-mcp` ⬜
@@ -216,7 +244,7 @@ implements it exactly. Closes savvagent/otto-factory#177.
     Blank strings count as absent, as in `maybe_repo_of`. It runs **before** the transaction:
     it resolves the team (a platform call), and only records the repo for later. Neither or
     both is `invalid_argument`, naming `repo` / `remote` / `team` (spec's error table). Use
-    `of_core::Error::Invalid(..).mcp()` so the code is `invalid_argument`, as other caller
+    `Err(of_core::Error::Invalid(..)).mcp()` (`.mcp()` is on `Result`, not `Error`) so the code is `invalid_argument`, as other caller
     mistakes in these tools are.
   - `pub(crate) async fn channel_of(tx, scope, arg: ChannelArg, write: bool) -> Result<ChannelRef, ErrorData>`,
     called inside the transaction. A repo goes through `repo_for_write(..., Hold::Shared)` when
@@ -273,7 +301,10 @@ implements it exactly. Closes savvagent/otto-factory#177.
       `platform`.
     - `a_team_channel_fails_closed_when_the_platform_is_down`: `env.platform.set_down(true)`;
       `inbox` with `team` gives the `503` / `platform_unavailable` error the file's existing
-      `unavailable(..)` helper checks.
+      `unavailable` check (a closure local to
+      `a_platform_outage_refuses_team_scoped_reads_and_writes`; copy it). Note in the test that
+      `team_scope`'s `member` lookup fails first, so this proves the tool fails closed, not
+      that `by_slug` does; Task 2's core test covers `by_slug`.
     - `send_message_needs_exactly_one_channel`: neither is `invalid_argument`; repo plus team
       is `invalid_argument`.
     - `send_message_refuses_to`: a raw JSON call with `"to": "x@acme.test"` is rejected as an
