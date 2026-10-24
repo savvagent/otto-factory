@@ -1,6 +1,6 @@
 # Message channels design
 
-> **Status:** DRAFT — replace the org-wide broadcast and person-directed DMs with two required,
+> **Status:** IMPLEMENTED (PR #254, 2026-10-24) — replace the org-wide broadcast and person-directed DMs with two required,
 > mutually exclusive message channels (repo or team) with per-channel read cursors. A **breaking**
 > change to the MCP surface (`feat(of-mcp)!:`). Closes savvagent/otto-factory#177.
 >
