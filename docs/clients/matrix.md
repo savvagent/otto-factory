@@ -206,6 +206,13 @@ client saw `name: "rmcp"`, `version: "2.0.0"` regardless of what otto-tower was 
 MCP transport layer's own identity was leaked instead of the server's
 (`docs/specs/2026-09-10-semver-release-design.md` §3).
 
+**Breaking: the message tools take a channel.** `send_message`, `inbox`, `ack_messages` and
+`unread_count` each require exactly one of `repo` (or `remote`) or `team` (a team slug), and
+read or write that one channel. `send_message` no longer accepts `to`; the message args refuse
+unknown fields, so a client still sending it gets an `invalid_params` error instead of a post.
+The `send_message` call in the Copilot CLI run above predates this and was not re-run
+(`docs/specs/2026-10-24-message-channels-design.md`, savvagent/otto-factory#177).
+
 ---
 
 ## Re-running this

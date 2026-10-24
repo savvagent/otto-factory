@@ -298,7 +298,7 @@ every tool in it:
   sends it to re-authenticate against the very platform that is down. Only the platform
   *answering* "inactive" is a `401`. Anything else (transport error, 5xx, our own credential
   being rejected) is `503` with `Retry-After`. Identity questions a tool asks — whoami,
-  resolving a message recipient — **fail closed** the same way: an error, never a guess.
+  resolving a message's team channel — **fail closed** the same way: an error, never a guess.
 - **The org comes from the token and nowhere else.** No tool takes an org argument.
 - **Every result is a one-field object** — `{"job": …}`, `{"jobs": […]}` — defined in
   `tools::out`. MCP requires `outputSchema` to be rooted at `object`, so a bare array is
@@ -610,8 +610,9 @@ means in this repository:
 - **Registration is an operator step at the platform** (`otto-platform-server resource register`,
   `set-webhook`), not something this binary does at startup. The scope list registered there must
   match `of_core::scopes`. See `docs/deploy/fly.md`.
-- **Identity reads go through `PlatformClient`**: `member` (whoami), `member_by_email` (message
-  recipients), `team` / `team_by_slug` (team checks). Each treats "the platform could not answer"
+- **Identity reads go through `PlatformClient`**: `member` (whoami), `team` (team checks), and
+  `team_by_slug` (the console's `?team=` and the message tools' team channels, through
+  `VerifiedTeam::by_slug`). Each treats "the platform could not answer"
   as a refusal, never as an empty result.
 - **Passkeys, recovery, SSO, invitations, account claiming, sessions** — all the platform's.
   `docs/clients/matrix.md` records what each MCP client sent against the pre-split authorization
