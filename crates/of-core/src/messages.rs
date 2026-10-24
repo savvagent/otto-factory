@@ -82,7 +82,6 @@ pub struct Message {
     #[serde(serialize_with = "crate::agent_label::serialize_stored")]
     pub sender_label: Option<String>,
     pub sender_kind: SenderKind,
-    pub recipient_user_id: Option<UserId>,
     pub team_id: Option<TeamId>,
     pub kind: MessageKind,
     pub body: String,
@@ -94,8 +93,9 @@ pub struct Message {
 #[derive(Debug, Clone, Default)]
 pub struct NewMessage {
     pub body: String,
-    /// `None` broadcasts to the org (or the team, when `team_id` is set).
-    pub recipient_user_id: Option<UserId>,
+    /// The channel: exactly one of `team_id` (that team's channel) and
+    /// `repo_id` (that repo's) must be set; `send_message` refuses neither and
+    /// both.
     pub team_id: Option<crate::teams::VerifiedTeam>,
     pub kind: MessageKind,
     pub sender_kind: SenderKind,
@@ -109,72 +109,53 @@ pub struct NewMessage {
     pub idempotency_key: Option<String>,
 }
 
-/// Who a message being replied to was between. See [`MessagesExt::reply_parent`].
+/// One message channel: a repo's or a team's. Every message is in exactly one,
+/// and every read, count, and cursor is of exactly one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ReplyParent {
-    pub sender: UserId,
-    /// `None` for a broadcast.
-    pub recipient: Option<UserId>,
+pub enum ChannelRef {
+    Repo(RepoId),
+    Team(TeamId),
 }
 
-impl ReplyParent {
-    /// Who a reply from `replier` must be addressed to. A reply to a broadcast
-    /// goes wherever `requested` says. A reply to a private message stays
-    /// between the same two people: it goes to the other participant, and
-    /// `requested` may only name them, because a broadcast reply would show the
-    /// whole org that the private thread exists and quote its context.
-    pub fn reply_recipient(
-        &self,
-        replier: UserId,
-        requested: Option<UserId>,
-    ) -> Result<Option<UserId>> {
-        let Some(recipient) = self.recipient else {
-            return Ok(requested);
-        };
-        let other = if replier == self.sender {
-            recipient
-        } else {
-            self.sender
-        };
-        match requested {
-            None => Ok(Some(other)),
-            Some(r) if r == other => Ok(Some(other)),
-            Some(_) => Err(Error::Invalid(
-                "a reply to a private message stays between its two participants; omit \
-                 `to` to answer the other one, or omit in_reply_to to start a new thread"
-                    .into(),
-            )),
-        }
+/// SQL: message `m` is in channel `c`, compared against the value bound as
+/// `$n`, and that value. The column is chosen here, in Rust, between two fixed
+/// strings and never built from input; the same reason `inbox` picks its
+/// `ORDER BY` direction from two literals rather than binding it.
+fn channel_sql(c: ChannelRef, n: usize) -> (String, uuid::Uuid) {
+    match c {
+        ChannelRef::Repo(r) => (format!("m.repo_id = ${n}"), r.as_uuid()),
+        ChannelRef::Team(t) => (format!("m.team_id = ${n}"), t.as_uuid()),
+    }
+}
+
+/// [`channel_sql`]'s twin for an unaliased `message_cursors` row, bound to the
+/// same `$n`. A cursor is per channel, so a read that does not key on the
+/// channel would get several rows back once a member has read two.
+fn cursor_channel_sql(c: ChannelRef, n: usize) -> String {
+    match c {
+        ChannelRef::Repo(_) => format!("repo_id = ${n}"),
+        ChannelRef::Team(_) => format!("team_id = ${n}"),
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct InboxQuery {
-    /// Only messages past my cursor that I did not send. Default true.
+    /// The one channel to read.
+    pub channel: ChannelRef,
+    /// Only messages past my cursor in this channel that I did not send.
     pub unread_only: bool,
     pub limit: i64,
     /// Newest first, so a limit-capped read keeps the most recent messages
-    /// rather than the oldest. Default false (oldest first, conversational order).
+    /// rather than the oldest. False is oldest first, conversational order.
     pub newest_first: bool,
     /// The reader's team visibility: when set, messages tied to a team, repo, or
     /// job outside it are left out. `None` is unrestricted.
     pub visible_teams: Option<Vec<TeamId>>,
 }
 
-impl Default for InboxQuery {
-    fn default() -> Self {
-        Self {
-            unread_only: true,
-            limit: 50,
-            newest_first: false,
-            visible_teams: None,
-        }
-    }
-}
-
 /// SQL: message `m` is visible under the `uuid[]` bound as `$n` (NULL = all).
 /// A message tied to a team, a repo, or a job the reader cannot see is not
-/// theirs to read, whoever it was addressed to. `scope_teams` is what it was
+/// theirs to read, whatever channel it is in. `scope_teams` is what it was
 /// tied to when sent, which outlives a deleted repo or job (see
 /// `0004_message_scope.sql`); the live checks catch a repo moved since.
 fn message_visible_sql(n: usize) -> String {
@@ -197,19 +178,19 @@ fn team_uuids(teams: Option<&Vec<TeamId>>) -> Option<Vec<uuid::Uuid>> {
 }
 
 /// SQL: the `scope_teams` of a message being inserted, from the insert's own
-/// parameters — `$1` org, `$6` team, `$9` repo, `$10` job, `$11` the message it
+/// parameters — `$1` org, `$5` team, `$8` repo, `$9` job, `$10` the message it
 /// replies to. Every team it is bound to, and its thread's: a reply posted
 /// without a repo or job of its own is still part of a team's conversation.
-const SCOPE_TEAMS_SQL: &str = "ARRAY(SELECT DISTINCT t FROM unnest(ARRAY[$6::uuid, \
-       (SELECT r.team_id FROM repos r WHERE r.org_id = $1 AND r.id = $9), \
-       (SELECT j.team_id FROM jobs j WHERE j.org_id = $1 AND j.id = $10), \
+const SCOPE_TEAMS_SQL: &str = "ARRAY(SELECT DISTINCT t FROM unnest(ARRAY[$5::uuid, \
+       (SELECT r.team_id FROM repos r WHERE r.org_id = $1 AND r.id = $8), \
+       (SELECT j.team_id FROM jobs j WHERE j.org_id = $1 AND j.id = $9), \
        (SELECT r.team_id FROM jobs j JOIN repos r ON r.org_id = j.org_id AND r.id = j.repo_id \
-         WHERE j.org_id = $1 AND j.id = $10)] \
-     || COALESCE((SELECT p.scope_teams FROM messages p WHERE p.org_id = $1 AND p.id = $11), \
+         WHERE j.org_id = $1 AND j.id = $9)] \
+     || COALESCE((SELECT p.scope_teams FROM messages p WHERE p.org_id = $1 AND p.id = $10), \
                  '{}'::uuid[])) AS t WHERE t IS NOT NULL)";
 
 const MSG_COLS: &str = "id, org_id, created_at, sender_user_id, sender_label, sender_kind, \
-                        recipient_user_id, team_id, kind, body, repo_id, job_id, in_reply_to";
+                        team_id, kind, body, repo_id, job_id, in_reply_to";
 
 /// Fingerprint the fields that define "the same `send_message` call" — see
 /// the `idempotency` module doc and `jobs::job_idempotency_fingerprint`,
@@ -220,7 +201,6 @@ const MSG_COLS: &str = "id, org_id, created_at, sender_user_id, sender_label, se
 fn message_idempotency_fingerprint(sender: UserId, new: &NewMessage) -> Vec<u8> {
     let NewMessage {
         body,
-        recipient_user_id,
         team_id,
         kind,
         sender_kind,
@@ -236,7 +216,12 @@ fn message_idempotency_fingerprint(sender: UserId, new: &NewMessage) -> Vec<u8> 
     crate::idempotency::fingerprint(&serde_json::json!({
         "sender": sender,
         "body": body.trim(),
-        "recipientUserId": recipient_user_id,
+        // Messages are no longer addressed to a person, but the key stays,
+        // always null: every stored keyed message hashed it, so dropping it
+        // would turn each pre-migration keyed retry into
+        // idempotency_key_conflict — the same precedent as the label policy
+        // (#163) keeping the label hashed as sent.
+        "recipientUserId": serde_json::Value::Null,
         "teamId": team_id.map(|t| t.id()),
         "kind": kind,
         "senderKind": sender_kind,
@@ -265,52 +250,41 @@ pub trait MessagesExt {
         new: NewMessage,
     ) -> impl std::future::Future<Output = Result<Message>> + Send;
 
-    /// Messages visible to `reader`: broadcasts plus anything addressed to them.
+    /// Messages in one channel (`q.channel`) visible to `reader`.
     fn inbox(
         &mut self,
         reader: UserId,
         q: &InboxQuery,
     ) -> impl std::future::Future<Output = Result<Vec<Message>>> + Send;
 
-    /// Advance the read cursor.
+    /// Advance `reader`'s read cursor for `channel`.
     ///
-    /// Clamped to the newest existing message id, so an over-large value cannot
-    /// suppress messages that have not been written yet. Returns the cursor that
-    /// actually landed, which is rarely what a careless caller passed.
-    fn ack_messages(
-        &mut self,
-        reader: UserId,
-        up_to: i64,
-    ) -> impl std::future::Future<Output = Result<i64>> + Send;
-
-    fn unread_count(
-        &mut self,
-        reader: UserId,
-    ) -> impl std::future::Future<Output = Result<i64>> + Send;
-
-    /// [`Self::ack_messages`], clamped to the newest message `scope` may see, so
-    /// the cursor that lands says nothing about hidden traffic.
+    /// Clamped to the newest message in that channel that `scope` may see, so
+    /// an over-large value cannot suppress messages that have not been written
+    /// yet, and the cursor that lands says nothing about hidden traffic or
+    /// another channel's. Returns the cursor that actually landed, which is
+    /// rarely what a careless caller passed.
     fn ack_messages_for(
         &mut self,
         reader: UserId,
+        channel: ChannelRef,
         up_to: i64,
         scope: &TeamScope,
     ) -> impl std::future::Future<Output = Result<i64>> + Send;
 
-    /// Whether `reader` could read message `id`: it exists, it is a broadcast
-    /// or to or from them, and `scope` covers every team it is tied to.
+    /// Whether message `id` exists and `scope` covers every team it is tied to.
+    /// A message is in a shared channel, so nothing about who sent it matters.
     fn message_readable(
         &mut self,
         id: i64,
-        reader: UserId,
         scope: &TeamScope,
     ) -> impl std::future::Future<Output = Result<bool>> + Send;
 
-    /// The message an `in_reply_to` names, if `reader` could read it, with the
-    /// audience a reply to it must keep. A message that does not exist, a
-    /// private message between other people, and one tied to a team, repo, or
-    /// job outside `scope` are the same [`Error::Invalid`], so a reply cannot be
-    /// used to probe for hidden message ids.
+    /// Refuse an `in_reply_to` the replier could not read. A message that does
+    /// not exist and one tied to a team, repo, or job outside `scope` are the
+    /// same [`Error::Invalid`], so a reply cannot be used to probe for hidden
+    /// message ids. The parent may be in another channel: the reply inherits
+    /// its `scope_teams`, so that cannot widen who sees anything.
     ///
     /// For a restricted `scope` the repos behind the parent (its own and its
     /// job's) are held until the transaction ends, as any write's repo is: the
@@ -320,14 +294,15 @@ pub trait MessagesExt {
     fn reply_parent(
         &mut self,
         parent: i64,
-        reader: UserId,
         scope: &TeamScope,
-    ) -> impl std::future::Future<Output = Result<ReplyParent>> + Send;
+    ) -> impl std::future::Future<Output = Result<()>> + Send;
 
-    /// [`Self::unread_count`], counting only messages `scope` may see.
+    /// Unread messages in `channel` that `scope` may see and `reader` did not
+    /// send.
     fn unread_count_for(
         &mut self,
         reader: UserId,
+        channel: ChannelRef,
         scope: &TeamScope,
     ) -> impl std::future::Future<Output = Result<i64>> + Send;
 }
@@ -407,6 +382,24 @@ impl MessagesExt for Tx<'_> {
                 body.len()
             )));
         }
+        // Exactly one channel. The schema's `messages_channel_ck` says the same,
+        // but a constraint violation tells a caller nothing about what to send
+        // instead.
+        match (new.repo_id, new.team_id) {
+            (Some(_), None) | (None, Some(_)) => {}
+            (None, None) => {
+                return Err(Error::Invalid(
+                    "a message goes to one channel: set repo_id for a repo's channel or \
+                     team_id for a team's"
+                        .into(),
+                ))
+            }
+            (Some(_), Some(_)) => {
+                return Err(Error::Invalid(
+                    "a message goes to one channel, a repo or a team, not both".into(),
+                ))
+            }
+        }
         if let Some(key) = new.idempotency_key.as_deref() {
             crate::idempotency::validate(key)?;
         }
@@ -431,17 +424,16 @@ impl MessagesExt for Tx<'_> {
                 .await?;
             let inserted = sqlx::query_as(&format!(
                 "INSERT INTO messages (org_id, sender_user_id, sender_label, sender_kind, \
-                                       recipient_user_id, team_id, kind, body, repo_id, \
+                                       team_id, kind, body, repo_id, \
                                        job_id, in_reply_to, idempotency_key, \
                                        idempotency_payload_hash, scope_teams) \
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,{SCOPE_TEAMS_SQL}) \
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,{SCOPE_TEAMS_SQL}) \
                  RETURNING {MSG_COLS}"
             ))
             .bind(org)
             .bind(sender)
             .bind(sender_label)
             .bind(new.sender_kind)
-            .bind(new.recipient_user_id)
             .bind(new.team_id.map(|t| t.in_org(self.org())).transpose()?)
             .bind(new.kind)
             .bind(body)
@@ -542,16 +534,15 @@ impl MessagesExt for Tx<'_> {
             // columns written, no savepoint.
             sqlx::query_as(&format!(
                 "INSERT INTO messages (org_id, sender_user_id, sender_label, sender_kind, \
-                                       recipient_user_id, team_id, kind, body, repo_id, \
+                                       team_id, kind, body, repo_id, \
                                        job_id, in_reply_to, scope_teams) \
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,{SCOPE_TEAMS_SQL}) \
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,{SCOPE_TEAMS_SQL}) \
                  RETURNING {MSG_COLS}"
             ))
             .bind(org)
             .bind(sender)
             .bind(sender_label)
             .bind(new.sender_kind)
-            .bind(new.recipient_user_id)
             .bind(new.team_id.map(|t| t.in_org(self.org())).transpose()?)
             .bind(new.kind)
             .bind(body)
@@ -573,18 +564,20 @@ impl MessagesExt for Tx<'_> {
         // of an ORDER BY cannot be bound as a parameter, and building it by
         // string concatenation from client input is how injection happens.
         let order = if q.newest_first { "DESC" } else { "ASC" };
+        let (channel, channel_id) = channel_sql(q.channel, 6);
 
         let msgs = sqlx::query_as(&format!(
             "SELECT {MSG_COLS} FROM messages m \
              WHERE m.org_id = $1 \
-               AND (m.recipient_user_id IS NULL OR m.recipient_user_id = $2) \
+               AND {channel} \
                AND (NOT $3 OR ( \
                      m.sender_user_id <> $2 \
                      AND m.id > COALESCE( \
                        (SELECT last_read_id FROM message_cursors \
-                        WHERE org_id = $1 AND user_id = $2), 0))) \
+                        WHERE org_id = $1 AND user_id = $2 AND {}), 0))) \
                AND {} \
              ORDER BY m.id {order} LIMIT $4",
+            cursor_channel_sql(q.channel, 6),
             message_visible_sql(5)
         ))
         .bind(org)
@@ -592,87 +585,88 @@ impl MessagesExt for Tx<'_> {
         .bind(q.unread_only)
         .bind(limit)
         .bind(team_uuids(q.visible_teams.as_ref()))
+        .bind(channel_id)
         .fetch_all(self.conn())
         .await?;
 
         Ok(msgs)
     }
 
-    async fn ack_messages(&mut self, reader: UserId, up_to: i64) -> Result<i64> {
-        self.ack_messages_for(reader, up_to, &TeamScope::All).await
-    }
-
     async fn ack_messages_for(
         &mut self,
         reader: UserId,
+        channel: ChannelRef,
         up_to: i64,
         scope: &TeamScope,
     ) -> Result<i64> {
         let org = self.org();
         let teams = team_uuids(scope.restriction().as_ref());
-        // The newest message this reader could have read: a private message
-        // to someone else is not one, and landing the cursor on its id would
-        // tell the reader it exists.
+        let (in_channel, channel_id) = channel_sql(channel, 3);
+        // The newest message this reader could have read in this channel:
+        // landing the cursor on a hidden message's id, or on a newer one in
+        // another channel, would tell the reader it exists.
         let newest: i64 = sqlx::query_scalar(&format!(
             "SELECT COALESCE(MAX(m.id), 0) FROM messages m WHERE m.org_id = $1 \
-               AND (m.recipient_user_id IS NULL OR m.recipient_user_id = $3 \
-                    OR m.sender_user_id = $3) \
+               AND {in_channel} \
                AND {}",
             message_visible_sql(2)
         ))
         .bind(org)
         .bind(teams)
-        .bind(reader)
+        .bind(channel_id)
         .fetch_one(self.conn())
         .await?;
 
         let target = up_to.clamp(0, newest);
 
-        let landed: i64 = sqlx::query_scalar(
-            "INSERT INTO message_cursors (org_id, user_id, last_read_id) VALUES ($1,$2,$3) \
-             ON CONFLICT (org_id, user_id) DO UPDATE \
-               SET last_read_id = GREATEST(message_cursors.last_read_id, EXCLUDED.last_read_id), \
-                   updated_at = now() \
-             RETURNING last_read_id",
-        )
-        .bind(org)
-        .bind(reader)
-        .bind(target)
-        .fetch_one(self.conn())
-        .await?;
+        // One fixed statement per channel kind: an `ON CONFLICT` target must
+        // name the partial unique index's own predicate to infer it, and that
+        // cannot be a parameter.
+        let upsert = match channel {
+            ChannelRef::Repo(_) => {
+                "INSERT INTO message_cursors (org_id, user_id, repo_id, last_read_id) \
+                 VALUES ($1,$2,$3,$4) \
+                 ON CONFLICT (org_id, user_id, repo_id) WHERE repo_id IS NOT NULL DO UPDATE \
+                   SET last_read_id = GREATEST(message_cursors.last_read_id, EXCLUDED.last_read_id), \
+                       updated_at = now() \
+                 RETURNING last_read_id"
+            }
+            ChannelRef::Team(_) => {
+                "INSERT INTO message_cursors (org_id, user_id, team_id, last_read_id) \
+                 VALUES ($1,$2,$3,$4) \
+                 ON CONFLICT (org_id, user_id, team_id) WHERE team_id IS NOT NULL DO UPDATE \
+                   SET last_read_id = GREATEST(message_cursors.last_read_id, EXCLUDED.last_read_id), \
+                       updated_at = now() \
+                 RETURNING last_read_id"
+            }
+        };
+        let landed: i64 = sqlx::query_scalar(upsert)
+            .bind(org)
+            .bind(reader)
+            .bind(channel_id)
+            .bind(target)
+            .fetch_one(self.conn())
+            .await?;
 
         Ok(landed)
     }
 
-    async fn message_readable(
-        &mut self,
-        id: i64,
-        reader: UserId,
-        scope: &TeamScope,
-    ) -> Result<bool> {
+    async fn message_readable(&mut self, id: i64, scope: &TeamScope) -> Result<bool> {
         let org = self.org();
         let teams = team_uuids(scope.restriction().as_ref());
         Ok(sqlx::query_scalar(&format!(
             "SELECT EXISTS (SELECT 1 FROM messages m WHERE m.org_id = $1 AND m.id = $2 \
-               AND (m.recipient_user_id IS NULL OR m.recipient_user_id = $3 \
-                    OR m.sender_user_id = $3) \
                AND {})",
-            message_visible_sql(4)
+            message_visible_sql(3)
         ))
         .bind(org)
         .bind(id)
-        .bind(reader)
         .bind(teams)
         .fetch_one(self.conn())
         .await?)
     }
 
-    async fn reply_parent(
-        &mut self,
-        parent: i64,
-        reader: UserId,
-        scope: &TeamScope,
-    ) -> Result<ReplyParent> {
+    async fn reply_parent(&mut self, parent: i64, scope: &TeamScope) -> Result<()> {
         let org = self.org();
         if !scope.is_all() {
             // In id order, so two transactions holding the same pair cannot
@@ -691,49 +685,40 @@ impl MessagesExt for Tx<'_> {
             .execute(self.conn())
             .await?;
         }
-        let found: Option<(UserId, Option<UserId>)> =
-            if self.message_readable(parent, reader, scope).await? {
-                sqlx::query_as(
-                    "SELECT sender_user_id, recipient_user_id FROM messages \
-                 WHERE org_id = $1 AND id = $2",
-                )
-                .bind(org)
-                .bind(parent)
-                .fetch_optional(self.conn())
-                .await?
-            } else {
-                None
-            };
-        let Some((sender, recipient)) = found else {
+        if !self.message_readable(parent, scope).await? {
             return Err(Error::Invalid(format!(
                 "in_reply_to {parent} is not a message you can read; pass the id of a \
                  message from your inbox, or omit in_reply_to to start a new thread"
             )));
-        };
-        Ok(ReplyParent { sender, recipient })
+        }
+        Ok(())
     }
 
-    async fn unread_count(&mut self, reader: UserId) -> Result<i64> {
-        self.unread_count_for(reader, &TeamScope::All).await
-    }
-
-    async fn unread_count_for(&mut self, reader: UserId, scope: &TeamScope) -> Result<i64> {
+    async fn unread_count_for(
+        &mut self,
+        reader: UserId,
+        channel: ChannelRef,
+        scope: &TeamScope,
+    ) -> Result<i64> {
         let org = self.org();
         let teams = team_uuids(scope.restriction().as_ref());
+        let (in_channel, channel_id) = channel_sql(channel, 4);
         let n: i64 = sqlx::query_scalar(&format!(
             "SELECT COUNT(*) FROM messages m \
              WHERE m.org_id = $1 \
-               AND (m.recipient_user_id IS NULL OR m.recipient_user_id = $2) \
+               AND {in_channel} \
                AND m.sender_user_id <> $2 \
                AND m.id > COALESCE( \
                  (SELECT last_read_id FROM message_cursors \
-                  WHERE org_id = $1 AND user_id = $2), 0) \
+                  WHERE org_id = $1 AND user_id = $2 AND {}), 0) \
                AND {}",
+            cursor_channel_sql(channel, 4),
             message_visible_sql(3)
         ))
         .bind(org)
         .bind(reader)
         .bind(teams)
+        .bind(channel_id)
         .fetch_one(self.conn())
         .await?;
         Ok(n)

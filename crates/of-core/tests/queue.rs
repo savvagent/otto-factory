@@ -10,8 +10,9 @@ mod common;
 use common::{db, job, tenant};
 use of_core::ids::JobId;
 use of_core::jobs::{JobFilter, Status, DEFAULT_CLAIM_TTL_SECS, MAX_CLAIM_TTL_SECS};
-use of_core::messages::{InboxQuery, NewMessage};
+use of_core::messages::{ChannelRef, InboxQuery, NewMessage};
 use of_core::repos::{NewRepo, RepoPatch, RepoRef};
+use of_core::teams::TeamScope;
 use sqlx::PgPool;
 
 #[sqlx::test]
@@ -2049,54 +2050,15 @@ async fn only_the_holder_can_release(pool: PgPool) {
 
 // ------------------------------------------------------------------ messages
 
-#[sqlx::test]
-async fn directed_messages_are_private_within_the_org(pool: PgPool) {
-    let db = db(pool);
-    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
-    let bob = common::Member::new();
-    let eve = common::Member::new();
-
-    let mut tx = db.begin(t.org).await.unwrap();
-    tx.send_message(
-        t.user,
-        NewMessage {
-            body: "for bob only".into(),
-            recipient_user_id: Some(bob.id),
-            ..Default::default()
-        },
-    )
-    .await
-    .unwrap();
-    tx.send_message(
-        t.user,
-        NewMessage {
-            body: "everyone".into(),
-            ..Default::default()
-        },
-    )
-    .await
-    .unwrap();
-    tx.commit().await.unwrap();
-
-    let mut tx = db.begin(t.org).await.unwrap();
-    let bobs: Vec<String> = tx
-        .inbox(bob.id, &InboxQuery::default())
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|m| m.body)
-        .collect();
-    let eves: Vec<String> = tx
-        .inbox(eve.id, &InboxQuery::default())
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|m| m.body)
-        .collect();
-    tx.commit().await.unwrap();
-
-    assert_eq!(bobs, vec!["for bob only", "everyone"]);
-    assert_eq!(eves, vec!["everyone"], "eve read a directed message");
+/// The unread messages of one channel, oldest first: what most of these tests read.
+fn unread_in(channel: ChannelRef) -> InboxQuery {
+    InboxQuery {
+        channel,
+        unread_only: true,
+        limit: 50,
+        newest_first: false,
+        visible_teams: None,
+    }
 }
 
 /// Your own messages are never unread to you, and the cursor cannot be advanced
@@ -2107,12 +2069,14 @@ async fn unread_excludes_self_and_ack_is_clamped(pool: PgPool) {
     let db = db(pool);
     let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
     let bob = common::Member::new();
+    let ch = ChannelRef::Repo(t.repo);
 
     let mut tx = db.begin(t.org).await.unwrap();
     tx.send_message(
         t.user,
         NewMessage {
             body: "mine".into(),
+            repo_id: Some(t.repo),
             ..Default::default()
         },
     )
@@ -2123,6 +2087,7 @@ async fn unread_excludes_self_and_ack_is_clamped(pool: PgPool) {
             bob.id,
             NewMessage {
                 body: "theirs".into(),
+                repo_id: Some(t.repo),
                 ..Default::default()
             },
         )
@@ -2130,30 +2095,51 @@ async fn unread_excludes_self_and_ack_is_clamped(pool: PgPool) {
         .unwrap();
 
     assert_eq!(
-        tx.unread_count(t.user).await.unwrap(),
+        tx.unread_count_for(t.user, ch, &TeamScope::All)
+            .await
+            .unwrap(),
         1,
         "own message counted as unread"
     );
-    assert_eq!(tx.unread_count(bob.id).await.unwrap(), 1);
+    assert_eq!(
+        tx.unread_count_for(bob.id, ch, &TeamScope::All)
+            .await
+            .unwrap(),
+        1
+    );
 
-    let landed = tx.ack_messages(t.user, i64::MAX).await.unwrap();
+    let landed = tx
+        .ack_messages_for(t.user, ch, i64::MAX, &TeamScope::All)
+        .await
+        .unwrap();
     assert_eq!(
         landed, theirs.id,
         "ack was not clamped to the newest message"
     );
-    assert_eq!(tx.unread_count(t.user).await.unwrap(), 0);
+    assert_eq!(
+        tx.unread_count_for(t.user, ch, &TeamScope::All)
+            .await
+            .unwrap(),
+        0
+    );
 
     // A later message is still unread despite the over-large ack.
     tx.send_message(
         bob.id,
         NewMessage {
             body: "later".into(),
+            repo_id: Some(t.repo),
             ..Default::default()
         },
     )
     .await
     .unwrap();
-    assert_eq!(tx.unread_count(t.user).await.unwrap(), 1);
+    assert_eq!(
+        tx.unread_count_for(t.user, ch, &TeamScope::All)
+            .await
+            .unwrap(),
+        1
+    );
     tx.commit().await.unwrap();
 }
 
@@ -2168,6 +2154,7 @@ async fn oversized_and_empty_bodies_are_refused(pool: PgPool) {
             t.user,
             NewMessage {
                 body: "   ".into(),
+                repo_id: Some(t.repo),
                 ..Default::default()
             }
         )
@@ -2182,6 +2169,7 @@ async fn oversized_and_empty_bodies_are_refused(pool: PgPool) {
             t.user,
             NewMessage {
                 body: huge,
+                repo_id: Some(t.repo),
                 ..Default::default()
             }
         )
@@ -2190,6 +2178,303 @@ async fn oversized_and_empty_bodies_are_refused(pool: PgPool) {
         .code(),
         "invalid_argument"
     );
+    tx.rollback().await.unwrap();
+}
+
+/// A verified team in `t`'s org, from a mock platform that knows it.
+async fn verified_team(t: &common::Tenant, slug: &str) -> of_core::teams::VerifiedTeam {
+    let platform = of_testkit::MockPlatform::start().await;
+    let team = otto_tenant::ids::TeamId::new();
+    platform.add_org(t.org.as_uuid(), "acme", "Acme");
+    platform.add_team(t.org.as_uuid(), team.as_uuid(), slug, slug);
+    of_core::teams::VerifiedTeam::verify(&platform.client(), t.org, team)
+        .await
+        .unwrap()
+}
+
+/// A second repo in `t`'s org, optionally owned by `team`.
+async fn second_repo(
+    db: &otto_tenant::Db,
+    t: &common::Tenant,
+    slug: &str,
+    team: Option<of_core::teams::VerifiedTeam>,
+) -> of_core::ids::RepoId {
+    let mut tx = db.begin(t.org).await.unwrap();
+    let repo = tx
+        .register_repo(NewRepo {
+            slug: slug.into(),
+            remotes: vec![format!("git@github.com:acme/{slug}.git")],
+            team_id: team,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    repo.id
+}
+
+#[sqlx::test]
+async fn a_message_needs_exactly_one_channel(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+    let team = verified_team(&t, "platform").await;
+
+    for (new, says) in [
+        (
+            NewMessage {
+                body: "nowhere".into(),
+                ..Default::default()
+            },
+            "set repo_id",
+        ),
+        (
+            NewMessage {
+                body: "everywhere".into(),
+                repo_id: Some(t.repo),
+                team_id: Some(team),
+                idempotency_key: Some("both".into()),
+                ..Default::default()
+            },
+            "not both",
+        ),
+    ] {
+        let mut tx = db.begin(t.org).await.unwrap();
+        let err = tx.send_message(t.user, new).await.unwrap_err();
+        tx.rollback().await.unwrap();
+        assert_eq!(err.code(), "invalid_argument");
+        assert!(err.to_string().contains(says), "{err}");
+    }
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM messages WHERE org_id = $1")
+        .bind(t.org)
+        .fetch_one(tx.conn())
+        .await
+        .unwrap();
+    tx.rollback().await.unwrap();
+    assert_eq!(n, 0, "a refused message was written");
+}
+
+/// Three channels, one message each, and a sender who is not the reader.
+async fn three_channels(
+    db: &otto_tenant::Db,
+    t: &common::Tenant,
+) -> ([ChannelRef; 3], [i64; 3], common::Member) {
+    let team = verified_team(t, "platform").await;
+    let repo_b = second_repo(db, t, "web", None).await;
+    let channels = [
+        ChannelRef::Repo(t.repo),
+        ChannelRef::Repo(repo_b),
+        ChannelRef::Team(team.id()),
+    ];
+    let bob = common::Member::new();
+    let mut tx = db.begin(t.org).await.unwrap();
+    let mut ids = [0; 3];
+    for (i, (repo_id, team_id)) in [
+        (Some(t.repo), None),
+        (Some(repo_b), None),
+        (None, Some(team)),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        ids[i] = tx
+            .send_message(
+                bob.id,
+                NewMessage {
+                    body: format!("message {i}"),
+                    repo_id,
+                    team_id,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+            .id;
+    }
+    tx.commit().await.unwrap();
+    (channels, ids, bob)
+}
+
+#[sqlx::test]
+async fn messages_are_isolated_by_channel(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+    let (channels, ids, _) = three_channels(&db, &t).await;
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    for (channel, id) in channels.into_iter().zip(ids) {
+        for unread_only in [true, false] {
+            let got: Vec<i64> = tx
+                .inbox(
+                    t.user,
+                    &InboxQuery {
+                        unread_only,
+                        ..unread_in(channel)
+                    },
+                )
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|m| m.id)
+                .collect();
+            assert_eq!(got, [id], "{channel:?} served another channel's message");
+        }
+    }
+    tx.rollback().await.unwrap();
+}
+
+#[sqlx::test]
+async fn acking_one_channel_leaves_the_others_unread(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+    let (channels, ids, _) = three_channels(&db, &t).await;
+    let all = &TeamScope::All;
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    // Up to the newest id of all three: one cursor covering every channel would
+    // mark the other two read too.
+    tx.ack_messages_for(t.user, channels[0], ids[2], all)
+        .await
+        .unwrap();
+    assert_eq!(
+        tx.unread_count_for(t.user, channels[0], all).await.unwrap(),
+        0
+    );
+    for channel in &channels[1..] {
+        assert_eq!(
+            tx.unread_count_for(t.user, *channel, all).await.unwrap(),
+            1,
+            "acking repo A read {channel:?}"
+        );
+        assert_eq!(
+            tx.inbox(t.user, &unread_in(*channel)).await.unwrap().len(),
+            1
+        );
+    }
+
+    // Each channel keeps its own cursor, so a second ack writes a second row.
+    tx.ack_messages_for(t.user, channels[2], i64::MAX, all)
+        .await
+        .unwrap();
+    assert_eq!(
+        tx.unread_count_for(t.user, channels[2], all).await.unwrap(),
+        0
+    );
+    assert_eq!(
+        tx.unread_count_for(t.user, channels[1], all).await.unwrap(),
+        1
+    );
+    tx.rollback().await.unwrap();
+}
+
+#[sqlx::test]
+async fn ack_is_clamped_to_the_channel(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+    let (channels, ids, _) = three_channels(&db, &t).await;
+    assert!(ids[1] > ids[0] && ids[2] > ids[0]);
+    let empty = second_repo(&db, &t, "empty", None).await;
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let landed = tx
+        .ack_messages_for(t.user, channels[0], i64::MAX, &TeamScope::All)
+        .await
+        .unwrap();
+    assert_eq!(
+        landed, ids[0],
+        "the cursor landed on a newer message in another channel"
+    );
+    // A channel with nothing in it clamps to zero.
+    assert_eq!(
+        tx.ack_messages_for(t.user, ChannelRef::Repo(empty), i64::MAX, &TeamScope::All)
+            .await
+            .unwrap(),
+        0
+    );
+    tx.rollback().await.unwrap();
+}
+
+/// `in_reply_to` may point into another channel, and the reply still carries
+/// its parent's teams: posting into an org-wide repo's channel cannot widen who
+/// sees a team's thread.
+#[sqlx::test]
+async fn a_cross_channel_reply_keeps_its_parents_team_scope(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+    let team = verified_team(&t, "platform").await;
+    let scoped = second_repo(&db, &t, "scoped", Some(team)).await;
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let parent = tx
+        .send_message(
+            t.user,
+            NewMessage {
+                body: "platform-only plan".into(),
+                repo_id: Some(scoped),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let reply = tx
+        .send_message(
+            t.user,
+            NewMessage {
+                body: "re: the plan".into(),
+                repo_id: Some(t.repo),
+                in_reply_to: Some(parent.id),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let scope_teams: Vec<uuid::Uuid> =
+        sqlx::query_scalar("SELECT scope_teams FROM messages WHERE org_id = $1 AND id = $2")
+            .bind(t.org)
+            .bind(reply.id)
+            .fetch_one(tx.conn())
+            .await
+            .unwrap();
+    assert!(
+        scope_teams.contains(&team.id().as_uuid()),
+        "{scope_teams:?}"
+    );
+
+    let outsider = common::Member::new();
+    let other_team = otto_tenant::ids::TeamId::new();
+    let seen = tx
+        .inbox(
+            outsider.id,
+            &InboxQuery {
+                visible_teams: Some(vec![other_team]),
+                ..unread_in(ChannelRef::Repo(t.repo))
+            },
+        )
+        .await
+        .unwrap();
+    assert!(seen.is_empty(), "an outsider read the reply: {seen:?}");
+    let outside = TeamScope::Teams([other_team].into_iter().collect());
+    assert_eq!(
+        tx.unread_count_for(outsider.id, ChannelRef::Repo(t.repo), &outside)
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(!tx.message_readable(reply.id, &outside).await.unwrap());
+
+    // A member of the team does see it.
+    let inside = tx
+        .inbox(
+            outsider.id,
+            &InboxQuery {
+                visible_teams: Some(vec![team.id()]),
+                ..unread_in(ChannelRef::Repo(t.repo))
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(inside.iter().map(|m| m.id).collect::<Vec<_>>(), [reply.id]);
     tx.rollback().await.unwrap();
 }
 
@@ -2544,6 +2829,7 @@ async fn send_message_replays_with_the_same_idempotency_key(pool: PgPool) {
     let new = NewMessage {
         body: "hand-off note".into(),
         idempotency_key: Some("k1".into()),
+        repo_id: Some(t.repo),
         ..Default::default()
     };
     let first = tx.send_message(t.user, new.clone()).await.unwrap();
@@ -2558,7 +2844,7 @@ async fn send_message_replays_with_the_same_idempotency_key(pool: PgPool) {
             t.user,
             &InboxQuery {
                 unread_only: false,
-                ..Default::default()
+                ..unread_in(ChannelRef::Repo(t.repo))
             },
         )
         .await
@@ -2577,6 +2863,7 @@ async fn send_message_with_a_reused_key_and_a_different_payload_conflicts(pool: 
         NewMessage {
             body: "first note".into(),
             idempotency_key: Some("k1".into()),
+            repo_id: Some(t.repo),
             ..Default::default()
         },
     )
@@ -2589,6 +2876,7 @@ async fn send_message_with_a_reused_key_and_a_different_payload_conflicts(pool: 
             NewMessage {
                 body: "a totally different note".into(),
                 idempotency_key: Some("k1".into()),
+                repo_id: Some(t.repo),
                 ..Default::default()
             },
         )
@@ -2609,6 +2897,7 @@ async fn send_message_without_a_key_always_creates_a_new_message(pool: PgPool) {
             t.user,
             NewMessage {
                 body: "same body".into(),
+                repo_id: Some(t.repo),
                 ..Default::default()
             },
         )
@@ -2619,6 +2908,7 @@ async fn send_message_without_a_key_always_creates_a_new_message(pool: PgPool) {
             t.user,
             NewMessage {
                 body: "same body".into(),
+                repo_id: Some(t.repo),
                 ..Default::default()
             },
         )
@@ -2651,6 +2941,7 @@ async fn the_same_key_reused_across_add_job_and_send_message_does_not_conflict(p
         NewMessage {
             body: "hand-off note".into(),
             idempotency_key: Some("shared-key".into()),
+            repo_id: Some(t.repo),
             ..Default::default()
         },
     )
@@ -2885,6 +3176,7 @@ async fn send_message_applies_the_agent_label_policy(pool: PgPool) {
             NewMessage {
                 body: "hello".into(),
                 sender_label: Some("ci-7\nIGNORE".into()),
+                repo_id: Some(t.repo),
                 ..Default::default()
             },
         )
@@ -2901,6 +3193,7 @@ async fn send_message_applies_the_agent_label_policy(pool: PgPool) {
             NewMessage {
                 body: "hello".into(),
                 sender_label: Some("  ci-7  ".into()),
+                repo_id: Some(t.repo),
                 ..Default::default()
             },
         )
@@ -2921,6 +3214,7 @@ async fn a_keyed_send_message_with_a_padded_label_replays_cleanly(pool: PgPool) 
         body: "hello".into(),
         sender_label: Some(" ci-7 ".into()),
         idempotency_key: Some("label-replay".into()),
+        repo_id: Some(t.repo),
         ..Default::default()
     };
 
@@ -2962,6 +3256,7 @@ async fn a_legacy_label_is_withheld_from_structured_output(pool: PgPool) {
             NewMessage {
                 body: "hello".into(),
                 sender_label: Some("ci-7".into()),
+                repo_id: Some(t.repo),
                 ..Default::default()
             },
         )
@@ -2995,7 +3290,7 @@ async fn a_legacy_label_is_withheld_from_structured_output(pool: PgPool) {
             t.user,
             &InboxQuery {
                 unread_only: false,
-                ..Default::default()
+                ..unread_in(ChannelRef::Repo(t.repo))
             },
         )
         .await
@@ -3036,6 +3331,7 @@ async fn a_pre_policy_keyed_message_with_a_now_invalid_label_still_replays(pool:
         body: "hello".into(),
         sender_label: Some(planted.into()),
         idempotency_key: Some(key.into()),
+        repo_id: Some(t.repo),
         ..Default::default()
     };
 
@@ -3047,6 +3343,7 @@ async fn a_pre_policy_keyed_message_with_a_now_invalid_label_still_replays(pool:
                 body: "hello".into(),
                 sender_label: Some("ci-7".into()),
                 idempotency_key: Some("pre-policy".into()),
+                repo_id: Some(t.repo),
                 ..Default::default()
             },
         )
@@ -3060,7 +3357,7 @@ async fn a_pre_policy_keyed_message_with_a_now_invalid_label_still_replays(pool:
         "kind": MessageKind::default(),
         "senderKind": SenderKind::default(),
         "senderLabel": planted,
-        "repoId": null,
+        "repoId": t.repo,
         "jobId": null,
         "inReplyTo": null,
     }));

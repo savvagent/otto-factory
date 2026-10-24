@@ -8,10 +8,10 @@ mod common;
 use common::{db, job, tenant, Member};
 use of_core::jobs::{JobsExt, Status};
 use of_core::leases::LeasesExt;
-use of_core::messages::{MessagesExt, NewMessage};
+use of_core::messages::{ChannelRef, MessagesExt, NewMessage};
 use of_core::platform_events::{apply, begin_live, revoked, Outcome};
 use of_core::repos::{NewRepo, RepoPatch, ReposExt};
-use of_core::teams::VerifiedTeam;
+use of_core::teams::{TeamScope, VerifiedTeam};
 use of_core::trackers::{upsert_binding, upsert_connection, Provider};
 use of_testkit::MockPlatform;
 use otto_resource::webhook::{self, WebhookEvent};
@@ -50,13 +50,16 @@ async fn populate(db: &otto_tenant::Db, t: &common::Tenant) {
         t.user,
         NewMessage {
             body: "hello".into(),
+            repo_id: Some(t.repo),
             job_id: Some(j1.id.clone()),
             ..Default::default()
         },
     )
     .await
     .unwrap();
-    tx.ack_messages(t.user, 1).await.unwrap();
+    tx.ack_messages_for(t.user, ChannelRef::Repo(t.repo), 1, &TeamScope::All)
+        .await
+        .unwrap();
     let conn = upsert_connection(
         &mut tx,
         Provider::Github,
@@ -596,12 +599,15 @@ async fn member_removed_releases_what_they_held(pool: PgPool) {
         bob,
         NewMessage {
             body: "bob was here".into(),
+            repo_id: Some(a.repo),
             ..Default::default()
         },
     )
     .await
     .unwrap();
-    tx.ack_messages(bob, 1).await.unwrap();
+    tx.ack_messages_for(bob, ChannelRef::Repo(a.repo), 1, &TeamScope::All)
+        .await
+        .unwrap();
     tx.commit().await.unwrap();
 
     let ev = event(
@@ -621,7 +627,16 @@ async fn member_removed_releases_what_they_held(pool: PgPool) {
     let done = tx.get_job(&done.id).await.unwrap();
     let leases = tx.list_leases(None).await.unwrap();
     let messages = tx
-        .inbox(a.user, &of_core::messages::InboxQuery::default())
+        .inbox(
+            a.user,
+            &of_core::messages::InboxQuery {
+                channel: ChannelRef::Repo(a.repo),
+                unread_only: true,
+                limit: 50,
+                newest_first: false,
+                visible_teams: None,
+            },
+        )
         .await
         .unwrap();
     tx.commit().await.unwrap();
@@ -647,6 +662,62 @@ async fn member_removed_releases_what_they_held(pool: PgPool) {
     assert_eq!(messages.len(), 1, "what bob wrote is history and stays");
 
     assert_eq!(apply(&db, &ev).await.unwrap(), Outcome::Duplicate);
+}
+
+/// A member has one cursor per channel they have read; removal drops them all,
+/// and only in the org they left.
+#[sqlx::test]
+async fn member_removed_drops_every_channel_cursor(pool: PgPool) {
+    let platform = MockPlatform::start().await;
+    let db = db(pool);
+    let a = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+    let b = tenant(&db, "globex", "git@github.com:globex/api.git").await;
+    let (ours, theirs) = teams_in_two_orgs(&platform, &a, &b).await;
+    let bob = Member::new().id;
+
+    // The same person in both orgs, reading a repo channel and a team channel
+    // in each.
+    for (t, team) in [(&a, ours), (&b, theirs)] {
+        let mut tx = db.begin(t.org).await.unwrap();
+        for (repo_id, team_id) in [(Some(t.repo), None), (None, Some(team))] {
+            tx.send_message(
+                t.user,
+                NewMessage {
+                    body: "read me".into(),
+                    repo_id,
+                    team_id,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        }
+        for channel in [ChannelRef::Repo(t.repo), ChannelRef::Team(team.id())] {
+            assert!(
+                tx.ack_messages_for(bob, channel, i64::MAX, &TeamScope::All)
+                    .await
+                    .unwrap()
+                    > 0
+            );
+        }
+        tx.commit().await.unwrap();
+    }
+    assert_eq!(count(&db, a.org, "message_cursors").await, 2);
+
+    let ev = event(
+        "member.removed",
+        serde_json::json!({ "org_id": a.org.as_uuid(), "user_id": bob.as_uuid() }),
+    );
+    let Outcome::Applied { detail } = apply(&db, &ev).await.unwrap() else {
+        panic!("expected the event to apply");
+    };
+    assert_eq!(detail["cursors_dropped"], 2);
+    assert_eq!(count(&db, a.org, "message_cursors").await, 0);
+    assert_eq!(
+        count(&db, b.org, "message_cursors").await,
+        2,
+        "removal in one org dropped cursors in another"
+    );
 }
 
 #[sqlx::test]

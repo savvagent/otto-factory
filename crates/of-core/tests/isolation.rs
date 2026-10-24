@@ -21,8 +21,9 @@ mod common;
 use common::{db, job, tenant};
 use of_core::ids::JobId;
 use of_core::jobs::JobFilter;
-use of_core::messages::{InboxQuery, NewMessage};
+use of_core::messages::{ChannelRef, InboxQuery, NewMessage};
 use of_core::repos::{RepoPatch, RepoRef};
+use of_core::teams::TeamScope;
 use of_core::trackers::{resolve_binding, upsert_binding, upsert_connection, Provider};
 use otto_tenant::ids::OrgId;
 use sqlx::PgPool;
@@ -252,6 +253,7 @@ async fn message_idempotency_keys_do_not_cross_org_boundaries(pool: PgPool) {
     let a_new = NewMessage {
         body: "acme note".into(),
         idempotency_key: Some("shared-key".into()),
+        repo_id: Some(a.repo),
         ..Default::default()
     };
     let mut tx = db.begin(a.org).await.unwrap();
@@ -261,6 +263,7 @@ async fn message_idempotency_keys_do_not_cross_org_boundaries(pool: PgPool) {
     let b_new = NewMessage {
         body: "globex note".into(),
         idempotency_key: Some("shared-key".into()),
+        repo_id: Some(b.repo),
         ..Default::default()
     };
     let mut tx = db.begin(b.org).await.unwrap();
@@ -438,6 +441,7 @@ async fn messages_are_invisible_across_orgs(pool: PgPool) {
         a.user,
         NewMessage {
             body: "internal acme plan".into(),
+            repo_id: Some(a.repo),
             ..Default::default()
         },
     )
@@ -445,13 +449,26 @@ async fn messages_are_invisible_across_orgs(pool: PgPool) {
     .unwrap();
     tx.commit().await.unwrap();
 
+    // Org B reads its own repo's channel, and then org A's repo's channel by
+    // id, as if it had learned it: only the org predicate stands in the way.
     let mut tx = db.begin(b.org).await.unwrap();
-    let seen = tx.inbox(b.user, &InboxQuery::default()).await.unwrap();
-    let n = tx.unread_count(b.user).await.unwrap();
+    for channel in [ChannelRef::Repo(b.repo), ChannelRef::Repo(a.repo)] {
+        let q = InboxQuery {
+            channel,
+            unread_only: false,
+            limit: 50,
+            newest_first: false,
+            visible_teams: None,
+        };
+        let seen = tx.inbox(b.user, &q).await.unwrap();
+        let n = tx
+            .unread_count_for(b.user, channel, &TeamScope::All)
+            .await
+            .unwrap();
+        assert!(seen.is_empty(), "org B read org A's messages: {seen:?}");
+        assert_eq!(n, 0);
+    }
     tx.commit().await.unwrap();
-
-    assert!(seen.is_empty(), "org B read org A's messages: {seen:?}");
-    assert_eq!(n, 0);
 }
 
 #[sqlx::test]
@@ -1176,9 +1193,7 @@ async fn audit_rows_cannot_be_erased_from_a_request(pool: PgPool) {
 /// the explicit `org_id` predicate (or RLS) stands in the way.
 #[sqlx::test]
 async fn team_scoped_helpers_do_not_cross_orgs(pool: PgPool) {
-    use of_core::messages::ReplyParent;
     use of_core::repos::Hold;
-    use of_core::teams::TeamScope;
     use otto_tenant::ids::TeamId;
 
     let db = db(pool);
@@ -1267,15 +1282,23 @@ async fn team_scoped_helpers_do_not_cross_orgs(pool: PgPool) {
 
         assert_eq!(tx.lease_repo_id(b_lease.id).await.unwrap(), None);
 
-        assert!(!tx.message_readable(b_msg.id, a.user, &scope).await.unwrap());
-        let parent: Result<ReplyParent, _> = tx.reply_parent(b_msg.id, a.user, &scope).await;
+        assert!(!tx.message_readable(b_msg.id, &scope).await.unwrap());
+        let parent = tx.reply_parent(b_msg.id, &scope).await;
         assert!(matches!(parent, Err(of_core::Error::Invalid(_))));
-        assert_eq!(tx.unread_count_for(a.user, &scope).await.unwrap(), 0);
-        assert_eq!(
-            tx.ack_messages_for(a.user, i64::MAX, &scope).await.unwrap(),
-            0,
-            "the cursor landed on org B's message"
-        );
+        // Org A's own channel, and org B's repo's channel handed over by id.
+        for channel in [ChannelRef::Repo(a.repo), ChannelRef::Repo(b.repo)] {
+            assert_eq!(
+                tx.unread_count_for(a.user, channel, &scope).await.unwrap(),
+                0
+            );
+            assert_eq!(
+                tx.ack_messages_for(a.user, channel, i64::MAX, &scope)
+                    .await
+                    .unwrap(),
+                0,
+                "the cursor landed on org B's message"
+            );
+        }
         assert_eq!(
             tx.stats_for_teams(None, &[team]).await.unwrap().total,
             0,
