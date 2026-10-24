@@ -631,8 +631,8 @@ impl MessagesExt for Tx<'_> {
             .await?;
             if !readable {
                 return Err(Error::Invalid(format!(
-                    "message {up_to} is not one you can read in this channel; pass the \
-                     highest id inbox returned for this same channel (or 0)"
+                    "message {up_to} is not one you can read in this channel; read inbox \
+                     for this same channel again and ack the highest id it returns (or 0)"
                 )));
             }
         }

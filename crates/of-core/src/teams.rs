@@ -32,17 +32,17 @@ use otto_tenant::ids::{OrgId, TeamId, UserId};
 pub const TEAM_SLUG_MAX: usize = 128;
 
 /// Whether `slug` (already trimmed) could name a team at all. The slug goes
-/// into a URL path at the platform, so a separator, a dot segment, or a
-/// control character must never be sent, whatever the platform would make of
-/// it.
+/// into a URL path at the platform, so a separator, a dot segment, URL syntax
+/// (`%`, `?`, `#`), or a control character is refused here rather than left to
+/// the client's percent-encoding, whatever the platform would make of it.
 fn team_slug_shape_ok(slug: &str) -> bool {
     !slug.is_empty()
         && slug.len() <= TEAM_SLUG_MAX
         && slug != "."
         && slug != ".."
-        && !slug
-            .chars()
-            .any(|c| c == '/' || c.is_whitespace() || c.is_control())
+        && !slug.chars().any(|c| {
+            matches!(c, '/' | '\\' | '%' | '?' | '#') || c.is_whitespace() || c.is_control()
+        })
 }
 
 /// A team id the platform confirmed exists in a particular org.

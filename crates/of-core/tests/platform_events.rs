@@ -854,6 +854,27 @@ async fn by_slug_refuses_an_unknown_slug() {
     );
 }
 
+/// A slug that could not name a team is refused before any request: with the
+/// platform down, a request would have come back as `Error::Platform`.
+#[tokio::test]
+async fn by_slug_refuses_a_malformed_slug_without_asking_the_platform() {
+    let platform = MockPlatform::start().await;
+    let org = OrgId::new();
+    platform.add_org(org.as_uuid(), "acme", "Acme");
+    platform.set_down(true);
+
+    let long = "a".repeat(of_core::teams::TEAM_SLUG_MAX + 1);
+    for slug in [
+        "", "  ", ".", "..", "a/b", "a\\b", "a%2Fb", "a?b", "a#b", "a b", "a\tb", &long,
+    ] {
+        let res = VerifiedTeam::by_slug(&platform.client(), org, slug).await;
+        assert!(
+            matches!(res, Err(of_core::Error::TeamNotFound { .. })),
+            "{slug:?}: {res:?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn by_slug_on_an_unreachable_platform_is_a_platform_error() {
     let platform = MockPlatform::start().await;

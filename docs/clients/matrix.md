@@ -211,7 +211,9 @@ MCP transport layer's own identity was leaked instead of the server's
 read or write that one channel. `send_message` no longer accepts `to`; the message args refuse
 unknown fields, so a client still sending it gets a JSON-RPC `invalid_params` error (from
 argument parsing) instead of a post. A missing or doubled channel, by contrast, is a tool error
-whose `code` is `invalid_argument`.
+whose `code` is `invalid_argument`. `ack_messages`' `upTo` must now be 0 or a message the caller
+can read in that channel: a large number meaning "mark everything read" is `invalid_argument`
+rather than clamped, because ids are global and cursors are per channel.
 The `send_message` call in the Copilot CLI run above predates this and was not re-run
 (`docs/specs/2026-10-24-message-channels-design.md`, savvagent/otto-factory#177).
 
