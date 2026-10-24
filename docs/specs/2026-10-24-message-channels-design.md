@@ -157,6 +157,16 @@ That would publish private messages. So the migration deletes every row with
 (`reply_recipient` forced it), so whole private threads go together. Any other row pointing at
 one keeps working through `in_reply_to ... ON DELETE SET NULL`.
 
+**Why legacy broadcasts lose their job link.** A `NOT VALID` CHECK skips the rows already
+there, but it still binds every later `UPDATE` of them. Today's `send_message` accepts `job`
+without `repo`, so production can hold unscoped broadcasts with a `job_id` and neither channel
+column. Deleting such a job after `0008` updates those rows twice: `delete_job`'s `scope_teams`
+widening and the FK's `ON DELETE SET NULL (job_id)`. Both would violate `messages_channel_ck`,
+so `delete_job` would fail. Those rows belong to no channel and are never served again, so the
+same per-org pass nulls their `job_id` before the constraint exists. After that nothing updates
+them: `delete_job` matches by `job_id`, no path deletes a repo, and replies to them are
+themselves legacy rows or carry a channel. A test deletes a job a legacy broadcast once named.
+
 The legacy global cursors are deleted in the same pass. Under per-channel reads they match
 nothing, and removing them lets the cursor `CHECK` be fully validated instead of `NOT VALID`.
 
@@ -180,6 +190,9 @@ BEGIN
     PERFORM set_config('app.org_id', o::text, true);
     DELETE FROM messages WHERE org_id = o AND recipient_user_id IS NOT NULL;
     DELETE FROM message_cursors WHERE org_id = o;
+    -- See "Why legacy broadcasts lose their job link" below.
+    UPDATE messages SET job_id = NULL
+      WHERE org_id = o AND repo_id IS NULL AND team_id IS NULL AND job_id IS NOT NULL;
   END LOOP;
   PERFORM set_config('app.org_id', '', true);
 END $$;
@@ -214,6 +227,16 @@ CREATE UNIQUE INDEX message_cursors_repo_idx
   ON message_cursors (org_id, user_id, repo_id) WHERE repo_id IS NOT NULL;
 CREATE UNIQUE INDEX message_cursors_team_idx
   ON message_cursors (org_id, user_id, team_id) WHERE team_id IS NOT NULL;
+
+-- The new id's sequence. The baseline's default privileges cover it only when the
+-- role that ran the baseline runs this migration too; say it explicitly, guarded the
+-- way the baseline guards every grant to otto_app.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'otto_app') THEN
+    GRANT USAGE, SELECT ON SEQUENCE message_cursors_id_seq TO otto_app;
+  END IF;
+END $$;
 ```
 
 The tenant policies themselves are untouched: column, constraint, and index changes are
@@ -224,9 +247,12 @@ in a migration).
 
 **`teams`.** Add `VerifiedTeam::by_slug(platform, org, slug) -> Result<VerifiedTeam>`, beside
 `verify`, failing closed the same way: the platform's "no such team" (or an answer for another
-org) is `Error::TeamNotFound`, and a failure to answer is `Error::Platform`. The message for
-`TeamNotFound` from a slug names the slug and says team slugs are managed in the otto platform
-console.
+org) is `Error::TeamNotFound`, and a failure to answer is `Error::Platform`. `TeamNotFound`
+has one `Display`, and today's says "omit the team to make the repo organization-wide", which
+is wrong for a message channel. It is reworded to be neutral (it serves repos, jobs, and
+channels) and to include "or you are not on it", because a hidden team gets this same error.
+Its code stays `team_not_found`. Both the unknown-slug and not-on-the-team answers are built
+from the slug the caller passed, so they are byte-identical.
 
 **`messages`.**
 
@@ -297,8 +323,9 @@ console.
 
 - `platform_events`: no change. `member.removed`'s `DELETE FROM message_cursors WHERE org_id
   = $1 AND user_id = $2` removes every channel cursor. `org.deleted` already lists both
-  tables. `team.deleted` leaves team-channel messages and cursors under the tombstoned id:
-  owners and admins can still read the channel, and nobody else matches it.
+  tables. `team.deleted` leaves team-channel messages and cursors under the tombstoned id. They
+  are kept but unreachable over MCP: a deleted team's slug no longer resolves through
+  `team_by_slug`, so even an owner gets `team_not_found`. Nobody else would match them anyway.
 - `jobs.rs`'s `delete_job` `scope_teams` widening: unchanged.
 - Console: unchanged.
 
@@ -356,7 +383,7 @@ signatures and stop compiling. Budget for repairing them.
   inherits its parent's `scope_teams`.
 - `of-core` migration test, after `crates/of-core/tests/meter_rename.rs`: seed two orgs with
   DMs (one carrying a `repo_id`), broadcasts, and legacy cursors; run `0008`; assert every DM
-  and legacy cursor is gone in **both** orgs and every non-DM row survives. Run it once with
+  and legacy cursor is gone in **both** orgs and every non-DM row survives, with a legacy broadcast's `job_id` nulled. Run it once with
   the migrating role subject to RLS (as a non-owner role, the way
   `rls_scopes_a_migration_style_update_with_no_org_context` does), so the temporary policies are
   proven to be what makes the loop find the orgs.
@@ -364,6 +391,8 @@ signatures and stop compiling. Budget for repairing them.
   `ack_messages` with `team`); a member not on the team gets `team_not_found`, byte-identical to
   an unknown slug; an admin not on the team can read it; `MockPlatform::set_down` during team
   resolution is a `503`; `to` is rejected; a legacy unscoped broadcast is never served.
+- `of-core`: after the migration, deleting a job that a legacy unscoped broadcast named
+  succeeds (the migration nulled that link; see §1).
 
 Gates: `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all`.
 
