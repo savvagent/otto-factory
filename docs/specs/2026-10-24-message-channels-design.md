@@ -1,0 +1,392 @@
+# Message channels design
+
+> **Status:** DRAFT — replace the org-wide broadcast and person-directed DMs with two required,
+> mutually exclusive message channels (repo or team) with per-channel read cursors. A **breaking**
+> change to the MCP surface (`feat(of-mcp)!:`). Closes savvagent/otto-factory#177.
+>
+> **Revised 2026-10-23** to match the code after the platform split and the migration squash
+> (`savvagent/otto-factory#192`). The 2026-09-11 draft was written against an earlier schema
+> with an in-database `teams` table and migrations numbered up to `0030`. What changed:
+> teams are the platform's (no `teams` table, no foreign keys to it, `VerifiedTeam`/`TeamScope`
+> instead of `resolve_team`); team visibility is now enforced and fails closed, including on
+> messages (`scope_teams`, `0004_message_scope.sql`); the ack clamp is visibility-aware; and
+> dropping `recipient_user_id` without deleting the DM rows would have leaked them (see §1).
+> The paired plan (`docs/plans/2026-10-24-message-channels.md`) was regenerated from this revision the same day.
+>
+> **Signed off 2026-10-23** by the org owner: deleting DMs, not seeding per-channel cursors,
+> refusing `to` as an unknown field, and keeping `"recipientUserId": null` in the idempotency
+> fingerprint (the open items in Risks below are accepted).
+
+## Brief
+
+Redesign otto-tower's messaging (`crates/of-core/src/messages.rs`, and `send_message` /
+`inbox` / `ack_messages` / `unread_count` in `crates/of-mcp/src/tools/coord.rs`). Today it is
+an org-wide broadcast plus person-directed private DMs (`to: <email>`). It becomes two scoped
+coordination channels:
+
+- A **repo channel**: coordination scoped to one repo, the anchor jobs and leases already use.
+- A **team channel**: a team's coordination across repos.
+
+Every new message targets exactly one of the two. There is no more unscoped broadcast and no
+more DM. Person-directed messaging is the one part of this feature that is chat-shaped rather
+than coordination-shaped, and otto-tower is not becoming a chat product (constraint 2,
+substrate not workflow).
+
+An "ask another agent for help" primitive was considered and set aside. The job queue
+(`add_job` + `claim_jobs` + `metadata`) plus these channels already covers it through a
+customer's own skill; a bespoke delegation primitive would make the server opinionated about
+how an agent orchestrates work, which constraints 2 and 3 put in the skill.
+
+## What exists today
+
+Facts this design builds on. All verified against `master` at `b98761d`.
+
+- **Schema** (`0001_baseline.sql`, `0004_message_scope.sql`): `messages` has
+  `recipient_user_id uuid` (NULL = broadcast), `team_id uuid` (opaque, no FK; the platform owns
+  teams), `repo_id uuid REFERENCES repos (id) ON DELETE SET NULL`, `job_id` (composite FK to
+  `jobs`, `ON DELETE SET NULL (job_id)`), `in_reply_to`, the idempotency pair, and
+  `scope_teams uuid[]`: every team the message was bound to when sent (its team, its repo's
+  team, its job's and that job's repo's team, and its thread's `scope_teams`), which never
+  changes. `message_cursors` is one row per `(org_id, user_id)`, a single global
+  `last_read_id`. Both tables are in the baseline's `tenant_tables`, so both have a
+  `<table>_tenant_isolation` policy and `FORCE ROW LEVEL SECURITY`.
+- **Visibility.** `message_visible_sql` restricts every read to messages whose `scope_teams`,
+  `team_id`, live repo team, and live job (and job-repo) team are all within the reader's
+  `TeamScope`. Owners and admins are `TeamScope::All`.
+- **MCP surface.** `send_message` takes `to` (email, resolved through the platform with
+  `member_by_email`, failing closed), `repo`/`remote` (optional, `maybe_repo_for_write`), `job`,
+  `in_reply_to`, `kind`, `agent`, `idempotencyKey`. It **never sets `team_id`**: no MCP tool
+  takes a team today. A reply to a DM is forced to stay between its two participants
+  (`ReplyParent::reply_recipient`). `inbox` and `unread_count` read the whole org's broadcasts
+  plus the caller's DMs, through the caller's `TeamScope`. `ack_messages_for` clamps the cursor
+  to the newest message the caller could read, so where the cursor lands reveals nothing
+  about hidden traffic.
+- **Lifecycle** (`of_core::platform_events`): `member.removed` deletes the user's
+  `message_cursors` rows; `org.deleted` deletes `messages` and `message_cursors` (children
+  before `repos`); `team.deleted` leaves `team_id` in place as a tombstone, so the team's rows
+  become visible to owners and admins only. No code path deletes a single repo.
+- **Console.** No console code calls a messaging route or tool (`web/src` has no hits; the
+  `messages` there are the Paraglide catalogs).
+
+## Decisions
+
+- **A team channel is readable and writable by that team's members, plus owners and admins.**
+  This replaces the 2026-09-11 draft's "any member may read any channel", which predates
+  enforced team visibility. It is the same rule repos, jobs, and messages already follow
+  (`TeamScope::allows`), so it adds no new authorization concept. A team the caller is not on
+  is reported exactly like a team that does not exist (`team_not_found`). That matches how a
+  hidden repo is `repo_unresolved`, so the tool cannot be used to list teams.
+- **A repo channel is readable by anyone who can see the repo** (`resolve_repo_visible`). Each
+  message is still filtered through `message_visible_sql`, so a message in a visible repo's
+  channel that names a job, or replies into a thread, bound to a team the reader is not on
+  stays hidden. That is today's rule, unchanged.
+- **Teams are named by slug** (`team`), resolved through `PlatformClient::team_by_slug` and
+  checked against the caller's org: the same lookup the console uses for `?team=`
+  (`of-web/src/routes/jobs.rs::resolve_team`). An unknown slug cannot list the valid ones,
+  because team slugs are the platform's. The error says so and points at the platform console,
+  as the console's does. A platform that cannot answer is `503 platform_unavailable`, never
+  "no team".
+- **Per-channel read cursors.** A single cursor cannot work with reading one channel at a
+  time: acking a repo channel up to id N would silently mark lower-numbered messages in every
+  other channel read. Each `(org, user, channel)` gets its own cursor.
+- **The DMs are deleted, not orphaned** (see §1 for why orphaning leaks). Unscoped historical
+  broadcasts are left in place. Under the new reads they belong to no channel, so they are never
+  served again, and the new `CHECK` is `NOT VALID` so their existence never fails a migration.
+- **`watch` stays org-wide.** It already wakes on any job, lease, or message change in the org
+  and carries no data. A channel filter would need `repo_id`/`team_id` in the `pg_notify`
+  payload and a filter in `Watcher::wait`, a separate design. The accepted timing signal that
+  CLAUDE.md records for `watch` is unchanged.
+- **`in_reply_to` may point into another channel.** It is a threading hint, not a
+  same-channel invariant. It cannot widen anything: a reply already inherits its parent's
+  `scope_teams`, so a cross-channel reply is visible only to readers who could also see the
+  parent. The parent must still be readable by the sender, with the same
+  "not a message you can read" error that cannot be used to probe ids.
+- **`job` stays optional on any message**, in either channel. A team-channel message about a
+  job carries `job_id` and no `repo_id`; its `scope_teams` still picks up the job's repo's team.
+
+## Goal & Success Criteria
+
+Turn the message channel from an org broadcast plus DMs into per-repo and per-team channels,
+matching how jobs and leases are scoped, so a fleet working across many repos sees only the
+coordination relevant to its work.
+
+1. `send_message` requires exactly one of `{repo, remote}` or `team`. Supplying neither, or
+   both a repo and a team, is `invalid` naming the two valid forms. `to` is no longer
+   accepted: it is removed from the schema, and the struct denies unknown fields so an old
+   caller sending `to` gets an error instead of a silent broadcast into a channel it did not
+   choose.
+2. `inbox`, `unread_count`, and `ack_messages` take the same selector, also required, and read
+   and acknowledge one channel. Reading or acking one channel never changes another channel's
+   unread state.
+3. A team channel of a team the caller is not on is `team_not_found` on all four tools,
+   indistinguishable from a slug that does not exist. A platform outage while resolving a team
+   is `503`.
+4. After the migration no DM row survives, in any org. No message is reachable through a
+   channel it was not posted to, and no historical unscoped broadcast is served.
+5. Tests demonstrate cross-channel isolation (repo A ↔ repo B ↔ team T), per-channel cursors,
+   team-channel visibility, and the migration's per-org scoping (below).
+6. Tool descriptions describe channels and pass `crates/of-mcp/tests/tools.rs`'s
+   self-description assertion. `every_tool_has_a_price` is unaffected (no tool is added or
+   removed).
+7. This removes a tool argument, so it is a breaking change to the MCP surface. The PR title is
+   `feat(of-mcp)!: …` with a `BREAKING CHANGE:` footer (CLAUDE.md, Releases & versioning).
+
+## Scope
+
+**In scope:** migration `0008_message_channels.sql`; `of-core::messages` and a slug
+constructor in `of-core::teams`; `of-mcp::tools::coord` and a channel resolver in
+`of-mcp::tools`; removal of `member_by_email`, `ReplyParent::reply_recipient`, and the
+`not_a_member` error; tests in `of-core` and `of-mcp`.
+
+**Non-goals:** an agent-delegation protocol; console UI; a channel-aware `watch`; a "read
+every channel I'm in" digest (that is the firehose this removes); seeding per-channel cursors
+from the old global cursor (see Risks); deleting unscoped historical broadcasts.
+
+## Architecture
+
+### §1 Migration `0008_message_channels.sql`
+
+`0007_trigger_label_default_otto_tower.sql` is the current head. Confirm at implementation
+time.
+
+**Why the DMs must be deleted, not orphaned.** A DM could carry a `repo_id`: `send_message`
+accepted `to` and `repo` together. Dropping `recipient_user_id` and leaving the row would turn
+it into an ordinary message in that repo's channel, readable by everyone who can see the repo.
+That would publish private messages. So the migration deletes every row with
+`recipient_user_id IS NOT NULL` first. Replies to DMs are themselves DMs
+(`reply_recipient` forced it), so whole private threads go together. Any other row pointing at
+one keeps working through `in_reply_to ... ON DELETE SET NULL`.
+
+The legacy global cursors are deleted in the same pass. Under per-channel reads they match
+nothing, and removing them lets the cursor `CHECK` be fully validated instead of `NOT VALID`.
+
+Both deletes rewrite tenant-table data, so they follow CLAUDE.md's one pattern safe under every
+deployment shape: loop over orgs, and give every statement **both** an explicit `org_id`
+predicate **and** `set_config('app.org_id', …, true)`. Enumerating the orgs is the one read
+that cannot be pinned. Where RLS applies to the migrating role, the tenant policies hide every
+row from it, and the loop would silently do nothing. So, exactly as `0004_message_scope.sql`
+does, a read-only `current_org() IS NULL` policy is created on each table for the length of the
+migration and dropped at the end, in the migration's own transaction.
+
+```sql
+CREATE POLICY messages_channels_0008 ON messages FOR SELECT USING (current_org() IS NULL);
+CREATE POLICY message_cursors_channels_0008 ON message_cursors FOR SELECT USING (current_org() IS NULL);
+
+DO $$
+DECLARE
+  o uuid;
+BEGIN
+  FOR o IN SELECT org_id FROM messages UNION SELECT org_id FROM message_cursors LOOP
+    PERFORM set_config('app.org_id', o::text, true);
+    DELETE FROM messages WHERE org_id = o AND recipient_user_id IS NOT NULL;
+    DELETE FROM message_cursors WHERE org_id = o;
+  END LOOP;
+  PERFORM set_config('app.org_id', '', true);
+END $$;
+
+DROP POLICY messages_channels_0008 ON messages;
+DROP POLICY message_cursors_channels_0008 ON message_cursors;
+
+-- Messages are no longer addressed to a person. messages_recipient_idx goes with the column.
+ALTER TABLE messages DROP COLUMN recipient_user_id;
+
+-- Exactly one channel, for every row written from here on. NOT VALID because historical
+-- unscoped broadcasts remain; they belong to no channel and are never served.
+ALTER TABLE messages
+  ADD CONSTRAINT messages_channel_ck
+  CHECK ((repo_id IS NOT NULL) <> (team_id IS NOT NULL)) NOT VALID;
+
+CREATE INDEX messages_repo_channel_idx ON messages (org_id, repo_id, id) WHERE repo_id IS NOT NULL;
+CREATE INDEX messages_team_channel_idx ON messages (org_id, team_id, id) WHERE team_id IS NOT NULL;
+
+-- One cursor per member per channel. team_id is opaque (teams are the platform's; no FK).
+-- A synthetic key because a primary key cannot include a nullable column; the two partial
+-- unique indexes express "one per channel".
+ALTER TABLE message_cursors
+  DROP CONSTRAINT message_cursors_pkey,
+  ADD COLUMN id bigserial PRIMARY KEY,
+  ADD COLUMN repo_id uuid REFERENCES repos (id) ON DELETE CASCADE,
+  ADD COLUMN team_id uuid,
+  ADD CONSTRAINT message_cursors_channel_ck
+    CHECK ((repo_id IS NOT NULL) <> (team_id IS NOT NULL));
+
+CREATE UNIQUE INDEX message_cursors_repo_idx
+  ON message_cursors (org_id, user_id, repo_id) WHERE repo_id IS NOT NULL;
+CREATE UNIQUE INDEX message_cursors_team_idx
+  ON message_cursors (org_id, user_id, team_id) WHERE team_id IS NOT NULL;
+```
+
+The tenant policies themselves are untouched: column, constraint, and index changes are
+schema-only. `TRUNCATE` and `COPY` are not used (CLAUDE.md forbids both against tenant tables
+in a migration).
+
+### §2 `of-core`
+
+**`teams`.** Add `VerifiedTeam::by_slug(platform, org, slug) -> Result<VerifiedTeam>`, beside
+`verify`, failing closed the same way: the platform's "no such team" (or an answer for another
+org) is `Error::TeamNotFound`, and a failure to answer is `Error::Platform`. The message for
+`TeamNotFound` from a slug names the slug and says team slugs are managed in the otto platform
+console.
+
+**`messages`.**
+
+- `ChannelRef` enum: `Repo(RepoId)` | `Team(TeamId)`. The one channel parameter for every read.
+- `Message` and `NewMessage` lose `recipient_user_id`. `MSG_COLS`, both `INSERT`s, and
+  `message_idempotency_fingerprint` drop it too. `"teamId"` and `"repoId"` are already
+  fingerprinted, so a replay's identity becomes "same channel, same everything else" with
+  no other change. Keys stored before the migration can no longer replay with the same
+  fingerprint, because `"recipientUserId": null` was part of the hashed JSON. Either keep the
+  key in the JSON as a constant `null` so pre-migration keyed broadcasts still replay, or
+  accept that they conflict. **Decision: keep `"recipientUserId": null`**, for the same reason
+  `send_message` keeps hashing the label as sent (#163): a byte-for-byte retry must replay.
+- `Tx::send_message` checks exactly one of `repo_id` / `team_id` (`Error::Invalid`) beside
+  its existing body and key checks. That application check is what makes the `NOT VALID`
+  constraint safe to leave unvalidated: no new row can violate it. `find_replayed_message`
+  needs no channel check, because a fingerprint mismatch already covers it.
+- `InboxQuery` gains `channel: ChannelRef`. It loses `impl Default`, because no channel is a
+  sensible default; call sites name it.
+- `inbox`, `unread_count_for`, and `ack_messages_for` take a channel. The `recipient_user_id`
+  predicate becomes `m.repo_id = $n` or `m.team_id = $n`. Which column is chosen in Rust
+  (two fixed query shapes), never interpolated from input, for the same reason `inbox`
+  already picks its `ORDER BY` direction in Rust. Their cursor sub-select reads the channel's
+  row. `message_visible_sql` is applied unchanged on top.
+- `ack_messages_for` clamps to the newest message **in that channel** that the reader may
+  see, then upserts that channel's cursor (`ON CONFLICT (org_id, user_id, repo_id) WHERE
+  repo_id IS NOT NULL`, or the team equivalent). The 2026-09-11 draft clamped to the org-wide
+  `MAX(id)`. That is wrong now: landing on a hidden message's id reveals that it exists, which
+  is exactly what the current visibility-aware clamp prevents.
+- The `TeamScope::All` convenience wrappers (`ack_messages`, `unread_count`) either take the
+  channel too or are removed. They exist for tests, and the plan picks one.
+- `ReplyParent` and `reply_recipient` are deleted. `reply_parent` becomes a readability check
+  returning `()`. It keeps holding the parent's repos `FOR SHARE` for a restricted scope, and it
+  keeps its probe-proof error. `message_readable` loses its recipient predicate.
+
+### §3 `of-mcp`
+
+- **Channel resolution** (`tools/mod.rs`, beside `repo_of`): `channel_of(...)` takes
+  `repo`/`remote`/`team` and returns `ChannelRef`. Exactly one must be named (blank counts as
+  absent, as in `maybe_repo_of`). Otherwise the error is `invalid`, naming
+  `repo` / `remote` / `team` and what was received. A repo resolves through `repo_of`, or
+  `repo_for_write` with `Hold::Shared` on `send_message`. A team resolves through
+  `VerifiedTeam::by_slug`, **before the transaction opens**: platform calls stay outside
+  transactions, as `team_scope` does. Then `TeamScope::allows(Some(team))` must hold, or it is
+  the same `team_not_found`.
+- **Holding a team.** A repo is held during a write so an admin cannot move it between the
+  check and the insert. A team channel has no row here to hold, because membership is the
+  platform's. Removing a member from a team in that window lets one last message through. That
+  is the same 10 s `member_teams` cache window that already applies to every team-scoped read,
+  and it is accepted, not closed.
+- **`SendMessageArgs`**: remove `to`; add `team: Option<String>`; add
+  `#[serde(deny_unknown_fields)]` (criterion 1). `InboxArgs` and `AckMessagesArgs` gain
+  `repo` / `remote` / `team`. `unread_count` moves from `NoArgs` to an args struct with the same
+  three fields. All four take `deny_unknown_fields`, as the job tools' args already do.
+- **Deleted:** `Factory::member_by_email`, the `reply_recipient` helper in `coord.rs`, the
+  `not_a_member` error. `PlatformClient::member_by_email` stays in `otto-resource`; it is just
+  unused here.
+- **Descriptions:**
+  - `send_message`: "Post a note to one repo's or one team's shared channel. Pass `repo` (or
+    `remote`) for coordination about that repo, or `team` (a team slug) for a team's work
+    across repos — exactly one. …" The idempotency and `agent` sentences stay.
+  - `inbox`, `unread_count`, and `ack_messages` each say they work on one channel at a time,
+    named the same way, and that an unknown team or a team you are not on is
+    `team_not_found`.
+- No change to metering. All four tools stay free, and `charge` stays the first call after
+  `self.tx(...)`.
+
+### §4 Elsewhere
+
+- `platform_events`: no change. `member.removed`'s `DELETE FROM message_cursors WHERE org_id
+  = $1 AND user_id = $2` removes every channel cursor. `org.deleted` already lists both
+  tables. `team.deleted` leaves team-channel messages and cursors under the tombstoned id:
+  owners and admins can still read the channel, and nobody else matches it.
+- `jobs.rs`'s `delete_job` `scope_teams` widening: unchanged.
+- Console: unchanged.
+
+## Error handling
+
+| Case | Answer |
+|---|---|
+| Neither repo nor team named | `invalid`: "name a channel: `repo` (or `remote`) for a repo's channel, or `team` for a team's" |
+| Both named | `invalid`: "name one channel: a repo or a team, not both" |
+| Repo unresolvable or hidden | `repo_unresolved`, listing visible slugs (unchanged) |
+| Team slug unknown, foreign, deleted, or not one of the caller's | `team_not_found`, naming the slug, pointing at the platform console |
+| Platform cannot answer the team lookup or the scope lookup | `503 platform_unavailable`, `Retry-After` |
+| `to` sent by an old client | `invalid` (unknown field) |
+| `in_reply_to` not readable | unchanged: "not a message you can read…" |
+
+## Testing
+
+This is not additive: about 25 existing tests construct DMs or call the channel-less
+signatures and stop compiling. Budget for repairing them.
+
+**Delete** (they test DMs):
+
+- `of-core/tests/queue.rs`: `directed_messages_are_private_within_the_org`
+- `of-mcp/tests/tools.rs`: `a_message_cannot_be_addressed_to_someone_in_another_org`,
+  `a_direct_message_fails_closed_when_the_platform_cannot_answer`,
+  `a_reply_to_a_private_message_stays_private`
+
+**Rework**:
+
+- `of-mcp/tests/tools.rs`: `ack_does_not_land_on_someone_elses_private_message`. Keep the
+  property, rewritten as "ack does not land on a hidden message, nor on another channel's".
+
+**Update** (thread a channel through; keep the assertions):
+
+- `of-core/tests/queue.rs`: `unread_excludes_self_and_ack_is_clamped`, the four
+  `send_message_*` / `the_same_key_reused_across_add_job_and_send_message_does_not_conflict`
+  idempotency tests, `send_message_applies_the_agent_label_policy`,
+  `a_keyed_send_message_with_a_padded_label_replays_cleanly`,
+  `a_pre_policy_keyed_message_with_a_now_invalid_label_still_replays`
+- `of-core/tests/isolation.rs`: `message_idempotency_keys_do_not_cross_org_boundaries`,
+  `messages_are_invisible_across_orgs`
+- `of-core/tests/platform_events.rs`: `a_message_takes_a_team_from_its_own_org_only_keyed_or_not`
+- `of-mcp/tests/tools.rs`: `messages_reach_the_inbox_and_the_cursor_clears_them`, the two
+  `send_message_with_*idempotency_key*` tests, `messages_about_a_hidden_repo_or_job_are_not_delivered`,
+  `a_deleted_jobs_messages_keep_their_team_scope`, `deleting_a_job_scopes_messages_the_backfill_missed`,
+  `a_reply_is_scoped_to_its_thread_and_cannot_probe_hidden_ids`,
+  `a_reply_cannot_land_after_its_parents_repo_moves_out_of_sight`, and the tool-list and
+  description assertions
+
+**Add**:
+
+- `of-core`: `send_message` refuses neither or both channels; a message in repo A's channel is
+  absent from repo B's and from team T's, and vice versa; acking repo A leaves repo B's and
+  team T's unread counts unchanged; the ack clamp is per channel; a cross-channel reply
+  inherits its parent's `scope_teams`.
+- `of-core` migration test, after `crates/of-core/tests/meter_rename.rs`: seed two orgs with
+  DMs (one carrying a `repo_id`), broadcasts, and legacy cursors; run `0008`; assert every DM
+  and legacy cursor is gone in **both** orgs and every non-DM row survives. Run it once with
+  the migrating role subject to RLS (as a non-owner role, the way
+  `rls_scopes_a_migration_style_update_with_no_org_context` does), so the temporary policies are
+  proven to be what makes the loop find the orgs.
+- `of-mcp`: team channel end to end (`send_message` / `inbox` / `unread_count` /
+  `ack_messages` with `team`); a member not on the team gets `team_not_found`, byte-identical to
+  an unknown slug; an admin not on the team can read it; `MockPlatform::set_down` during team
+  resolution is a `503`; `to` is rejected; a legacy unscoped broadcast is never served.
+
+Gates: `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all`.
+
+## Risks & open questions
+
+- **Deleting DMs is one-way.** It is what the column drop would have done in effect, minus the
+  leak. Restoring them means a backup restore. Signed off 2026-10-23.
+- **First read of each channel shows old traffic as unread.** Legacy cursors are deleted rather
+  than translated, so every member starts each channel at cursor 0. `inbox` is capped at 50 by
+  default (200 max), so this is bounded and happens once. Seeding per-channel cursors from the
+  old global one is possible (`last_read_id` carried to each channel the member has messages
+  in) but adds a data migration for a one-time nuisance. Left out unless the owner wants it.
+- **`watch` remains org-wide**, extended to channel messages but not newly introduced.
+- **No digest view.** By design.
+- **A team-channel post can land in the `member_teams` cache window** after the sender leaves
+  the team (≤ 10 s). Same accepted gap as every team-scoped read.
+- **`messages_channel_ck` and `ON DELETE SET NULL (repo_id)`.** Deleting a repo with
+  repo-channel messages would null their only channel column and fail the constraint. That is
+  unreachable today: no path deletes a single repo, and `org.deleted` removes messages before
+  repos. Whoever adds repo deletion must delete or move the repo's channel messages first, not
+  rely on the cascade. (The cursor FK is `ON DELETE CASCADE` and has no such problem.)
+- **`deny_unknown_fields` on the four message args structs** follows the precedent of the job
+  tools' args (`tools/jobs.rs`). It matters most here: a dropped `to` must not silently become
+  a channel post. The error serde produces names the unknown field, but not why it went away.
+  If that is too terse for an LLM caller, the alternative is an explicit `to` field that always
+  errors with a migration hint, for one release.
