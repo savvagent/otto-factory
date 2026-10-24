@@ -353,7 +353,8 @@ from the slug the caller passed, so they are byte-identical.
 | Neither repo nor team named | `invalid`: "name a channel: `repo` (or `remote`) for a repo's channel, or `team` for a team's" |
 | Both named | `invalid`: "name one channel: a repo or a team, not both" |
 | Repo unresolvable or hidden | `repo_unresolved`, listing visible slugs (unchanged) |
-| Team slug unknown, foreign, deleted, or not one of the caller's | `team_not_found`, naming the slug, pointing at the platform console |
+| Team slug unknown, foreign, deleted, malformed, or not one of the caller's | `team_not_found` (`Error::TeamChannelNotFound`), naming the slug, pointing at the platform console and at a repo channel |
+| `ack_messages` `upTo` not 0 and not a message the caller can read in that channel | `invalid_argument`, the same for a nonexistent, hidden, or other-channel id |
 | Platform cannot answer the team lookup or the scope lookup | `503 platform_unavailable`, `Retry-After` |
 | `to` sent by an old client | `invalid` (unknown field) |
 | `in_reply_to` not readable | unchanged: "not a message you can read…" |
@@ -426,11 +427,15 @@ Gates: `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --a
 - **No digest view.** By design.
 - **A team-channel post can land in the `member_teams` cache window** after the sender leaves
   the team (≤ 10 s). Same accepted gap as every team-scoped read.
-- **`messages_channel_ck` and `ON DELETE SET NULL (repo_id)`.** Deleting a repo with
-  repo-channel messages would null their only channel column and fail the constraint. That is
-  unreachable today: no path deletes a single repo, and `org.deleted` removes messages before
-  repos. Whoever adds repo deletion must delete or move the repo's channel messages first, not
-  rely on the cascade. (The cursor FK is `ON DELETE CASCADE` and has no such problem.)
+- **Deleting a repo deletes its channel.** `messages.repo_id` becomes `ON DELETE CASCADE` in
+  `0008` (addendum, item 4), because `SET NULL` would null a repo-channel message's only
+  channel column and fail `messages_channel_ck`. No path deletes a single repo today; whoever
+  adds one gets the channel removed with it, as its cursors already are.
+- **Every team-channel call makes one uncached platform request.** `team_by_slug` has no cache
+  in `otto-resource` (unlike `member_teams`, 10 s), so each team-channel `send_message` /
+  `inbox` / `unread_count` / `ack_messages` costs a round trip and answers `503` during a
+  platform blip. Accepted for now and said in `unread_count`'s description; a short positive
+  slug cache belongs upstream in `otto-resource` if it shows up in practice.
 - **`message_cursors.repo_id` references `repos (id)`, not `(org_id, id)`**, like every other
   `repo_id` foreign key in the schema. A direct `of-core` caller writing a cursor in org A that
   names org B's repo succeeds or fails on whether that id exists anywhere. Repo ids are random
@@ -441,3 +446,35 @@ Gates: `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --a
   a channel post. The error serde produces names the unknown field, but not why it went away.
   If that is too terse for an LLM caller, the alternative is an explicit `to` field that always
   errors with a migration hint, for one release.
+
+## Addendum — review round 1 (PR #254), 2026-10-24
+
+The review trio and the PR toolkit reviewers found no critical issue. These changes were made in
+response; each supersedes the text above where they differ.
+
+1. **The migration locks both tables first** (`LOCK TABLE messages, message_cursors IN ACCESS
+   EXCLUSIVE MODE`). An old image inserting a DM with a `repo_id` between the delete and the
+   column drop, during a rolling deploy, would publish it. The temporary policies already took
+   that lock as a side effect; now it is explicit.
+2. **Rows that fail the new CHECK** (no channel, or both) keep their visibility before losing
+   their links: the job's team and the job's repo's team are folded into `scope_teams`, as
+   `delete_job` does, and only then are `job_id` and `in_reply_to` nulled (an `in_reply_to ON
+   DELETE SET NULL` update would also violate the CHECK).
+3. **A backstop refuses the column drop if any DM survived.** After the loop, with `app.org_id`
+   unset and the temporary policies still exposing every row, the migration raises an exception
+   if a row with `recipient_user_id` (or a legacy cursor) remains. A missed org becomes a failed
+   deploy instead of a privacy leak.
+4. **`messages.repo_id` is `ON DELETE CASCADE`** (see Risks).
+5. **Channel predicates are exclusive**: a repo channel is `m.repo_id = $n AND m.team_id IS
+   NULL`, a team channel `m.team_id = $n AND m.repo_id IS NULL`, so a legacy row with both is
+   served in neither, matching the CHECK.
+6. **`ack_messages` refuses an `upTo` outside its channel.** Ids are global and cursors are per
+   channel, so clamping another channel's id (or `i64::MAX`) silently marked the whole channel
+   read. `upTo` must be 0 or a message the caller can read in that channel; a nonexistent,
+   hidden, or other-channel id gets the same `invalid_argument`, so it cannot probe.
+7. **Team slugs are shape-checked** before they reach the platform URL (empty, over 128 bytes,
+   `.`/`..`, `/`, whitespace, or control characters are `team_not_found` without a request),
+   and a platform answer for another org is logged as an error while still refused.
+8. **`TeamChannelNotFound`** carries the channel wording ("or you are not on it … name a team
+   you are on, or use a repo's channel"), with the same `team_not_found` code. `TeamNotFound`
+   keeps its original text for the repo, job, and console paths, where membership is not checked.

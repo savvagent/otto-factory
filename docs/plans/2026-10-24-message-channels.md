@@ -15,7 +15,9 @@ implements it exactly. Closes savvagent/otto-factory#177.
 
 ## Status — 2026-10-24
 
-⬜ Not started.
+🚧 Tasks 1–5 implemented in PR #254, awaiting merge. Review-round changes are recorded in the
+spec's addendum (migration lock, backstop and repo cascade; exclusive channel predicates; acks
+refused outside their channel; team slug shape check; `TeamChannelNotFound`).
 
 ---
 
@@ -71,7 +73,7 @@ implements it exactly. Closes savvagent/otto-factory#177.
 
 ---
 
-## Task 1 — migration `0008_message_channels.sql` ⬜
+## Task 1 — migration `0008_message_channels.sql` 🚧
 
 - [ ] Create the file with the SQL from spec §1, verbatim apart from comments. Keep the
       comment explaining why DMs are deleted and not orphaned (a DM could carry `repo_id`), the
@@ -119,7 +121,7 @@ implements it exactly. Closes savvagent/otto-factory#177.
       is checked at Task 3's gate.
 - [ ] Commit: `feat(of-core): migrate messages to repo and team channels`.
 
-## Task 2 — `VerifiedTeam::by_slug` ⬜
+## Task 2 — `VerifiedTeam::by_slug` 🚧
 
 - [ ] `crates/of-core/src/teams.rs`: add
 
@@ -145,7 +147,7 @@ implements it exactly. Closes savvagent/otto-factory#177.
 - [ ] `cargo test -p of-core --test platform_events`, clippy, commit
       `feat(of-core): resolve a verified team by slug`.
 
-## Task 3 — `of-core::messages` ⬜
+## Task 3 — `of-core::messages` 🚧
 
 - [ ] Types:
   - `#[derive(Debug, Clone, Copy, PartialEq, Eq)] pub enum ChannelRef { Repo(RepoId), Team(TeamId) }`.
@@ -234,7 +236,7 @@ implements it exactly. Closes savvagent/otto-factory#177.
       `cargo test -p of-core`) to prove the migrations apply from empty. Commit
       `feat(of-core)!: scope messages to a repo or team channel`.
 
-## Task 4 — `of-mcp` ⬜
+## Task 4 — `of-mcp` 🚧
 
 - [ ] `crates/of-mcp/src/tools/mod.rs`:
   - `pub(crate) async fn team_channel(f: &Factory, caller: &Principal, scope: &TeamScope,
@@ -324,7 +326,7 @@ implements it exactly. Closes savvagent/otto-factory#177.
 - [ ] Commit `feat(of-mcp)!: scope message tools to a repo or team channel`, with a
       `BREAKING CHANGE:` footer.
 
-## Task 5 — `CLAUDE.md` ⬜
+## Task 5 — `CLAUDE.md` 🚧
 
 - [ ] In "Authentication": `member_by_email (message recipients)` becomes
       `team_by_slug (message team channels, via VerifiedTeam::by_slug)`. Keep the bullet's

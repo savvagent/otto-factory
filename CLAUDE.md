@@ -70,6 +70,8 @@ These decide scope disputes. When a change conflicts with one of them, the chang
 1. **Coordination is anchored on repos.** A repo is a first-class entity, not a config
    string. Jobs belong to repos (`repo_id` is `NOT NULL`); leases are repo-scoped; an
    unresolvable repo is an error naming the registered slugs, never a silent fallback.
+   (Messages go to a repo's channel or a team's; a team channel carries a team's coordination
+   across repos and is not a precedent for a job or lease without a repo.)
 2. **Substrate, not workflow.** otto-tower ships no opinion about how work is specified,
    planned, reviewed, or measured. If a capability could live either in the server or in a
    customer's own skill calling the server, **it belongs in the skill**. Jobs carry an
@@ -376,7 +378,9 @@ members, invites, teams, SSO, tokens, or usage. Those are the platform's, and
   `resolve_repo_visible` keeps its slug out of the "registered repos" list too. A job is
   visible only if its own team **and** its repo's team are (`job_visible_sql`, `get_job_visible`),
   messages follow the same rule through their team, repo, and job **and** through `scope_teams`,
-  the teams they were bound to when sent (thread included), which outlives a deleted job;
+  the teams they were bound to when sent (thread included), which outlives a deleted job (a
+  message goes to exactly one channel, a repo's or a team's; a team channel the caller is not
+  on is `team_not_found`, the same as an unknown slug, and owners and admins read every team's);
   lease ids of hidden repos are `lease_not_held`, and counts, dependency lists, returned leases, and
   errors are computed or redacted for what the caller may see — a redacted error keeps its
   original `code()` (`Error::Redacted`). A write checks visibility with the repo row **held**
