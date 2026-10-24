@@ -10,8 +10,9 @@
 //!
 //! [`VerifiedTeam`] is how that is enforced rather than remembered. `NewRepo`,
 //! `RepoPatch`, and `NewJob` take one instead of a bare [`TeamId`], and the only
-//! way to build one is [`VerifiedTeam::verify`], which asks the platform whether
-//! the team exists in the caller's org and **fails closed**:
+//! ways to build one are [`VerifiedTeam::verify`] (by id) and
+//! [`VerifiedTeam::by_slug`] (by slug), which ask the platform whether the team
+//! exists in the caller's org and **fail closed**:
 //!
 //! - the platform says the team is not in this org → [`Error::TeamNotFound`];
 //! - the platform cannot be reached, or answers with anything unexpected →

@@ -747,6 +747,9 @@ async fn by_slug_finds_a_team_in_its_org() {
     assert_eq!(verified.org(), org);
 }
 
+/// The platform scopes the lookup by org, so this proves that scoping holds
+/// end to end. `by_slug`'s own re-check of the answer's org is defense against a
+/// confused response, which the mock cannot produce (the same as for `verify`).
 #[tokio::test]
 async fn by_slug_refuses_another_orgs_slug() {
     let platform = MockPlatform::start().await;
@@ -788,6 +791,10 @@ async fn by_slug_on_an_unreachable_platform_is_a_platform_error() {
         panic!("a team was verified while the platform was down")
     };
     assert!(matches!(e, of_core::Error::Platform(_)), "{e:?}");
+    assert!(
+        e.retriable(),
+        "an outage is worth retrying, not a missing team"
+    );
 }
 
 #[sqlx::test]
