@@ -41,6 +41,7 @@ pub mod leases;
 pub mod messages;
 pub mod migrate;
 pub mod platform_events;
+pub mod repo_slug;
 pub mod repos;
 pub mod scopes;
 pub mod teams;

@@ -177,9 +177,11 @@ impl From<CoreError> for ApiError {
             | TicketAlreadyLinked { .. }
             | IdempotencyKeyConflict { .. } => StatusCode::CONFLICT,
 
-            WrongStatus { .. } | DependencyCycle(..) | Invalid(_) | InvalidAgentLabel { .. } => {
-                StatusCode::BAD_REQUEST
-            }
+            WrongStatus { .. }
+            | DependencyCycle(..)
+            | Invalid(_)
+            | InvalidAgentLabel { .. }
+            | InvalidRepoSlug { .. } => StatusCode::BAD_REQUEST,
 
             // The withheld error's own status: a cycle is a bad request, the
             // rest are conflicts with a row the caller cannot see.

@@ -634,7 +634,17 @@ fn request_schemas() -> Value {
         "RegisterRepoRequest": {
             "type": "object",
             "properties": {
-                "slug": { "type": "string" },
+                "slug": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": of_core::repo_slug::MAX_LEN,
+                    "pattern": of_core::repo_slug::PATTERN,
+                    "description":
+                        "The handle agents use. Starts with an ASCII letter or digit; the \
+                         rest is ASCII letters, digits, `-`, `_`, `.` or `/`. No path \
+                         segment (split on `/`) may be empty, `.` or `..`. Never trimmed. \
+                         Refused as `invalid_repo_slug`.",
+                },
                 "name": { "type": ["string", "null"] },
                 "remotes": {
                     "type": "array",
@@ -676,6 +686,16 @@ mod tests {
 
     fn doc() -> Value {
         document(&catalog())
+    }
+
+    #[test]
+    fn register_repo_slug_carries_the_slug_rule() {
+        let doc = doc();
+        let slug = &doc["components"]["schemas"]["RegisterRepoRequest"]["properties"]["slug"];
+        assert_eq!(slug["minLength"], 1);
+        assert_eq!(slug["maxLength"], of_core::repo_slug::MAX_LEN);
+        assert_eq!(slug["pattern"], of_core::repo_slug::PATTERN);
+        assert!(slug["description"].as_str().is_some_and(|d| !d.is_empty()));
     }
 
     /// The drift test. Every schema the catalog names has to exist, or a

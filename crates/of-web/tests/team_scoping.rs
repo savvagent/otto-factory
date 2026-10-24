@@ -154,7 +154,8 @@ async fn a_hidden_repo_is_not_found_and_not_named_anywhere(pool: PgPool) {
         let r = get(&w, &w.bob, uri).await;
         r.expect(StatusCode::NOT_FOUND);
         assert!(
-            r.text.contains("Registered repos: growth-repo, shared."),
+            r.text
+                .contains("Registered repos: \\\"growth-repo\\\", \\\"shared\\\"."),
             "{}",
             r.text
         );
@@ -164,10 +165,13 @@ async fn a_hidden_repo_is_not_found_and_not_named_anywhere(pool: PgPool) {
     r.expect(StatusCode::NOT_FOUND);
     let r = get(&w, &w.bob, "/api/orgs/acme/jobs?repo=platform-repo").await;
     r.expect(StatusCode::NOT_FOUND);
-    assert!(r.text.contains("Registered repos: growth-repo, shared."));
+    assert!(r
+        .text
+        .contains("Registered repos: \\\"growth-repo\\\", \\\"shared\\\"."));
     let r = get(&w, &w.rob, "/api/orgs/acme/jobs?repo=nope").await;
     assert!(
-        r.text.contains("growth-repo, platform-repo, shared"),
+        r.text
+            .contains("\\\"growth-repo\\\", \\\"platform-repo\\\", \\\"shared\\\""),
         "{}",
         r.text
     );
@@ -453,4 +457,16 @@ async fn a_lease_does_not_name_a_hidden_job(pool: PgPool) {
     assert_eq!(job_of(&get(&w, &w.rob, uri).await), json!(hidden));
     assert_eq!(job_of(&get(&w, &w.alice, uri).await), json!(hidden));
     assert_eq!(job_of(&get(&w, &w.carol, uri).await), Value::Null);
+}
+
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn registering_a_repo_with_a_bad_slug_is_a_400(pool: PgPool) {
+    let w = world(pool).await;
+    let r = Call::post("/api/orgs/acme/repos")
+        .with_session(&w.rob.session)
+        .json(json!({ "slug": "has space" }))
+        .send(&w.h.router)
+        .await;
+    r.expect(StatusCode::BAD_REQUEST);
+    assert_eq!(r.body["error"]["code"], "invalid_repo_slug", "{:?}", r.body);
 }

@@ -341,9 +341,9 @@ pub trait ReposExt {
 
 impl ReposExt for Tx<'_> {
     async fn register_repo(&mut self, new: NewRepo) -> Result<Repo> {
-        if new.slug.trim().is_empty() {
-            return Err(Error::Invalid("repo slug must not be empty".into()));
-        }
+        // First, before any lookup: a refused slug costs nothing and is never
+        // rewritten, so the stored one is exactly what the caller will pass back.
+        let slug = crate::repo_slug::validate(&new.slug)?;
 
         // The team was verified against the platform by whoever built `NewRepo`
         // (`VerifiedTeam` has no other constructor); here we only check that it
@@ -366,7 +366,7 @@ impl ReposExt for Tx<'_> {
         });
 
         let org = self.org();
-        let name = new.name.unwrap_or_else(|| new.slug.clone());
+        let name = new.name.unwrap_or_else(|| slug.to_string());
 
         let repo: Repo = sqlx::query_as(&format!(
             "INSERT INTO repos (org_id, slug, name, provider, default_branch, team_id, \
@@ -374,7 +374,7 @@ impl ReposExt for Tx<'_> {
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING {REPO_COLS}"
         ))
         .bind(org)
-        .bind(&new.slug)
+        .bind(slug)
         .bind(&name)
         .bind(provider)
         .bind(new.default_branch.as_deref().unwrap_or("main"))
@@ -386,7 +386,7 @@ impl ReposExt for Tx<'_> {
         .await
         .map_err(|e| match &e {
             sqlx::Error::Database(db) if db.is_unique_violation() => {
-                Error::RepoSlugTaken(new.slug.clone())
+                Error::RepoSlugTaken(slug.to_string())
             }
             _ => Error::Db(e),
         })?;
@@ -708,7 +708,10 @@ impl ReposInternal for Tx<'_> {
 
     async fn unresolved(&mut self, attempted: &str, scope: &TeamScope) -> Result<Error> {
         let known = self
-            .list_repos_visible(false, None, scope)
+            // The page ceiling, not the default of 200: render_known prints how
+            // many repos it left out, so the list must be as complete as the
+            // query allows. Above the ceiling that count is a floor (accepted).
+            .list_repos_visible(false, Some(1000), scope)
             .await?
             .into_iter()
             .map(|r| r.slug)
@@ -716,11 +719,9 @@ impl ReposInternal for Tx<'_> {
 
         Ok(Error::RepoUnresolved {
             attempted: attempted.to_string(),
-            known: if known.is_empty() {
-                "none registered yet".into()
-            } else {
-                known.join(", ")
-            },
+            // Stored slugs can predate the slug rule; render_known quotes the
+            // conforming ones, caps the list, and counts the rest unnamed.
+            known: crate::repo_slug::render_known(&known),
         })
     }
 }

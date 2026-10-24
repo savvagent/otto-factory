@@ -17,8 +17,11 @@ use of_core::repos::Hold;
 #[serde(rename_all = "camelCase")]
 pub struct RegisterRepoArgs {
     /// Short handle agents will use for this repo, unique in your organization
-    /// (for example "contract-explorer"). Keep it stable: it appears in errors
-    /// and in other people's scripts.
+    /// (for example "contract-explorer" or "acme/api"). 1 to 128 characters:
+    /// ASCII letters, digits, `-`, `_`, `.` and `/`, starting with a letter or
+    /// digit. A slug outside that shape is refused with `invalid_repo_slug`,
+    /// never trimmed or rewritten. Keep it stable: it appears in errors and in
+    /// other people's scripts.
     pub slug: String,
     /// Human-readable name. Defaults to the slug.
     #[serde(default)]
@@ -98,7 +101,11 @@ impl Factory {
         description = "Register a git repository in this organization so jobs, leases and \
                        messages can be anchored to it. Pass the output of `git remote get-url \
                        origin` as a remote; every spelling of the same repo resolves to one \
-                       entry. Returns the registered repo."
+                       entry. The slug is a short identifier of 1 to 128 characters (ASCII letters, \
+                       digits, `-`, `_`, `.`, `/`; it must start with a letter or digit, and no \
+                       `/`-separated part may be empty, `.` or `..`): \
+                       anything else is refused with `invalid_repo_slug` rather than \
+                       rewritten, so choose one that is stable. Returns the registered repo."
     )]
     pub async fn register_repo(
         &self,
