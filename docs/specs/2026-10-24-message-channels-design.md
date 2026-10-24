@@ -170,13 +170,18 @@ themselves legacy rows or carry a channel. A test deletes a job a legacy broadca
 The legacy global cursors are deleted in the same pass. Under per-channel reads they match
 nothing, and removing them lets the cursor `CHECK` be fully validated instead of `NOT VALID`.
 
-Both deletes rewrite tenant-table data, so they follow CLAUDE.md's one pattern safe under every
+The two deletes and the update rewrite tenant-table data, so they follow CLAUDE.md's one pattern safe under every
 deployment shape: loop over orgs, and give every statement **both** an explicit `org_id`
 predicate **and** `set_config('app.org_id', …, true)`. Enumerating the orgs is the one read
 that cannot be pinned. Where RLS applies to the migrating role, the tenant policies hide every
 row from it, and the loop would silently do nothing. So, exactly as `0004_message_scope.sql`
 does, a read-only `current_org() IS NULL` policy is created on each table for the length of the
-migration and dropped at the end, in the migration's own transaction.
+migration and dropped at the end, in the migration's own transaction. The org list is
+read into an array **before** the loop: a plpgsql `FOR ... IN <query>` loop reads through a
+cursor in batches, re-evaluating `current_org()` per scanned row, so after the first
+`set_config` the temporary policy is false and a streaming plan would skip every later org,
+whose DMs would then survive the column drop as public channel posts. (`0004` has the same
+latent pattern; it is applied and is not edited.)
 
 ```sql
 CREATE POLICY messages_channels_0008 ON messages FOR SELECT USING (current_org() IS NULL);
@@ -185,12 +190,18 @@ CREATE POLICY message_cursors_channels_0008 ON message_cursors FOR SELECT USING 
 DO $$
 DECLARE
   o uuid;
+  orgs uuid[];
 BEGIN
-  FOR o IN SELECT org_id FROM messages UNION SELECT org_id FROM message_cursors LOOP
+  -- Read every org up front. A `FOR o IN <query>` loop fetches through a cursor in
+  -- batches and evaluates current_org() per scanned row, so once set_config has pinned
+  -- an org the temporary policy is false and later orgs can be skipped where RLS applies.
+  SELECT array_agg(DISTINCT org_id) INTO orgs
+    FROM (SELECT org_id FROM messages UNION SELECT org_id FROM message_cursors) s;
+  FOREACH o IN ARRAY COALESCE(orgs, '{}') LOOP
     PERFORM set_config('app.org_id', o::text, true);
     DELETE FROM messages WHERE org_id = o AND recipient_user_id IS NOT NULL;
     DELETE FROM message_cursors WHERE org_id = o;
-    -- See "Why legacy broadcasts lose their job link" below.
+    -- See "Why legacy broadcasts lose their job link" above.
     UPDATE messages SET job_id = NULL
       WHERE org_id = o AND repo_id IS NULL AND team_id IS NULL AND job_id IS NOT NULL;
   END LOOP;
@@ -285,7 +296,9 @@ from the slug the caller passed, so they are byte-identical.
   channel too or are removed. They exist for tests, and the plan picks one.
 - `ReplyParent` and `reply_recipient` are deleted. `reply_parent` becomes a readability check
   returning `()`. It keeps holding the parent's repos `FOR SHARE` for a restricted scope, and it
-  keeps its probe-proof error. `message_readable` loses its recipient predicate.
+  keeps its probe-proof error. `message_readable` loses its recipient predicate. A legacy
+  unscoped broadcast still passes it and can be an `in_reply_to` parent; that reveals nothing,
+  because its sender could already read it, and the reply itself must name a channel.
 
 ### §3 `of-mcp`
 
@@ -391,7 +404,7 @@ signatures and stop compiling. Budget for repairing them.
   `ack_messages` with `team`); a member not on the team gets `team_not_found`, byte-identical to
   an unknown slug; an admin not on the team can read it; `MockPlatform::set_down` during team
   resolution is a `503`; `to` is rejected; a legacy unscoped broadcast is never served.
-- `of-core`: after the migration, deleting a job that a legacy unscoped broadcast named
+- `of-core` migration test: after the migration, deleting a job that a legacy unscoped broadcast named
   succeeds (the migration nulled that link; see §1).
 
 Gates: `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all`.

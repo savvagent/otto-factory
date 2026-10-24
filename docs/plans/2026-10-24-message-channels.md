@@ -27,7 +27,7 @@ implements it exactly. Closes savvagent/otto-factory#177.
 - Tests need Postgres: `podman compose up -d`, `cp .env.example .env`.
 - Migrations are append-only. `0008` is the next free number (`0007_trigger_label_default_otto_tower.sql`
   is the head); re-check before creating the file.
-- The migration's two `DELETE`s rewrite tenant data. They use CLAUDE.md's per-org loop with
+- The migration's two `DELETE`s and its `UPDATE` rewrite tenant data. They use CLAUDE.md's per-org loop with
   **both** the explicit `org_id` predicate and `set_config('app.org_id', …, true)`, plus the
   temporary read-only `current_org() IS NULL` policies that let the org enumeration see rows
   where RLS applies (the `0004_message_scope.sql` precedent). Never `TRUNCATE` and never
@@ -77,7 +77,10 @@ implements it exactly. Closes savvagent/otto-factory#177.
       comment explaining why DMs are deleted and not orphaned (a DM could carry `repo_id`), the
       one explaining the temporary policies, and the one explaining why a legacy broadcast's
       `job_id` is nulled (a `NOT VALID` CHECK still binds later UPDATEs, so `delete_job` would
-      fail on it). Include the guarded `GRANT ... ON SEQUENCE message_cursors_id_seq`.
+      fail on it). Include the guarded `GRANT ... ON SEQUENCE message_cursors_id_seq`. The org
+      list is materialized into an array before a `FOREACH` loop (spec §1: a `FOR ... IN
+      <query>` cursor can skip orgs once `app.org_id` is pinned); the RLS-applying test seeds
+      more than 10 orgs so that would show.
 - [ ] Check that the `DROP CONSTRAINT message_cursors_pkey, ADD COLUMN id bigserial PRIMARY KEY`
       combination applies cleanly on Postgres 16 with rows already deleted. Split it into
       separate `ALTER`s if the combined form complains.
@@ -85,7 +88,9 @@ implements it exactly. Closes savvagent/otto-factory#177.
       `meter_rename.rs` (`include_str!` the migration; seed rows directly on the pool; run the
       SQL; count). `#[sqlx::test]` has already applied `0008`, so the test re-creates the
       pre-migration shape first: `ALTER TABLE messages ADD COLUMN recipient_user_id uuid`,
-      drop the new constraints and indexes, and restore the old cursor primary key. Use a
+      drop the new constraints and indexes, drop `message_cursors`' new `id` primary key and its
+      `id` / `repo_id` / `team_id` columns, and restore the old `(org_id, user_id)` primary
+      key — otherwise re-running the migration fails at `ADD COLUMN id`. Use a
       helper `undo_0008(pool)`, documented as standing in for a database at `0007`.
       Seed for **two** orgs:
       - one DM with a `repo_id`, one DM without a repo, and one reply to a DM (also a DM);
@@ -210,9 +215,6 @@ implements it exactly. Closes savvagent/otto-factory#177.
     the hand-built hash JSON has `"repoId": null`; once the message carries a repo channel that
     literal must carry the same repo id, or the fingerprint regression test fails for the
     wrong reason.
-  - Add `a_legacy_broadcast_does_not_block_deleting_a_job`: stand in for a migrated legacy
-    row (drop `messages_channel_ck` on the pool, insert a channel-less row with `job_id`
-    NULL, re-add the constraint `NOT VALID`); `delete_job` on another job still works.
 - [ ] Repair `crates/of-core/tests/isolation.rs`:
       `message_idempotency_keys_do_not_cross_org_boundaries`,
       `messages_are_invisible_across_orgs`, and `team_scoped_helpers_do_not_cross_orgs` (calls
@@ -223,7 +225,8 @@ implements it exactly. Closes savvagent/otto-factory#177.
       assertion. **Runtime-only breakage the compiler will not flag:** `populate` sends a
       `NewMessage` with only `job_id` plus `..Default::default()`; it compiles, but the
       exactly-one-channel check refuses it, which breaks the `org.deleted` "every table" tests.
-      Give it a repo channel. Also repair `member_removed_releases_what_they_held` (calls
+      Give it a repo channel. `populate` also calls `tx.ack_messages(t.user, 1)`, the wrapper
+      this plan deletes. Also repair `member_removed_releases_what_they_held` (calls
       `ack_messages`). Add `member_removed_drops_every_channel_cursor`: two cursors (repo and team)
       for one user, `member.removed`, zero left.
 - [ ] `cargo test -p of-core`, `cargo clippy -p of-core --all-targets -- -D warnings`. Also once
