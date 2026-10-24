@@ -10,7 +10,7 @@ implements it exactly.
 
 ## Status — 2026-10-23
 
-🚧 Implemented in PR #249, awaiting merge. Review-round additions: path-segment rule (no empty, `.` or `..` segment), OpenAPI slug constraints from `repo_slug::PATTERN`/`MAX_LEN`, `RepoUnresolved` doc comment, spec Risks and addendum.
+✅ Shipped in savvagent/otto-factory#249, merged as `b98761d` (`fix(of-core)!: shape-check repo slugs and quote them in unresolved-repo errors`), closing savvagent/otto-factory#206. Tasks 1–3 were implemented as planned. Review round 1 added the path-segment rule (no empty, `.` or `..` segment), OpenAPI slug constraints from `repo_slug::PATTERN`/`MAX_LEN`, a `RepoUnresolved` doc comment, and the 1000-row fetch so the "and N more" count is real; see the spec's addendum. Follow-ups: #250, #251, #252.
 
 ## Global Constraints
 
@@ -47,62 +47,62 @@ Task 1 builds the pure rule and the error variant with unit tests, so Tasks 2–
 Task 2 is the write side and is the breaking change. Task 3 is the read side, and updates the
 existing assertions that Task 2 does not touch.
 
-## Task 1 — The rule and the error ⬜
+## Task 1 — The rule and the error ✅
 
 **Files:** `crates/of-core/src/repo_slug.rs` (create), `lib.rs`, `error.rs`,
 `crates/of-web/src/error.rs`.
 **Interfaces:** produces `repo_slug::{MAX_LEN, MAX_LISTED, validate, is_displayable, describe,
 render_known}` and `Error::InvalidRepoSlug { problem: String }` with code `invalid_repo_slug`.
 
-- [ ] Write failing unit tests in `repo_slug.rs` (`#[cfg(test)]`): accepts `api`, `acme/api-v2`,
+- [x] Write failing unit tests in `repo_slug.rs` (`#[cfg(test)]`): accepts `api`, `acme/api-v2`,
       `a.b_c`, `a..b`, a 128-char slug; refuses empty, 129 chars, leading `-`, leading `.`, leading
       `/`, a space, `\n`, `"`, `é`, a trailing space (no trimming); no refusal message contains the
       input; `is_displayable` agrees with `validate`; `describe("api")` is `"api"` with quotes and
       `describe` of a bad slug is `another repo (call list_repos)`; `render_known` returns exactly the
       four strings in the spec §3 table (none visible, all shown, cut by `MAX_LISTED`, none shown) and
       lists at most 50.
-- [ ] Run `cargo test -p of-core --lib repo_slug` → fails (module missing).
-- [ ] Implement `repo_slug.rs` and the module doc (why: peer-chosen text in a sentence another member
+- [x] Run `cargo test -p of-core --lib repo_slug` → fails (module missing).
+- [x] Implement `repo_slug.rs` and the module doc (why: peer-chosen text in a sentence another member
       reads; refuses rather than rewrites; shape only). Add `pub mod repo_slug;` to `lib.rs`.
-- [ ] Add `InvalidRepoSlug` to `error.rs` with a message in the `InvalidAgentLabel` style (what is
+- [x] Add `InvalidRepoSlug` to `error.rs` with a message in the `InvalidAgentLabel` style (what is
       wrong, the valid shape with an example, "nothing was changed"), `code()` → `invalid_repo_slug`,
       not retriable. Change `RemoteTaken`'s `#[error]` to render its second field with `describe`.
-- [ ] Map `InvalidRepoSlug { .. }` to `BAD_REQUEST` in `crates/of-web/src/error.rs`.
-- [ ] Run `cargo test -p of-core --lib` and `cargo clippy --all-targets -- -D warnings` → pass.
-- [ ] Format and commit: `cargo fmt --all` then
+- [x] Map `InvalidRepoSlug { .. }` to `BAD_REQUEST` in `crates/of-web/src/error.rs`.
+- [x] Run `cargo test -p of-core --lib` and `cargo clippy --all-targets -- -D warnings` → pass.
+- [x] Format and commit: `cargo fmt --all` then
       `git commit -m "feat(of-core): add the repo slug rule and invalid_repo_slug"`.
 
-## Task 2 — Validate at `register_repo` ⬜
+## Task 2 — Validate at `register_repo` ✅
 
 **Files:** `crates/of-core/src/repos.rs`, `crates/of-mcp/src/tools/repos.rs`,
 `crates/of-core/tests/queue.rs`, `crates/of-mcp/tests/tools.rs`, `crates/of-web/tests/` (the
 existing repos HTTP test file; find it with `grep -ln "POST.*repos\|register_repo" crates/of-web/tests`).
 **Interfaces:** consumes `repo_slug::validate`.
 
-- [ ] Write failing tests: (core, `queue.rs`) `register_repo` with `"has space"` and with `""` return
+- [x] Write failing tests: (core, `queue.rs`) `register_repo` with `"has space"` and with `""` return
       `invalid_repo_slug` and `list_repos` is unchanged; a valid slug registers and the stored slug is
       the caller's string unchanged; a nonconforming duplicate of an existing slug is
       `invalid_repo_slug`, not `repo_slug_taken`. (mcp, `tools.rs`) the `register_repo` tool with a
       bad slug is `invalid_repo_slug`, and its description contains `invalid_repo_slug` and `128`.
       (web) `POST /api/orgs/{org}/repos` with a bad slug is `400` with `code: invalid_repo_slug`.
-- [ ] Run each → fail.
-- [ ] Grep for any test asserting `Invalid` for an empty slug and update it to `invalid_repo_slug`.
-- [ ] In `repos.rs`, replace the `trim().is_empty()` check with `repo_slug::validate(&new.slug)?`
+- [x] Run each → fail.
+- [x] Grep for any test asserting `Invalid` for an empty slug and update it to `invalid_repo_slug`.
+- [x] In `repos.rs`, replace the `trim().is_empty()` check with `repo_slug::validate(&new.slug)?`
       before anything else, and use the returned `&str` for the insert. Update the `register_repo`
       tool description and the `slug` arg doc (state the shape, the limit, that it is refused rather
       than rewritten, and that it should be stable).
-- [ ] Run `cargo test -p of-core --test queue`, `cargo test -p of-mcp --test tools`,
+- [x] Run `cargo test -p of-core --test queue`, `cargo test -p of-mcp --test tools`,
       `cargo test -p of-web` → pass. Grep for any existing test registering a slug that now fails
       (the spec found none) and fix the fixture if one appears.
-- [ ] Format and commit: `git commit -m "fix(of-core): refuse a repo slug that is not a short identifier"`.
+- [x] Format and commit: `git commit -m "fix(of-core): refuse a repo slug that is not a short identifier"`.
 
-## Task 3 — Render the registered list and the owner safely ⬜
+## Task 3 — Render the registered list and the owner safely ✅
 
 **Files:** `crates/of-core/src/repos.rs`, `crates/of-core/tests/queue.rs`,
 `crates/of-mcp/tests/tools.rs`, `crates/of-web/tests/team_scoping.rs`.
 **Interfaces:** consumes `repo_slug::{render_known, describe}`.
 
-- [ ] Write failing tests: (core) plant a legacy slug with raw SQL `UPDATE repos SET slug = $2
+- [x] Write failing tests: (core) plant a legacy slug with raw SQL `UPDATE repos SET slug = $2
       WHERE org_id = $1 AND id = $3` (multi-line, instruction-shaped) → an unresolved lookup's
       message does not contain it, contains the quoted conforming slugs and the
       `(and 1 more not shown; call list_repos for the full list)` clause, and the legacy repo still
@@ -112,16 +112,16 @@ existing repos HTTP test file; find it with `grep -ln "POST.*repos\|register_rep
       against a conforming one contains it quoted. Cross-org negative: a second org with its own slugs
       never appears in the first org's `known` (the existing isolation assertions at
       `isolation.rs:1254` stay green).
-- [ ] Run → fail.
-- [ ] In `unresolved`, build `known` with `repo_slug::render_known(&slugs)`.
-- [ ] Update the existing assertions that quoting breaks: `team_scoping.rs:157,167`
+- [x] Run → fail.
+- [x] In `unresolved`, build `known` with `repo_slug::render_known(&slugs)`.
+- [x] Update the existing assertions that quoting breaks: `team_scoping.rs:157,167`
       (`Registered repos: "growth-repo", "shared".`), `team_scoping.rs:170`
       (`"growth-repo", "platform-repo", "shared"`), and `tools.rs:3929`
       (`"growth-repo", "shared"`; its negative half becomes `!contains("\"platform-repo\"")`).
       The `of-mcp/src/error.rs` unit test passes `known` as a raw string and needs no change.
-- [ ] Run `cargo test --workspace` against the Postgres service, then
+- [x] Run `cargo test --workspace` against the Postgres service, then
       `cargo clippy --all-targets -- -D warnings` and `cargo fmt --all --check` → pass.
-- [ ] Format and commit: `git commit -m "fix(of-core): quote and cap the registered repos an unresolved error lists"`.
+- [x] Format and commit: `git commit -m "fix(of-core): quote and cap the registered repos an unresolved error lists"`.
 
 ## Out-of-band checks (Phase 5)
 

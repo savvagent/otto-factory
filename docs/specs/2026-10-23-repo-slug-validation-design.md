@@ -1,8 +1,11 @@
 # Repo slug validation design
 
-> **Status:** DRAFT — bound and shape-check the repo slug at `register_repo`, and render the
-> registered-slug list in `RepoUnresolved` quoted, capped, and without any slug that fails today's
-> rule. A **breaking** change (`fix(of-core)!:`). Closes savvagent/otto-factory#206.
+> **Status:** IMPLEMENTED — shipped in savvagent/otto-factory#249 (merged as `b98761d`, a
+> **breaking** change: `fix(of-core)!: ...`), closing savvagent/otto-factory#206. Bound and
+> shape-check the repo slug at `register_repo`, and render the registered-slug list in
+> `RepoUnresolved` quoted, capped, and without any slug that fails today's rule. The production
+> count of existing slugs failing the rule was 0 of 6 repos. Follow-ups: savvagent/otto-factory#250,
+> #251, #252. See the Review round 1 addendum for what changed after review.
 
 > **Follows from:** `docs/specs/2026-10-08-agent-label-validation-design.md` (savvagent/otto-factory#208),
 > which recorded this as out of scope because the compatibility question differs: a slug is an
