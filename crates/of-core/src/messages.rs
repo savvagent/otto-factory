@@ -403,7 +403,7 @@ impl MessagesExt for Tx<'_> {
         if let Some(key) = new.idempotency_key.as_deref() {
             crate::idempotency::validate(key)?;
         }
-        // Recipients read the label beside the body (#163). The normalized
+        // Readers see the label beside the body (#163). The normalized
         // form is what is stored, but the idempotency fingerprint below still
         // hashes the label exactly as sent — unchanged from before this
         // policy, so keyed messages stored earlier still replay. A byte-for-
