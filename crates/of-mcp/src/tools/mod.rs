@@ -102,14 +102,19 @@ pub(crate) async fn team_channel(
     scope: &TeamScope,
     slug: &str,
 ) -> Result<VerifiedTeam, ErrorData> {
-    let team = VerifiedTeam::by_slug(f.platform(), caller.org_id, slug)
-        .await
-        .mcp()?;
-    if !scope.allows(Some(team.id())) {
-        return Err(of_core::Error::TeamNotFound {
+    let hidden = || {
+        Err(of_core::Error::TeamChannelNotFound {
             team: format!("{slug:?}"),
         })
-        .mcp();
+        .mcp()
+    };
+    let team = match VerifiedTeam::by_slug(f.platform(), caller.org_id, slug).await {
+        Ok(team) => team,
+        Err(of_core::Error::TeamNotFound { .. }) => return hidden(),
+        Err(e) => return Err(e).mcp(),
+    };
+    if !scope.allows(Some(team.id())) {
+        return hidden();
     }
     Ok(team)
 }
