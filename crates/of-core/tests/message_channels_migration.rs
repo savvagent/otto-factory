@@ -1,10 +1,12 @@
 //! `0008_message_channels.sql` moves messages from org broadcasts and DMs to
 //! repo and team channels. Its data step deletes every org's DMs (a DM could
 //! carry a `repo_id`, so leaving it would publish it to that repo's channel)
-//! and legacy cursors, and nulls `job_id` on every legacy row that fails the
-//! new channel CHECK, channel-less or naming both a repo and a team (a
-//! `NOT VALID` CHECK still binds later UPDATEs, so `delete_job` would fail on
-//! them). It must do so for every org under both shapes a migration can run
+//! and legacy cursors, and nulls `job_id` and `in_reply_to` on every legacy row
+//! that fails the new channel CHECK, channel-less or naming both a repo and a
+//! team (a `NOT VALID` CHECK still binds later UPDATEs, so `delete_job`, or
+//! deleting the message such a row replies to, would fail on them), after
+//! folding the job's teams into its `scope_teams`. A backstop refuses the
+//! migration if any DM or legacy cursor survived. It must do so for every org under both shapes a migration can run
 //! in: a role that bypasses RLS (this deployment's superuser) and a role
 //! subject to RLS with no `app.org_id` set (`otto_app`, standing in for the
 //! fallback).
@@ -42,11 +44,45 @@ async fn undo_0008(pool: &PgPool) {
            DROP COLUMN id,
            DROP COLUMN repo_id,
            DROP COLUMN team_id,
-           ADD PRIMARY KEY (org_id, user_id);",
+           ADD PRIMARY KEY (org_id, user_id);
+         ALTER TABLE messages
+           DROP CONSTRAINT messages_repo_id_fkey,
+           ADD CONSTRAINT messages_repo_id_fkey
+             FOREIGN KEY (repo_id) REFERENCES repos (id) ON DELETE SET NULL;",
     )
     .execute(pool)
     .await
     .unwrap();
+    // What this undoes, as the migration writes it, so the two cannot drift.
+    for text in [
+        "CHECK ((repo_id IS NOT NULL) <> (team_id IS NOT NULL)) NOT VALID",
+        "FOREIGN KEY (repo_id) REFERENCES repos (id) ON DELETE CASCADE",
+    ] {
+        assert!(
+            MIGRATION.contains(text),
+            "0008 no longer contains `{text}`; update undo_0008 with it"
+        );
+    }
+}
+
+/// The migration's backstop `DO` block, alone: the one after the
+/// `0008-backstop` marker.
+fn backstop_block() -> &'static str {
+    let marker = MIGRATION
+        .find("-- 0008-backstop")
+        .expect("0008 lost its `-- 0008-backstop` marker");
+    let rest = &MIGRATION[marker..];
+    let start = rest.find("DO $$").expect("no DO block after the marker");
+    let rest = &rest[start..];
+    let end = rest
+        .find("END $$;")
+        .expect("a DO block without its END $$;");
+    let block = &rest[..end + "END $$;".len()];
+    assert!(
+        block.contains("recipient_user_id IS NOT NULL"),
+        "the block after the marker is not the DM backstop"
+    );
+    block
 }
 
 /// The migration's per-org `DO` block, alone. `otto_app` owns nothing, so it
@@ -82,33 +118,45 @@ fn data_block() -> &'static str {
 struct Seeded {
     org: Uuid,
     job: &'static str,
+    repo: Uuid,
+    /// The job's own team and its repo's, which the both-channel row must
+    /// keep in `scope_teams` once it loses its job link.
+    job_team: Uuid,
+    repo_team: Uuid,
 }
 
-/// Per org: a repo and a job; three DMs (one in a repo, one without, and a
-/// reply to a DM, itself a DM); a repo broadcast, an unscoped broadcast, and an
-/// unscoped broadcast naming the job; a legacy row naming both a repo and a
-/// team and the job; and two legacy cursors. Written directly
+/// Per org: a team-scoped repo and a job on another team; three DMs (one in a
+/// repo, one without, and a reply to a DM, itself a DM); a repo broadcast, a
+/// repo broadcast replying to a DM, an unscoped broadcast, an unscoped
+/// broadcast naming the job, and a team broadcast naming the job; a legacy row
+/// naming both a repo and a team and the job; and two legacy cursors. Written directly
 /// on the pool, as data a migration (not application code) would rewrite.
 async fn seed(pool: &PgPool) -> Seeded {
     let org = Uuid::new_v4();
     let sender = Uuid::new_v4();
     let recipient = Uuid::new_v4();
     let job = "job-1";
+    let job_team = Uuid::new_v4();
+    let repo_team = Uuid::new_v4();
 
     let repo: Uuid = sqlx::query_scalar(
-        "INSERT INTO repos (org_id, slug, name) VALUES ($1, 'api', 'api') RETURNING id",
+        "INSERT INTO repos (org_id, slug, name, team_id) VALUES ($1, 'api', 'api', $2) RETURNING id",
     )
     .bind(org)
+    .bind(repo_team)
     .fetch_one(pool)
     .await
     .unwrap();
-    sqlx::query("INSERT INTO jobs (id, org_id, repo_id, title) VALUES ($1, $2, $3, 'seeded')")
-        .bind(job)
-        .bind(org)
-        .bind(repo)
-        .execute(pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO jobs (id, org_id, repo_id, title, team_id) VALUES ($1, $2, $3, 'seeded', $4)",
+    )
+    .bind(job)
+    .bind(org)
+    .bind(repo)
+    .bind(job_team)
+    .execute(pool)
+    .await
+    .unwrap();
 
     let insert = |body: &'static str,
                   to: Option<Uuid>,
@@ -138,15 +186,37 @@ async fn seed(pool: &PgPool) -> Seeded {
     insert("dm-reply", Some(sender), None, None, Some(dm))
         .await
         .unwrap();
-    insert("broadcast-repo", None, Some(repo), None, None)
+    let repo_post = insert("broadcast-repo", None, Some(repo), None, None)
         .await
         .unwrap();
-    insert("broadcast-unscoped", None, None, None, None)
+    // A surviving row replying to a DM: the DM delete must leave it standing,
+    // its reply link nulled by `in_reply_to ... ON DELETE SET NULL`.
+    insert("broadcast-reply-to-dm", None, Some(repo), None, Some(dm))
+        .await
+        .unwrap();
+    // Channel-less and replying to a repo post: unless the migration nulls
+    // its reply link, deleting that repo (which cascades to the post) would
+    // update this row through `in_reply_to ... ON DELETE SET NULL` and fail
+    // the NOT VALID CHECK.
+    insert("broadcast-unscoped", None, None, None, Some(repo_post))
         .await
         .unwrap();
     insert("broadcast-job", None, None, Some(job), None)
         .await
         .unwrap();
+
+    // Already in exactly one channel (a team's), so the migration must leave
+    // its job link alone.
+    sqlx::query(
+        "INSERT INTO messages (org_id, sender_user_id, body, team_id, job_id) \
+         VALUES ($1, $2, 'broadcast-team-job', gen_random_uuid(), $3)",
+    )
+    .bind(org)
+    .bind(sender)
+    .bind(job)
+    .execute(pool)
+    .await
+    .unwrap();
 
     // Only a direct of-core caller could write this; it fails the new CHECK too.
     sqlx::query(
@@ -172,7 +242,13 @@ async fn seed(pool: &PgPool) -> Seeded {
         .unwrap();
     }
 
-    Seeded { org, job }
+    Seeded {
+        org,
+        job,
+        repo,
+        job_team,
+        repo_team,
+    }
 }
 
 /// (DMs, broadcasts, cursors, the job-carrying broadcast's job_id, the
@@ -204,11 +280,48 @@ async fn state(pool: &PgPool, org: Uuid) -> State {
     )
 }
 
-fn assert_migrated(state: State, org: Uuid) {
+/// (the DM reply's `in_reply_to`, the team broadcast's `job_id`, the
+/// both-channel row's `scope_teams`).
+async fn details(pool: &PgPool, org: Uuid) -> (Option<i64>, Option<String>, Vec<Uuid>) {
+    let reply: Option<i64> = sqlx::query_scalar(
+        "SELECT in_reply_to FROM messages WHERE org_id = $1 AND body = 'broadcast-reply-to-dm'",
+    )
+    .bind(org)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let team_job: Option<String> = sqlx::query_scalar(
+        "SELECT job_id FROM messages WHERE org_id = $1 AND body = 'broadcast-team-job'",
+    )
+    .bind(org)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let mut scope: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT scope_teams FROM messages WHERE org_id = $1 AND body = 'legacy-both'",
+    )
+    .bind(org)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    scope.sort();
+    (reply, team_job, scope)
+}
+
+async fn assert_migrated(pool: &PgPool, s: &Seeded) {
+    let org = s.org;
     assert_eq!(
-        state,
-        (0, 3, 0, None, None),
+        state(pool, org).await,
+        (0, 5, 0, None, None),
         "org {org}: (DMs, broadcasts, cursors, legacy broadcast job_id, both-channel job_id)"
+    );
+    let mut teams = vec![s.job_team, s.repo_team];
+    teams.sort();
+    assert_eq!(
+        details(pool, org).await,
+        (None, Some(s.job.to_owned()), teams),
+        "org {org}: (the DM reply survives unthreaded, the team broadcast keeps its job, \
+         the both-channel row keeps its job's teams in scope_teams)"
     );
 }
 
@@ -229,7 +342,7 @@ async fn deletes_every_orgs_dms_and_cursors_when_rls_is_bypassed(pool: PgPool) {
     sqlx::raw_sql(MIGRATION).execute(&pool).await.unwrap();
 
     for s in &orgs {
-        assert_migrated(state(&pool, s.org).await, s.org);
+        assert_migrated(&pool, s).await;
     }
 
     let column: i64 = sqlx::query_scalar(
@@ -266,7 +379,69 @@ async fn deletes_every_orgs_dms_and_cursors_when_rls_is_bypassed(pool: PgPool) {
             .unwrap();
     }
 
+    // A repo with channel traffic can be deleted, and its channel goes with it
+    // (the baseline's SET NULL would have nulled the only channel column and
+    // failed messages_channel_ck).
+    let s = &orgs[1];
+    sqlx::query("DELETE FROM repos WHERE org_id = $1 AND id = $2")
+        .bind(s.org)
+        .bind(s.repo)
+        .execute(&pool)
+        .await
+        .expect("deleting a repo with channel messages must succeed");
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM messages WHERE repo_id = $1")
+        .bind(s.repo)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(left, 0, "a deleted repo's channel messages go with it");
+
     assert_schema(&pool, orgs[0].org).await;
+}
+
+#[sqlx::test]
+async fn the_backstop_refuses_to_drop_a_surviving_dm(pool: PgPool) {
+    undo_0008(&pool).await;
+    let s = seed(&pool).await;
+    let block = backstop_block();
+
+    // The loop "missed" this org: its DMs and cursors are all still here.
+    let err = sqlx::raw_sql(block)
+        .execute(&pool)
+        .await
+        .expect_err("a surviving DM must stop the migration");
+    assert!(
+        err.to_string().contains(
+            "0008: direct messages survived the per-org delete; refusing to drop \
+             recipient_user_id, which would publish them into repo channels"
+        ),
+        "{err}"
+    );
+
+    // DMs gone, a legacy cursor left: still refused.
+    sqlx::query("DELETE FROM messages WHERE org_id = $1 AND body LIKE 'dm-%'")
+        .bind(s.org)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let err = sqlx::raw_sql(block)
+        .execute(&pool)
+        .await
+        .expect_err("a surviving legacy cursor must stop the migration");
+    assert!(
+        err.to_string().contains("legacy message cursors survived"),
+        "{err}"
+    );
+
+    sqlx::query("DELETE FROM message_cursors WHERE org_id = $1")
+        .bind(s.org)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql(block)
+        .execute(&pool)
+        .await
+        .expect("nothing left to publish: the backstop passes");
 }
 
 /// The schema the whole file leaves behind.
@@ -369,7 +544,7 @@ async fn deletes_every_orgs_dms_and_cursors_when_rls_applies(pool: PgPool) {
     for s in &control {
         assert_eq!(
             state(&pool, s.org).await,
-            (3, 3, 2, Some(s.job.to_owned()), Some(s.job.to_owned())),
+            (3, 5, 2, Some(s.job.to_owned()), Some(s.job.to_owned())),
             "control org {}: the loop must find nothing without the temporary policies",
             s.org
         );
@@ -405,6 +580,9 @@ async fn deletes_every_orgs_dms_and_cursors_when_rls_applies(pool: PgPool) {
         .await
         .unwrap();
     as_otto_app(&mut tx, block).await;
+    // The backstop as the same role: with the temporary policies it sees every
+    // row, finds no DM left, and passes.
+    as_otto_app(&mut tx, backstop_block()).await;
     sqlx::raw_sql(
         "DROP POLICY messages_channels_0008 ON messages;
          DROP POLICY message_cursors_channels_0008 ON message_cursors;",
@@ -415,6 +593,6 @@ async fn deletes_every_orgs_dms_and_cursors_when_rls_applies(pool: PgPool) {
     tx.commit().await.unwrap();
 
     for s in control.iter().chain(&orgs) {
-        assert_migrated(state(&pool, s.org).await, s.org);
+        assert_migrated(&pool, s).await;
     }
 }
