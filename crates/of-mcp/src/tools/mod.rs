@@ -20,13 +20,15 @@
 
 use of_core::ids::{JobId, RepoId};
 use of_core::jobs::{Job, JobsExt};
+use of_core::messages::ChannelRef;
 use of_core::repos::ReposExt;
 use of_core::repos::{Hold, Repo, RepoRef};
-use of_core::teams::TeamScope;
+use of_core::teams::{TeamScope, VerifiedTeam};
 use otto_tenant::Tx;
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::model::ErrorData;
 
+use crate::auth::Principal;
 use crate::server::{Factory, McpResult};
 
 pub mod coord;
@@ -86,23 +88,99 @@ pub(crate) async fn repo_for_write(
         .mcp()
 }
 
-/// [`maybe_repo_of`] for a write; see [`repo_for_write`].
-pub(crate) async fn maybe_repo_for_write(
-    tx: &mut Tx<'_>,
-    team: &TeamScope,
-    slug: Option<String>,
-    remote: Option<String>,
-) -> Result<Option<RepoId>, ErrorData> {
-    let named = slug.as_deref().is_some_and(|s| !s.trim().is_empty())
-        || remote.as_deref().is_some_and(|s| !s.trim().is_empty());
-    if !named {
-        return Ok(None);
+/// Resolve a team the caller named by slug, as a message channel.
+///
+/// A team the caller is not on is refused with exactly the error an unknown
+/// slug gets, built from the slug the caller passed in both branches, so the
+/// tool cannot be used to tell which teams exist (the same reason a hidden repo
+/// is `repo_unresolved`). Asks the platform, so call it before the transaction
+/// opens; a platform that cannot answer is `platform_unavailable`, never "no
+/// team".
+pub(crate) async fn team_channel(
+    f: &Factory,
+    caller: &Principal,
+    scope: &TeamScope,
+    slug: &str,
+) -> Result<VerifiedTeam, ErrorData> {
+    let team = VerifiedTeam::by_slug(f.platform(), caller.org_id, slug)
+        .await
+        .mcp()?;
+    if !scope.allows(Some(team.id())) {
+        return Err(of_core::Error::TeamNotFound {
+            team: format!("{slug:?}"),
+        })
+        .mcp();
     }
-    Ok(Some(
-        repo_for_write(tx, team, slug, remote, Hold::Shared)
-            .await?
-            .id,
-    ))
+    Ok(team)
+}
+
+/// The channel a message tool was pointed at, as far as it can be resolved
+/// before the transaction opens: a team is already checked (a platform call), a
+/// repo is only recorded, because resolving it needs the transaction.
+pub(crate) enum ChannelArg {
+    Repo {
+        slug: Option<String>,
+        remote: Option<String>,
+    },
+    Team(VerifiedTeam),
+}
+
+/// Read `repo` / `remote` / `team` into exactly one channel. Blank counts as
+/// absent, as in [`maybe_repo_of`]. Neither and both are caller mistakes
+/// (`invalid_argument`), never a default channel: a note posted to a channel
+/// nobody meant is a silent failure.
+pub(crate) async fn channel_arg(
+    f: &Factory,
+    caller: &Principal,
+    scope: &TeamScope,
+    repo: Option<String>,
+    remote: Option<String>,
+    team: Option<String>,
+) -> Result<ChannelArg, ErrorData> {
+    let named = |s: &Option<String>| s.as_deref().is_some_and(|s| !s.trim().is_empty());
+    let repo_named = named(&repo) || named(&remote);
+    let team = team.filter(|t| !t.trim().is_empty());
+    match (repo_named, team) {
+        (false, None) => Err(of_core::Error::Invalid(
+            "name a channel: `repo` (or `remote`) for a repo's channel, or `team` (a team \
+             slug) for a team's; none of the three was given"
+                .into(),
+        ))
+        .mcp(),
+        (true, Some(_)) => Err(of_core::Error::Invalid(
+            "name one channel: a repo or a team, not both; `team` was given together with \
+             `repo` or `remote`"
+                .into(),
+        ))
+        .mcp(),
+        (true, None) => Ok(ChannelArg::Repo { slug: repo, remote }),
+        (false, Some(slug)) => Ok(ChannelArg::Team(
+            team_channel(f, caller, scope, slug.trim()).await?,
+        )),
+    }
+}
+
+/// Finish resolving a [`ChannelArg`] inside the transaction. A repo is resolved
+/// as `scope` may see it, and held until the transaction ends when `write`, so
+/// an admin cannot move it out of the caller's teams before the insert. A team
+/// has no row here to hold: membership is the platform's.
+pub(crate) async fn channel_of(
+    tx: &mut Tx<'_>,
+    scope: &TeamScope,
+    arg: ChannelArg,
+    write: bool,
+) -> Result<ChannelRef, ErrorData> {
+    match arg {
+        ChannelArg::Repo { slug, remote } => {
+            let repo = if write {
+                repo_for_write(tx, scope, slug, remote, Hold::Shared).await?
+            } else {
+                repo_of(tx, scope, slug, remote).await?
+            };
+            Ok(ChannelRef::Repo(repo.id))
+        }
+        ChannelArg::Team(team) => Ok(ChannelRef::Team(team.id())),
+    }
 }
 
 /// Resolve a repo only if the caller named one.
