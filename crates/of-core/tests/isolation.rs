@@ -26,6 +26,7 @@ use of_core::repos::{RepoPatch, RepoRef};
 use of_core::teams::TeamScope;
 use of_core::trackers::{resolve_binding, upsert_binding, upsert_connection, Provider};
 use otto_tenant::ids::OrgId;
+use otto_tenant::ids::TeamId;
 use sqlx::PgPool;
 
 #[sqlx::test]
@@ -430,29 +431,58 @@ async fn dependencies_cannot_cross_orgs(pool: PgPool) {
     assert!(res.is_err(), "org A depended on org B's job");
 }
 
+/// `team` as a team of `t`'s org, verified against a mock platform that
+/// knows it.
+async fn verified_team(t: &common::Tenant, team: TeamId) -> of_core::teams::VerifiedTeam {
+    let platform = of_testkit::MockPlatform::start().await;
+    platform.add_org(t.org.as_uuid(), "org", "Org");
+    platform.add_team(t.org.as_uuid(), team.as_uuid(), "team", "Team");
+    of_core::teams::VerifiedTeam::verify(&platform.client(), t.org, team)
+        .await
+        .unwrap()
+}
+
 #[sqlx::test]
 async fn messages_are_invisible_across_orgs(pool: PgPool) {
     let db = db(pool);
     let a = tenant(&db, "acme", "git@github.com:acme/api.git").await;
     let b = tenant(&db, "globex", "git@github.com:globex/api.git").await;
+    let a_team = TeamId::from(uuid::Uuid::new_v4());
+    let b_team = TeamId::from(uuid::Uuid::new_v4());
 
     let mut tx = db.begin(a.org).await.unwrap();
-    tx.send_message(
-        a.user,
-        NewMessage {
-            body: "internal acme plan".into(),
-            repo_id: Some(a.repo),
-            ..Default::default()
-        },
-    )
-    .await
-    .unwrap();
+    let mut a_ids = Vec::new();
+    for (repo_id, team_id) in [
+        (Some(a.repo), None),
+        (None, Some(verified_team(&a, a_team).await)),
+    ] {
+        a_ids.push(
+            tx.send_message(
+                a.user,
+                NewMessage {
+                    body: "internal acme plan".into(),
+                    repo_id,
+                    team_id,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+            .id,
+        );
+    }
     tx.commit().await.unwrap();
 
-    // Org B reads its own repo's channel, and then org A's repo's channel by
-    // id, as if it had learned it: only the org predicate stands in the way.
+    // Org B reads its own repo's and team's channels, and then org A's repo's
+    // and team's channels by id, as if it had learned them: only the org
+    // predicate stands in the way.
     let mut tx = db.begin(b.org).await.unwrap();
-    for channel in [ChannelRef::Repo(b.repo), ChannelRef::Repo(a.repo)] {
+    for channel in [
+        ChannelRef::Repo(b.repo),
+        ChannelRef::Team(b_team),
+        ChannelRef::Repo(a.repo),
+        ChannelRef::Team(a_team),
+    ] {
         let q = InboxQuery {
             channel,
             unread_only: false,
@@ -467,6 +497,16 @@ async fn messages_are_invisible_across_orgs(pool: PgPool) {
             .unwrap();
         assert!(seen.is_empty(), "org B read org A's messages: {seen:?}");
         assert_eq!(n, 0);
+        for up_to in &a_ids {
+            assert_eq!(
+                tx.ack_messages_for(b.user, channel, *up_to, &TeamScope::All)
+                    .await
+                    .unwrap_err()
+                    .code(),
+                "invalid_argument",
+                "{channel:?}: org B acked org A's message {up_to}"
+            );
+        }
     }
     tx.commit().await.unwrap();
 }
@@ -1194,7 +1234,6 @@ async fn audit_rows_cannot_be_erased_from_a_request(pool: PgPool) {
 #[sqlx::test]
 async fn team_scoped_helpers_do_not_cross_orgs(pool: PgPool) {
     use of_core::repos::Hold;
-    use otto_tenant::ids::TeamId;
 
     let db = db(pool);
     let a = tenant(&db, "acme", "git@github.com:acme/api.git").await;
@@ -1227,6 +1266,17 @@ async fn team_scoped_helpers_do_not_cross_orgs(pool: PgPool) {
             NewMessage {
                 body: "globex plan".into(),
                 repo_id: Some(b.repo),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let b_team_msg = tx
+        .send_message(
+            b.user,
+            NewMessage {
+                body: "globex team plan".into(),
+                team_id: Some(verified_team(&b, team).await),
                 ..Default::default()
             },
         )
@@ -1285,18 +1335,32 @@ async fn team_scoped_helpers_do_not_cross_orgs(pool: PgPool) {
         assert!(!tx.message_readable(b_msg.id, &scope).await.unwrap());
         let parent = tx.reply_parent(b_msg.id, &scope).await;
         assert!(matches!(parent, Err(of_core::Error::Invalid(_))));
-        // Org A's own channel, and org B's repo's channel handed over by id.
-        for channel in [ChannelRef::Repo(a.repo), ChannelRef::Repo(b.repo)] {
+        // Org A's own channel, and org B's repo's and team's channels handed
+        // over by id.
+        for channel in [
+            ChannelRef::Repo(a.repo),
+            ChannelRef::Repo(b.repo),
+            ChannelRef::Team(team),
+        ] {
             assert_eq!(
                 tx.unread_count_for(a.user, channel, &scope).await.unwrap(),
                 0
             );
+            for up_to in [b_msg.id, b_team_msg.id] {
+                assert_eq!(
+                    tx.ack_messages_for(a.user, channel, up_to, &scope)
+                        .await
+                        .unwrap_err()
+                        .code(),
+                    "invalid_argument",
+                    "{channel:?}: org A acked org B's message {up_to}"
+                );
+            }
             assert_eq!(
-                tx.ack_messages_for(a.user, channel, i64::MAX, &scope)
+                tx.ack_messages_for(a.user, channel, 0, &scope)
                     .await
                     .unwrap(),
-                0,
-                "the cursor landed on org B's message"
+                0
             );
         }
         assert_eq!(

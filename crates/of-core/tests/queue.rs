@@ -2062,10 +2062,10 @@ fn unread_in(channel: ChannelRef) -> InboxQuery {
 }
 
 /// Your own messages are never unread to you, and the cursor cannot be advanced
-/// past the newest message — otherwise a careless ack would suppress messages
-/// that have not been written yet.
+/// past the newest message: an id no message has yet is refused, otherwise a
+/// careless ack would suppress messages that have not been written yet.
 #[sqlx::test]
-async fn unread_excludes_self_and_ack_is_clamped(pool: PgPool) {
+async fn unread_excludes_self_and_ack_refuses_a_future_id(pool: PgPool) {
     let db = db(pool);
     let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
     let bob = common::Member::new();
@@ -2108,14 +2108,16 @@ async fn unread_excludes_self_and_ack_is_clamped(pool: PgPool) {
         1
     );
 
-    let landed = tx
+    let err = tx
         .ack_messages_for(t.user, ch, i64::MAX, &TeamScope::All)
         .await
+        .unwrap_err();
+    assert_eq!(err.code(), "invalid_argument", "{err}");
+    let landed = tx
+        .ack_messages_for(t.user, ch, theirs.id, &TeamScope::All)
+        .await
         .unwrap();
-    assert_eq!(
-        landed, theirs.id,
-        "ack was not clamped to the newest message"
-    );
+    assert_eq!(landed, theirs.id);
     assert_eq!(
         tx.unread_count_for(t.user, ch, &TeamScope::All)
             .await
@@ -2123,7 +2125,7 @@ async fn unread_excludes_self_and_ack_is_clamped(pool: PgPool) {
         0
     );
 
-    // A later message is still unread despite the over-large ack.
+    // A later message is still unread: the refused ack moved nothing past it.
     tx.send_message(
         bob.id,
         NewMessage {
@@ -2332,20 +2334,21 @@ async fn acking_one_channel_leaves_the_others_unread(pool: PgPool) {
     let all = &TeamScope::All;
 
     let mut tx = db.begin(t.org).await.unwrap();
-    // Up to the newest id of all three: one cursor covering every channel would
-    // mark the other two read too.
-    tx.ack_messages_for(t.user, channels[0], ids[2], all)
+    // The team channel holds the newest id of all three: one cursor covering
+    // every channel would mark the other two read too.
+    assert!(ids[2] > ids[0] && ids[2] > ids[1]);
+    tx.ack_messages_for(t.user, channels[2], ids[2], all)
         .await
         .unwrap();
     assert_eq!(
-        tx.unread_count_for(t.user, channels[0], all).await.unwrap(),
+        tx.unread_count_for(t.user, channels[2], all).await.unwrap(),
         0
     );
-    for channel in &channels[1..] {
+    for channel in &channels[..2] {
         assert_eq!(
             tx.unread_count_for(t.user, *channel, all).await.unwrap(),
             1,
-            "acking repo A read {channel:?}"
+            "acking the team channel read {channel:?}"
         );
         assert_eq!(
             tx.inbox(t.user, &unread_in(*channel)).await.unwrap().len(),
@@ -2354,11 +2357,11 @@ async fn acking_one_channel_leaves_the_others_unread(pool: PgPool) {
     }
 
     // Each channel keeps its own cursor, so a second ack writes a second row.
-    tx.ack_messages_for(t.user, channels[2], i64::MAX, all)
+    tx.ack_messages_for(t.user, channels[0], ids[0], all)
         .await
         .unwrap();
     assert_eq!(
-        tx.unread_count_for(t.user, channels[2], all).await.unwrap(),
+        tx.unread_count_for(t.user, channels[0], all).await.unwrap(),
         0
     );
     assert_eq!(
@@ -2368,30 +2371,240 @@ async fn acking_one_channel_leaves_the_others_unread(pool: PgPool) {
     tx.rollback().await.unwrap();
 }
 
+/// The error an ack of `id` gets, with the id itself taken out, so two
+/// refusals can be compared for "identical apart from the id they echo".
+fn refusal_text(err: &of_core::Error, id: i64) -> String {
+    assert_eq!(err.code(), "invalid_argument", "{err}");
+    err.to_string().replace(&id.to_string(), "<id>")
+}
+
+/// Ids are global and cursors are per channel: an ack names a message the
+/// reader can read in that same channel, or 0. Another channel's id, a hidden
+/// one, and one that does not exist are the same refusal, so an ack cannot
+/// probe which ids exist; none of them moves the cursor.
 #[sqlx::test]
-async fn ack_is_clamped_to_the_channel(pool: PgPool) {
+async fn ack_refuses_an_id_outside_its_channel(pool: PgPool) {
     let db = db(pool);
     let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
-    let (channels, ids, _) = three_channels(&db, &t).await;
-    assert!(ids[1] > ids[0] && ids[2] > ids[0]);
+    let (channels, ids, bob) = three_channels(&db, &t).await;
     let empty = second_repo(&db, &t, "empty", None).await;
 
+    // A message in repo A's (org-wide) channel that replies into the team's
+    // thread, so it carries the team in `scope_teams`: hidden from a reader
+    // on no team, though it is in a channel that reader can read.
     let mut tx = db.begin(t.org).await.unwrap();
-    let landed = tx
-        .ack_messages_for(t.user, channels[0], i64::MAX, &TeamScope::All)
+    let hidden = tx
+        .send_message(
+            bob.id,
+            NewMessage {
+                body: "team thread, posted in repo A".into(),
+                repo_id: Some(t.repo),
+                in_reply_to: Some(ids[2]),
+                ..Default::default()
+            },
+        )
         .await
-        .unwrap();
-    assert_eq!(
-        landed, ids[0],
-        "the cursor landed on a newer message in another channel"
+        .unwrap()
+        .id;
+    tx.commit().await.unwrap();
+    let nobody = TeamScope::Teams(Default::default());
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    let refusals = [
+        (ids[1], TeamScope::All, "another repo channel's message"),
+        (ids[2], TeamScope::All, "the team channel's message"),
+        (hidden, nobody.clone(), "a hidden message in this channel"),
+        (i64::MAX, TeamScope::All, "an id no message has"),
+        (-1, TeamScope::All, "a negative id"),
+    ];
+    let mut texts = Vec::new();
+    for (id, scope, what) in &refusals {
+        let err = tx
+            .ack_messages_for(t.user, channels[0], *id, scope)
+            .await
+            .expect_err(what);
+        texts.push(refusal_text(&err, *id));
+    }
+    assert!(
+        texts.iter().all(|t| t == &texts[0]),
+        "refusals differ, so they tell the cases apart: {texts:#?}"
     );
-    // A channel with nothing in it clamps to zero.
     assert_eq!(
-        tx.ack_messages_for(t.user, ChannelRef::Repo(empty), i64::MAX, &TeamScope::All)
+        tx.unread_count_for(t.user, channels[0], &TeamScope::All)
+            .await
+            .unwrap(),
+        2,
+        "a refused ack moved the cursor"
+    );
+
+    // The reader's own channel's ids land, for a reader who can see them.
+    assert_eq!(
+        tx.ack_messages_for(t.user, channels[0], ids[0], &nobody)
+            .await
+            .unwrap(),
+        ids[0]
+    );
+    assert_eq!(
+        tx.ack_messages_for(t.user, channels[0], hidden, &TeamScope::All)
+            .await
+            .unwrap(),
+        hidden
+    );
+    // 0 is always accepted, and moves nothing back.
+    assert_eq!(
+        tx.ack_messages_for(t.user, channels[0], 0, &TeamScope::All)
+            .await
+            .unwrap(),
+        hidden
+    );
+    assert_eq!(
+        tx.ack_messages_for(t.user, ChannelRef::Repo(empty), 0, &TeamScope::All)
             .await
             .unwrap(),
         0
     );
+    tx.rollback().await.unwrap();
+}
+
+/// The cursor upsert's update path, for both kinds of channel: a second ack
+/// moves the one existing row forward, an older id leaves it where it is, and
+/// there is never a second row for the same member and channel.
+#[sqlx::test]
+async fn a_second_ack_updates_the_one_cursor(pool: PgPool) {
+    let db = db(pool);
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+    let team = verified_team(&t, "platform").await;
+    let bob = common::Member::new();
+    let all = &TeamScope::All;
+
+    for (channel, repo_id, team_id) in [
+        (ChannelRef::Repo(t.repo), Some(t.repo), None),
+        (ChannelRef::Team(team.id()), None, Some(team)),
+    ] {
+        let mut tx = db.begin(t.org).await.unwrap();
+        let mut ids = Vec::new();
+        for i in 0..3 {
+            ids.push(
+                tx.send_message(
+                    bob.id,
+                    NewMessage {
+                        body: format!("{channel:?} {i}"),
+                        repo_id,
+                        team_id,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap()
+                .id,
+            );
+        }
+        assert_eq!(
+            tx.ack_messages_for(t.user, channel, ids[1], all)
+                .await
+                .unwrap(),
+            ids[1]
+        );
+        assert_eq!(
+            tx.ack_messages_for(t.user, channel, ids[2], all)
+                .await
+                .unwrap(),
+            ids[2],
+            "{channel:?}: the second ack did not move the cursor"
+        );
+        assert_eq!(
+            tx.ack_messages_for(t.user, channel, ids[0], all)
+                .await
+                .unwrap(),
+            ids[2],
+            "{channel:?}: an older id moved the cursor back"
+        );
+        assert_eq!(tx.unread_count_for(t.user, channel, all).await.unwrap(), 0);
+
+        let (column, id) = match channel {
+            ChannelRef::Repo(r) => ("repo_id", r.as_uuid()),
+            ChannelRef::Team(t) => ("team_id", t.as_uuid()),
+        };
+        let rows: i64 = sqlx::query_scalar(&format!(
+            "SELECT count(*) FROM message_cursors \
+             WHERE org_id = $1 AND user_id = $2 AND {column} = $3"
+        ))
+        .bind(t.org)
+        .bind(t.user)
+        .bind(id)
+        .fetch_one(tx.conn())
+        .await
+        .unwrap();
+        assert_eq!(rows, 1, "{channel:?}: one cursor per member per channel");
+        tx.commit().await.unwrap();
+    }
+}
+
+/// A legacy row naming both a repo and a team (only possible before
+/// `messages_channel_ck`, which is NOT VALID, so it can still be there) belongs
+/// to neither channel: neither serves it, counts it, or accepts an ack of it.
+#[sqlx::test]
+async fn a_row_in_both_channels_is_served_in_neither(pool: PgPool) {
+    let db = db(pool.clone());
+    let t = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+    let team = verified_team(&t, "platform").await;
+    let bob = common::Member::new();
+
+    // As the pool's role, which owns the table: the schema change and the row
+    // only a pre-CHECK writer could produce.
+    sqlx::query("ALTER TABLE messages DROP CONSTRAINT messages_channel_ck")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let both: i64 = sqlx::query_scalar(
+        "INSERT INTO messages (org_id, sender_user_id, body, repo_id, team_id) \
+         VALUES ($1, $2, 'legacy both', $3, $4) RETURNING id",
+    )
+    .bind(t.org)
+    .bind(bob.id)
+    .bind(t.repo)
+    .bind(team.id())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let check = "CHECK ((repo_id IS NOT NULL) <> (team_id IS NOT NULL)) NOT VALID";
+    assert!(
+        include_str!("../migrations/0008_message_channels.sql").contains(check),
+        "0008 no longer writes `{check}`; update this test with it"
+    );
+    sqlx::query(&format!(
+        "ALTER TABLE messages ADD CONSTRAINT messages_channel_ck {check}"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let mut tx = db.begin(t.org).await.unwrap();
+    for channel in [ChannelRef::Repo(t.repo), ChannelRef::Team(team.id())] {
+        let read = tx
+            .inbox(
+                t.user,
+                &InboxQuery {
+                    unread_only: false,
+                    ..unread_in(channel)
+                },
+            )
+            .await
+            .unwrap();
+        assert!(read.is_empty(), "{channel:?} served {read:?}");
+        assert_eq!(
+            tx.unread_count_for(t.user, channel, &TeamScope::All)
+                .await
+                .unwrap(),
+            0,
+            "{channel:?} counted it"
+        );
+        let err = tx
+            .ack_messages_for(t.user, channel, both, &TeamScope::All)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), "invalid_argument", "{channel:?}: {err}");
+    }
     tx.rollback().await.unwrap();
 }
 

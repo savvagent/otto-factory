@@ -121,10 +121,21 @@ pub enum ChannelRef {
 /// `$n`, and that value. The column is chosen here, in Rust, between two fixed
 /// strings and never built from input; the same reason `inbox` picks its
 /// `ORDER BY` direction from two literals rather than binding it.
+///
+/// Exclusive: a repo channel's message has no team and a team channel's has no
+/// repo. `messages_channel_ck` is `NOT VALID`, so a legacy row naming both can
+/// still exist; it belongs to neither channel, and matching on one column
+/// alone would serve it in both.
 fn channel_sql(c: ChannelRef, n: usize) -> (String, uuid::Uuid) {
     match c {
-        ChannelRef::Repo(r) => (format!("m.repo_id = ${n}"), r.as_uuid()),
-        ChannelRef::Team(t) => (format!("m.team_id = ${n}"), t.as_uuid()),
+        ChannelRef::Repo(r) => (
+            format!("(m.repo_id = ${n} AND m.team_id IS NULL)"),
+            r.as_uuid(),
+        ),
+        ChannelRef::Team(t) => (
+            format!("(m.team_id = ${n} AND m.repo_id IS NULL)"),
+            t.as_uuid(),
+        ),
     }
 }
 
@@ -257,13 +268,15 @@ pub trait MessagesExt {
         q: &InboxQuery,
     ) -> impl std::future::Future<Output = Result<Vec<Message>>> + Send;
 
-    /// Advance `reader`'s read cursor for `channel`.
+    /// Advance `reader`'s read cursor for `channel` to `up_to`.
     ///
-    /// Clamped to the newest message in that channel that `scope` may see, so
-    /// an over-large value cannot suppress messages that have not been written
-    /// yet, and the cursor that lands says nothing about hidden traffic or
-    /// another channel's. Returns the cursor that actually landed, which is
-    /// rarely what a careless caller passed.
+    /// `up_to` must be 0 or the id of a message in `channel` that `scope` may
+    /// see. Ids are global and cursors are per channel, so another channel's id
+    /// (or a made-up large one) would silently mark this whole channel read,
+    /// and would suppress messages not yet written; it is refused instead.
+    /// A message that does not exist and one the reader cannot see are the
+    /// same [`Error::Invalid`], so an ack cannot probe for hidden ids. The
+    /// cursor never moves backwards; returns where it landed.
     fn ack_messages_for(
         &mut self,
         reader: UserId,
@@ -602,22 +615,27 @@ impl MessagesExt for Tx<'_> {
         let org = self.org();
         let teams = team_uuids(scope.restriction().as_ref());
         let (in_channel, channel_id) = channel_sql(channel, 3);
-        // The newest message this reader could have read in this channel:
-        // landing the cursor on a hidden message's id, or on a newer one in
-        // another channel, would tell the reader it exists.
-        let newest: i64 = sqlx::query_scalar(&format!(
-            "SELECT COALESCE(MAX(m.id), 0) FROM messages m WHERE m.org_id = $1 \
-               AND {in_channel} \
-               AND {}",
-            message_visible_sql(2)
-        ))
-        .bind(org)
-        .bind(teams)
-        .bind(channel_id)
-        .fetch_one(self.conn())
-        .await?;
-
-        let target = up_to.clamp(0, newest);
+        if up_to != 0 {
+            let readable: bool = sqlx::query_scalar(&format!(
+                "SELECT EXISTS (SELECT 1 FROM messages m WHERE m.org_id = $1 \
+                   AND m.id = $4 \
+                   AND {in_channel} \
+                   AND {})",
+                message_visible_sql(2)
+            ))
+            .bind(org)
+            .bind(teams)
+            .bind(channel_id)
+            .bind(up_to)
+            .fetch_one(self.conn())
+            .await?;
+            if !readable {
+                return Err(Error::Invalid(format!(
+                    "message {up_to} is not one you can read in this channel; pass the \
+                     highest id inbox returned for this same channel (or 0)"
+                )));
+            }
+        }
 
         // One fixed statement per channel kind: an `ON CONFLICT` target must
         // name the partial unique index's own predicate to infer it, and that
@@ -644,7 +662,7 @@ impl MessagesExt for Tx<'_> {
             .bind(org)
             .bind(reader)
             .bind(channel_id)
-            .bind(target)
+            .bind(up_to)
             .fetch_one(self.conn())
             .await?;
 

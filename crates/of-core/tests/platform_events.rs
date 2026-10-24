@@ -46,18 +46,19 @@ async fn populate(db: &otto_tenant::Db, t: &common::Tenant) {
     tx.acquire_lease(t.repo, "branch:main", t.user, Some("agent"), None, None)
         .await
         .unwrap();
-    tx.send_message(
-        t.user,
-        NewMessage {
-            body: "hello".into(),
-            repo_id: Some(t.repo),
-            job_id: Some(j1.id.clone()),
-            ..Default::default()
-        },
-    )
-    .await
-    .unwrap();
-    tx.ack_messages_for(t.user, ChannelRef::Repo(t.repo), 1, &TeamScope::All)
+    let hello = tx
+        .send_message(
+            t.user,
+            NewMessage {
+                body: "hello".into(),
+                repo_id: Some(t.repo),
+                job_id: Some(j1.id.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    tx.ack_messages_for(t.user, ChannelRef::Repo(t.repo), hello.id, &TeamScope::All)
         .await
         .unwrap();
     let conn = upsert_connection(
@@ -595,17 +596,18 @@ async fn member_removed_releases_what_they_held(pool: PgPool) {
     tx.acquire_lease(a.repo, "branch:mine", a.user, None, None, None)
         .await
         .unwrap();
-    tx.send_message(
-        bob,
-        NewMessage {
-            body: "bob was here".into(),
-            repo_id: Some(a.repo),
-            ..Default::default()
-        },
-    )
-    .await
-    .unwrap();
-    tx.ack_messages_for(bob, ChannelRef::Repo(a.repo), 1, &TeamScope::All)
+    let was_here = tx
+        .send_message(
+            bob,
+            NewMessage {
+                body: "bob was here".into(),
+                repo_id: Some(a.repo),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    tx.ack_messages_for(bob, ChannelRef::Repo(a.repo), was_here.id, &TeamScope::All)
         .await
         .unwrap();
     tx.commit().await.unwrap();
@@ -679,25 +681,28 @@ async fn member_removed_drops_every_channel_cursor(pool: PgPool) {
     // in each.
     for (t, team) in [(&a, ours), (&b, theirs)] {
         let mut tx = db.begin(t.org).await.unwrap();
-        for (repo_id, team_id) in [(Some(t.repo), None), (None, Some(team))] {
-            tx.send_message(
-                t.user,
-                NewMessage {
-                    body: "read me".into(),
-                    repo_id,
-                    team_id,
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-        }
-        for channel in [ChannelRef::Repo(t.repo), ChannelRef::Team(team.id())] {
-            assert!(
-                tx.ack_messages_for(bob, channel, i64::MAX, &TeamScope::All)
+        for (channel, repo_id, team_id) in [
+            (ChannelRef::Repo(t.repo), Some(t.repo), None),
+            (ChannelRef::Team(team.id()), None, Some(team)),
+        ] {
+            let id = tx
+                .send_message(
+                    t.user,
+                    NewMessage {
+                        body: "read me".into(),
+                        repo_id,
+                        team_id,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap()
+                .id;
+            assert_eq!(
+                tx.ack_messages_for(bob, channel, id, &TeamScope::All)
                     .await
-                    .unwrap()
-                    > 0
+                    .unwrap(),
+                id
             );
         }
         tx.commit().await.unwrap();

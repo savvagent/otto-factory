@@ -182,9 +182,9 @@ fn default_true() -> bool {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AckMessagesArgs {
-    /// The highest message id you have read in this channel. Clamped to the
-    /// newest message in it that you can see, so an over-large value cannot
-    /// hide messages not yet written.
+    /// The highest message id you have read in this channel: an id inbox
+    /// returned for this same channel, or 0. Any other id (another channel's,
+    /// one you cannot see, one that does not exist) is invalid_argument.
     pub up_to: i64,
     /// The repo whose channel to acknowledge, by registered slug. Name exactly one
     /// channel: repo (or remote), or team.
@@ -591,8 +591,10 @@ impl Factory {
                        named the same way as send_message (repo, remote, or team): exactly one \
                        is required, and neither or both is invalid_argument. An unknown team \
                        or one you are not on is team_not_found. Each channel has its own cursor, so acking \
-                       one never marks another read. Returns the cursor that actually landed, \
-                       which is clamped to the newest message in that channel you can see."
+                       one never marks another read. up_to must be an id inbox returned for \
+                       this same channel (or 0); any other id, including another channel's \
+                       or one that does not exist, is invalid_argument and moves nothing. \
+                       The cursor never moves backwards; returns where it landed."
     )]
     pub async fn ack_messages(
         &self,
@@ -621,8 +623,9 @@ impl Factory {
         description = "How many messages are waiting for you in one channel. One channel at a \
                        time, named the same way as send_message (repo, remote, or team): \
                        exactly one is required, and neither or both is invalid_argument. An \
-                       unknown team or one you are not on is team_not_found. Cheap enough to call before deciding \
-                       whether reading that channel's inbox is worth it."
+                       unknown team or one you are not on is team_not_found. Cheap for a repo channel; a team channel \
+                       also costs one lookup at the platform to resolve the team. Call it \
+                       before deciding whether reading that channel's inbox is worth it."
     )]
     pub async fn unread_count(
         &self,

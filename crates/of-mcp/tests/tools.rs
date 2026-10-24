@@ -4421,15 +4421,8 @@ async fn messages_about_a_hidden_repo_or_job_are_not_delivered(pool: PgPool) {
         .await);
     assert_eq!(code_of(&e), "repo_unresolved");
 
-    // The cursor lands at the newest message carol can see, not the newest there is.
-    let landed = ok(f
-        .ack_messages(
-            Extension(parts(&t.carol)),
-            Parameters(ack_of(Some("shared"), None, 1_000_000)),
-        )
-        .await)["cursor"]
-        .as_i64()
-        .unwrap();
+    // carol can ack the message she can see, and not the one about a job she
+    // cannot, which is refused exactly like an id that does not exist.
     let all = ok(f
         .inbox(
             Extension(parts(&t.alice)),
@@ -4442,7 +4435,22 @@ async fn messages_about_a_hidden_repo_or_job_are_not_delivered(pool: PgPool) {
         .iter()
         .map(|m| m["id"].as_i64().unwrap())
         .collect();
-    assert_eq!(landed, ids[0], "clamped to the visible 'plain' message");
+    let ack = |up_to: i64| {
+        f.ack_messages(
+            Extension(parts(&t.carol)),
+            Parameters(ack_of(Some("shared"), None, up_to)),
+        )
+    };
+    let hidden = err(ack(ids[1]).await);
+    let missing = err(ack(1_000_000).await);
+    assert_eq!(code_of(&hidden), "invalid_argument");
+    assert_eq!(
+        hidden.message.replace(&ids[1].to_string(), "<id>"),
+        missing.message.replace("1000000", "<id>"),
+        "a hidden message must be refused exactly like a missing one"
+    );
+    let landed = ok(ack(ids[0]).await)["cursor"].as_i64().unwrap();
+    assert_eq!(landed, ids[0], "the visible 'plain' message lands");
 }
 
 /// A lease id confirms nothing and does nothing for a repo the caller cannot see.
@@ -4971,68 +4979,146 @@ async fn a_reply_is_scoped_to_its_thread_and_cannot_probe_hidden_ids(pool: PgPoo
     );
 }
 
-/// `ack_messages` lands on the newest message in the channel acked that the
-/// reader could have read: not a newer one in that channel tied to a team they
-/// are not on, and not one in a hidden repo's channel or another channel, whose
-/// ids would otherwise tell them that traffic exists.
+/// `ack_messages` accepts only an id the reader can read in the channel acked:
+/// not one in that channel tied to a team they are not on, one in a hidden
+/// repo's channel or another channel, or one that does not exist. All four are
+/// the same `invalid_argument`, so an ack cannot tell the reader that traffic
+/// exists; none moves the cursor.
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn ack_does_not_land_on_a_hidden_or_other_channels_message(pool: PgPool) {
     let t = teams_world(pool).await;
-    let visible = ok(t
-        .send(&t.owner, "everyone", Some("shared"), None, None, None)
-        .await)["message"]["id"]
-        .as_i64()
-        .unwrap();
-    ok(t.send(
-        &t.owner,
-        "about growth's job",
-        Some("shared"),
-        Some(&t.jobs["growth-repo"]),
-        None,
-        None,
-    )
-    .await);
-    ok(t.send(
-        &t.owner,
-        "growth only",
-        Some("growth-repo"),
-        None,
-        None,
-        None,
-    )
-    .await);
-    ok(t.send(
-        &t.owner,
-        "platform team",
-        None,
-        None,
-        None,
-        Some("platform"),
-    )
-    .await);
-
-    let landed = ok(t
-        .env
-        .factory
-        .ack_messages(
-            Extension(parts(&t.alice)),
-            Parameters(ack_of(Some("shared"), None, i64::MAX)),
+    let id_of = |r: Result<Json<tools::out::MessageOut>, ErrorData>| {
+        ok(r)["message"]["id"].as_i64().unwrap()
+    };
+    let visible = id_of(
+        t.send(&t.owner, "everyone", Some("shared"), None, None, None)
+            .await,
+    );
+    let hidden_job = id_of(
+        t.send(
+            &t.owner,
+            "about growth's job",
+            Some("shared"),
+            Some(&t.jobs["growth-repo"]),
+            None,
+            None,
         )
-        .await)["cursor"]
-        .as_i64()
-        .unwrap();
+        .await,
+    );
+    let hidden_repo = id_of(
+        t.send(
+            &t.owner,
+            "growth only",
+            Some("growth-repo"),
+            None,
+            None,
+            None,
+        )
+        .await,
+    );
+    let team_post = id_of(
+        t.send(
+            &t.owner,
+            "platform team",
+            None,
+            None,
+            None,
+            Some("platform"),
+        )
+        .await,
+    );
+
+    let ack = |up_to: i64| {
+        t.env.factory.ack_messages(
+            Extension(parts(&t.alice)),
+            Parameters(ack_of(Some("shared"), None, up_to)),
+        )
+    };
+    let mut texts = Vec::new();
+    for up_to in [hidden_job, hidden_repo, team_post, i64::MAX] {
+        let e = err(ack(up_to).await);
+        assert_eq!(code_of(&e), "invalid_argument", "{up_to}: {}", e.message);
+        texts.push(e.message.replace(&up_to.to_string(), "<id>"));
+    }
+    assert!(
+        texts.iter().all(|m| m == &texts[0]),
+        "the refusals tell the cases apart: {texts:#?}"
+    );
+    let unread = |channel: tools::coord::ChannelArgs| {
+        t.env
+            .factory
+            .unread_count(Extension(parts(&t.alice)), Parameters(channel))
+    };
+    assert_eq!(
+        ok(unread(repo_channel("shared")).await)["unread"],
+        1,
+        "a refused ack moved the cursor"
+    );
+
+    let landed = ok(ack(visible).await)["cursor"].as_i64().unwrap();
     assert_eq!(landed, visible);
+    assert_eq!(ok(unread(repo_channel("shared")).await)["unread"], 0);
 
     // Acking the repo channel marked nothing read in the team channel.
-    let unread = ok(t
-        .env
-        .factory
-        .unread_count(
-            Extension(parts(&t.alice)),
-            Parameters(team_channel("platform")),
+    assert_eq!(ok(unread(team_channel("platform")).await)["unread"], 1);
+}
+
+/// `ack_messages` resolves its channel like the other message tools: a hidden
+/// repo's channel is `repo_unresolved`, and naming no channel or two is
+/// `invalid_argument`.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn ack_messages_needs_one_visible_channel(pool: PgPool) {
+    let t = teams_world(pool).await;
+    let f = &t.env.factory;
+    let ack = |args: tools::coord::AckMessagesArgs| {
+        f.ack_messages(Extension(parts(&t.carol)), Parameters(args))
+    };
+    let e = err(ack(ack_of(Some("platform-repo"), None, 0)).await);
+    assert_eq!(code_of(&e), "repo_unresolved", "{}", e.message);
+    let e = err(ack(ack_of(None, None, 0)).await);
+    assert_eq!(code_of(&e), "invalid_argument", "{}", e.message);
+    let e = err(ack(ack_of(Some("shared"), Some("platform"), 0)).await);
+    assert_eq!(code_of(&e), "invalid_argument", "{}", e.message);
+}
+
+/// A keyed post to a team's channel replays like one to a repo's, and the same
+/// key in another channel, a team's or a repo's, is a different call.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_keyed_team_post_replays_and_conflicts_across_channels(pool: PgPool) {
+    let t = teams_world(pool).await;
+    let send = |repo: Option<&str>, team: Option<&str>| {
+        t.env.factory.send_message(
+            Extension(parts(&t.owner)),
+            Parameters(tools::coord::SendMessageArgs {
+                body: "standup moved".into(),
+                kind: None,
+                repo: repo.map(Into::into),
+                remote: None,
+                team: team.map(Into::into),
+                job: None,
+                in_reply_to: None,
+                agent: None,
+                idempotency_key: Some("standup-1".into()),
+            }),
         )
-        .await);
-    assert_eq!(unread["unread"], 1);
+    };
+    let first = ok(send(None, Some("platform")).await);
+    let again = ok(send(None, Some("platform")).await);
+    assert_eq!(first["message"]["id"], again["message"]["id"]);
+    for (repo, team) in [(None, Some("growth")), (Some("shared"), None)] {
+        let e = err(send(repo, team).await);
+        assert_eq!(
+            code_of(&e),
+            "idempotency_key_conflict",
+            "{repo:?}/{team:?}: {}",
+            e.message
+        );
+    }
+    let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM messages")
+        .fetch_one(t.env.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(stored, 1, "a replay or a conflict stored a second message");
 }
 
 /// A team's channel is its members' (and owners' and admins'): a post there is
@@ -5103,7 +5189,7 @@ async fn a_team_channel_is_not_found_for_a_non_member(pool: PgPool) {
             .await,
     );
 
-    for team in ["platform", "no-such-team"] {
+    for team in ["platform", "no-such-team", "../admin"] {
         let refusals = [
             err(t.send(&t.bob, "x", None, None, None, Some(team)).await),
             err(f
@@ -5127,8 +5213,8 @@ async fn a_team_channel_is_not_found_for_a_non_member(pool: PgPool) {
             assert_eq!(
                 e.message.replace(&format!("{team:?}"), "\"T\""),
                 "team \"T\" was not found in this organization, or you are not on it. \
-                 Teams are managed in the otto platform console; use a team from there, \
-                 or omit the team.",
+                 Teams are managed in the otto platform console; name a team you are on, \
+                 or use a repo's channel (repo or remote) instead.",
                 "a hidden team must read exactly like an unknown one"
             );
         }
@@ -5317,10 +5403,15 @@ async fn a_legacy_unscoped_broadcast_is_never_served(pool: PgPool) {
     .execute(pool)
     .await
     .unwrap();
-    sqlx::query(
-        "ALTER TABLE messages ADD CONSTRAINT messages_channel_ck \
-         CHECK ((repo_id IS NOT NULL) <> (team_id IS NOT NULL)) NOT VALID",
-    )
+    // Re-added exactly as the migration writes it, so the two cannot drift.
+    let check = "CHECK ((repo_id IS NOT NULL) <> (team_id IS NOT NULL)) NOT VALID";
+    assert!(
+        include_str!("../../of-core/migrations/0008_message_channels.sql").contains(check),
+        "0008 no longer writes `{check}`; update this test with it"
+    );
+    sqlx::query(&format!(
+        "ALTER TABLE messages ADD CONSTRAINT messages_channel_ck {check}"
+    ))
     .execute(pool)
     .await
     .unwrap();
