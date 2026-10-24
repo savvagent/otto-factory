@@ -109,7 +109,7 @@ pub enum Error {
     InvalidRepoSlug { problem: String },
 
     /// The platform does not know this team in this org (never existed, other
-    /// tenant's, or deleted). Raised by `VerifiedTeam::verify`, and it is a
+    /// tenant's, or deleted). Raised by `VerifiedTeam::verify` and `by_slug`, and it is a
     /// refusal: an unknown team is never read as "org-wide".
     #[error(
         "team {team} was not found in this organization, or you are not on it. Teams \
