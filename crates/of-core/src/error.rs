@@ -109,14 +109,28 @@ pub enum Error {
     InvalidRepoSlug { problem: String },
 
     /// The platform does not know this team in this org (never existed, other
-    /// tenant's, or deleted). Raised by `VerifiedTeam::verify`, and it is a
-    /// refusal: an unknown team is never read as "org-wide".
+    /// tenant's, or deleted). Raised by `VerifiedTeam::verify` and
+    /// `VerifiedTeam::by_slug`, and it is a refusal: an unknown team is never
+    /// read as "org-wide".
     #[error(
         "team {team} was not found in this organization. Teams are managed in the \
          otto platform console; use a team id from there, or omit the team to make \
          the repo organization-wide."
     )]
     TeamNotFound { team: String },
+
+    /// A message tool's team channel that is unknown in this org **or** one the
+    /// caller is not on: one error for both, built from the slug the caller
+    /// passed, so the message tools cannot be used to tell which teams exist.
+    /// The same stable `team_not_found` code as [`Error::TeamNotFound`]; its
+    /// own text because "omit the team to make the repo organization-wide"
+    /// is wrong advice for a channel.
+    #[error(
+        "team {team} was not found in this organization, or you are not on it. Teams \
+         are managed in the otto platform console; name a team you are on, or use a \
+         repo's channel (repo or remote) instead."
+    )]
+    TeamChannelNotFound { team: String },
 
     #[error("{0}")]
     Invalid(String),
@@ -192,7 +206,7 @@ impl Error {
             Error::LeaseNotHeld(_) => "lease_not_held",
             Error::InvalidAgentLabel { .. } => "invalid_agent_label",
             Error::InvalidRepoSlug { .. } => "invalid_repo_slug",
-            Error::TeamNotFound { .. } => "team_not_found",
+            Error::TeamNotFound { .. } | Error::TeamChannelNotFound { .. } => "team_not_found",
             Error::Invalid(_) => "invalid_argument",
             Error::RaceLost(_) => "race_lost",
             Error::IdempotencyKeyConflict { .. } => "idempotency_key_conflict",
@@ -250,6 +264,21 @@ mod tests {
         };
         assert!(!e.retriable());
         assert_eq!(e.code(), "idempotency_key_conflict");
+    }
+
+    /// The channel lookup's own text, with the same stable code as the
+    /// repo and job paths' `TeamNotFound`, so a caller branching on
+    /// `team_not_found` handles both.
+    #[test]
+    fn team_channel_not_found_shares_team_not_founds_code() {
+        let e = Error::TeamChannelNotFound {
+            team: "\"platform\"".into(),
+        };
+        assert_eq!(e.code(), "team_not_found");
+        assert!(!e.retriable());
+        assert!(e.to_string().contains("or you are not on it"), "{e}");
+        let plain = Error::TeamNotFound { team: "t".into() };
+        assert!(!plain.to_string().contains("not on it"), "{plain}");
     }
 
     #[test]

@@ -70,6 +70,8 @@ These decide scope disputes. When a change conflicts with one of them, the chang
 1. **Coordination is anchored on repos.** A repo is a first-class entity, not a config
    string. Jobs belong to repos (`repo_id` is `NOT NULL`); leases are repo-scoped; an
    unresolvable repo is an error naming the registered slugs, never a silent fallback.
+   (Messages go to a repo's channel or a team's; a team channel carries a team's coordination
+   across repos and is not a precedent for a job or lease without a repo.)
 2. **Substrate, not workflow.** otto-tower ships no opinion about how work is specified,
    planned, reviewed, or measured. If a capability could live either in the server or in a
    customer's own skill calling the server, **it belongs in the skill**. Jobs carry an
@@ -298,7 +300,7 @@ every tool in it:
   sends it to re-authenticate against the very platform that is down. Only the platform
   *answering* "inactive" is a `401`. Anything else (transport error, 5xx, our own credential
   being rejected) is `503` with `Retry-After`. Identity questions a tool asks — whoami,
-  resolving a message recipient — **fail closed** the same way: an error, never a guess.
+  resolving a message's team channel — **fail closed** the same way: an error, never a guess.
 - **The org comes from the token and nowhere else.** No tool takes an org argument.
 - **Every result is a one-field object** — `{"job": …}`, `{"jobs": […]}` — defined in
   `tools::out`. MCP requires `outputSchema` to be rooted at `object`, so a bare array is
@@ -376,7 +378,9 @@ members, invites, teams, SSO, tokens, or usage. Those are the platform's, and
   `resolve_repo_visible` keeps its slug out of the "registered repos" list too. A job is
   visible only if its own team **and** its repo's team are (`job_visible_sql`, `get_job_visible`),
   messages follow the same rule through their team, repo, and job **and** through `scope_teams`,
-  the teams they were bound to when sent (thread included), which outlives a deleted job;
+  the teams they were bound to when sent (thread included), which outlives a deleted job (a
+  message goes to exactly one channel, a repo's or a team's; a team channel the caller is not
+  on is `team_not_found`, the same as an unknown slug, and owners and admins read every team's);
   lease ids of hidden repos are `lease_not_held`, and counts, dependency lists, returned leases, and
   errors are computed or redacted for what the caller may see — a redacted error keeps its
   original `code()` (`Error::Redacted`). A write checks visibility with the repo row **held**
@@ -610,8 +614,9 @@ means in this repository:
 - **Registration is an operator step at the platform** (`otto-platform-server resource register`,
   `set-webhook`), not something this binary does at startup. The scope list registered there must
   match `of_core::scopes`. See `docs/deploy/fly.md`.
-- **Identity reads go through `PlatformClient`**: `member` (whoami), `member_by_email` (message
-  recipients), `team` / `team_by_slug` (team checks). Each treats "the platform could not answer"
+- **Identity reads go through `PlatformClient`**: `member` (whoami), `team` (team checks), and
+  `team_by_slug` (the console's `?team=` and the message tools' team channels, through
+  `VerifiedTeam::by_slug`). Each treats "the platform could not answer"
   as a refusal, never as an empty result.
 - **Passkeys, recovery, SSO, invitations, account claiming, sessions** — all the platform's.
   `docs/clients/matrix.md` records what each MCP client sent against the pre-split authorization

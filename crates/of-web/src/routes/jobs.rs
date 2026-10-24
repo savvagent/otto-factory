@@ -64,6 +64,17 @@ async fn resolve_team(
     ctx: &OrgCtx,
     slug: &str,
 ) -> ApiResult<otto_tenant::ids::TeamId> {
+    let not_found = || {
+        ApiError::not_found(format!(
+            "no team {slug:?} in this organization; team slugs are managed in the otto \
+             platform console"
+        ))
+    };
+    // The slug goes into a URL path at the platform; one that could not name a
+    // team is refused here, the same way the message tools refuse it.
+    if !of_core::teams::team_slug_shape_ok(slug) {
+        return Err(not_found());
+    }
     match state
         .platform
         .team_by_slug(ctx.org.id.as_uuid(), slug)
@@ -71,10 +82,7 @@ async fn resolve_team(
     {
         // The platform scopes the lookup by org; check the answer anyway.
         Ok(Some(team)) if team.org_id == ctx.org.id.as_uuid() => Ok(team.id.into()),
-        Ok(_) => Err(ApiError::not_found(format!(
-            "no team {slug:?} in this organization; team slugs are managed in the otto \
-             platform console"
-        ))),
+        Ok(_) => Err(not_found()),
         Err(e) => Err(ApiError::platform_unavailable("resolve a team slug", e)),
     }
 }

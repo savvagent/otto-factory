@@ -10,8 +10,9 @@
 //!
 //! [`VerifiedTeam`] is how that is enforced rather than remembered. `NewRepo`,
 //! `RepoPatch`, and `NewJob` take one instead of a bare [`TeamId`], and the only
-//! way to build one is [`VerifiedTeam::verify`], which asks the platform whether
-//! the team exists in the caller's org and **fails closed**:
+//! ways to build one are [`VerifiedTeam::verify`] (by id) and
+//! [`VerifiedTeam::by_slug`] (by slug), which ask the platform whether the team
+//! exists in the caller's org and **fail closed**:
 //!
 //! - the platform says the team is not in this org → [`Error::TeamNotFound`];
 //! - the platform cannot be reached, or answers with anything unexpected →
@@ -25,6 +26,24 @@ use std::collections::HashSet;
 use crate::error::{Error, Result};
 use otto_resource::{PlatformClient, Role};
 use otto_tenant::ids::{OrgId, TeamId, UserId};
+
+/// The longest team slug [`VerifiedTeam::by_slug`] will send to the platform, in
+/// bytes.
+pub const TEAM_SLUG_MAX: usize = 128;
+
+/// Whether `slug` (already trimmed) could name a team at all. The slug goes
+/// into a URL path at the platform, so a separator, a dot segment, URL syntax
+/// (`%`, `?`, `#`), or a control character is refused here rather than left to
+/// the client's percent-encoding, whatever the platform would make of it.
+pub fn team_slug_shape_ok(slug: &str) -> bool {
+    !slug.is_empty()
+        && slug.len() <= TEAM_SLUG_MAX
+        && slug != "."
+        && slug != ".."
+        && !slug.chars().any(|c| {
+            matches!(c, '/' | '\\' | '%' | '?' | '#') || c.is_whitespace() || c.is_control()
+        })
+}
 
 /// A team id the platform confirmed exists in a particular org.
 ///
@@ -56,9 +75,72 @@ impl VerifiedTeam {
             Some(info) if info.org_id == org.as_uuid() && info.id == team.as_uuid() => {
                 Ok(Self { org, team })
             }
-            _ => Err(Error::TeamNotFound {
+            Some(info) => {
+                // Still a refusal, but not an ordinary one: the platform
+                // answered a lookup scoped to this org with another org's or
+                // another id's team, which is a platform fault worth paging on.
+                tracing::error!(
+                    org = %org,
+                    requested_team = %team,
+                    returned_org = %info.org_id,
+                    returned_team = %info.id,
+                    "platform answered a team lookup with a team outside the requested org or id; \
+                     refused as team_not_found"
+                );
+                Err(Error::TeamNotFound {
+                    team: team.to_string(),
+                })
+            }
+            None => Err(Error::TeamNotFound {
                 team: team.to_string(),
             }),
+        }
+    }
+
+    /// Ask the platform for the team with `slug` in `org`. Fails closed exactly as
+    /// [`Self::verify`] does.
+    ///
+    /// ```no_run
+    /// # async fn demo(platform: &otto_resource::PlatformClient, org: otto_tenant::OrgId)
+    /// #     -> of_core::Result<()> {
+    /// use of_core::teams::VerifiedTeam;
+    ///
+    /// // A slug the org does not have is an error, never an org-wide repo.
+    /// let team = VerifiedTeam::by_slug(platform, org, "platform").await?;
+    /// # let _ = team; Ok(()) }
+    /// ```
+    ///
+    /// The slug is trimmed and shape-checked before anything is sent: one that
+    /// no team could have (empty, over [`TEAM_SLUG_MAX`] bytes, `.` or `..`, or
+    /// holding a `/`, whitespace, or a control character) is refused locally
+    /// with the same [`Error::TeamNotFound`] an unknown slug gets, so it never
+    /// reaches the platform's URL path.
+    pub async fn by_slug(platform: &PlatformClient, org: OrgId, slug: &str) -> Result<Self> {
+        let not_found = || Error::TeamNotFound {
+            team: format!("{slug:?}"),
+        };
+        let trimmed = slug.trim();
+        if !team_slug_shape_ok(trimmed) {
+            return Err(not_found());
+        }
+        match platform.team_by_slug(org.as_uuid(), trimmed).await? {
+            Some(info) if info.org_id == org.as_uuid() => Ok(Self {
+                org,
+                team: info.id.into(),
+            }),
+            Some(info) => {
+                // See `verify`: a lookup scoped to this org answered with
+                // another org's team.
+                tracing::error!(
+                    org = %org,
+                    requested_slug = ?trimmed,
+                    returned_org = %info.org_id,
+                    "platform answered a team-by-slug lookup with another org's team; \
+                     refused as team_not_found"
+                );
+                Err(not_found())
+            }
+            None => Err(not_found()),
         }
     }
 
@@ -165,5 +247,23 @@ impl TeamScope {
     /// Whether this scope sees every row (an administrator's).
     pub fn is_all(&self) -> bool {
         matches!(self, Self::All)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn team_slug_shape() {
+        assert!(team_slug_shape_ok("platform"));
+        assert!(team_slug_shape_ok("a.b-c_d"));
+        assert!(team_slug_shape_ok(&"x".repeat(TEAM_SLUG_MAX)));
+        for bad in [
+            "", ".", "..", "a/b", "../x", "a b", "a\tb", "a\u{0}b", "a\u{7f}b", "a\u{a0}b",
+        ] {
+            assert!(!team_slug_shape_ok(bad), "{bad:?} should be refused");
+        }
+        assert!(!team_slug_shape_ok(&"x".repeat(TEAM_SLUG_MAX + 1)));
     }
 }

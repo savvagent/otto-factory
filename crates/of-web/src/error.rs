@@ -165,9 +165,11 @@ impl From<CoreError> for ApiError {
         }
 
         let status = match &e {
-            JobNotFound(_) | RepoNotFound(_) | RepoUnresolved { .. } | TeamNotFound { .. } => {
-                StatusCode::NOT_FOUND
-            }
+            JobNotFound(_)
+            | RepoNotFound(_)
+            | RepoUnresolved { .. }
+            | TeamNotFound { .. }
+            | TeamChannelNotFound { .. } => StatusCode::NOT_FOUND,
 
             RepoSlugTaken(_)
             | RemoteTaken(..)

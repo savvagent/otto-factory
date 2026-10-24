@@ -8,10 +8,10 @@ mod common;
 use common::{db, job, tenant, Member};
 use of_core::jobs::{JobsExt, Status};
 use of_core::leases::LeasesExt;
-use of_core::messages::{MessagesExt, NewMessage};
+use of_core::messages::{ChannelRef, MessagesExt, NewMessage};
 use of_core::platform_events::{apply, begin_live, revoked, Outcome};
 use of_core::repos::{NewRepo, RepoPatch, ReposExt};
-use of_core::teams::VerifiedTeam;
+use of_core::teams::{TeamScope, VerifiedTeam};
 use of_core::trackers::{upsert_binding, upsert_connection, Provider};
 use of_testkit::MockPlatform;
 use otto_resource::webhook::{self, WebhookEvent};
@@ -46,17 +46,21 @@ async fn populate(db: &otto_tenant::Db, t: &common::Tenant) {
     tx.acquire_lease(t.repo, "branch:main", t.user, Some("agent"), None, None)
         .await
         .unwrap();
-    tx.send_message(
-        t.user,
-        NewMessage {
-            body: "hello".into(),
-            job_id: Some(j1.id.clone()),
-            ..Default::default()
-        },
-    )
-    .await
-    .unwrap();
-    tx.ack_messages(t.user, 1).await.unwrap();
+    let hello = tx
+        .send_message(
+            t.user,
+            NewMessage {
+                body: "hello".into(),
+                repo_id: Some(t.repo),
+                job_id: Some(j1.id.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    tx.ack_messages_for(t.user, ChannelRef::Repo(t.repo), hello.id, &TeamScope::All)
+        .await
+        .unwrap();
     let conn = upsert_connection(
         &mut tx,
         Provider::Github,
@@ -592,16 +596,20 @@ async fn member_removed_releases_what_they_held(pool: PgPool) {
     tx.acquire_lease(a.repo, "branch:mine", a.user, None, None, None)
         .await
         .unwrap();
-    tx.send_message(
-        bob,
-        NewMessage {
-            body: "bob was here".into(),
-            ..Default::default()
-        },
-    )
-    .await
-    .unwrap();
-    tx.ack_messages(bob, 1).await.unwrap();
+    let was_here = tx
+        .send_message(
+            bob,
+            NewMessage {
+                body: "bob was here".into(),
+                repo_id: Some(a.repo),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    tx.ack_messages_for(bob, ChannelRef::Repo(a.repo), was_here.id, &TeamScope::All)
+        .await
+        .unwrap();
     tx.commit().await.unwrap();
 
     let ev = event(
@@ -621,7 +629,16 @@ async fn member_removed_releases_what_they_held(pool: PgPool) {
     let done = tx.get_job(&done.id).await.unwrap();
     let leases = tx.list_leases(None).await.unwrap();
     let messages = tx
-        .inbox(a.user, &of_core::messages::InboxQuery::default())
+        .inbox(
+            a.user,
+            &of_core::messages::InboxQuery {
+                channel: ChannelRef::Repo(a.repo),
+                unread_only: true,
+                limit: 50,
+                newest_first: false,
+                visible_teams: None,
+            },
+        )
         .await
         .unwrap();
     tx.commit().await.unwrap();
@@ -647,6 +664,65 @@ async fn member_removed_releases_what_they_held(pool: PgPool) {
     assert_eq!(messages.len(), 1, "what bob wrote is history and stays");
 
     assert_eq!(apply(&db, &ev).await.unwrap(), Outcome::Duplicate);
+}
+
+/// A member has one cursor per channel they have read; removal drops them all,
+/// and only in the org they left.
+#[sqlx::test]
+async fn member_removed_drops_every_channel_cursor(pool: PgPool) {
+    let platform = MockPlatform::start().await;
+    let db = db(pool);
+    let a = tenant(&db, "acme", "git@github.com:acme/api.git").await;
+    let b = tenant(&db, "globex", "git@github.com:globex/api.git").await;
+    let (ours, theirs) = teams_in_two_orgs(&platform, &a, &b).await;
+    let bob = Member::new().id;
+
+    // The same person in both orgs, reading a repo channel and a team channel
+    // in each.
+    for (t, team) in [(&a, ours), (&b, theirs)] {
+        let mut tx = db.begin(t.org).await.unwrap();
+        for (channel, repo_id, team_id) in [
+            (ChannelRef::Repo(t.repo), Some(t.repo), None),
+            (ChannelRef::Team(team.id()), None, Some(team)),
+        ] {
+            let id = tx
+                .send_message(
+                    t.user,
+                    NewMessage {
+                        body: "read me".into(),
+                        repo_id,
+                        team_id,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap()
+                .id;
+            assert_eq!(
+                tx.ack_messages_for(bob, channel, id, &TeamScope::All)
+                    .await
+                    .unwrap(),
+                id
+            );
+        }
+        tx.commit().await.unwrap();
+    }
+    assert_eq!(count(&db, a.org, "message_cursors").await, 2);
+
+    let ev = event(
+        "member.removed",
+        serde_json::json!({ "org_id": a.org.as_uuid(), "user_id": bob.as_uuid() }),
+    );
+    let Outcome::Applied { detail } = apply(&db, &ev).await.unwrap() else {
+        panic!("expected the event to apply");
+    };
+    assert_eq!(detail["cursors_dropped"], 2);
+    assert_eq!(count(&db, a.org, "message_cursors").await, 0);
+    assert_eq!(
+        count(&db, b.org, "message_cursors").await,
+        2,
+        "removal in one org dropped cursors in another"
+    );
 }
 
 #[sqlx::test]
@@ -730,6 +806,92 @@ async fn an_unreachable_platform_refuses_instead_of_assuming() {
     };
     assert!(matches!(e, of_core::Error::Platform(_)), "{e:?}");
     assert!(e.retriable(), "an outage is worth retrying");
+}
+
+#[tokio::test]
+async fn by_slug_finds_a_team_in_its_org() {
+    let platform = MockPlatform::start().await;
+    let org = OrgId::new();
+    let team = TeamId::new();
+    platform.add_org(org.as_uuid(), "acme", "Acme");
+    platform.add_team(org.as_uuid(), team.as_uuid(), "platform", "Platform");
+
+    let verified = VerifiedTeam::by_slug(&platform.client(), org, "platform")
+        .await
+        .expect("a team the org has");
+    assert_eq!(verified.id(), team);
+    assert_eq!(verified.org(), org);
+}
+
+/// The platform scopes the lookup by org, so this proves that scoping holds
+/// end to end. `by_slug`'s own re-check of the answer's org is defense against a
+/// confused response, which the mock cannot produce (the same as for `verify`).
+#[tokio::test]
+async fn by_slug_refuses_another_orgs_slug() {
+    let platform = MockPlatform::start().await;
+    let (mine, theirs) = (OrgId::new(), OrgId::new());
+    platform.add_org(mine.as_uuid(), "mine", "Mine");
+    platform.add_org(theirs.as_uuid(), "theirs", "Theirs");
+    platform.add_team(theirs.as_uuid(), Uuid::new_v4(), "secret", "Secret");
+
+    let res = VerifiedTeam::by_slug(&platform.client(), mine, "secret").await;
+    assert!(
+        matches!(res, Err(of_core::Error::TeamNotFound { .. })),
+        "{res:?}"
+    );
+}
+
+#[tokio::test]
+async fn by_slug_refuses_an_unknown_slug() {
+    let platform = MockPlatform::start().await;
+    let org = OrgId::new();
+    platform.add_org(org.as_uuid(), "acme", "Acme");
+
+    let res = VerifiedTeam::by_slug(&platform.client(), org, "nope").await;
+    assert!(
+        matches!(res, Err(of_core::Error::TeamNotFound { .. })),
+        "{res:?}"
+    );
+}
+
+/// A slug that could not name a team is refused before any request: with the
+/// platform down, a request would have come back as `Error::Platform`.
+#[tokio::test]
+async fn by_slug_refuses_a_malformed_slug_without_asking_the_platform() {
+    let platform = MockPlatform::start().await;
+    let org = OrgId::new();
+    platform.add_org(org.as_uuid(), "acme", "Acme");
+    platform.set_down(true);
+
+    let long = "a".repeat(of_core::teams::TEAM_SLUG_MAX + 1);
+    for slug in [
+        "", "  ", ".", "..", "a/b", "a\\b", "a%2Fb", "a?b", "a#b", "a b", "a\tb", &long,
+    ] {
+        let res = VerifiedTeam::by_slug(&platform.client(), org, slug).await;
+        assert!(
+            matches!(res, Err(of_core::Error::TeamNotFound { .. })),
+            "{slug:?}: {res:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn by_slug_on_an_unreachable_platform_is_a_platform_error() {
+    let platform = MockPlatform::start().await;
+    let org = OrgId::new();
+    platform.add_org(org.as_uuid(), "acme", "Acme");
+    platform.add_team(org.as_uuid(), Uuid::new_v4(), "platform", "Platform");
+    platform.set_down(true);
+
+    let res = VerifiedTeam::by_slug(&platform.client(), org, "platform").await;
+    let Err(e) = res else {
+        panic!("a team was verified while the platform was down")
+    };
+    assert!(matches!(e, of_core::Error::Platform(_)), "{e:?}");
+    assert!(
+        e.retriable(),
+        "an outage is worth retrying, not a missing team"
+    );
 }
 
 #[sqlx::test]

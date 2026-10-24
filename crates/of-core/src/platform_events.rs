@@ -12,8 +12,8 @@
 //! | Event | Effect |
 //! |---|---|
 //! | `org.deleted` | Every row this database holds for the org is deleted: repos, jobs, leases, messages, tracker connections, counters, unshipped usage, console sessions, and the org's domain audit trail. Only the dedupe marker survives. |
-//! | `team.deleted` | **Scope is kept, not widened.** Repos, jobs, and messages keep their `team_id`. See below. |
-//! | `member.removed` | The user's live leases are released, their in-progress or active job claims go back to `pending`, and their message read cursor is dropped, and their console sessions in the org are deleted. History they authored (jobs they created, messages they sent) is kept. |
+//! | `team.deleted` | **Scope is kept, not widened.** Repos, jobs, and messages keep their `team_id`. The team's channel (its messages and its members' cursors) stays under the tombstoned id, unreachable over MCP because the slug no longer resolves. See below. |
+//! | `member.removed` | The user's live leases are released, their in-progress or active job claims go back to `pending`, their message read cursors are deleted (one per channel they read), and their console sessions in the org are deleted. History they authored (jobs they created, messages they sent) is kept. |
 //!
 //! # Why clean-up and requests take a lock
 //!

@@ -11,7 +11,7 @@ use of_core::messages::MessagesExt;
 use std::time::Duration;
 
 use of_core::ids::JobId;
-use of_core::messages::{InboxQuery, MessageKind, NewMessage, SenderKind};
+use of_core::messages::{ChannelRef, InboxQuery, MessageKind, NewMessage, SenderKind};
 use of_core::repos::{Hold, ReposExt};
 use of_core::watch::Outcome;
 use rmcp::handler::server::tool::Extension;
@@ -20,7 +20,10 @@ use rmcp::model::ErrorData;
 use rmcp::{tool, tool_router};
 use serde::Deserialize;
 
-use super::{ensure_job_visible, maybe_repo_for_write, maybe_repo_of, out, repo_for_write, scope};
+use super::{
+    channel_arg, channel_of, ensure_job_visible, maybe_repo_of, out, repo_for_write, scope,
+    ChannelArg,
+};
 use crate::server::{Factory, McpResult};
 
 /// Default long-poll duration, and the ceiling.
@@ -102,21 +105,25 @@ pub struct RepoScopeArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SendMessageArgs {
     /// What you want to say.
     pub body: String,
-    /// Email address of one teammate to send this to privately. Omit to
-    /// broadcast to everyone in the organization.
-    #[serde(default)]
-    pub to: Option<String>,
     /// "note" (default), "request" when you need an answer, or "response".
     #[serde(default)]
     pub kind: Option<String>,
+    /// The repo whose channel this goes to, by registered slug. Pass this (or
+    /// remote) or team, not both.
     #[serde(default)]
     pub repo: Option<String>,
+    /// The repo whose channel this goes to, as `git remote get-url origin`
+    /// printed it. Pass this (or repo) or team, not both.
     #[serde(default)]
     pub remote: Option<String>,
+    /// A team's slug, for that team's channel across repos. Pass this or
+    /// repo/remote, not both.
+    #[serde(default)]
+    pub team: Option<String>,
     /// The job this is about, if any.
     #[serde(default)]
     pub job: Option<String>,
@@ -142,8 +149,20 @@ pub struct SendMessageArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct InboxArgs {
+    /// The repo whose channel to read, by registered slug. Name exactly one
+    /// channel: repo (or remote), or team.
+    #[serde(default)]
+    pub repo: Option<String>,
+    /// The repo whose channel to read, as `git remote get-url origin` printed
+    /// it.
+    #[serde(default)]
+    pub remote: Option<String>,
+    /// A team's slug, for that team's channel. A team you are not on is
+    /// team_not_found.
+    #[serde(default)]
+    pub team: Option<String>,
     /// Only messages you have not acknowledged and did not send. Defaults to
     /// true.
     #[serde(default = "default_true")]
@@ -161,12 +180,41 @@ fn default_true() -> bool {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AckMessagesArgs {
-    /// The highest message id you have read. Clamped to the newest message
-    /// that exists, so an over-large value cannot hide messages not yet
-    /// written.
+    /// The highest message id you have read in this channel: an id inbox
+    /// returned for this same channel, or 0. Any other id (another channel's,
+    /// one you cannot see, one that does not exist) is invalid_argument.
     pub up_to: i64,
+    /// The repo whose channel to acknowledge, by registered slug. Name exactly one
+    /// channel: repo (or remote), or team.
+    #[serde(default)]
+    pub repo: Option<String>,
+    /// The repo whose channel to acknowledge, as `git remote get-url origin` printed
+    /// it.
+    #[serde(default)]
+    pub remote: Option<String>,
+    /// A team's slug, for that team's channel. A team you are not on is
+    /// team_not_found.
+    #[serde(default)]
+    pub team: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChannelArgs {
+    /// The repo whose channel to count, by registered slug. Name exactly one
+    /// channel: repo (or remote), or team.
+    #[serde(default)]
+    pub repo: Option<String>,
+    /// The repo whose channel to count, as `git remote get-url origin` printed
+    /// it.
+    #[serde(default)]
+    pub remote: Option<String>,
+    /// A team's slug, for that team's channel. A team you are not on is
+    /// team_not_found.
+    #[serde(default)]
+    pub team: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
@@ -177,9 +225,6 @@ pub struct WatchArgs {
     #[serde(default)]
     pub timeout_seconds: Option<u64>,
 }
-
-#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
-pub struct NoArgs {}
 
 /// Parse the caller's message kind.
 fn message_kind(raw: Option<&str>) -> Result<MessageKind, ErrorData> {
@@ -380,15 +425,19 @@ impl Factory {
 
     #[tool(
         name = "send_message",
-        description = "Post a note to the team's shared channel, or privately to one teammate \
-                       by email address. Use it for hand-offs and questions that do not fit in \
-                       a job field — 'I have left the migration half-applied on this branch' is \
-                       exactly the kind of thing that belongs here. Pass idempotencyKey if your \
-                       connection can drop before you see the response, so a retry returns the \
-                       original message instead of posting a duplicate. agent is a short label (one \
-                       line, at most 128 visible characters) shown to recipients as the sender; \
-                       a longer or multi-line one is refused with invalid_agent_label rather \
-                       than shortened."
+        description = "Post a note to one repo's or one team's shared channel: pass repo (or \
+                       remote) for coordination about that repo, or team (a team slug) for a \
+                       team's work across repos. Exactly one is required; neither or both is \
+                       invalid_argument, and an unknown team or one you are not on is \
+                       team_not_found. Use it \
+                       for hand-offs and questions that do not fit in a job field — 'I have \
+                       left the migration half-applied on this branch' is exactly the kind of \
+                       thing that belongs here. Pass idempotencyKey if your connection can drop \
+                       before you see the response, so a retry returns the original message \
+                       instead of posting a duplicate. agent is a short label (one line, at \
+                       most 128 visible characters) shown to readers as the sender; a longer or \
+                       multi-line one is refused with invalid_agent_label rather than \
+                       shortened."
     )]
     pub async fn send_message(
         &self,
@@ -399,12 +448,15 @@ impl Factory {
         caller.require_scope(scope::MESSAGES).mcp()?;
 
         let kind = message_kind(args.kind.as_deref())?;
-        let recipient = match args.to.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-            Some(email) => Some(self.member_by_email(&caller, email).await?),
-            None => None,
-        };
 
+        // Both platform calls (the scope, and a team channel's slug) before the
+        // transaction opens, so a slow platform holds no pooled connection.
         let team = self.team_scope(&caller).await?;
+        let arg = channel_arg(self, &caller, &team, args.repo, args.remote, args.team).await?;
+        let team_id = match &arg {
+            ChannelArg::Team(t) => Some(*t),
+            ChannelArg::Repo { .. } => None,
+        };
         let mut tx = self.tx(&caller).await?;
 
         // No key: reproduce today's behavior exactly, charging as the
@@ -412,18 +464,19 @@ impl Factory {
         // identical comment (tools::jobs) and Factory::charge's doc comment.
         let Some(key) = args.idempotency_key else {
             self.charge(&mut tx, &caller, "send_message").await?;
-            let repo_id = maybe_repo_for_write(&mut tx, &team, args.repo, args.remote).await?;
+            let repo_id = repo_id_of(channel_of(&mut tx, &team, arg, true).await?);
             if let Some(job) = &args.job {
                 ensure_job_visible(&mut tx, &team, &JobId::from(job.clone())).await?;
             }
-            let recipient =
-                reply_recipient(&mut tx, &team, &caller, args.in_reply_to, recipient).await?;
+            if let Some(parent) = args.in_reply_to {
+                tx.reply_parent(parent, &team).await.mcp()?;
+            }
             let message = tx
                 .send_message(
                     caller.user_id,
                     NewMessage {
                         body: args.body,
-                        recipient_user_id: recipient,
+                        team_id,
                         kind,
                         // Always `Agent` from this surface. A human writing
                         // in the console is the same user authenticating the
@@ -445,16 +498,17 @@ impl Factory {
         };
 
         // A key was supplied: replay-vs-new must be resolved before
-        // charging, which needs `repo_id` to build the payload to check.
-        let repo_id = maybe_repo_for_write(&mut tx, &team, args.repo, args.remote).await?;
+        // charging, which needs the channel to build the payload to check.
+        let repo_id = repo_id_of(channel_of(&mut tx, &team, arg, true).await?);
         if let Some(job) = &args.job {
             ensure_job_visible(&mut tx, &team, &JobId::from(job.clone())).await?;
         }
-        let recipient =
-            reply_recipient(&mut tx, &team, &caller, args.in_reply_to, recipient).await?;
+        if let Some(parent) = args.in_reply_to {
+            tx.reply_parent(parent, &team).await.mcp()?;
+        }
         let new_message = NewMessage {
             body: args.body,
-            recipient_user_id: recipient,
+            team_id,
             kind,
             sender_kind: SenderKind::Agent,
             sender_label: args.agent,
@@ -462,7 +516,6 @@ impl Factory {
             job_id: args.job.map(JobId::from),
             in_reply_to: args.in_reply_to,
             idempotency_key: Some(key),
-            ..Default::default()
         };
 
         if let Some(existing) = tx
@@ -472,11 +525,7 @@ impl Factory {
         {
             // The original is the caller's own, but what it is tied to may have
             // moved out of their teams since: not theirs to read back now.
-            if !tx
-                .message_readable(existing.id, caller.user_id, &team)
-                .await
-                .mcp()?
-            {
+            if !tx.message_readable(existing.id, &team).await.mcp()? {
                 // Not `*_not_found`, which would invite a retry with the same
                 // key: the original exists, so the key is spent.
                 return Err(of_core::Error::Redacted {
@@ -501,9 +550,13 @@ impl Factory {
 
     #[tool(
         name = "inbox",
-        description = "Read messages addressed to you or broadcast to the organization. \
-                       Defaults to unread only, excluding your own. Call ack_messages with the \
-                       highest id you have read so the next call does not repeat them."
+        description = "Read the messages in a repo's or a team's channel. One channel at a \
+                       time, named the same way as send_message (repo, remote, or team): \
+                       exactly one is required, and neither or both is invalid_argument. An \
+                       unknown team or one you are not on is team_not_found. Defaults to \
+                       unread only, excluding your own. Call ack_messages for the same channel \
+                       with the highest id you have read so the next call does not repeat \
+                       them."
     )]
     pub async fn inbox(
         &self,
@@ -514,15 +567,17 @@ impl Factory {
         caller.require_scope(scope::MESSAGES).mcp()?;
 
         let team = self.team_scope(&caller).await?;
+        let arg = channel_arg(self, &caller, &team, args.repo, args.remote, args.team).await?;
+
+        let mut tx = self.tx(&caller).await?;
+        self.charge(&mut tx, &caller, "inbox").await?;
         let q = InboxQuery {
+            channel: channel_of(&mut tx, &team, arg, false).await?,
             visible_teams: team.restriction(),
             unread_only: args.unread_only,
             limit: args.limit.unwrap_or(50),
             newest_first: args.newest_first,
         };
-
-        let mut tx = self.tx(&caller).await?;
-        self.charge(&mut tx, &caller, "inbox").await?;
         let messages = tx.inbox(caller.user_id, &q).await.mcp()?;
         tx.commit().await.mcp()?;
 
@@ -531,9 +586,15 @@ impl Factory {
 
     #[tool(
         name = "ack_messages",
-        description = "Move your read cursor to a message id, so those messages stop appearing \
-                       in your unread inbox. Returns the cursor that actually landed, which is \
-                       clamped to the newest message that exists."
+        description = "Move your read cursor for one channel to a message id, so those messages \
+                       stop appearing in that channel's unread inbox. One channel at a time, \
+                       named the same way as send_message (repo, remote, or team): exactly one \
+                       is required, and neither or both is invalid_argument. An unknown team \
+                       or one you are not on is team_not_found. Each channel has its own cursor, so acking \
+                       one never marks another read. up_to must be an id inbox returned for \
+                       this same channel (or 0); any other id, including another channel's \
+                       or one that does not exist, is invalid_argument and moves nothing. \
+                       The cursor never moves backwards; returns where it landed."
     )]
     pub async fn ack_messages(
         &self,
@@ -544,10 +605,12 @@ impl Factory {
         caller.require_scope(scope::MESSAGES).mcp()?;
 
         let team = self.team_scope(&caller).await?;
+        let arg = channel_arg(self, &caller, &team, args.repo, args.remote, args.team).await?;
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "ack_messages").await?;
+        let channel = channel_of(&mut tx, &team, arg, false).await?;
         let cursor = tx
-            .ack_messages_for(caller.user_id, args.up_to, &team)
+            .ack_messages_for(caller.user_id, channel, args.up_to, &team)
             .await
             .mcp()?;
         tx.commit().await.mcp()?;
@@ -557,21 +620,30 @@ impl Factory {
 
     #[tool(
         name = "unread_count",
-        description = "How many messages are waiting for you. Cheap enough to call before \
-                       deciding whether reading the inbox is worth it."
+        description = "How many messages are waiting for you in one channel. One channel at a \
+                       time, named the same way as send_message (repo, remote, or team): \
+                       exactly one is required, and neither or both is invalid_argument. An \
+                       unknown team or one you are not on is team_not_found. Cheap for a repo channel; a team channel \
+                       also costs one lookup at the platform to resolve the team. Call it \
+                       before deciding whether reading that channel's inbox is worth it."
     )]
     pub async fn unread_count(
         &self,
         Extension(parts): Extension<http::request::Parts>,
-        Parameters(_): Parameters<NoArgs>,
+        Parameters(args): Parameters<ChannelArgs>,
     ) -> Result<Json<out::UnreadOut>, ErrorData> {
         let caller = self.caller(&parts)?;
         caller.require_scope(scope::MESSAGES).mcp()?;
 
         let team = self.team_scope(&caller).await?;
+        let arg = channel_arg(self, &caller, &team, args.repo, args.remote, args.team).await?;
         let mut tx = self.tx(&caller).await?;
         self.charge(&mut tx, &caller, "unread_count").await?;
-        let unread = tx.unread_count_for(caller.user_id, &team).await.mcp()?;
+        let channel = channel_of(&mut tx, &team, arg, false).await?;
+        let unread = tx
+            .unread_count_for(caller.user_id, channel, &team)
+            .await
+            .mcp()?;
         tx.commit().await.mcp()?;
 
         Ok(Json(out::UnreadOut { unread }))
@@ -664,24 +736,13 @@ async fn ensure_lease_visible(
     Ok(())
 }
 
-/// Who a message goes to, given the message it replies to (if any): the
-/// parent must be one the caller can read, and a reply to a private message
-/// stays private (`ReplyParent::reply_recipient`). The parent's repos stay held
-/// until the transaction ends; see `MessagesExt::reply_parent`.
-async fn reply_recipient(
-    tx: &mut otto_tenant::Tx<'_>,
-    team: &of_core::teams::TeamScope,
-    caller: &crate::auth::Principal,
-    in_reply_to: Option<i64>,
-    requested: Option<otto_tenant::ids::UserId>,
-) -> Result<Option<otto_tenant::ids::UserId>, ErrorData> {
-    let Some(parent) = in_reply_to else {
-        return Ok(requested);
-    };
-    tx.reply_parent(parent, caller.user_id, team)
-        .await
-        .and_then(|p| p.reply_recipient(caller.user_id, requested))
-        .mcp()
+/// The repo a message's channel names, for `NewMessage::repo_id`; a team
+/// channel's message carries no repo.
+fn repo_id_of(channel: ChannelRef) -> Option<of_core::ids::RepoId> {
+    match channel {
+        ChannelRef::Repo(r) => Some(r),
+        ChannelRef::Team(_) => None,
+    }
 }
 
 /// Blank a returned lease's `job_id` if the caller cannot see that job, as
@@ -705,49 +766,6 @@ fn lease_id(raw: &str) -> Result<uuid::Uuid, ErrorData> {
             None,
         )
     })
-}
-
-impl Factory {
-    /// Resolve an email address to a member of the caller's own org, by asking
-    /// the platform, which owns accounts and memberships.
-    ///
-    /// The platform answers only for active members of *this* org, which is what
-    /// keeps an email lookup inside the tenant boundary: without that, this tool
-    /// would both deliver messages to strangers and answer "does this address
-    /// have an otto account?" for anyone who asked. The answer is checked again
-    /// here (the org in the response must be the caller's) rather than trusted.
-    ///
-    /// The failure says "no member of this organization", never "no such user",
-    /// for the same reason the login form is careful: the two are
-    /// indistinguishable to the caller and only one of them is safe to confirm.
-    /// A platform that cannot answer is an error, not a "no": recording a
-    /// message as broadcast, or refusing a real teammate, because a lookup
-    /// failed would both be wrong.
-    async fn member_by_email(
-        &self,
-        caller: &crate::auth::Principal,
-        email: &str,
-    ) -> Result<otto_tenant::ids::UserId, ErrorData> {
-        let not_a_member = || {
-            ErrorData::invalid_params(
-                format!(
-                    "no member of this organization has the address {email:?}; \
-                     omit `to` to broadcast to everyone instead"
-                ),
-                Some(serde_json::json!({ "code": "not_a_member", "retriable": false })),
-            )
-        };
-
-        let member = self
-            .platform()
-            .member_by_email(caller.org_id.as_uuid(), email)
-            .await
-            .mcp()?
-            .filter(|m| m.org.id == caller.org_id.as_uuid())
-            .ok_or_else(not_a_member)?;
-
-        Ok(member.user.id.into())
-    }
 }
 
 #[cfg(test)]

@@ -1271,50 +1271,6 @@ async fn one_orgs_token_cannot_see_or_touch_anothers_work(pool: PgPool) {
     assert_eq!(after["job"]["status"], "pending");
 }
 
-/// `users` is global — one human, one row, however many orgs — so an email
-/// lookup is the one place a tool could reach across the tenant boundary
-/// without reading another org's rows at all. The refusal must also not
-/// confirm that the address exists.
-#[sqlx::test(migrations = "../of-core/migrations")]
-async fn a_message_cannot_be_addressed_to_someone_in_another_org(pool: PgPool) {
-    let (env, caller) = env(pool).await;
-
-    let globex = env.org("globex", "Globex");
-    env.member(globex.id, "cfo@globex.test", Role::Member);
-
-    let to = |address: &str| tools::coord::SendMessageArgs {
-        body: "hello".into(),
-        to: Some(address.into()),
-        kind: None,
-        repo: None,
-        remote: None,
-        job: None,
-        in_reply_to: None,
-        agent: None,
-        idempotency_key: None,
-    };
-
-    let existing = err(env
-        .factory
-        .send_message(Extension(parts(&caller)), Parameters(to("cfo@globex.test")))
-        .await);
-    let absent = err(env
-        .factory
-        .send_message(
-            Extension(parts(&caller)),
-            Parameters(to("nobody@nowhere.test")),
-        )
-        .await);
-
-    assert_eq!(code_of(&existing), "not_a_member");
-    assert!(existing.message.contains("no member of this organization"));
-    assert_eq!(
-        existing.message.replace("cfo@globex.test", "X"),
-        absent.message.replace("nobody@nowhere.test", "X"),
-        "a real address in another org must be indistinguishable from an unused one"
-    );
-}
-
 // --------------------------------------------------------------- coordination
 
 #[sqlx::test(migrations = "../of-core/migrations")]
@@ -1576,6 +1532,7 @@ async fn acquire_lease_falls_back_to_branch_when_resource_is_blank(pool: PgPool)
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn messages_reach_the_inbox_and_the_cursor_clears_them(pool: PgPool) {
     let (env, sender) = env(pool).await;
+    env.register(&sender).await;
     let mate = env.teammate(sender.org_id, "sam@acme.test").await;
 
     ok(env
@@ -1584,10 +1541,10 @@ async fn messages_reach_the_inbox_and_the_cursor_clears_them(pool: PgPool) {
             Extension(parts(&sender)),
             Parameters(tools::coord::SendMessageArgs {
                 body: "migration is half applied on feature/x".into(),
-                to: Some("sam@acme.test".into()),
                 kind: Some("request".into()),
-                repo: None,
+                repo: Some("api".into()),
                 remote: None,
+                team: None,
                 job: None,
                 in_reply_to: None,
                 agent: Some("agent-one".into()),
@@ -1598,29 +1555,35 @@ async fn messages_reach_the_inbox_and_the_cursor_clears_them(pool: PgPool) {
 
     let unread = ok(env
         .factory
-        .unread_count(Extension(parts(&mate)), Parameters(tools::coord::NoArgs {}))
+        .unread_count(Extension(parts(&mate)), Parameters(repo_channel("api")))
         .await);
     assert_eq!(unread["unread"], 1);
 
     // The sender does not see their own message as unread.
     let mine = ok(env
         .factory
-        .unread_count(
-            Extension(parts(&sender)),
-            Parameters(tools::coord::NoArgs {}),
-        )
+        .unread_count(Extension(parts(&sender)), Parameters(repo_channel("api")))
         .await);
     assert_eq!(mine["unread"], 0);
+
+    // The same channel named by its remote is the same channel.
+    let by_remote = ok(env
+        .factory
+        .unread_count(
+            Extension(parts(&mate)),
+            Parameters(tools::coord::ChannelArgs {
+                remote: Some(REMOTE.into()),
+                ..Default::default()
+            }),
+        )
+        .await);
+    assert_eq!(by_remote["unread"], 1);
 
     let inbox = ok(env
         .factory
         .inbox(
             Extension(parts(&mate)),
-            Parameters(tools::coord::InboxArgs {
-                unread_only: true,
-                limit: None,
-                newest_first: false,
-            }),
+            Parameters(inbox_of(Some("api"), None)),
         )
         .await);
     let messages = inbox["messages"].as_array().unwrap();
@@ -1632,18 +1595,58 @@ async fn messages_reach_the_inbox_and_the_cursor_clears_them(pool: PgPool) {
         .factory
         .ack_messages(
             Extension(parts(&mate)),
-            Parameters(tools::coord::AckMessagesArgs {
-                up_to: messages[0]["id"].as_i64().unwrap(),
-            }),
+            Parameters(ack_of(
+                Some("api"),
+                None,
+                messages[0]["id"].as_i64().unwrap(),
+            )),
         )
         .await);
     assert_eq!(cursor["cursor"], messages[0]["id"]);
 
     let unread = ok(env
         .factory
-        .unread_count(Extension(parts(&mate)), Parameters(tools::coord::NoArgs {}))
+        .unread_count(Extension(parts(&mate)), Parameters(repo_channel("api")))
         .await);
     assert_eq!(unread["unread"], 0);
+}
+
+/// `unread_count`'s arguments for one repo's channel.
+fn repo_channel(slug: &str) -> tools::coord::ChannelArgs {
+    tools::coord::ChannelArgs {
+        repo: Some(slug.into()),
+        ..Default::default()
+    }
+}
+
+/// `unread_count`'s arguments for one team's channel.
+fn team_channel(slug: &str) -> tools::coord::ChannelArgs {
+    tools::coord::ChannelArgs {
+        team: Some(slug.into()),
+        ..Default::default()
+    }
+}
+
+/// An unread-only, oldest-first `inbox` of a repo's channel or a team's.
+fn inbox_of(repo: Option<&str>, team: Option<&str>) -> tools::coord::InboxArgs {
+    tools::coord::InboxArgs {
+        repo: repo.map(Into::into),
+        remote: None,
+        team: team.map(Into::into),
+        unread_only: true,
+        limit: None,
+        newest_first: false,
+    }
+}
+
+/// `ack_messages` of a repo's channel or a team's.
+fn ack_of(repo: Option<&str>, team: Option<&str>, up_to: i64) -> tools::coord::AckMessagesArgs {
+    tools::coord::AckMessagesArgs {
+        up_to,
+        repo: repo.map(Into::into),
+        remote: None,
+        team: team.map(Into::into),
+    }
 }
 
 // ------------------------------------------------------------ idempotency
@@ -1651,6 +1654,7 @@ async fn messages_reach_the_inbox_and_the_cursor_clears_them(pool: PgPool) {
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn send_message_with_an_idempotency_key_replays_instead_of_duplicating(pool: PgPool) {
     let (env, caller) = env(pool).await;
+    env.register(&caller).await;
 
     let before = env.usage(&caller).await;
     let billable_before = before["billableUsed"].as_i64().unwrap();
@@ -1658,10 +1662,10 @@ async fn send_message_with_an_idempotency_key_replays_instead_of_duplicating(poo
 
     let args = || tools::coord::SendMessageArgs {
         body: "hand-off note".into(),
-        to: None,
         kind: None,
-        repo: None,
+        repo: Some("api".into()),
         remote: None,
+        team: None,
         job: None,
         in_reply_to: None,
         agent: None,
@@ -1697,6 +1701,7 @@ async fn send_message_with_an_idempotency_key_replays_instead_of_duplicating(poo
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn send_message_with_a_reused_idempotency_key_and_a_different_body_errors(pool: PgPool) {
     let (env, caller) = env(pool).await;
+    env.register(&caller).await;
 
     ok(env
         .factory
@@ -1704,10 +1709,10 @@ async fn send_message_with_a_reused_idempotency_key_and_a_different_body_errors(
             Extension(parts(&caller)),
             Parameters(tools::coord::SendMessageArgs {
                 body: "first note".into(),
-                to: None,
                 kind: None,
-                repo: None,
+                repo: Some("api".into()),
                 remote: None,
+                team: None,
                 job: None,
                 in_reply_to: None,
                 agent: None,
@@ -1722,10 +1727,10 @@ async fn send_message_with_a_reused_idempotency_key_and_a_different_body_errors(
             Extension(parts(&caller)),
             Parameters(tools::coord::SendMessageArgs {
                 body: "a totally different note".into(),
-                to: None,
                 kind: None,
-                repo: None,
+                repo: Some("api".into()),
                 remote: None,
+                team: None,
                 job: None,
                 in_reply_to: None,
                 agent: None,
@@ -2330,10 +2335,10 @@ async fn coordination_calls_are_recorded_as_free(pool: PgPool) {
             Extension(parts(&caller)),
             Parameters(tools::coord::SendMessageArgs {
                 body: "hello".into(),
-                to: None,
                 kind: None,
                 repo: Some("api".into()),
                 remote: None,
+                team: None,
                 job: None,
                 in_reply_to: None,
                 agent: None,
@@ -3545,44 +3550,6 @@ async fn a_token_opens_exactly_its_own_org_over_the_wire(pool: PgPool) {
         .all(|e| !e.billable && e.user_id == Some(rob)));
 }
 
-/// A name the platform cannot resolve because the platform is down must be an
-/// error, never "send it to everyone" and never "no such member".
-#[sqlx::test(migrations = "../of-core/migrations")]
-async fn a_direct_message_fails_closed_when_the_platform_cannot_answer(pool: PgPool) {
-    let (env, caller) = env(pool).await;
-    env.teammate(caller.org_id, "bob@acme.test").await;
-    env.platform.set_down(true);
-
-    let e = err(env
-        .factory
-        .send_message(
-            Extension(parts(&caller)),
-            Parameters(tools::coord::SendMessageArgs {
-                body: "private".into(),
-                to: Some("bob@acme.test".into()),
-                kind: None,
-                repo: None,
-                remote: None,
-                job: None,
-                in_reply_to: None,
-                agent: None,
-                idempotency_key: None,
-            }),
-        )
-        .await);
-
-    assert_eq!(code_of(&e), "platform_unavailable");
-    assert_eq!(e.data.as_ref().unwrap()["retriable"], true);
-    let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM messages")
-        .fetch_one(env.db.pool())
-        .await
-        .unwrap();
-    assert_eq!(
-        stored, 0,
-        "a message was stored although its recipient was never resolved"
-    );
-}
-
 #[sqlx::test(migrations = "../of-core/migrations")]
 async fn whoami_refuses_rather_than_guessing_when_the_platform_is_down(pool: PgPool) {
     let (env, caller) = env(pool).await;
@@ -4374,15 +4341,15 @@ impl Env {
 async fn messages_about_a_hidden_repo_or_job_are_not_delivered(pool: PgPool) {
     let t = teams_world(pool).await;
     let f = &t.env.factory;
-    let send = |who: &Principal, body: &str, repo: Option<&str>, job: Option<&str>| {
+    let send = |who: &Principal, body: &str, repo: &str, job: Option<&str>| {
         f.send_message(
             Extension(parts(who)),
             Parameters(tools::coord::SendMessageArgs {
                 body: body.into(),
-                to: None,
                 kind: None,
-                repo: repo.map(Into::into),
+                repo: Some(repo.into()),
                 remote: None,
+                team: None,
                 job: job.map(Into::into),
                 in_reply_to: None,
                 agent: None,
@@ -4390,28 +4357,28 @@ async fn messages_about_a_hidden_repo_or_job_are_not_delivered(pool: PgPool) {
             }),
         )
     };
-    ok(send(&t.owner, "plain", None, None).await);
-    ok(send(&t.owner, "about repo", Some("platform-repo"), None).await);
-    ok(send(&t.owner, "about job", None, Some(&t.jobs["platform-repo"])).await);
+    ok(send(&t.owner, "plain", "shared", None).await);
+    ok(send(&t.owner, "about repo", "platform-repo", None).await);
+    // In a channel carol can read, but about a job she cannot see.
+    ok(send(
+        &t.owner,
+        "about job",
+        "shared",
+        Some(&t.jobs["platform-repo"]),
+    )
+    .await);
 
     // Naming a hidden job or repo when sending is refused outright.
-    let e = err(send(&t.carol, "x", None, Some(&t.jobs["platform-repo"])).await);
+    let e = err(send(&t.carol, "x", "shared", Some(&t.jobs["platform-repo"])).await);
     assert_eq!(code_of(&e), "job_not_found");
-    let e = err(send(&t.carol, "x", Some("platform-repo"), None).await);
+    let e = err(send(&t.carol, "x", "platform-repo", None).await);
     assert_eq!(code_of(&e), "repo_unresolved");
 
-    let inbox = |who: &Principal| {
+    let inbox = |who: &Principal, repo: &'static str| {
         let p = parts(who);
         async move {
             let out = ok(f
-                .inbox(
-                    Extension(p),
-                    Parameters(tools::coord::InboxArgs {
-                        unread_only: true,
-                        limit: None,
-                        newest_first: false,
-                    }),
-                )
+                .inbox(Extension(p), Parameters(inbox_of(Some(repo), None)))
                 .await);
             out["messages"]
                 .as_array()
@@ -4421,39 +4388,45 @@ async fn messages_about_a_hidden_repo_or_job_are_not_delivered(pool: PgPool) {
                 .collect::<Vec<_>>()
         }
     };
-    let unread = |who: &Principal| {
+    let unread = |who: &Principal, repo: &'static str| {
         let p = parts(who);
         async move {
-            ok(
-                f.unread_count(Extension(p), Parameters(tools::coord::NoArgs {}))
-                    .await,
-            )["unread"]
+            ok(f.unread_count(Extension(p), Parameters(repo_channel(repo)))
+                .await)["unread"]
                 .as_i64()
                 .unwrap()
         }
     };
-    assert_eq!(inbox(&t.carol).await, ["plain"]);
-    assert_eq!(unread(&t.carol).await, 1);
-    assert_eq!(inbox(&t.alice).await, ["plain", "about repo", "about job"]);
-    assert_eq!(unread(&t.alice).await, 3);
+    assert_eq!(inbox(&t.carol, "shared").await, ["plain"]);
+    assert_eq!(unread(&t.carol, "shared").await, 1);
+    assert_eq!(inbox(&t.alice, "shared").await, ["plain", "about job"]);
+    assert_eq!(unread(&t.alice, "shared").await, 2);
+    assert_eq!(inbox(&t.alice, "platform-repo").await, ["about repo"]);
+    assert_eq!(unread(&t.alice, "platform-repo").await, 1);
 
-    // The cursor lands at the newest message carol can see, not the newest there is.
-    let landed = ok(f
-        .ack_messages(
+    // A hidden repo's channel cannot be read at all, and says so like an
+    // unregistered one.
+    let e = err(f
+        .inbox(
             Extension(parts(&t.carol)),
-            Parameters(tools::coord::AckMessagesArgs { up_to: 1_000_000 }),
+            Parameters(inbox_of(Some("platform-repo"), None)),
         )
-        .await)["cursor"]
-        .as_i64()
-        .unwrap();
+        .await);
+    assert_eq!(code_of(&e), "repo_unresolved");
+    let e = err(f
+        .unread_count(
+            Extension(parts(&t.carol)),
+            Parameters(repo_channel("platform-repo")),
+        )
+        .await);
+    assert_eq!(code_of(&e), "repo_unresolved");
+
+    // carol can ack the message she can see, and not the one about a job she
+    // cannot, which is refused exactly like an id that does not exist.
     let all = ok(f
         .inbox(
             Extension(parts(&t.alice)),
-            Parameters(tools::coord::InboxArgs {
-                unread_only: true,
-                limit: None,
-                newest_first: false,
-            }),
+            Parameters(inbox_of(Some("shared"), None)),
         )
         .await);
     let ids: Vec<i64> = all["messages"]
@@ -4462,7 +4435,22 @@ async fn messages_about_a_hidden_repo_or_job_are_not_delivered(pool: PgPool) {
         .iter()
         .map(|m| m["id"].as_i64().unwrap())
         .collect();
-    assert_eq!(landed, ids[0], "clamped to the visible 'plain' message");
+    let ack = |up_to: i64| {
+        f.ack_messages(
+            Extension(parts(&t.carol)),
+            Parameters(ack_of(Some("shared"), None, up_to)),
+        )
+    };
+    let hidden = err(ack(ids[1]).await);
+    let missing = err(ack(1_000_000).await);
+    assert_eq!(code_of(&hidden), "invalid_argument");
+    assert_eq!(
+        hidden.message.replace(&ids[1].to_string(), "<id>"),
+        missing.message.replace("1000000", "<id>"),
+        "a hidden message must be refused exactly like a missing one"
+    );
+    let landed = ok(ack(ids[0]).await)["cursor"].as_i64().unwrap();
+    assert_eq!(landed, ids[0], "the visible 'plain' message lands");
 }
 
 /// A lease id confirms nothing and does nothing for a repo the caller cannot see.
@@ -4816,7 +4804,7 @@ impl Teams {
         repo: Option<&str>,
         job: Option<&str>,
         in_reply_to: Option<i64>,
-        to: Option<&str>,
+        team: Option<&str>,
     ) -> Result<Json<tools::out::MessageOut>, ErrorData> {
         self.env
             .factory
@@ -4824,10 +4812,10 @@ impl Teams {
                 Extension(parts(who)),
                 Parameters(tools::coord::SendMessageArgs {
                     body: body.into(),
-                    to: to.map(Into::into),
                     kind: None,
                     repo: repo.map(Into::into),
                     remote: None,
+                    team: team.map(Into::into),
                     job: job.map(Into::into),
                     in_reply_to,
                     agent: None,
@@ -4837,7 +4825,14 @@ impl Teams {
             .await
     }
 
-    async fn inbox(&self, who: &Principal) -> Vec<String> {
+    /// Every message in a repo's channel (`repo`) or a team's (`team`), read
+    /// or not, as `who` sees it.
+    async fn inbox_in(
+        &self,
+        who: &Principal,
+        repo: Option<&str>,
+        team: Option<&str>,
+    ) -> Vec<String> {
         let out = ok(self
             .env
             .factory
@@ -4845,8 +4840,7 @@ impl Teams {
                 Extension(parts(who)),
                 Parameters(tools::coord::InboxArgs {
                     unread_only: false,
-                    limit: None,
-                    newest_first: false,
+                    ..inbox_of(repo, team)
                 }),
             )
             .await);
@@ -4857,6 +4851,11 @@ impl Teams {
             .map(|m| m["body"].as_str().unwrap().to_string())
             .collect()
     }
+
+    /// [`Self::inbox_in`] for one repo's channel.
+    async fn inbox(&self, who: &Principal, repo: &str) -> Vec<String> {
+        self.inbox_in(who, Some(repo), None).await
+    }
 }
 
 /// Deleting a job used to fail outright once anyone had messaged about it (the
@@ -4866,11 +4865,16 @@ impl Teams {
 async fn a_deleted_jobs_messages_keep_their_team_scope(pool: PgPool) {
     let t = teams_world(pool).await;
     let job = t.jobs["platform-repo"].clone();
-    ok(
-        t.send(&t.alice, "about the job", None, Some(&job), None, None)
-            .await,
-    );
-    assert_eq!(t.inbox(&t.carol).await, Vec::<String>::new());
+    ok(t.send(
+        &t.alice,
+        "about the job",
+        Some("shared"),
+        Some(&job),
+        None,
+        None,
+    )
+    .await);
+    assert_eq!(t.inbox(&t.carol, "shared").await, Vec::<String>::new());
 
     ok(t.env
         .factory
@@ -4880,9 +4884,9 @@ async fn a_deleted_jobs_messages_keep_their_team_scope(pool: PgPool) {
         )
         .await);
 
-    assert_eq!(t.inbox(&t.carol).await, Vec::<String>::new());
-    assert_eq!(t.inbox(&t.bob).await, Vec::<String>::new());
-    assert_eq!(t.inbox(&t.owner).await, ["about the job"]);
+    assert_eq!(t.inbox(&t.carol, "shared").await, Vec::<String>::new());
+    assert_eq!(t.inbox(&t.bob, "shared").await, Vec::<String>::new());
+    assert_eq!(t.inbox(&t.owner, "shared").await, ["about the job"]);
 }
 
 /// A message with no recorded scope (what `0004`'s backfill leaves when the
@@ -4892,7 +4896,10 @@ async fn a_deleted_jobs_messages_keep_their_team_scope(pool: PgPool) {
 async fn deleting_a_job_scopes_messages_the_backfill_missed(pool: PgPool) {
     let t = teams_world(pool).await;
     let job = t.jobs["growth-repo"].clone();
-    ok(t.send(&t.bob, "legacy", None, Some(&job), None, None).await);
+    ok(
+        t.send(&t.bob, "legacy", Some("shared"), Some(&job), None, None)
+            .await,
+    );
     {
         let mut tx = t.env.db.begin(t.owner.org_id).await.unwrap();
         sqlx::query("UPDATE messages SET scope_teams = '{}' WHERE org_id = $1")
@@ -4911,9 +4918,9 @@ async fn deleting_a_job_scopes_messages_the_backfill_missed(pool: PgPool) {
         )
         .await);
 
-    assert_eq!(t.inbox(&t.carol).await, Vec::<String>::new());
-    assert_eq!(t.inbox(&t.alice).await, Vec::<String>::new());
-    assert_eq!(t.inbox(&t.bob).await, ["legacy"]);
+    assert_eq!(t.inbox(&t.carol, "shared").await, Vec::<String>::new());
+    assert_eq!(t.inbox(&t.alice, "shared").await, Vec::<String>::new());
+    assert_eq!(t.inbox(&t.bob, "shared").await, ["legacy"]);
 }
 
 /// A reply carries its thread's scope, and a reply cannot name a message the
@@ -4936,9 +4943,18 @@ async fn a_reply_is_scoped_to_its_thread_and_cannot_probe_hidden_ids(pool: PgPoo
 
     // Carol cannot see the thread: replying to it reads exactly like replying
     // to an id that does not exist.
-    let hidden = err(t.send(&t.carol, "x", None, None, Some(parent), None).await);
+    let hidden = err(t
+        .send(&t.carol, "x", Some("shared"), None, Some(parent), None)
+        .await);
     let missing = err(t
-        .send(&t.carol, "x", None, None, Some(parent + 1_000), None)
+        .send(
+            &t.carol,
+            "x",
+            Some("shared"),
+            None,
+            Some(parent + 1_000),
+            None,
+        )
         .await);
     assert_eq!(code_of(&hidden), "invalid_argument");
     assert_eq!(code_of(&hidden), code_of(&missing));
@@ -4947,62 +4963,483 @@ async fn a_reply_is_scoped_to_its_thread_and_cannot_probe_hidden_ids(pool: PgPoo
         missing.message.replace(&(parent + 1_000).to_string(), "N")
     );
 
-    // Neither can a private message between other people be replied to.
-    let private = ok(t
-        .send(
-            &t.owner,
-            "just for alice",
-            None,
-            None,
-            None,
-            Some("alice@acme.test"),
-        )
-        .await)["message"]["id"]
-        .as_i64()
-        .unwrap();
-    let e = err(t.send(&t.carol, "x", None, None, Some(private), None).await);
-    assert_eq!(code_of(&e), "invalid_argument");
-
-    // Alice replies without naming the repo again; the reply stays in the
-    // platform team's thread rather than going org-wide.
-    ok(t.send(&t.alice, "reply", None, None, Some(parent), None)
-        .await);
-    assert_eq!(t.inbox(&t.carol).await, Vec::<String>::new());
-    assert_eq!(t.inbox(&t.bob).await, Vec::<String>::new());
+    // Alice replies from the shared channel: `in_reply_to` may point into
+    // another channel, and the reply carries the platform thread's scope rather
+    // than going org-wide with the channel it was posted in.
+    ok(
+        t.send(&t.alice, "reply", Some("shared"), None, Some(parent), None)
+            .await,
+    );
+    assert_eq!(t.inbox(&t.carol, "shared").await, Vec::<String>::new());
+    assert_eq!(t.inbox(&t.bob, "shared").await, Vec::<String>::new());
+    assert_eq!(t.inbox(&t.alice, "shared").await, ["reply"]);
     assert_eq!(
-        t.inbox(&t.alice).await,
-        ["platform thread", "just for alice", "reply"]
+        t.inbox(&t.alice, "platform-repo").await,
+        ["platform thread"]
     );
 }
 
-/// `ack_messages` lands on the newest message the reader could have read: not a
-/// private message to someone else, whose id would tell them it exists.
+/// `ack_messages` accepts only an id the reader can read in the channel acked:
+/// not one in that channel tied to a team they are not on, one in a hidden
+/// repo's channel or another channel, or one that does not exist. All four are
+/// the same `invalid_argument`, so an ack cannot tell the reader that traffic
+/// exists; none moves the cursor.
 #[sqlx::test(migrations = "../of-core/migrations")]
-async fn ack_does_not_land_on_someone_elses_private_message(pool: PgPool) {
+async fn ack_does_not_land_on_a_hidden_or_other_channels_message(pool: PgPool) {
     let t = teams_world(pool).await;
-    let public = ok(t.send(&t.owner, "everyone", None, None, None, None).await)["message"]["id"]
-        .as_i64()
+    let id_of = |r: Result<Json<tools::out::MessageOut>, ErrorData>| {
+        ok(r)["message"]["id"].as_i64().unwrap()
+    };
+    let visible = id_of(
+        t.send(&t.owner, "everyone", Some("shared"), None, None, None)
+            .await,
+    );
+    let hidden_job = id_of(
+        t.send(
+            &t.owner,
+            "about growth's job",
+            Some("shared"),
+            Some(&t.jobs["growth-repo"]),
+            None,
+            None,
+        )
+        .await,
+    );
+    let hidden_repo = id_of(
+        t.send(
+            &t.owner,
+            "growth only",
+            Some("growth-repo"),
+            None,
+            None,
+            None,
+        )
+        .await,
+    );
+    let team_post = id_of(
+        t.send(
+            &t.owner,
+            "platform team",
+            None,
+            None,
+            None,
+            Some("platform"),
+        )
+        .await,
+    );
+
+    let ack = |up_to: i64| {
+        t.env.factory.ack_messages(
+            Extension(parts(&t.alice)),
+            Parameters(ack_of(Some("shared"), None, up_to)),
+        )
+    };
+    let mut texts = Vec::new();
+    for up_to in [hidden_job, hidden_repo, team_post, i64::MAX] {
+        let e = err(ack(up_to).await);
+        assert_eq!(code_of(&e), "invalid_argument", "{up_to}: {}", e.message);
+        texts.push(e.message.replace(&up_to.to_string(), "<id>"));
+    }
+    assert!(
+        texts.iter().all(|m| m == &texts[0]),
+        "the refusals tell the cases apart: {texts:#?}"
+    );
+    let unread = |channel: tools::coord::ChannelArgs| {
+        t.env
+            .factory
+            .unread_count(Extension(parts(&t.alice)), Parameters(channel))
+    };
+    assert_eq!(
+        ok(unread(repo_channel("shared")).await)["unread"],
+        1,
+        "a refused ack moved the cursor"
+    );
+
+    let landed = ok(ack(visible).await)["cursor"].as_i64().unwrap();
+    assert_eq!(landed, visible);
+    assert_eq!(ok(unread(repo_channel("shared")).await)["unread"], 0);
+
+    // Acking the repo channel marked nothing read in the team channel.
+    assert_eq!(ok(unread(team_channel("platform")).await)["unread"], 1);
+}
+
+/// `ack_messages` resolves its channel like the other message tools: a hidden
+/// repo's channel is `repo_unresolved`, and naming no channel or two is
+/// `invalid_argument`.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn ack_messages_needs_one_visible_channel(pool: PgPool) {
+    let t = teams_world(pool).await;
+    let f = &t.env.factory;
+    let ack = |args: tools::coord::AckMessagesArgs| {
+        f.ack_messages(Extension(parts(&t.carol)), Parameters(args))
+    };
+    let e = err(ack(ack_of(Some("platform-repo"), None, 0)).await);
+    assert_eq!(code_of(&e), "repo_unresolved", "{}", e.message);
+    let e = err(ack(ack_of(None, None, 0)).await);
+    assert_eq!(code_of(&e), "invalid_argument", "{}", e.message);
+    let e = err(ack(ack_of(Some("shared"), Some("platform"), 0)).await);
+    assert_eq!(code_of(&e), "invalid_argument", "{}", e.message);
+}
+
+/// A keyed post to a team's channel replays like one to a repo's, and the same
+/// key in another channel, a team's or a repo's, is a different call.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_keyed_team_post_replays_and_conflicts_across_channels(pool: PgPool) {
+    let t = teams_world(pool).await;
+    let send = |repo: Option<&str>, team: Option<&str>| {
+        t.env.factory.send_message(
+            Extension(parts(&t.owner)),
+            Parameters(tools::coord::SendMessageArgs {
+                body: "standup moved".into(),
+                kind: None,
+                repo: repo.map(Into::into),
+                remote: None,
+                team: team.map(Into::into),
+                job: None,
+                in_reply_to: None,
+                agent: None,
+                idempotency_key: Some("standup-1".into()),
+            }),
+        )
+    };
+    let first = ok(send(None, Some("platform")).await);
+    let again = ok(send(None, Some("platform")).await);
+    assert_eq!(first["message"]["id"], again["message"]["id"]);
+    for (repo, team) in [(None, Some("growth")), (Some("shared"), None)] {
+        let e = err(send(repo, team).await);
+        assert_eq!(
+            code_of(&e),
+            "idempotency_key_conflict",
+            "{repo:?}/{team:?}: {}",
+            e.message
+        );
+    }
+    let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM messages")
+        .fetch_one(t.env.db.pool())
+        .await
         .unwrap();
+    assert_eq!(stored, 1, "a replay or a conflict stored a second message");
+}
+
+/// A team's channel is its members' (and owners' and admins'): a post there is
+/// read by the team's channel and not by any repo's, and has its own cursor.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_team_channel_reaches_its_members(pool: PgPool) {
+    let t = teams_world(pool).await;
+    let f = &t.env.factory;
     ok(t.send(
-        &t.owner,
-        "just for alice",
+        &t.alice,
+        "platform sync at 3",
         None,
         None,
         None,
-        Some("alice@acme.test"),
+        Some("platform"),
     )
     .await);
-    let landed = ok(t
-        .env
-        .factory
-        .ack_messages(
-            Extension(parts(&t.carol)),
-            Parameters(tools::coord::AckMessagesArgs { up_to: 1_000_000 }),
+
+    assert_eq!(
+        t.inbox_in(&t.owner, None, Some("platform")).await,
+        ["platform sync at 3"]
+    );
+    assert_eq!(
+        t.inbox_in(&t.alice, None, Some("platform")).await,
+        ["platform sync at 3"]
+    );
+    assert_eq!(t.inbox(&t.alice, "shared").await, Vec::<String>::new());
+
+    let unread = |who: &Principal| {
+        let p = parts(who);
+        async move {
+            ok(
+                f.unread_count(Extension(p), Parameters(team_channel("platform")))
+                    .await,
+            )["unread"]
+                .as_i64()
+                .unwrap()
+        }
+    };
+    assert_eq!(unread(&t.owner).await, 1);
+    assert_eq!(unread(&t.alice).await, 0, "your own post is never unread");
+
+    let inbox = ok(f
+        .inbox(
+            Extension(parts(&t.owner)),
+            Parameters(inbox_of(None, Some("platform"))),
         )
-        .await)["cursor"]
-        .as_i64()
+        .await);
+    let id = inbox["messages"][0]["id"].as_i64().unwrap();
+    let cursor = ok(f
+        .ack_messages(
+            Extension(parts(&t.owner)),
+            Parameters(ack_of(None, Some("platform"), id)),
+        )
+        .await);
+    assert_eq!(cursor["cursor"], id);
+    assert_eq!(unread(&t.owner).await, 0);
+}
+
+/// A team the caller is not on reads exactly like a team that does not exist,
+/// on every message tool, so the tools cannot be used to list teams.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_team_channel_is_not_found_for_a_non_member(pool: PgPool) {
+    let t = teams_world(pool).await;
+    let f = &t.env.factory;
+    ok(
+        t.send(&t.alice, "for platform", None, None, None, Some("platform"))
+            .await,
+    );
+
+    for team in ["platform", "no-such-team", "../admin"] {
+        let refusals = [
+            err(t.send(&t.bob, "x", None, None, None, Some(team)).await),
+            err(f
+                .inbox(
+                    Extension(parts(&t.bob)),
+                    Parameters(inbox_of(None, Some(team))),
+                )
+                .await),
+            err(f
+                .unread_count(Extension(parts(&t.bob)), Parameters(team_channel(team)))
+                .await),
+            err(f
+                .ack_messages(
+                    Extension(parts(&t.bob)),
+                    Parameters(ack_of(None, Some(team), i64::MAX)),
+                )
+                .await),
+        ];
+        for e in refusals {
+            assert_eq!(code_of(&e), "team_not_found", "{team}: {}", e.message);
+            assert_eq!(
+                e.message.replace(&format!("{team:?}"), "\"T\""),
+                "team \"T\" was not found in this organization, or you are not on it. \
+                 Teams are managed in the otto platform console; name a team you are on, \
+                 or use a repo's channel (repo or remote) instead.",
+                "a hidden team must read exactly like an unknown one"
+            );
+        }
+    }
+    let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM messages")
+        .fetch_one(t.env.db.pool())
+        .await
         .unwrap();
-    assert_eq!(landed, public);
+    assert_eq!(stored, 1, "bob's refused post stored nothing");
+}
+
+/// Owners and admins see every team's work, so they read every team's channel.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn an_admin_reads_a_team_channel_they_are_not_on(pool: PgPool) {
+    let t = teams_world(pool).await;
+    ok(
+        t.send(&t.alice, "for platform", None, None, None, Some("platform"))
+            .await,
+    );
+    // The owner is on no team at all.
+    assert_eq!(
+        t.inbox_in(&t.owner, None, Some("platform")).await,
+        ["for platform"]
+    );
+    ok(t.send(
+        &t.owner,
+        "from the owner",
+        None,
+        None,
+        None,
+        Some("platform"),
+    )
+    .await);
+    assert_eq!(
+        t.inbox_in(&t.alice, None, Some("platform")).await,
+        ["for platform", "from the owner"]
+    );
+}
+
+/// A team channel is never "no team" or "everyone" because the platform is down.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_team_channel_fails_closed_when_the_platform_is_down(pool: PgPool) {
+    let t = teams_world(pool).await;
+    let f = &t.env.factory;
+    t.env.platform.set_down(true);
+
+    // Copied from `a_platform_outage_refuses_team_scoped_reads_and_writes`.
+    let unavailable = |e: ErrorData| {
+        assert_eq!(code_of(&e), "platform_unavailable");
+        assert_eq!(e.data.as_ref().unwrap()["retriable"], true);
+        assert!(
+            !e.message.contains("platform-repo") && !e.message.contains("job in"),
+            "leaked: {}",
+            e.message
+        );
+    };
+    // `team_scope`'s member lookup is asked first and fails first, so this
+    // proves the tool fails closed, not that `VerifiedTeam::by_slug` does; the
+    // of-core test of `by_slug` covers that.
+    unavailable(err(f
+        .inbox(
+            Extension(parts(&t.alice)),
+            Parameters(inbox_of(None, Some("platform"))),
+        )
+        .await));
+    unavailable(err(t
+        .send(&t.alice, "x", None, None, None, Some("platform"))
+        .await));
+}
+
+/// Exactly one channel: a message with none would land nowhere anyone reads,
+/// and one with two is ambiguous.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn send_message_needs_exactly_one_channel(pool: PgPool) {
+    let t = teams_world(pool).await;
+    let f = &t.env.factory;
+
+    let neither = err(t.send(&t.alice, "x", None, None, None, None).await);
+    assert_eq!(code_of(&neither), "invalid_argument");
+    assert!(neither.message.contains("repo"), "{}", neither.message);
+    assert!(neither.message.contains("team"), "{}", neither.message);
+    // Blank is absent, not a channel.
+    let blank = err(t
+        .send(&t.alice, "x", Some("  "), None, None, Some(""))
+        .await);
+    assert_eq!(code_of(&blank), "invalid_argument");
+
+    let both = err(t
+        .send(&t.alice, "x", Some("shared"), None, None, Some("platform"))
+        .await);
+    assert_eq!(code_of(&both), "invalid_argument");
+    assert!(both.message.contains("not both"), "{}", both.message);
+
+    // The reads refuse the same way.
+    let e = err(f
+        .inbox(Extension(parts(&t.alice)), Parameters(inbox_of(None, None)))
+        .await);
+    assert_eq!(code_of(&e), "invalid_argument");
+    let e = err(f
+        .unread_count(
+            Extension(parts(&t.alice)),
+            Parameters(tools::coord::ChannelArgs {
+                repo: Some("shared".into()),
+                remote: None,
+                team: Some("platform".into()),
+            }),
+        )
+        .await);
+    assert_eq!(code_of(&e), "invalid_argument");
+
+    let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM messages")
+        .fetch_one(t.env.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(stored, 0);
+}
+
+/// An old client still sending `to` is told so, rather than having its private
+/// note silently posted to a shared channel.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn send_message_refuses_to(pool: PgPool) {
+    let platform = MockPlatform::start().await;
+    let (acme, rob) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+    platform.add_org(acme, "acme", "Acme");
+    platform.add_member(acme, rob, "rob@acme.test", Role::Owner);
+    let token = platform.issue(acme, rob, Role::Owner, of_core::scopes::KNOWN);
+    let db = Db::from_pool(pool.clone());
+    let app = front_door(pool, platform.client()).await;
+
+    let reg = call_tool(
+        &app,
+        &token,
+        "register_repo",
+        serde_json::json!({ "slug": "api", "remotes": [REMOTE] }),
+    )
+    .await;
+    assert!(reg["result"]["isError"] != true, "{reg}");
+
+    let refused = call_tool(
+        &app,
+        &token,
+        "send_message",
+        serde_json::json!({ "body": "psst", "repo": "api", "to": "x@acme.test" }),
+    )
+    .await;
+    let text = refused.to_string();
+    assert!(
+        text.contains("unknown field") && text.contains("`to`"),
+        "{refused}"
+    );
+
+    let sent = call_tool(
+        &app,
+        &token,
+        "send_message",
+        serde_json::json!({ "body": "hello", "repo": "api" }),
+    )
+    .await;
+    assert!(sent["result"]["isError"] != true, "{sent}");
+
+    let bodies: Vec<String> = sqlx::query_scalar("SELECT body FROM messages")
+        .fetch_all(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(bodies, ["hello"], "the refused call stored nothing");
+}
+
+/// A pre-migration broadcast with no channel is left in place, but no channel's
+/// read or count ever serves it again. `NOT VALID` still binds new inserts, so
+/// the constraint is dropped to stand one in and re-added as the migration
+/// leaves it.
+#[sqlx::test(migrations = "../of-core/migrations")]
+async fn a_legacy_unscoped_broadcast_is_never_served(pool: PgPool) {
+    let t = teams_world(pool).await;
+    let f = &t.env.factory;
+    let pool = t.env.db.pool();
+    sqlx::query("ALTER TABLE messages DROP CONSTRAINT messages_channel_ck")
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO messages (org_id, sender_user_id, body) VALUES ($1, $2, 'legacy broadcast')",
+    )
+    .bind(t.owner.org_id.as_uuid())
+    .bind(t.alice.user_id.as_uuid())
+    .execute(pool)
+    .await
+    .unwrap();
+    // Re-added exactly as the migration writes it, so the two cannot drift.
+    let check = "CHECK ((repo_id IS NOT NULL) <> (team_id IS NOT NULL)) NOT VALID";
+    assert!(
+        include_str!("../../of-core/migrations/0008_message_channels.sql").contains(check),
+        "0008 no longer writes `{check}`; update this test with it"
+    );
+    sqlx::query(&format!(
+        "ALTER TABLE messages ADD CONSTRAINT messages_channel_ck {check}"
+    ))
+    .execute(pool)
+    .await
+    .unwrap();
+
+    for who in [&t.owner, &t.alice, &t.bob, &t.carol] {
+        let repos: &[&str] = if std::ptr::eq(who, &t.owner) {
+            &["shared", "platform-repo", "growth-repo"]
+        } else {
+            &["shared"]
+        };
+        for repo in repos {
+            assert_eq!(t.inbox(who, repo).await, Vec::<String>::new());
+            let unread = ok(f
+                .unread_count(Extension(parts(who)), Parameters(repo_channel(repo)))
+                .await);
+            assert_eq!(unread["unread"], 0);
+        }
+    }
+    for team in ["platform", "growth"] {
+        assert_eq!(
+            t.inbox_in(&t.owner, None, Some(team)).await,
+            Vec::<String>::new()
+        );
+        let unread = ok(f
+            .unread_count(Extension(parts(&t.owner)), Parameters(team_channel(team)))
+            .await);
+        assert_eq!(unread["unread"], 0);
+    }
 }
 
 /// `acquire_lease` on a resource the caller already holds, and `renew_lease`,
@@ -5131,47 +5568,6 @@ async fn a_write_cannot_land_after_its_repo_moves_out_of_sight(pool: PgPool) {
     assert_eq!(t.list_jobs(&t.owner).await.len(), 3, "nothing was added");
 }
 
-/// A reply to a private message stays between its two participants: without
-/// `to` it answers the other one, and it cannot be widened to anyone else.
-#[sqlx::test(migrations = "../of-core/migrations")]
-async fn a_reply_to_a_private_message_stays_private(pool: PgPool) {
-    let t = teams_world(pool).await;
-    let private = ok(t
-        .send(
-            &t.owner,
-            "just for alice",
-            None,
-            None,
-            None,
-            Some("alice@acme.test"),
-        )
-        .await)["message"]["id"]
-        .as_i64()
-        .unwrap();
-
-    let reply = ok(t
-        .send(&t.alice, "back to you", None, None, Some(private), None)
-        .await);
-    assert_eq!(
-        reply["message"]["recipientUserId"],
-        serde_json::json!(t.owner.user_id)
-    );
-    assert_eq!(t.inbox(&t.carol).await, Vec::<String>::new());
-    assert_eq!(t.inbox(&t.owner).await, ["back to you"]);
-
-    let e = err(t
-        .send(
-            &t.alice,
-            "x",
-            None,
-            None,
-            Some(private),
-            Some("carol@acme.test"),
-        )
-        .await);
-    assert_eq!(code_of(&e), "invalid_argument");
-}
-
 /// The reply copies its parent's scope when it is inserted, so the parent's repo
 /// is held from the check to the insert: a move that commits first is seen.
 #[sqlx::test(migrations = "../of-core/migrations")]
@@ -5193,7 +5589,7 @@ async fn a_reply_cannot_land_after_its_parents_repo_moves_out_of_sight(pool: PgP
         .move_repo_uncommitted("platform-repo", Some(t.growth_team))
         .await;
 
-    let reply = t.send(&t.alice, "reply", None, None, Some(parent), None);
+    let reply = t.send(&t.alice, "reply", Some("shared"), None, Some(parent), None);
     tokio::pin!(reply);
     assert!(
         tokio::time::timeout(Duration::from_millis(300), &mut reply)
@@ -5312,10 +5708,10 @@ async fn an_invalid_agent_label_is_refused_and_not_billed(pool: PgPool) {
             Extension(parts(&caller)),
             Parameters(tools::coord::SendMessageArgs {
                 body: "hello".into(),
-                to: None,
                 kind: None,
-                repo: None,
+                repo: Some("api".into()),
                 remote: None,
+                team: None,
                 job: None,
                 in_reply_to: None,
                 agent: Some("ci\u{202e}7".into()),
