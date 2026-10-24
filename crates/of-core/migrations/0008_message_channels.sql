@@ -20,6 +20,11 @@
 -- happens to take a lock strong enough to stop it, but the guarantee belongs
 -- in a statement that says so, not in a side effect of another one. The
 -- backstop below then refuses to drop the column if any DM survived anyway.
+--
+-- Bounded: a long transaction on the old image would otherwise hold this
+-- migration, and every message read and write queued behind it, indefinitely.
+-- Timing out fails the deploy, which is retried, instead.
+SET LOCAL lock_timeout = '10s';
 LOCK TABLE messages, message_cursors IN ACCESS EXCLUSIVE MODE;
 
 -- The statements in this loop rewrite tenant-table data, so they loop over orgs with both the
@@ -46,18 +51,20 @@ DO $$
 DECLARE
   o uuid;
   orgs uuid[];
-  dms bigint;
-  cursors bigint;
+  n bigint;
+  dms bigint := 0;
+  cursors bigint := 0;
 BEGIN
   SELECT array_agg(DISTINCT org_id) INTO orgs
     FROM (SELECT org_id FROM messages UNION SELECT org_id FROM message_cursors) s;
   FOREACH o IN ARRAY COALESCE(orgs, '{}') LOOP
     PERFORM set_config('app.org_id', o::text, true);
     DELETE FROM messages WHERE org_id = o AND recipient_user_id IS NOT NULL;
-    GET DIAGNOSTICS dms = ROW_COUNT;
+    GET DIAGNOSTICS n = ROW_COUNT;
+    dms := dms + n;
     DELETE FROM message_cursors WHERE org_id = o;
-    GET DIAGNOSTICS cursors = ROW_COUNT;
-    RAISE NOTICE '0008: org %: deleted % direct messages and % legacy cursors', o, dms, cursors;
+    GET DIAGNOSTICS n = ROW_COUNT;
+    cursors := cursors + n;
     -- Every legacy row that fails `messages_channel_ck` loses its job link and
     -- its reply link: unscoped broadcasts (neither channel) and rows naming
     -- both a repo and a team (only a direct of-core caller could write one).
@@ -85,6 +92,10 @@ BEGIN
         AND (job_id IS NOT NULL OR in_reply_to IS NOT NULL);
   END LOOP;
   PERFORM set_config('app.org_id', '', true);
+  -- Totals only: a per-org count would put which tenants used private
+  -- messages, and how much, into the deploy log.
+  RAISE NOTICE '0008: deleted % direct messages and % legacy cursors across % orgs',
+    dms, cursors, COALESCE(array_length(orgs, 1), 0);
 END $$;
 
 -- 0008-backstop: the loop above must have reached every org. If it missed

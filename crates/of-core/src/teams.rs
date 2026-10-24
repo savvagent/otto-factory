@@ -35,7 +35,7 @@ pub const TEAM_SLUG_MAX: usize = 128;
 /// into a URL path at the platform, so a separator, a dot segment, URL syntax
 /// (`%`, `?`, `#`), or a control character is refused here rather than left to
 /// the client's percent-encoding, whatever the platform would make of it.
-fn team_slug_shape_ok(slug: &str) -> bool {
+pub fn team_slug_shape_ok(slug: &str) -> bool {
     !slug.is_empty()
         && slug.len() <= TEAM_SLUG_MAX
         && slug != "."
