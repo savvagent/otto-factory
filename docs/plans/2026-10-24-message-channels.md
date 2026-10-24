@@ -15,7 +15,7 @@ implements it exactly. Closes savvagent/otto-factory#177.
 
 ## Status — 2026-10-24
 
-🚧 Tasks 1–5 implemented in PR #254, awaiting merge. Review-round changes are recorded in the
+✅ Tasks 1–5 shipped in PR #254 (squash-merged as `e432963`). Review-round changes are recorded in the
 spec's addendum (migration lock, backstop and repo cascade; exclusive channel predicates; acks
 refused outside their channel; team slug shape check; `TeamChannelNotFound`).
 
@@ -73,9 +73,9 @@ refused outside their channel; team slug shape check; `TeamChannelNotFound`).
 
 ---
 
-## Task 1 — migration `0008_message_channels.sql` 🚧
+## Task 1 — migration `0008_message_channels.sql` ✅
 
-- [ ] Create the file with the SQL from spec §1, verbatim apart from comments. Keep the
+- [x] Create the file with the SQL from spec §1, verbatim apart from comments. Keep the
       comment explaining why DMs are deleted and not orphaned (a DM could carry `repo_id`), the
       one explaining the temporary policies, and the one explaining why a legacy broadcast's
       `job_id` is nulled (a `NOT VALID` CHECK still binds later UPDATEs, so `delete_job` would
@@ -83,10 +83,10 @@ refused outside their channel; team slug shape check; `TeamChannelNotFound`).
       list is materialized into an array before a `FOREACH` loop (spec §1: a `FOR ... IN
       <query>` cursor can skip orgs once `app.org_id` is pinned); the RLS-applying test seeds
       more than 10 orgs so that would show.
-- [ ] Check that the `DROP CONSTRAINT message_cursors_pkey, ADD COLUMN id bigserial PRIMARY KEY`
+- [x] Check that the `DROP CONSTRAINT message_cursors_pkey, ADD COLUMN id bigserial PRIMARY KEY`
       combination applies cleanly on Postgres 16 with rows already deleted. Split it into
       separate `ALTER`s if the combined form complains.
-- [ ] Create `crates/of-core/tests/message_channels_migration.rs`, modelled on
+- [x] Create `crates/of-core/tests/message_channels_migration.rs`, modelled on
       `meter_rename.rs` (`include_str!` the migration; seed rows directly on the pool; run the
       SQL; count). `#[sqlx::test]` has already applied `0008`, so the test re-creates the
       pre-migration shape first: `ALTER TABLE messages ADD COLUMN recipient_user_id uuid`,
@@ -116,14 +116,14 @@ refused outside their channel; team slug shape check; `TeamChannelNotFound`).
     the policies, not luck, make the loop find the orgs. Split the migration text with a
     helper that extracts the `DO $$ ... END $$;` block containing `FOREACH o IN ARRAY`, and fail the
     test loudly if it is not found exactly once.
-- [ ] Gate: `cargo test -p of-core --test message_channels_migration --test guards`. The other
+- [x] Gate: `cargo test -p of-core --test message_channels_migration --test guards`. The other
       message suites stay red until Task 3 (see Global constraints). The fresh-cluster apply
       is checked at Task 3's gate.
-- [ ] Commit: `feat(of-core): migrate messages to repo and team channels`.
+- [x] Commit: `feat(of-core): migrate messages to repo and team channels`.
 
-## Task 2 — `VerifiedTeam::by_slug` 🚧
+## Task 2 — `VerifiedTeam::by_slug` ✅
 
-- [ ] `crates/of-core/src/teams.rs`: add
+- [x] `crates/of-core/src/teams.rs`: add
 
       ```rust
       /// Ask the platform for the team with `slug` in `org`. Fails closed exactly as
@@ -135,21 +135,21 @@ refused outside their channel; team slug shape check; `TeamChannelNotFound`).
       `info.org_id == org.as_uuid()` gives `Self { org, team: info.id.into() }`. Anything else is
       `Error::TeamNotFound { team: format!("{slug:?}") }`. A transport failure is
       `Error::Platform` through `?`. Include a `no_run` doc example as `verify` has.
-- [ ] `crates/of-core/src/error.rs`: reword `TeamNotFound` so it no longer assumes a repo:
+- [x] `crates/of-core/src/error.rs`: reword `TeamNotFound` so it no longer assumes a repo:
       "team {team} was not found in this organization, or you are not on it. Teams are managed
       in the otto platform console; use a team from there, or omit the team." The "or you are
       not on it" clause is needed because Task 4 gives a hidden team this same error. The code
       stays `team_not_found`. Grep the tests for the old text; the existing assertions found
       are on the code only.
-- [ ] Tests in `crates/of-core/tests/platform_events.rs`, beside the `VerifiedTeam::verify`
+- [x] Tests in `crates/of-core/tests/platform_events.rs`, beside the `VerifiedTeam::verify`
       ones: `by_slug` finds a team; refuses another org's slug; refuses an unknown slug; is
       `Error::Platform` with `MockPlatform::set_down(true)`.
-- [ ] `cargo test -p of-core --test platform_events`, clippy, commit
+- [x] `cargo test -p of-core --test platform_events`, clippy, commit
       `feat(of-core): resolve a verified team by slug`.
 
-## Task 3 — `of-core::messages` 🚧
+## Task 3 — `of-core::messages` ✅
 
-- [ ] Types:
+- [x] Types:
   - `#[derive(Debug, Clone, Copy, PartialEq, Eq)] pub enum ChannelRef { Repo(RepoId), Team(TeamId) }`.
   - Remove `recipient_user_id` from `Message`, `NewMessage`, `MSG_COLS`, and both `INSERT`s.
     Renumber placeholders, and update `SCOPE_TEAMS_SQL`'s doc comment and parameter numbers
@@ -161,30 +161,30 @@ refused outside their channel; team slug shape check; `TeamChannelNotFound`).
   - Delete `ReplyParent`. `reply_parent` returns `Result<()>`, keeping its `FOR SHARE` hold
     and its error text. `message_readable` loses the recipient/sender predicate: any message
     passing `message_visible_sql` is readable.
-- [ ] `send_message`: after the body checks, `match (new.repo_id, new.team_id)`. Neither gives
+- [x] `send_message`: after the body checks, `match (new.repo_id, new.team_id)`. Neither gives
       `Error::Invalid("a message goes to one channel: set repo_id for a repo's channel or
       team_id for a team's")`. Both gives `Error::Invalid("a message goes to one channel, a repo
       or a team, not both")`. `find_replayed_message` is unchanged.
-- [ ] A private helper `channel_sql(c: ChannelRef, n: usize) -> (&'static str, uuid::Uuid)`
+- [x] A private helper `channel_sql(c: ChannelRef, n: usize) -> (&'static str, uuid::Uuid)`
       returns the column predicate (`"m.repo_id = $n"` / `"m.team_id = $n"`) and the value to
       bind, plus a twin for the cursor sub-select's `repo_id` / `team_id`. The column is chosen
       in Rust and never interpolated from input; say so in the comment, pointing at `inbox`'s
       `ORDER BY` precedent.
-- [ ] `inbox(reader, q)`: replace the recipient predicate with the channel predicate, and key
+- [x] `inbox(reader, q)`: replace the recipient predicate with the channel predicate, and key
       the cursor sub-select by channel too:
       `(SELECT last_read_id FROM message_cursors WHERE org_id = $1 AND user_id = $2 AND
       <channel column> = $n)`. Without the channel key, the sub-select returns several rows
       once a user has two cursors. Update the doc comment ("messages in one channel visible to
       `reader`").
-- [ ] `unread_count_for(reader, channel, scope)`: the same two changes.
-- [ ] `ack_messages_for(reader, channel, up_to, scope)`: the clamp is
+- [x] `unread_count_for(reader, channel, scope)`: the same two changes.
+- [x] `ack_messages_for(reader, channel, up_to, scope)`: the clamp is
       `MAX(m.id)` over the channel **and** `message_visible_sql`, without the old
       recipient/sender predicate. The upsert writes `repo_id` or `team_id` with
       `ON CONFLICT (org_id, user_id, repo_id) WHERE repo_id IS NOT NULL` (or the team
       equivalent), in two fixed SQL strings.
-- [ ] The `TeamScope::All` wrappers `ack_messages` and `unread_count`: delete them and call the
+- [x] The `TeamScope::All` wrappers `ack_messages` and `unread_count`: delete them and call the
       `_for` versions with `&TeamScope::All` in tests. One shape, not two.
-- [ ] Repair `crates/of-core/tests/queue.rs` (messages block, from the `messages` marker):
+- [x] Repair `crates/of-core/tests/queue.rs` (messages block, from the `messages` marker):
   - **Delete** `directed_messages_are_private_within_the_org`.
   - Thread a repo channel (`t.repo`, `ChannelRef::Repo(t.repo)`) through
     `unread_excludes_self_and_ack_is_clamped`, `oversized_and_empty_bodies_are_refused`, the
@@ -217,11 +217,11 @@ refused outside their channel; team slug shape check; `TeamChannelNotFound`).
     the hand-built hash JSON has `"repoId": null`; once the message carries a repo channel that
     literal must carry the same repo id, or the fingerprint regression test fails for the
     wrong reason.
-- [ ] Repair `crates/of-core/tests/isolation.rs`:
+- [x] Repair `crates/of-core/tests/isolation.rs`:
       `message_idempotency_keys_do_not_cross_org_boundaries`,
       `messages_are_invisible_across_orgs`, and `team_scoped_helpers_do_not_cross_orgs` (calls
       `unread_count_for` / `ack_messages_for`) need each org's repo as the channel.
-- [ ] Repair `crates/of-core/tests/platform_events.rs`:
+- [x] Repair `crates/of-core/tests/platform_events.rs`:
       `a_message_takes_a_team_from_its_own_org_only_keyed_or_not` builds `NewMessage` with a
       team, so it may already satisfy "exactly one". Fix it to compile and keep its cross-org
       assertion. **Runtime-only breakage the compiler will not flag:** `populate` sends a
@@ -231,14 +231,14 @@ refused outside their channel; team slug shape check; `TeamChannelNotFound`).
       this plan deletes. Also repair `member_removed_releases_what_they_held` (calls
       `ack_messages`). Add `member_removed_drops_every_channel_cursor`: two cursors (repo and team)
       for one user, `member.removed`, zero left.
-- [ ] `cargo test -p of-core`, `cargo clippy -p of-core --all-targets -- -D warnings`. Also once
+- [x] `cargo test -p of-core`, `cargo clippy -p of-core --all-targets -- -D warnings`. Also once
       against a fresh cluster (`podman compose down -v && podman compose up -d`, then
       `cargo test -p of-core`) to prove the migrations apply from empty. Commit
       `feat(of-core)!: scope messages to a repo or team channel`.
 
-## Task 4 — `of-mcp` 🚧
+## Task 4 — `of-mcp` ✅
 
-- [ ] `crates/of-mcp/src/tools/mod.rs`:
+- [x] `crates/of-mcp/src/tools/mod.rs`:
   - `pub(crate) async fn team_channel(f: &Factory, caller: &Principal, scope: &TeamScope,
     slug: &str) -> Result<VerifiedTeam, ErrorData>`. Calls `VerifiedTeam::by_slug`, then
     refuses with the same `Error::TeamNotFound` if `!scope.allows(Some(team.id()))`. A hidden
@@ -254,7 +254,7 @@ refused outside their channel; team slug shape check; `TeamChannelNotFound`).
   - `pub(crate) async fn channel_of(tx, scope, arg: ChannelArg, write: bool) -> Result<ChannelRef, ErrorData>`,
     called inside the transaction. A repo goes through `repo_for_write(..., Hold::Shared)` when
     `write`, else `repo_of`. A team returns `ChannelRef::Team(team.id())`.
-- [ ] `crates/of-mcp/src/tools/coord.rs`:
+- [x] `crates/of-mcp/src/tools/coord.rs`:
   - `SendMessageArgs`: remove `to`; add `team: Option<String>` ("A team's slug, for that team's
     channel across repos. Pass this or repo/remote, not both."); add `deny_unknown_fields`.
     Document `repo`/`remote` ("The repo whose channel this goes to.").
@@ -277,7 +277,7 @@ refused outside their channel; team slug shape check; `TeamChannelNotFound`).
     example, the idempotency sentence, and the agent-label sentence. `inbox`, `ack_messages`,
     and `unread_count` each gain: "One channel at a time, named the same way as send_message
     (repo, remote, or team). A team you are not on is team_not_found."
-- [ ] Repair `crates/of-mcp/tests/tools.rs`:
+- [x] Repair `crates/of-mcp/tests/tools.rs`:
   - **Delete** `a_message_cannot_be_addressed_to_someone_in_another_org`,
     `a_direct_message_fails_closed_when_the_platform_cannot_answer`, and
     `a_reply_to_a_private_message_stays_private`.
@@ -320,20 +320,20 @@ refused outside their channel; team slug shape check; `TeamChannelNotFound`).
       `NOT VALID` check still binds new inserts, so drop `messages_channel_ck` on the pool,
       insert a row with neither channel, and re-add the constraint `NOT VALID`. Then `inbox`
       and `unread_count` for every channel in the fixture return nothing of it.
-- [ ] `cargo check -p of-mcp --all-targets`, `cargo test -p of-mcp`,
+- [x] `cargo check -p of-mcp --all-targets`, `cargo test -p of-mcp`,
       `cargo clippy -p of-mcp --all-targets -- -D warnings`.
-- [ ] **Final gate:** `cargo test` and `cargo clippy --all-targets -- -D warnings`, unscoped.
-- [ ] Commit `feat(of-mcp)!: scope message tools to a repo or team channel`, with a
+- [x] **Final gate:** `cargo test` and `cargo clippy --all-targets -- -D warnings`, unscoped.
+- [x] Commit `feat(of-mcp)!: scope message tools to a repo or team channel`, with a
       `BREAKING CHANGE:` footer.
 
-## Task 5 — `CLAUDE.md` 🚧
+## Task 5 — `CLAUDE.md` ✅
 
-- [ ] In "Authentication": `member_by_email (message recipients)` becomes
+- [x] In "Authentication": `member_by_email (message recipients)` becomes
       `team_by_slug (message team channels, via VerifiedTeam::by_slug)`. Keep the bullet's
       "fails closed" sentence.
-- [ ] Grep `CLAUDE.md` for "addressed", "broadcast", "recipient", and "private" and correct any
+- [x] Grep `CLAUDE.md` for "addressed", "broadcast", "recipient", and "private" and correct any
       remaining description of DMs. The `scope_teams` paragraph stays accurate.
-- [ ] Commit `docs: describe message channels in CLAUDE.md`.
+- [x] Commit `docs: describe message channels in CLAUDE.md`.
 
 ---
 
