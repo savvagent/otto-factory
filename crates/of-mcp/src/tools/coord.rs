@@ -428,7 +428,8 @@ impl Factory {
         description = "Post a note to one repo's or one team's shared channel: pass repo (or \
                        remote) for coordination about that repo, or team (a team slug) for a \
                        team's work across repos. Exactly one is required; neither or both is \
-                       invalid_argument, and a team you are not on is team_not_found. Use it \
+                       invalid_argument, and an unknown team or one you are not on is \
+                       team_not_found. Use it \
                        for hand-offs and questions that do not fit in a job field — 'I have \
                        left the migration half-applied on this branch' is exactly the kind of \
                        thing that belongs here. Pass idempotencyKey if your connection can drop \
@@ -550,10 +551,12 @@ impl Factory {
     #[tool(
         name = "inbox",
         description = "Read the messages in a repo's or a team's channel. One channel at a \
-                       time, named the same way as send_message (repo, remote, or team). A team \
-                       you are not on is team_not_found. Defaults to unread only, excluding your own. Call ack_messages for the \
-                       same channel with the highest id you have read so the next call does \
-                       not repeat them."
+                       time, named the same way as send_message (repo, remote, or team): \
+                       exactly one is required, and neither or both is invalid_argument. An \
+                       unknown team or one you are not on is team_not_found. Defaults to \
+                       unread only, excluding your own. Call ack_messages for the same channel \
+                       with the highest id you have read so the next call does not repeat \
+                       them."
     )]
     pub async fn inbox(
         &self,
@@ -585,8 +588,9 @@ impl Factory {
         name = "ack_messages",
         description = "Move your read cursor for one channel to a message id, so those messages \
                        stop appearing in that channel's unread inbox. One channel at a time, \
-                       named the same way as send_message (repo, remote, or team). A team you \
-                       are not on is team_not_found. Each channel has its own cursor, so acking \
+                       named the same way as send_message (repo, remote, or team): exactly one \
+                       is required, and neither or both is invalid_argument. An unknown team \
+                       or one you are not on is team_not_found. Each channel has its own cursor, so acking \
                        one never marks another read. Returns the cursor that actually landed, \
                        which is clamped to the newest message in that channel you can see."
     )]
@@ -615,8 +619,9 @@ impl Factory {
     #[tool(
         name = "unread_count",
         description = "How many messages are waiting for you in one channel. One channel at a \
-                       time, named the same way as send_message (repo, remote, or team). A team \
-                       you are not on is team_not_found. Cheap enough to call before deciding \
+                       time, named the same way as send_message (repo, remote, or team): \
+                       exactly one is required, and neither or both is invalid_argument. An \
+                       unknown team or one you are not on is team_not_found. Cheap enough to call before deciding \
                        whether reading that channel's inbox is worth it."
     )]
     pub async fn unread_count(
