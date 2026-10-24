@@ -112,9 +112,8 @@ pub enum Error {
     /// tenant's, or deleted). Raised by `VerifiedTeam::verify`, and it is a
     /// refusal: an unknown team is never read as "org-wide".
     #[error(
-        "team {team} was not found in this organization. Teams are managed in the \
-         otto platform console; use a team id from there, or omit the team to make \
-         the repo organization-wide."
+        "team {team} was not found in this organization, or you are not on it. Teams \
+         are managed in the otto platform console; use a team from there, or omit the team."
     )]
     TeamNotFound { team: String },
 

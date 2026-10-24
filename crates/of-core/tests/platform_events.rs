@@ -732,6 +732,64 @@ async fn an_unreachable_platform_refuses_instead_of_assuming() {
     assert!(e.retriable(), "an outage is worth retrying");
 }
 
+#[tokio::test]
+async fn by_slug_finds_a_team_in_its_org() {
+    let platform = MockPlatform::start().await;
+    let org = OrgId::new();
+    let team = TeamId::new();
+    platform.add_org(org.as_uuid(), "acme", "Acme");
+    platform.add_team(org.as_uuid(), team.as_uuid(), "platform", "Platform");
+
+    let verified = VerifiedTeam::by_slug(&platform.client(), org, "platform")
+        .await
+        .expect("a team the org has");
+    assert_eq!(verified.id(), team);
+    assert_eq!(verified.org(), org);
+}
+
+#[tokio::test]
+async fn by_slug_refuses_another_orgs_slug() {
+    let platform = MockPlatform::start().await;
+    let (mine, theirs) = (OrgId::new(), OrgId::new());
+    platform.add_org(mine.as_uuid(), "mine", "Mine");
+    platform.add_org(theirs.as_uuid(), "theirs", "Theirs");
+    platform.add_team(theirs.as_uuid(), Uuid::new_v4(), "secret", "Secret");
+
+    let res = VerifiedTeam::by_slug(&platform.client(), mine, "secret").await;
+    assert!(
+        matches!(res, Err(of_core::Error::TeamNotFound { .. })),
+        "{res:?}"
+    );
+}
+
+#[tokio::test]
+async fn by_slug_refuses_an_unknown_slug() {
+    let platform = MockPlatform::start().await;
+    let org = OrgId::new();
+    platform.add_org(org.as_uuid(), "acme", "Acme");
+
+    let res = VerifiedTeam::by_slug(&platform.client(), org, "nope").await;
+    assert!(
+        matches!(res, Err(of_core::Error::TeamNotFound { .. })),
+        "{res:?}"
+    );
+}
+
+#[tokio::test]
+async fn by_slug_on_an_unreachable_platform_is_a_platform_error() {
+    let platform = MockPlatform::start().await;
+    let org = OrgId::new();
+    platform.add_org(org.as_uuid(), "acme", "Acme");
+    platform.add_team(org.as_uuid(), Uuid::new_v4(), "platform", "Platform");
+    platform.set_down(true);
+
+    let res = VerifiedTeam::by_slug(&platform.client(), org, "platform").await;
+    let Err(e) = res else {
+        panic!("a team was verified while the platform was down")
+    };
+    assert!(matches!(e, of_core::Error::Platform(_)), "{e:?}");
+}
+
 #[sqlx::test]
 async fn a_team_verified_for_another_org_cannot_be_attached_here(pool: PgPool) {
     let platform = MockPlatform::start().await;

@@ -62,6 +62,30 @@ impl VerifiedTeam {
         }
     }
 
+    /// Ask the platform for the team with `slug` in `org`. Fails closed exactly as
+    /// [`Self::verify`] does.
+    ///
+    /// ```no_run
+    /// # async fn demo(platform: &otto_resource::PlatformClient, org: otto_tenant::OrgId)
+    /// #     -> of_core::Result<()> {
+    /// use of_core::teams::VerifiedTeam;
+    ///
+    /// // A slug the org does not have is an error, never an org-wide repo.
+    /// let team = VerifiedTeam::by_slug(platform, org, "platform").await?;
+    /// # let _ = team; Ok(()) }
+    /// ```
+    pub async fn by_slug(platform: &PlatformClient, org: OrgId, slug: &str) -> Result<Self> {
+        match platform.team_by_slug(org.as_uuid(), slug).await? {
+            Some(info) if info.org_id == org.as_uuid() => Ok(Self {
+                org,
+                team: info.id.into(),
+            }),
+            _ => Err(Error::TeamNotFound {
+                team: format!("{slug:?}"),
+            }),
+        }
+    }
+
     pub fn id(&self) -> TeamId {
         self.team
     }
