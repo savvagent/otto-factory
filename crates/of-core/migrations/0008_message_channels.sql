@@ -13,7 +13,7 @@
 -- per-channel reads they match nothing, and removing them lets the cursor
 -- CHECK below be fully validated instead of NOT VALID.
 --
--- The two DELETEs and the UPDATE below rewrite tenant-table data, so they loop over orgs with both the
+-- The statements in this loop rewrite tenant-table data, so they loop over orgs with both the
 -- explicit `org_id` predicate and `app.org_id` (see CLAUDE.md).
 --
 -- Finding the orgs is the one read that cannot be pinned to an org. Where the
@@ -27,7 +27,7 @@ CREATE POLICY messages_channels_0008 ON messages FOR SELECT USING (current_org()
 CREATE POLICY message_cursors_channels_0008 ON message_cursors FOR SELECT USING (current_org() IS NULL);
 
 -- The org list is materialized into an array before the loop, not iterated as
--- `FOR o IN <query>`. That form fetches through a cursor in batches and
+-- a plpgsql `FOR ... IN <query>` loop. That form fetches through a cursor in batches and
 -- evaluates the policies (and so `current_org()`) as it scans; once the first
 -- iteration pins an org, the temporary `current_org() IS NULL` policy is false
 -- and later orgs can be silently skipped where RLS applies, leaving their DMs
@@ -44,15 +44,18 @@ BEGIN
     PERFORM set_config('app.org_id', o::text, true);
     DELETE FROM messages WHERE org_id = o AND recipient_user_id IS NOT NULL;
     DELETE FROM message_cursors WHERE org_id = o;
-    -- A legacy unscoped broadcast loses its job link. The NOT VALID CHECK
+    -- Every legacy row that fails `messages_channel_ck` loses its job link:
+    -- unscoped broadcasts (neither channel) and rows naming both a repo and a
+    -- team (only a direct of-core caller could write one). The NOT VALID CHECK
     -- below skips the rows already here but still binds every later UPDATE of
     -- them, and deleting the job would update such a row twice (`delete_job`'s
     -- `scope_teams` widening and the FK's `ON DELETE SET NULL (job_id)`), both
     -- violating `messages_channel_ck`, so `delete_job` would fail. These rows
-    -- belong to no channel and are never served again; after this nothing
-    -- updates them.
+    -- belong to no single channel and are never served again; after this
+    -- nothing updates them.
     UPDATE messages SET job_id = NULL
-      WHERE org_id = o AND repo_id IS NULL AND team_id IS NULL AND job_id IS NOT NULL;
+      WHERE org_id = o AND (repo_id IS NOT NULL) = (team_id IS NOT NULL)
+        AND job_id IS NOT NULL;
   END LOOP;
   PERFORM set_config('app.org_id', '', true);
 END $$;
@@ -63,6 +66,8 @@ DROP POLICY message_cursors_channels_0008 ON message_cursors;
 -- Messages are no longer addressed to a person. messages_recipient_idx goes with the column.
 ALTER TABLE messages DROP COLUMN recipient_user_id;
 
+-- The CHECK must come after the data step: the DM delete fires `in_reply_to ... ON DELETE
+-- SET NULL` on surviving rows, and the job_id update is itself an UPDATE it would bind.
 -- Exactly one channel, for every row written from here on. NOT VALID because historical
 -- unscoped broadcasts remain; they belong to no channel and are never served.
 ALTER TABLE messages
