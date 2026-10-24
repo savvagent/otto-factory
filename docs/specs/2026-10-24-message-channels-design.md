@@ -431,6 +431,11 @@ Gates: `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --a
   unreachable today: no path deletes a single repo, and `org.deleted` removes messages before
   repos. Whoever adds repo deletion must delete or move the repo's channel messages first, not
   rely on the cascade. (The cursor FK is `ON DELETE CASCADE` and has no such problem.)
+- **`message_cursors.repo_id` references `repos (id)`, not `(org_id, id)`**, like every other
+  `repo_id` foreign key in the schema. A direct `of-core` caller writing a cursor in org A that
+  names org B's repo succeeds or fails on whether that id exists anywhere. Repo ids are random
+  UUIDs and every MCP path resolves the repo through the caller's own org first, so this is not
+  reachable from outside. Accepted, consistent with the existing keys.
 - **`deny_unknown_fields` on the four message args structs** follows the precedent of the job
   tools' args (`tools/jobs.rs`). It matters most here: a dropped `to` must not silently become
   a channel post. The error serde produces names the unknown field, but not why it went away.
